@@ -78,7 +78,7 @@ export function FinancesView({ client, company }: Props) {
   const header = (
     <PageHeader
       title="Finances"
-      width="6xl"
+      width="full"
       description={
         <>
           What your company is earning and spending this month.
@@ -117,7 +117,7 @@ export function FinancesView({ client, company }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {header}
-      <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {/* KPIs */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Kpi icon={Wallet} label="Wallet balance" value={usd(data.balanceUsd)} hint="Ledger balance" />
@@ -145,8 +145,7 @@ export function FinancesView({ client, company }: Props) {
             </CardDescription>
             <CardDescription data-testid="monthly-budget-origin">
               This cap is read from the company manifest's <code>[budget]</code>{" "}
-              section and cannot be changed here. To limit spending from the
-              console, set a daily cap on each teammate's page.
+              section and cannot be changed here.
             </CardDescription>
           </CardHeader>
           {hasBudget && (

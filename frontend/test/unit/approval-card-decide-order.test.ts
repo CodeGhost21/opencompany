@@ -145,23 +145,18 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     );
   });
 
-  it("announces a hidden card's exact timestamp once", async () => {
-    // A redacted card's composition time is the only discriminator its buttons
-    // can carry (the payload is withheld), but it must be emitted exactly once:
-    // `decisionLabel` puts it in the "composed … (…)" phrase, and the caller
-    // omits its usual `request <timestamp>` suffix so the screen reader does not
-    // hear the opaque epoch twice on every hidden card.
+  it("offers no Approve or Decline at all on a hidden card", async () => {
+    // `contents_hidden` is the same admin check the resolve route itself
+    // applies, so a card whose contents this viewer cannot read is a card they
+    // cannot decide — see `approval-admin-gate.test.ts`. There is no longer an
+    // aria-label to get right or wrong here: the buttons do not render.
     await render({ ...APPROVAL, contents_hidden: true });
 
     const labelled = Array.from(container.querySelectorAll("button")).map((b) =>
       b.getAttribute("aria-label"),
     );
-    const approve = labelled.find((l) => l?.startsWith("Approve:"));
-    const decline = labelled.find((l) => l?.startsWith("Decline:"));
-    expect(approve).toContain(`composed 1m ago (${T0})`);
-    expect(approve).not.toContain(`request ${T0}`);
-    expect(decline).toContain(`composed 1m ago (${T0})`);
-    expect(decline).not.toContain(`request ${T0}`);
+    expect(labelled.find((l) => l?.startsWith("Approve:"))).toBeUndefined();
+    expect(labelled.find((l) => l?.startsWith("Decline:"))).toBeUndefined();
   });
 
   it("distinguishes two same-URL http_request cards by method (#1411)", async () => {
@@ -433,7 +428,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     ]);
   });
 
-  it("names a workflow grant revocation after the workflow (#1411)", async () => {
+  it("names an automation grant revocation after the automation (#1411)", async () => {
     // A workflow grant carries no agent (`agent` is empty, issue #1098) — its
     // subject lives in `workflow`, and the revocation label must name that
     // workflow, not the empty string the agent field would yield.
@@ -463,7 +458,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     ).not.toBeNull();
   });
 
-  it("names a workflow gate's broad approve after the workflow, not a teammate (#1411)", async () => {
+  it("names an automation gate's broad approve after the automation, not an agent (#1411)", async () => {
     // A native `workflow.approve` gate carries no agent — the broader scope's
     // subject is the workflow itself (issue #1098) — so picking it must not
     // tell a screen-reader user that a "teammate" is being granted the tool.
@@ -500,7 +495,7 @@ describe("ApprovalCard decide ordering (#1406)", () => {
     });
 
     expect(approveButton().getAttribute("aria-label")).toContain(
-      "let this workflow use this tool for 1 hour",
+      "let this automation use this tool for 1 hour",
     );
   });
 });

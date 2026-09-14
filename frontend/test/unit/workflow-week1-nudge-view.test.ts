@@ -52,7 +52,7 @@ Object.defineProperties(globalThis.HTMLElement.prototype, {
 
 const STUB_GRAPH: WorkflowGraph = {
   id: "wf-1",
-  name: "My first workflow",
+  name: "My first automation",
   description: "",
   nodes: [],
   edges: [],
@@ -92,7 +92,7 @@ function nudgeRow(id: string): NotificationDto {
     kind: WEEK1_NUDGE_KIND,
     subjectKind: "workflow",
     subjectId: "week1-first-workflow",
-    title: "Save your first workflow",
+    title: "Save your first automation",
     createdAt: 1,
   };
 }
@@ -214,7 +214,7 @@ describe("the week-1 nudge banner (PR #1878 review)", () => {
   });
 
 
-  it("does not resurrect a nudge off a fetch that was already stale when this session created a workflow", async () => {
+  it("does not resurrect a nudge off a fetch that was already stale when this session created an automation", async () => {
     const gate = deferred<{ notifications: NotificationDto[]; unread: number }>();
     const markedRead: string[] = [];
     const client = baseClient({
@@ -234,7 +234,7 @@ describe("the week-1 nudge banner (PR #1878 review)", () => {
     // The operator creates a workflow through the ordinary "New workflow"
     // flow before that fetch resolves.
     await act(async () => {
-      named("New workflow")?.click();
+      named("New automation")?.click();
     });
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[data-testid="week1-nudge-test-confirm-create"]')?.click();

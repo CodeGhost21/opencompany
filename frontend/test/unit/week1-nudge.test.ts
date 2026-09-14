@@ -16,7 +16,7 @@ const note = (over: Partial<NotificationDto> & Pick<NotificationDto, "id">): Not
   kind: WEEK1_NUDGE_KIND,
   subjectKind: "workflow",
   subjectId: "week1-first-workflow",
-  title: "Save your first workflow",
+  title: "Save your first automation",
   createdAt: 1,
   ...over,
 });

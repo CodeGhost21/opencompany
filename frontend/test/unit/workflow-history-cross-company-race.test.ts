@@ -66,7 +66,7 @@ const WF_ID = "shared-wf";
 
 const GRAPH: WorkflowGraph = {
   id: WF_ID,
-  name: "Shared workflow",
+  name: "Shared automation",
   version: null,
   nodes: [{ id: "start", kind: "trigger", name: "Start" }],
   edges: [],

@@ -30,14 +30,14 @@ describe("draftBanners", () => {
       drafted({
         workflow: GRAPH,
         summary: "email the weekly digest",
-        notes: ["Assigned the “Write” step to teammate `qa_engineer`."],
+        notes: ["Assigned the “Write” step to agent `qa_engineer`."],
       }),
     );
     expect(banners.summary).toBe(
       "Drafted: email the weekly digest — review below, then Create.",
     );
     expect(banners.notes).toEqual([
-      "Assigned the “Write” step to teammate `qa_engineer`.",
+      "Assigned the “Write” step to agent `qa_engineer`.",
     ]);
     expect(banners.reason).toBeNull();
   });
@@ -63,7 +63,7 @@ describe("draftBanners", () => {
     expect(withReason.reason).toBe("this only runs once");
 
     const noReason = draftBanners({ automatable: false });
-    expect(noReason.reason).toBe("This is better done once than built into a workflow.");
+    expect(noReason.reason).toBe("This is better done once than built into an automation.");
   });
 });
 

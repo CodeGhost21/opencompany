@@ -278,7 +278,7 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
    * reported as that rather than as a stream that never delivered.
    *
    * It does not read `PendingSyncPosts`, and does not need to. Suppression is
-   * up for certain: `ChatView` calls `onSendStart` before `client.chat`, and
+   * up for certain: `RoomView` calls `onSendStart` before `client.chat`, and
    * this handler is holding that very POST unresolved — so a frame for this
    * thread landing now is a frame `capture` held. `repliesAtCut`, read the
    * moment this returns, is the other half of that reading, and between them
@@ -337,8 +337,8 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
     // Recorded, never thrown — the same discipline `repliesAtCut` below is
     // written with, and for the same reason stated there: an exception inside
     // a route handler aborts the HANDLER, so `route.abort` never runs, the
-    // POST never fails, and the run dies waiting for a `Couldn't send` line
-    // that was never going to appear. That reports a premise violation as a
+    // POST never fails, and the run dies waiting for a `Not sent` line that
+    // was never going to appear. That reports a premise violation as a
     // timeout somewhere else entirely, which is precisely the misdirection
     // this spec is being fixed to stop making.
     premiseFailure = await awaitJournaledReply();
@@ -392,8 +392,12 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   // The operator is told the request failed, and that stays true — a reply
   // arriving later does not mean the send worked, and a console that quietly
   // swallowed the error would leave them unable to tell a delivered message
-  // from a dropped one.
-  await expect(page.getByText(/Couldn't send/).first()).toBeVisible({ timeout: 60_000 });
+  // from a dropped one. B-099 moved this off a sibling `system` bubble onto
+  // the message row itself (`ChatMessage.sendFailed`, rendered by
+  // `MessageRow`'s `FailedSendNotice` as "Not sent — {reason}") — see the doc
+  // comment on `sendFailed` in `src/lib/chat.ts` for why the old bubble was
+  // replaced.
+  await expect(page.getByText(/Not sent/).first()).toBeVisible({ timeout: 60_000 });
   await cutReadyPromise;
   expect(cuts, "the chat POST must actually have been cut").toBe(1);
   // With the frame observed to have arrived (`awaitCapturedFrame`), this is no

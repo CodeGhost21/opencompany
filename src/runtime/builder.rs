@@ -296,6 +296,10 @@ pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
         return crate::company::grants_search_explicit(allow)
             && crate::company::grants_search_explicit(&[tool.to_string()]);
     }
+    if literal == "mcp_registry" || literal.starts_with("mcp_registry.") {
+        return crate::company::grants_mcp_registry_explicit(allow)
+            && crate::company::grants_mcp_registry_explicit(&[tool.to_string()]);
+    }
 
     // MCP grants use a colon namespace, so `mcp:*` is the explicit opt-in for
     // an agent asking for all company servers. A bare `*` must not confer it.
@@ -1191,7 +1195,7 @@ impl RuntimeBuilder {
     /// what a desktop or self-hosted instance keeps: the whole hosted-only
     /// posture is that a builder nobody called this on reports nothing. The
     /// `serve` path calls it once, with the process-wide tracker chosen by
-    /// [`analytics::mixpanel::build`](crate::analytics::mixpanel::build).
+    /// [`analytics::openpanel::build`](crate::analytics::openpanel::build).
     pub fn with_analytics(mut self, tracker: Arc<dyn crate::analytics::Tracker>) -> Self {
         self.tracker = Some(tracker);
         self
@@ -2517,6 +2521,9 @@ impl RuntimeBuilder {
                 grants.rehydrate(journal.replayed_grants());
                 grants.rehydrate_continuations(journal.replayed_approval_continuations());
                 grants.rehydrate_blocker_resolutions(journal.replayed_blocker_resolutions());
+                grants.rehydrate_standing(
+                    journal.replayed_standing_grants(crate::ports::now_millis()),
+                );
                 grants
             }
         };
@@ -2704,6 +2711,18 @@ impl RuntimeBuilder {
             existing.as_ref().map(|r| &r.manifest),
             &self.manifest,
         );
+        // The move grammars the operator installed on desks, carried across the
+        // rebuild for the same reason every overlay is: they are never written
+        // back to `company.toml`, so the seed manifest this rebuild starts from
+        // still declares whatever `[[group_chat]].hive` it always did. Dropped
+        // here, the `store.save` at the end of this function would silently
+        // revert every desk to the blueprint's table — and a desk quietly
+        // deliberating under a grammar its operator replaced is exactly the
+        // drift the overlay layer exists to prevent.
+        let overlay_desk_hive = existing
+            .as_ref()
+            .map(|r| r.overlay_desk_hive.clone())
+            .unwrap_or_default();
         // The roster edits and removals an operator has made from the console.
         // Carried across the rebuild for the reason the overlay model exists at
         // all: neither is written back to `company.toml`, so the seed manifest
@@ -2745,6 +2764,7 @@ impl RuntimeBuilder {
         let desk_record = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: self.manifest.clone(),
             ledger: Vec::new(),
@@ -3093,7 +3113,8 @@ impl RuntimeBuilder {
                             // route both hold — enforces that cap on every run.
                             let supervisor = crate::runtime::RunSupervisor::with_limit(
                                 self.manifest.workflows.max_in_flight_runs,
-                            );
+                            )
+                            .with_emergency_gate(gate.clone());
                             run_supervisor = Some(supervisor.clone());
                             // Resolve the company's effective MCP servers to data
                             // (manifest ∪ runtime index, credentials materialized)
@@ -3267,6 +3288,7 @@ impl RuntimeBuilder {
                                 }),
                             );
                             let mut deps = HarnessDeps {
+                                emergency_gate: Some(gate.clone()),
                                 // Issue #1861: the same store the console's and
                                 // the scheduler's runs badge through, so a run
                                 // the orchestrator's `run_workflow` started
@@ -3572,6 +3594,7 @@ impl RuntimeBuilder {
                                 // blueprint gave it.
                                 overlay_retired_agents: overlay_retired_agents.clone(),
                                 overlay_agent_edits: overlay_agent_edits.clone(),
+                                overlay_desk_hive: overlay_desk_hive.clone(),
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
                                 ledger: Vec::new(),
@@ -3874,6 +3897,7 @@ impl RuntimeBuilder {
                 &CompanyRecord {
                     overlay_retired_agents,
                     overlay_agent_edits,
+                    overlay_desk_hive,
                     id: id.clone(),
                     manifest: self.manifest.clone(),
                     ledger,
@@ -5125,6 +5149,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -5430,6 +5455,9 @@ mod test {
                 "search.web",
                 "mcp:*",
                 "mcp*",
+                "mcp_registry",
+                "mcp_registry.*",
+                "mcp_registry.notion",
             ] {
                 assert!(
                     !allow_covers(&allow, grant),
@@ -5459,6 +5487,7 @@ mod test {
                 "paypal",
                 "search",
                 "mcp:*",
+                "mcp_registry",
                 "workspace",
             ]);
             for grant in [
@@ -5481,6 +5510,9 @@ mod test {
                 "search.*",
                 "search.web",
                 "mcp:*",
+                "mcp_registry",
+                "mcp_registry.*",
+                "mcp_registry.notion",
                 "workspace",
                 "workspace.write",
             ] {
@@ -5522,6 +5554,10 @@ mod test {
             assert!(allow_covers(&strings(&["search"]), "search.web"));
             assert!(allow_covers(&strings(&["media"]), "media.image"));
             assert!(allow_covers(&strings(&["chargebee"]), "chargebee.read"));
+            assert!(allow_covers(
+                &strings(&["mcp_registry"]),
+                "mcp_registry.notion"
+            ));
             assert!(
                 !allow_covers(&strings(&["docs"]), "docs.read"),
                 "ordinary namespaces keep the unstarred-grant exact-match rule"
@@ -5547,6 +5583,7 @@ mod test {
                 "hosting",
                 "paypal",
                 "mcp:*",
+                "mcp_registry",
             ]);
             for grant in [
                 "search*",
@@ -5558,6 +5595,7 @@ mod test {
                 "hosting*",
                 "paypal*",
                 "mcp*",
+                "mcp_registry*",
             ] {
                 assert!(
                     !allow_covers(&allow, grant),
@@ -5573,13 +5611,14 @@ mod test {
         /// exact write token, and `mcp:notion*` is a colon-scoped prefix.
         #[test]
         fn a_separator_broken_opt_in_request_stays_covered() {
-            let allow = strings(&["search", "workspace", "media", "mcp:*"]);
+            let allow = strings(&["search", "workspace", "media", "mcp:*", "mcp_registry"]);
             assert!(allow_covers(&allow, "search.*"));
             assert!(allow_covers(&allow, "search.web*"));
             assert!(allow_covers(&allow, "workspace.write"));
             assert!(allow_covers(&allow, "media.*"));
             assert!(allow_covers(&allow, "media.image*"));
             assert!(allow_covers(&allow, "mcp:notion*"));
+            assert!(allow_covers(&allow, "mcp_registry.notion*"));
         }
 
         /// Runs the three-level narrowing over `&str` slices, so each case below
@@ -6180,7 +6219,7 @@ mod test {
 
         for company in ["e2e_harness", "openhuman_demo"] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("companies")
+                .join("../../companies")
                 .join(company);
             let manifest = CompanyManifest::from_path(&path)
                 .unwrap_or_else(|e| panic!("{company} manifest must parse: {e}"));
@@ -7271,7 +7310,7 @@ needs_reason = true
     ///
     /// The other seeding tests build their bundle in a tempdir, so they prove
     /// the mechanism and not the content. This one boots
-    /// `companies/agentic_law_firm` exactly as an operator would and asserts
+    /// `companies/law_firm` exactly as an operator would and asserts
     /// that the axes that vertical is *about* — its matter list, its deadlines —
     /// are actually there, which is the whole point of the feature and the one
     /// thing a tempdir fixture cannot check.
@@ -7279,8 +7318,8 @@ needs_reason = true
     async fn a_shipped_bundle_seeds_its_own_ledgers_and_renders_them() {
         let home_dir = tmp_home("oc-ledger-shipped-");
         let bundle = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("companies")
-            .join("agentic_law_firm");
+            .join("../../companies")
+            .join("law_firm");
         let manifest = CompanyManifest::from_path(&bundle).expect("the shipped bundle parses");
         let id = CompanyId::new("firm");
         let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
@@ -7475,9 +7514,9 @@ needs_reason = true
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
         let provenance = TemplateProvenance {
-            source_id: "agentic_law_firm".to_string(),
+            source_id: "law_firm".to_string(),
             version: None,
-            path: Some("companies/agentic_law_firm".to_string()),
+            path: Some("companies/law_firm".to_string()),
         };
 
         // First launch from a template: provenance is stamped onto the record.
@@ -8725,6 +8764,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -8738,6 +8778,7 @@ needs_reason = true
                     description: None,
                     members: vec!["ceo".to_string()],
                     responder: crate::ports::types::ResponderMode::default(),
+                    hive: Default::default(),
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
@@ -8850,6 +8891,7 @@ needs_reason = true
                 overlay_desk_tools: Default::default(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -9078,6 +9120,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: persisted,
                 ledger: Vec::new(),
@@ -9091,6 +9134,7 @@ needs_reason = true
                     description: None,
                     members: vec!["ceo".to_string()],
                     responder: crate::ports::types::ResponderMode::default(),
+                    hive: Default::default(),
                 }],
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
@@ -9483,6 +9527,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -9609,6 +9654,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -9661,6 +9707,7 @@ needs_reason = true
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         record.overlay_desk_members.push(OverlayDeskMember {
             desk_id: "design".to_string(),
@@ -9761,6 +9808,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -9872,6 +9920,7 @@ needs_reason = true
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),
@@ -9944,6 +9993,34 @@ needs_reason = true
                 PolicyDecision::RequireApproval
             ),
             "the injected readonly gate must keep its own policy, not the carried override"
+        );
+    }
+
+    /// Issue #1925: approvals are explicit-only in production — the
+    /// manifest-`[policy]` HITL gate is deliberately dead weight, disabled at
+    /// the one construction site nothing else reaches
+    /// (`RuntimeBuilder::build`'s default, uninjected gate). Nothing else in
+    /// the type system pins that wiring: `with_policy_hitl_disabled` is a
+    /// plain builder call on `ManifestApprovalGate`, so deleting it would
+    /// compile clean and silently resurrect policy-driven parking in every
+    /// company that never explicitly injects a gate. Pinned here so that
+    /// deletion instead breaks this test.
+    #[tokio::test]
+    async fn the_default_uninjected_gate_ships_with_policy_hitl_disabled() {
+        let dir = tmp_home("oc-policy-hitl-default-");
+        let manifest = parse(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [policy]\nmode = \"supervised\"\n",
+        );
+        let runtime = RuntimeBuilder::new(dir.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            !runtime.approval_gate.policy_hitl_enabled(),
+            "the production default build must disable the manifest-policy HITL gate; a \
+             company that injects no gate of its own must never fall back to it"
         );
     }
 }

@@ -10,7 +10,7 @@ import {
   type DraftEdge,
 } from "@/views/WorkflowCreateDialog";
 
-describe("the shared workflow node-kind vocabulary", () => {
+describe("the shared automation node-kind vocabulary", () => {
   it("backs every accepted host kind, including split_out", () => {
     expect(NODE_KINDS.map((kind) => kind.value)).toEqual(WORKFLOW_NODE_KINDS);
     expect(WORKFLOW_NODE_KINDS).toContain("split_out");

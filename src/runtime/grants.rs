@@ -1108,6 +1108,21 @@ impl GrantSet {
     pub fn rehydrate_standing(&self, grants: impl IntoIterator<Item = StandingGrant>) {
         let mut state = self.inner.lock().expect("grant set poisoned");
         for grant in grants {
+            if grant
+                .expires_at_millis
+                .checked_sub(grant.at_millis)
+                .is_none_or(|duration| duration == 0 || duration > MAX_STANDING_GRANT_MILLIS)
+            {
+                tracing::warn!(
+                    "[grants] standing grant '{}' was not restored: its lifetime \
+                     ({} -> {}) is zero, inverted, or past the {}ms ceiling",
+                    grant.id,
+                    grant.at_millis,
+                    grant.expires_at_millis,
+                    MAX_STANDING_GRANT_MILLIS
+                );
+                continue;
+            }
             state.standing.insert(grant.id.clone(), grant);
         }
     }
@@ -1859,6 +1874,94 @@ mod test {
         assert!(set.peek(&ApprovalId::new("a2")).is_some());
     }
 
+    /// `rehydrate` seeds a `HashMap` keyed by approval id, so two journal
+    /// lines that name the same id (a replay quirk, or a caller that passes
+    /// the same call twice) do not double-count the grant — the later entry
+    /// in the iterator simply overwrites the earlier one, same as inserting
+    /// the same key twice into any map.
+    #[test]
+    fn rehydrate_with_a_duplicate_approval_id_keeps_only_the_last_entry() {
+        let set = GrantSet::default();
+        set.rehydrate([
+            call("a1", "finance", "old_tool", serde_json::json!({"n": 1})),
+            call("a1", "finance", "new_tool", serde_json::json!({"n": 2})),
+        ]);
+        assert_eq!(
+            set.live_count(),
+            1,
+            "one approval id must seed exactly one live grant, not two"
+        );
+        let seeded = set.peek(&ApprovalId::new("a1")).expect("the id is live");
+        assert_eq!(
+            seeded.tool, "new_tool",
+            "the later entry in the replay order wins"
+        );
+    }
+
+    /// `rehydrate` enforces no ceiling of its own on how many grants a single
+    /// replay can seed — the boot-time journal is the only source of a cap
+    /// (if any), and this queue must not silently drop entries past some
+    /// count. Mirrors the standing-list no-ceiling pin for the live side.
+    #[test]
+    fn rehydrate_seeds_every_grant_in_a_large_replay_batch_with_no_cap() {
+        let set = GrantSet::default();
+        let calls: Vec<_> = (0..500)
+            .map(|i| {
+                call(
+                    &format!("a{i}"),
+                    "finance",
+                    "t",
+                    serde_json::json!({ "i": i }),
+                )
+            })
+            .collect();
+        set.rehydrate(calls);
+        assert_eq!(
+            set.live_count(),
+            500,
+            "every grant in the replay batch must be seeded; none held back"
+        );
+        assert!(set.peek(&ApprovalId::new("a499")).is_some());
+    }
+
+    /// A boot-time `rehydrate` must not clobber grants a concurrent `consume`
+    /// is already working with: it seeds only the ids it was handed, under
+    /// the same lock as every other `GrantSet` operation, so a batch replay
+    /// can never wipe a grant that was live before the batch arrived.
+    #[test]
+    fn rehydrate_only_adds_its_own_batch_and_leaves_other_live_grants_alone() {
+        let set = GrantSet::default();
+        let pre_existing_args = serde_json::json!({ "amount_usd": 12.0 });
+        set.grant(call(
+            "pre-existing",
+            "finance",
+            "pay_invoice",
+            pre_existing_args,
+        ));
+
+        let batch: Vec<_> = (0..50)
+            .map(|i| {
+                call(
+                    &format!("new{i}"),
+                    "ops",
+                    "t",
+                    serde_json::json!({ "i": i }),
+                )
+            })
+            .collect();
+        set.rehydrate(batch);
+
+        assert!(
+            set.peek(&ApprovalId::new("pre-existing")).is_some(),
+            "a grant already live before the batch must survive the rehydrate"
+        );
+        assert_eq!(
+            set.live_count(),
+            51,
+            "the pre-existing grant plus every grant in the batch must all be live"
+        );
+    }
+
     /// Concurrent redemption of one grant: exactly one caller wins.
     ///
     /// The match and the removal are one critical section precisely so this
@@ -1894,6 +1997,97 @@ mod test {
         assert_eq!(winners.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(set.live_count(), 0);
         assert_eq!(set.drain_consumed().len(), 1, "one consumption journaled");
+    }
+
+    /// Consumption is buffered in `GrantState::consumed`, not journaled — the
+    /// durable `GrantConsumed` record is written one layer up, by the cycle
+    /// runner's drain, strictly after `consume` already returned. A restart
+    /// between "the tool ran" (`consume` removed the grant here) and "the
+    /// drain journalled it" therefore replays the pre-consumption journal
+    /// state: the grant comes back exactly as if it had never been redeemed,
+    /// and the identical call is admitted a **second** time with no second
+    /// approval ever asked. Modelled at the `GrantSet` layer: rehydrating the
+    /// same `GrantedCall` into a fresh set is exactly what a restart's replay
+    /// does when the `GrantConsumed` line never reached disk (see
+    /// `a_grant_consumed_but_not_yet_drained_replays_as_live_after_a_restart`
+    /// in `journal.rs` for the journal-file half of this).
+    #[test]
+    fn a_consumed_but_undrained_grant_re_admits_the_identical_call_after_rehydrate() {
+        let live = GrantSet::default();
+        let args = serde_json::json!({ "to": "a@b.test" });
+        let grant = call("appr-crash", "finance", "composio_execute", args.clone());
+        live.grant(grant.clone());
+
+        // The tool runs. `consume` removes it from `live` and buffers the id
+        // — the real, synchronous, journal-less path `ToolPolicy::check`
+        // takes deep inside a turn.
+        assert!(
+            live.consume("finance", "composio_execute", &args).is_some(),
+            "the first call is admitted normally"
+        );
+        assert_eq!(live.live_count(), 0);
+        // The drain that would journal `GrantConsumed` never runs here —
+        // modelling the crash between the tool running and the next cycle's
+        // drain picking the buffered id up.
+        assert_eq!(
+            live.drain_consumed().len(),
+            1,
+            "the consumption sits buffered, exactly as it would right before the crash"
+        );
+
+        // Restart: replay seeds a fresh set from the journal, which never
+        // learned the grant was spent.
+        let after_restart = GrantSet::default();
+        after_restart.rehydrate([grant]);
+        assert_eq!(
+            after_restart.live_count(),
+            1,
+            "the undrained consumption re-arms the grant on replay"
+        );
+
+        // AUTH: a different agent claiming the same tool and arguments must
+        // not redeem it — only the agent the grant actually names may
+        // collect the replay.
+        assert!(
+            after_restart
+                .consume("legal", "composio_execute", &args)
+                .is_none(),
+            "the re-armed grant must still only admit the agent it was minted for"
+        );
+        assert_eq!(
+            after_restart.live_count(),
+            1,
+            "the wrong-agent attempt must not have consumed the grant"
+        );
+
+        // BOUND: different arguments for the right agent and tool must not
+        // redeem it either — the re-arm is an exact-match replay, not a
+        // blanket re-authorization of the tool.
+        assert!(
+            after_restart
+                .consume(
+                    "finance",
+                    "composio_execute",
+                    &serde_json::json!({ "to": "someone-else@b.test" })
+                )
+                .is_none(),
+            "the re-armed grant must not admit a call with different arguments"
+        );
+        assert_eq!(after_restart.live_count(), 1);
+
+        // FAIL: the actual duplication — the identical (agent, tool, args)
+        // call the operator approved exactly once is admitted a SECOND time,
+        // with no new approval in between. This is the concrete failure
+        // TOOL-005 names, not a list-length assertion one layer removed
+        // from it.
+        assert!(
+            after_restart
+                .consume("finance", "composio_execute", &args)
+                .is_some(),
+            "documented duplication window: the crash-then-replay grant re-admits the \
+             identical call a second time with no second approval"
+        );
+        assert_eq!(after_restart.live_count(), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1981,6 +2175,36 @@ mod test {
             set.match_standing(&GrantSubject::agent("maya"), "web_fetch", None, 2_000)
                 .is_some(),
             "a replayed line must still admit the calls it always admitted"
+        );
+    }
+
+    /// A line naming neither `agent` nor `workflow` is not one either format
+    /// wrote on purpose — both fields default on deserialize, so it still
+    /// replays rather than refusing to load. `subject` resolves it the same
+    /// way a pre-#1098 line resolves: no `workflow` key means agent, and an
+    /// empty agent string is still a value, so it replays as a permission held
+    /// by the empty-string agent. Nothing mints a line shaped like this today;
+    /// this pins that a malformed one does not panic or silently vanish, and
+    /// that it cannot be mistaken for a workflow permission.
+    #[test]
+    fn a_line_naming_neither_agent_nor_workflow_replays_as_the_empty_string_agent() {
+        let line = r#"{
+            "id": "g-malformed",
+            "tool": "web_fetch",
+            "granted_by": { "kind": "user", "id": "user-1" },
+            "approval_id": "approval-malformed",
+            "at_millis": 1000,
+            "expires_at_millis": 9999
+        }"#;
+        let replayed: StandingGrant =
+            serde_json::from_str(line).expect("agent and workflow both default on load");
+        assert_eq!(replayed.agent, "");
+        assert_eq!(replayed.workflow, None);
+        assert_eq!(replayed.subject(), GrantSubject::agent(""));
+        assert_ne!(
+            replayed.subject(),
+            GrantSubject::workflow(""),
+            "an empty agent must never resolve to a workflow subject"
         );
     }
 
@@ -2498,6 +2722,28 @@ mod test {
         );
     }
 
+    /// `GET {scope}/grants` renders every entry `standing()`
+    /// returns with no pagination and no cap of its own — unlike, say, the
+    /// approval sweep's `MAX_RETIREMENTS_PER_TICK`. This pins that a large
+    /// standing-grant set comes back whole rather than a bounded page of it.
+    #[test]
+    fn standing_returns_every_live_grant_with_no_cap() {
+        let set = GrantSet::default();
+        for i in 0..500 {
+            set.grant_standing(standing(
+                &format!("g{i}"),
+                "ops",
+                &format!("tool-{i}"),
+                10_000,
+            ));
+        }
+        assert_eq!(
+            set.standing().len(),
+            500,
+            "every standing grant is returned; nothing pages or truncates the list"
+        );
+    }
+
     /// A single-use grant must burn even when a standing grant would also have
     /// admitted the call.
     ///
@@ -2969,6 +3215,113 @@ mod test {
             current_redeem_context(),
             RedeemContext::default(),
             "the scope does not leak past its own future"
+        );
+    }
+
+    /// The approval sweep caps how much housekeeping one tick does
+    /// (`MAX_RETIREMENTS_PER_TICK`); `GrantSet::sweep` has no equivalent, so a
+    /// company with a large expired-grant backlog processes every one of them
+    /// on a single minute tick. Pinned here so a future cap on the approval
+    /// sweep's model does not get "generalized" onto this one silently — if a
+    /// cap is ever added, this test is expected to need updating.
+    #[test]
+    fn sweep_processes_every_expired_grant_in_one_call_with_no_cap() {
+        let set = GrantSet::default();
+        for i in 0..250 {
+            set.grant(call(
+                &format!("g{i}"),
+                "finance",
+                "t",
+                serde_json::json!({ "i": i }),
+            ));
+        }
+        let expired = set.sweep(1_000 + GRANT_TTL_MILLIS, GRANT_TTL_MILLIS);
+        assert_eq!(
+            expired.len(),
+            250,
+            "every expired grant is swept in one call; nothing is held back for a later tick"
+        );
+        assert_eq!(set.live_count(), 0);
+    }
+
+    #[test]
+    fn rehydrate_standing_refuses_a_line_past_the_seven_day_ceiling() {
+        let set = GrantSet::default();
+        let far_future_expiry = 1_000 + MAX_STANDING_GRANT_MILLIS * 10;
+        set.rehydrate_standing([standing("g1", "maya", "web_fetch", far_future_expiry)]);
+        assert!(
+            set.standing()
+                .into_iter()
+                .all(|g| g.expires_at_millis <= 1_000 + MAX_STANDING_GRANT_MILLIS),
+            "a rehydrated standing grant must not outlive the 7-day ceiling every other \
+             mint path enforces, even when the journal line itself claims a longer expiry"
+        );
+    }
+
+    #[test]
+    fn rehydrate_standing_checks_each_duration_without_rebasing_its_expiry() {
+        for (at_millis, expires_at_millis, accepted) in [
+            (1_000, 1_001, true),
+            (1_000, 1_000 + MAX_STANDING_GRANT_MILLIS, true),
+            (1_000, 1_001 + MAX_STANDING_GRANT_MILLIS, false),
+            (1_000, 1_000, false),
+            (1_000, 999, false),
+            (0, u64::MAX, false),
+            (u64::MAX - MAX_STANDING_GRANT_MILLIS, u64::MAX, true),
+        ] {
+            for verdict in [Verdict::Approve, Verdict::Deny] {
+                let set = GrantSet::default();
+                let mut grant = standing("candidate", "maya", "web_fetch", expires_at_millis);
+                grant.at_millis = at_millis;
+                grant.verdict = verdict;
+                let valid = standing("valid", "maya", "web_fetch", 2_000);
+                set.rehydrate_standing([grant.clone(), valid.clone()]);
+
+                assert_eq!(
+                    set.peek_standing_by_approval(&grant.approval_id),
+                    accepted.then_some(grant),
+                    "duration bounds: {at_millis}..{expires_at_millis}, {verdict:?}"
+                );
+                assert_eq!(
+                    set.peek_standing_by_approval(&valid.approval_id),
+                    Some(valid),
+                    "an invalid line must not discard a valid sibling"
+                );
+            }
+        }
+    }
+
+    /// `subject()` reads an empty `agent` with no `workflow` as an agent
+    /// subject held by the empty-string agent, rather than refusing the line.
+    /// No live call names an empty agent id, so this is inert today — but
+    /// nothing here rejects a malformed line that reaches it. Pinned as
+    /// documented, accepted behaviour rather than a defect: the guard belongs
+    /// at whatever writes the journal line, not at replay.
+    #[test]
+    fn subject_of_an_empty_agent_with_no_workflow_is_an_agent_named_the_empty_string() {
+        let malformed = standing("g1", "", "web_fetch", 9_999);
+        assert_eq!(malformed.subject(), GrantSubject::agent(""));
+    }
+
+    /// `pending` marks are in-memory only and never rehydrated — accepted
+    /// because a boot sweeps every checkout regardless (see the module docs
+    /// on `mark_pending`). Pinned so that acceptance is asserted rather than
+    /// merely claimed: a restart genuinely drops the mark, and a fresh
+    /// process's `any_for_task` reports the task as no longer held even
+    /// though, in the old process, an approval was still pending on it.
+    #[test]
+    fn a_restart_drops_the_pending_mark_and_the_task_reads_as_no_longer_held() {
+        let before_restart = GrantSet::default();
+        before_restart.mark_pending(&ApprovalId::new("a1"), "t-1".to_string());
+        assert!(before_restart.any_for_task("t-1"));
+
+        // A restart is a fresh GrantSet; nothing seeds `pending` from the
+        // journal, unlike `live` (rehydrate) and `standing` (rehydrate_standing).
+        let after_restart = GrantSet::default();
+        assert!(
+            !after_restart.any_for_task("t-1"),
+            "the pending mark does not survive a restart; the task reads as unheld \
+             until its checkout sweep confirms that independently"
         );
     }
 }

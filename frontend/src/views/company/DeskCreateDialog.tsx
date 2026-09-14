@@ -98,7 +98,7 @@ export function DeskCreateDialog({
   }
 
   // Promote a selected teammate to the lead slot (index 0), which the whole
-  // stack treats as the desk's lead (`members[0]` — see `chat/model.ts` and
+  // stack treats as the desk's lead (`members[0]` — see `room/channels.ts` and
   // `api/types.ts`). The others keep their relative order behind the new lead.
   // No-ops (returns the same reference) when the id is already the lead, and no
   // backend call — the choice is posted with the rest of the draft on Create.
@@ -170,7 +170,7 @@ export function DeskCreateDialog({
         <DialogHeader>
           <DialogTitle>New desk</DialogTitle>
           <DialogDescription>
-            A desk is a group chat you talk to. Pick who staffs it — the first teammate you choose
+            A desk is a group chat you talk to. Pick who staffs it — the first agent you choose
             leads it.
           </DialogDescription>
         </DialogHeader>
@@ -217,14 +217,14 @@ export function DeskCreateDialog({
         </div>
 
         <div className="grid gap-2">
-          <Label>Teammates</Label>
+          <Label>Agents</Label>
           <p className="text-xs text-muted-foreground">
-            The top teammate leads the desk — add them in seniority order, or use “Make lead” to
+            The top agent leads the desk — add them in seniority order, or use “Make lead” to
             promote anyone.
           </p>
           {roster.length === 0 ? (
             <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
-              No roster teammates to add — you can add them after the desk exists.
+              No roster agents to add — you can add them after the desk exists.
             </p>
           ) : (
             <div className="flex flex-col gap-1.5">
@@ -232,8 +232,8 @@ export function DeskCreateDialog({
                 <Input
                   value={memberFilter}
                   onChange={(e) => setMemberFilter(e.target.value)}
-                  placeholder="Filter teammates…"
-                  aria-label="Filter teammates"
+                  placeholder="Filter agents…"
+                  aria-label="Filter agents"
                   data-testid="desk-member-filter"
                   className="h-8 text-sm"
                 />
@@ -319,7 +319,7 @@ export function DeskCreateDialog({
               })}
               {visibleRoster.length === 0 && (
                 <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
-                  No teammates match “{memberFilter.trim()}”.
+                  No agents match “{memberFilter.trim()}”.
                 </p>
               )}
             </div>

@@ -78,7 +78,7 @@ describe("NodeDetailPanel — operator-facing identity", () => {
     expect(container.textContent).not.toContain("future_magic");
   });
 
-  it("shows an assigned teammate's display name and demotes roster ids", () => {
+  it("shows an assigned agent's display name and demotes roster ids", () => {
     render(baseNode({ kind: "agent", agent: "research-lead" }), [
       { id: "research-lead", name: "Maya Chen", role: "Research lead" },
     ]);

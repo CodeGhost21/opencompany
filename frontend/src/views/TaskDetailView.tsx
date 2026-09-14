@@ -81,8 +81,8 @@ import {
   type TaskTab,
 } from "@/lib/task-output";
 import { useAskerNames } from "@/components/approval-card";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
-import type { DecidedApproval } from "@/views/chat/model";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
+import type { DecidedApproval } from "@/views/room/model";
 import {
   blockingTaskApprovals,
   decidingForTask,
@@ -1085,7 +1085,7 @@ function DetailHeader({
           <span className="inline-flex items-center gap-1.5">
             <Badge variant="outline" className="gap-1 font-normal">
               <Workflow className="size-3" aria-hidden />
-              Workflow
+              Automation
             </Badge>
           </span>
         )}
@@ -2161,7 +2161,7 @@ export function AwaitingApprovalRow({
             the feed has delivered none of this card's rows yet. */}
         <a
           href={href}
-          className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
+          className="shrink-0 font-medium text-status-blocked-text transition-opacity hover:opacity-80"
           aria-label={
             pending.count === 1
               ? "Review this task's pending approval on the Approvals page"

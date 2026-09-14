@@ -27,8 +27,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("chat has no second rail left to band with (issues #1383, four-row sidebar)", () => {
-  const chatView = read("views/ChatView.tsx");
-  const chatHeader = read("views/chat/ChatHeader.tsx");
+  const chatView = read("views/RoomView.tsx");
+  const chatHeader = read("views/room/ChatHeader.tsx");
 
   it("renders exactly one channel rail, and renders it through the sidebar's slot", () => {
     // #1383 was two rails plus content in one viewport. There are not two rails
@@ -64,10 +64,34 @@ describe("chat has no second rail left to band with (issues #1383, four-row side
   });
 });
 
-describe("settings sub-rail collapses to chips below lg (issue #1383)", () => {
+describe("every content rail collapses to chips below lg (issue #1383)", () => {
   const settings = read("views/SettingsSection.tsx");
+  // The shared rail every section with sub-pages draws since #2130. It is held
+  // to the same band as Settings' own, and that is the point of asserting both:
+  // #2130 put a second `w-60` rail on Company, Connections and Finance, and a
+  // rail that came on at `sm` there would rebuild the exact 768–1023px band this
+  // file exists to keep closed — three sections at a time instead of one.
+  const section = read("components/section-rail.tsx");
+
+  it("keeps Finance from being a SECOND rail beside the section rail", () => {
+    // Company's rail carries Finance's three pages as nested rows. Finance
+    // drawing its own would put two 240px rails and the app sidebar in one
+    // viewport at every width, not only in the band.
+    const finance = read("views/finance/FinanceSection.tsx");
+    expect(finance).not.toMatch(/<nav[\s>]/);
+    // Scoped to a `className`, not a bare substring: the file explains in prose
+    // why it no longer draws a `w-60` rail, and a guard that a comment can
+    // trip is a guard people delete the comment to satisfy.
+    expect(finance).not.toMatch(/className="[^"]*w-60/);
+  });
 
   it("shows the sub-rail only from lg", () => {
+    expect(section).toContain(
+      "hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 lg:flex",
+    );
+    expect(section).not.toContain(
+      "hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 sm:flex",
+    );
     expect(settings).toContain(
       "hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 lg:flex",
     );
@@ -78,9 +102,14 @@ describe("settings sub-rail collapses to chips below lg (issue #1383)", () => {
   });
 
   it("shows the chip-row fallback below lg, so the pane gets full width", () => {
-    expect(settings).toContain("border-b lg:hidden");
-    expect(settings).toContain("flex gap-1 overflow-x-auto p-2");
-    expect(settings).not.toContain("border-b sm:hidden");
+    for (const [name, source] of [
+      ["SettingsSection", settings],
+      ["section-rail", section],
+    ] as const) {
+      expect(source, name).toContain("border-b lg:hidden");
+      expect(source, name).toContain("flex gap-1 overflow-x-auto p-2");
+      expect(source, name).not.toContain("border-b sm:hidden");
+    }
   });
 
   /**
@@ -98,15 +127,19 @@ describe("settings sub-rail collapses to chips below lg (issue #1383)", () => {
    * `relative z-30` stacking context, above the drag band's `z-20`.
    */
   it("keeps the chip row above the macOS drag band (z-30 over the band's z-20)", () => {
-    const idx = settings.indexOf('border-b lg:hidden');
-    expect(idx).toBeGreaterThan(-1);
-    const wrapper = settings.slice(Math.max(0, idx - 60), idx);
-    expect(wrapper).toContain("relative z-30");
+    for (const [name, source] of [
+      ["SettingsSection", settings],
+      ["section-rail", section],
+    ] as const) {
+      const idx = source.indexOf("border-b lg:hidden");
+      expect(idx, name).toBeGreaterThan(-1);
+      expect(source.slice(Math.max(0, idx - 60), idx), name).toContain("relative z-30");
+    }
   });
 });
 
 describe("composer keeps Send in-flow in a narrow pane (issue #1383)", () => {
-  const composer = read("views/chat/MessageComposer.tsx");
+  const composer = read("views/room/MessageComposer.tsx");
 
   it("lets the action row wrap instead of overflowing", () => {
     expect(composer).toContain('className="flex flex-wrap items-center gap-0.5 px-2 pb-1.5"');
@@ -128,7 +161,7 @@ describe("composer keeps Send in-flow in a narrow pane (issue #1383)", () => {
 });
 
 describe("mention clearing is gated on the transcript being visible (codex P1)", () => {
-  const chatView = read("views/ChatView.tsx");
+  const chatView = read("views/RoomView.tsx");
 
   it("only reports a channel viewed while the chat pane is actually on screen", () => {
     // The view-report effect that clears mentions must not fire while the rail
@@ -138,7 +171,13 @@ describe("mention clearing is gated on the transcript being visible (codex P1)",
     // it, so the gate reads from the room-rail slot rather than from a
     // breakpoint this view guesses at.
     expect(chatView).toMatch(/if \(channel && chatPaneVisible\)/);
-    expect(chatView).toContain("const chatPaneVisible = !roomRail.covering;");
+    // Two ways for the transcript not to be on screen since #2130, and the gate
+    // has to name both. The sheet covering it is the phone. The other is the
+    // operator being on another section entirely — this view stays mounted
+    // there to keep the sidebar's rail fed, so being mounted stopped being
+    // evidence of being visible, and a mention marked read from Company is the
+    // same defect one route further away.
+    expect(chatView).toContain("const chatPaneVisible = routeOpen && !roomRail.covering;");
     // The visibility flag is a dependency, so closing the sheet re-runs the
     // report and clears whatever is newly visible.
     expect(chatView).toContain("chatPaneVisible,\n  ]);");

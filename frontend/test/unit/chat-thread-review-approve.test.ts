@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
-import { ThreadPanel } from "@/views/chat/ThreadPanel";
-import type { Channel } from "@/views/chat/model";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
+import type { Channel } from "@/views/room/model";
 
 /**
  * CodeRabbit #3905116857: a card that settles inside an already-open thread

@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 
-
 /**
  * The console's single content sheet — the "card" half of the two-layer shell
  * (issue #1178).
@@ -33,10 +32,28 @@ import type { ReactNode } from "react";
  */
 
 /**
- * `--frame-inset` on all four sides, so the frame is one quantity rather than
- * four numbers that happen to agree — and so it reads as a deliberate frame
- * rather than the hairline sliver a three-sided inset gives.
+ * The box the card and its halo share.
  *
+ * The margins live here rather than on the card, because the halo has to be
+ * positioned against the same rectangle the card occupies — and `CARD` cannot
+ * host it: `overflow-hidden` is what keeps a page's own scrolling inside the
+ * rounded corners, and it clips a pseudo-element just as readily as a child.
+ * So the halo is a sibling, and this is what both are measured from.
+ *
+ * `--frame-inset` on the two outer edges, nothing on the leading one, and a
+ * thinner top:
+ *
+ *   - **Leading edge.** The sidebar's groups already carry their own gutter, so
+ *     a `--frame-inset` here put 12px of card margin against 12px of column
+ *     padding — 24px between the last nav row and the first pixel of the page,
+ *     against 12px on the other three sides. One gutter, not two.
+ *   - **Top edge.** The title row has its own bottom padding, so a full inset
+ *     there reads as a gap twice the size of the others.
+ */
+const FRAME =
+  "relative mr-(--frame-inset) mb-(--frame-inset) mt-0.5 ml-0 flex min-h-0 min-w-0 flex-1";
+
+/**
  * `min-h-0` is what lets a view's own `overflow-y-auto` actually scroll: a flex
  * item's default `min-height: auto` floors it at its content's height, so
  * without this the surface grows to fit the page and the scroll happens on the
@@ -51,30 +68,36 @@ import type { ReactNode } from "react";
  * the lift, and it already resolves to the theme's own treatment: a tinted drop
  * shadow in light, a 1px inset top highlight in dark, which is what actually
  * reads as "raised" against near-black.
+ *
+ * `relative` so the card stacks above the halo behind it — the halo is
+ * `z-index: -1` against this same frame, and an auto-positioned card would let
+ * a blurred lobe wash over the page's own content at the corners.
  */
 const CARD =
   "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden " +
-  // `--frame-inset` on three sides, and a thinner top.
-  //
-  // The frame used to be one quantity because nothing sat above the card. The
-  // title row does now, so a full inset there stacks the row's own bottom
-  // padding on top of the card's margin and reads as a gap twice the size of
-  // the one on the other three edges — which is what it is.
-  "mx-(--frame-inset) mb-(--frame-inset) mt-0.5 rounded-2xl border border-chrome-border bg-background shadow-sm";
+  "rounded-2xl border border-chrome-border bg-background shadow-sm";
 
 export function ContentSurface({ children }: { children: ReactNode }) {
   return (
-    <div className={CARD} data-testid="content-surface">
-      {/* No drag band here any more.
+    <div className={FRAME}>
+      {/* The orbiting halo. Purely decorative — `aria-hidden`, no pointer
+          events — and defined in `index.css` as `.content-orbit`, where the
+          angle animation, the single-lobe gradient and the reduced-motion
+          behaviour are argued in one place. */}
+      <div aria-hidden="true" className="content-orbit" />
+      <div className={CARD} data-testid="content-surface">
+        {/* No drag band here any more.
 
-          This card carried one because the window drew no title bar of its own,
-          so the top of the content was the only thing left to grab. There is a
-          real full-width title row now (`window-title-bar.tsx`), which drags
-          where it is not covered by a control — so this band stopped being the
-          handle and stayed only as 28px at the top of every page that quietly
-          refused a press. It was the spacing under the new row, and the reason
-          the two canvases you can drag lost their top edge. */}
-      {children}
+            This card carried one because the window drew no title bar of its
+            own, so the top of the content was the only thing left to grab.
+            There is a real full-width title row now (`window-title-bar.tsx`),
+            which drags where it is not covered by a control — so this band
+            stopped being the handle and stayed only as 28px at the top of every
+            page that quietly refused a press. It was the spacing under the new
+            row, and the reason the two canvases you can drag lost their top
+            edge. */}
+        {children}
+      </div>
     </div>
   );
 }

@@ -11,7 +11,7 @@ import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
 /**
  * Choosing the desk lead (issue #1802).
  *
- * The whole stack treats `members[0]` as the desk's lead (`chat/model.ts`,
+ * The whole stack treats `members[0]` as the desk's lead (`room/channels.ts`,
  * `api/types.ts`). The creator used to encode that purely as selection order
  * with a Crown and a terse "1 · Lead" string, and the only way to change the
  * lead was to deselect everyone and re-pick. This makes the lead explicit: the
@@ -140,7 +140,7 @@ afterEach(() => {
 });
 
 describe("the desk creator lead picker", () => {
-  it("makes the first-selected teammate the lead", async () => {
+  it("makes the first-selected agent the lead", async () => {
     await open(stubClient(() => Promise.reject(new Error("must not be called"))));
 
     await act(async () => {
@@ -158,7 +158,7 @@ describe("the desk creator lead picker", () => {
     expect(leadSummary()).toContain("Ada");
   });
 
-  it("keeps each non-lead teammate's hierarchy position visible alongside Make lead", async () => {
+  it("keeps each non-lead agent's hierarchy position visible alongside Make lead", async () => {
     // Regression for the Codex P2 finding on #1827: with 3+ selected, every
     // non-lead row used to show only "Make lead", with no way to tell Grace
     // (2nd) from Linus (3rd) — the seniority order the hint text asks the
@@ -188,7 +188,7 @@ describe("the desk creator lead picker", () => {
     expect(position("Grace")).toBe("3");
   });
 
-  it("keeps focus on the promoted teammate's row after Make lead", async () => {
+  it("keeps focus on the promoted agent's row after Make lead", async () => {
     // Regression for the Codex accessibility finding on #1827: clicking
     // "Make lead" removes that very button from the DOM (the promoted row
     // switches to the non-focusable "Lead" badge), which used to drop focus
@@ -234,7 +234,7 @@ describe("the desk creator lead picker", () => {
     expect(leadSummary()).toContain("Grace");
   });
 
-  it("posts the promoted teammate as members[0]", async () => {
+  it("posts the promoted agent as members[0]", async () => {
     let captured: CreateDeskInput | undefined;
     const createDesk = vi.fn((input: CreateDeskInput) => {
       captured = input;
@@ -264,7 +264,7 @@ describe("the desk creator lead picker", () => {
     expect(captured?.members).toContain("grace");
   });
 
-  it("promotes the next teammate when the current lead is deselected", async () => {
+  it("promotes the next agent when the current lead is deselected", async () => {
     await open(stubClient(() => Promise.reject(new Error("must not be called"))));
 
     await act(async () => {

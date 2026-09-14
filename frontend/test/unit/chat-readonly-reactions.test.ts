@@ -5,13 +5,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "@/lib/chat";
-import { MessageTimeline } from "@/views/chat/MessageTimeline";
+import { MessageTimeline } from "@/views/room/MessageTimeline";
 import {
   buildTimeline,
   buildTimelineItems,
   QUICK_REACTIONS,
   type Channel,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * Issue #1986 — a read-only channel must not offer a new reaction.
@@ -45,12 +45,12 @@ import {
  *   swept the whole action bar away would be caught here.
  */
 
-/** The read-only Operator feed: `system` is the flag `ChatView` gates on. */
+/** The read-only Operator feed: `system` is the flag `RoomView` gates on. */
 const OPERATOR: Channel = {
   id: "operator",
   name: "Operator",
   kind: "channel",
-  purpose: "Workflow reports and notifications",
+  purpose: "Automation reports and notifications",
   system: true,
 };
 
@@ -120,7 +120,7 @@ function report(over: Partial<ChatMessage> = {}): ChatMessage {
   return {
     id: "h1",
     from: "company",
-    text: "Workflow **weekly digest** finished.",
+    text: "Automation **weekly digest** finished.",
     at: T0,
     ...over,
   };

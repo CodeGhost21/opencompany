@@ -89,7 +89,7 @@ describe("two queries in one thread", () => {
    */
   it("keep separate lists, so neither turn can lose the other's rows", () => {
     // QUERY A delegates and then blocks on a teammate, emitting nothing more.
-    let a = foldLiveFrame([], call("a1", "Delegate To Teammate"))!;
+    let a = foldLiveFrame([], call("a1", "Delegate To Agent"))!;
     a = foldLiveFrame(a, result("a1", "ok"))!;
     expect(a).toHaveLength(1);
 
@@ -99,7 +99,7 @@ describe("two queries in one thread", () => {
 
     // A's row survived B's whole turn, and the two never mixed.
     expect(a).toHaveLength(1);
-    expect(a[0].label).toBe("Delegate To Teammate");
+    expect(a[0].label).toBe("Delegate To Agent");
     expect(b).toHaveLength(1);
     expect(b[0].label).toBe("Http Request");
   });

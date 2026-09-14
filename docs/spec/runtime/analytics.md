@@ -4,7 +4,7 @@
 being used, what it deliberately never reports, which installs report at all,
 and how to turn it off.
 
-The short version, and the only three sentences most readers need:
+The short version, and the only four sentences most readers need:
 
 - A **desktop or self-hosted install sends nothing.** Not "sends nothing by
   default" in the sense of a flag someone could flip in a config file — the
@@ -13,12 +13,16 @@ The short version, and the only three sentences most readers need:
   Getting one out of that state takes a **recompile**: `--features analytics`
   *and* an explicit `OPENCOMPANY_ANALYTICS=on`, both deliberate, and neither
   reachable from anything a shipped binary reads at runtime. See
-  [Configuration](#configuration) for the four conditions in full.
+  [Configuration](#configuration) for the six conditions in full.
 - A **hosted tenant** — a container the OpenCompany platform provisioned and
   operates — reports **shape and outcome only**, under an **opaque id**.
 - Nothing an operator or an agent wrote ever leaves the process this way. Not
   message text, prompts, file names, ledger values, tool arguments, addresses,
   or company names.
+- The collector is **[OpenPanel](https://github.com/Openpanel-dev/openpanel)**,
+  which is AGPL-3.0 and self-hosted by whoever runs the platform. There is no
+  third party in the path and **no default address** — every reporting
+  deployment names its own collector.
 
 ## Why the default is silence
 
@@ -35,6 +39,20 @@ feature gate is what keeps both things true at once.
 And [`roadmap.md`](../roadmap.md)'s non-goal — "no private feedback backend" —
 still holds and is unchanged by this: **feedback** goes to public GitHub issues
 or stays local, and never rides this channel.
+
+## Why the collector is OpenPanel
+
+The same argument, one layer out. Silence-by-default answered "does a
+self-hosted instance report?" but left the destination a SaaS vendor, so the
+one deployment that *did* report — the hosted platform — shipped its usage to a
+third party, and a self-hoster who opted in had no way to run the other end.
+That is a licence taken more seriously by its users than by its own product.
+
+OpenPanel is AGPL-3.0 and runs from a compose file. Collection now lands on
+infrastructure the platform operator runs, and a reader of this document can
+stand the whole stack up themselves. **Mixpanel is gone entirely** — not behind
+a flag, not as a fallback. There is one transport and it speaks to whatever
+`OPENCOMPANY_ANALYTICS_ENDPOINT` names.
 
 ## What is collected
 
@@ -59,13 +77,21 @@ before the field existed. Absent rather than `other`, so "no model ran" stays a
 different answer from "a model ran that this build cannot name"; collapsing them
 would inflate the `other` bucket with every tool call.
 
+None of the three names collides with anything OpenPanel refuses.
+`session_start` and `session_end` are its only reserved names, and its
+anti-abuse blocklist rejects names over 80 characters, names containing a
+newline, names beginning `/`, and a substring list (`${`, `%{`, `../`,
+`union select`, …). A refused event comes back `400` and becomes one `debug!`
+line, so a future collision would look exactly like an instance quietly
+reporting one fewer event — which is why `no_event_name_is_one_the_collector_refuses`
+asserts it rather than leaving it to review.
+
 ### The context envelope
 
 Set once at boot, attached to every event:
 
 | Property | Value |
 |---|---|
-| `distinct_id` | the opaque identity — see below |
 | `deployment` | `desktop` \| `self-hosted` \| `hosted-tenant` |
 | `app_version` | the crate version |
 | `os`, `arch` | `std::env::consts` |
@@ -73,6 +99,11 @@ Set once at boot, attached to every event:
 | `cognition_provider` | `openrouter` \| `subscription` \| `managed` \| `ollama` \| `byok` \| … |
 | `cognition_metering` | `per-turn` \| `per-cycle` \| `none` |
 | `harness_in_build`, `mcp_in_build`, `acp_in_build`, `oauth_in_build`, `analytics_in_build` | the compiled feature set |
+| `__timestamp` | when the event happened — see [the wire contract](#the-wire-contract) |
+
+The opaque identity is **not** in this table any more. It rides beside the
+properties as OpenPanel's `profileId` rather than inside them as Mixpanel's
+`distinct_id` property; the value is unchanged.
 
 `cognition_*` is read off [`ports::brain::Cognition`](ports-cognition.md), the
 descriptor the runtime already keeps, rather than re-derived from configuration
@@ -111,12 +142,29 @@ know they are the point:
   richest source of user content in the tree.
 
 `src/analytics/test.rs` asserts both halves: that hostile inputs do not survive
-into a payload, and that **every** string in a rendered payload is either the
-opaque id, a platform constant, or a word from a hand-written vocabulary.
+into a payload, and that **every** string anywhere in a rendered body is either
+the opaque id, a platform constant, a word from a hand-written vocabulary, or
+the one field that is none of those — `__timestamp`, which is checked against
+the exact grammar `YYYY-MM-DDTHH:MM:SSZ` rather than waved through.
+
+## The wire contract
+
+`POST {OPENCOMPANY_ANALYTICS_ENDPOINT}`, one request per event, JSON body,
+authenticated by two headers. The full contract — the exact header names, the
+discriminated-union body, the reserved event names, the response statuses, and
+where a timestamp goes — is in
+[analytics-wire.md](analytics-wire.md), read from OpenPanel's own source rather
+than from its docs.
+
+Two consequences of it shape everything below and are worth stating here:
+**there is no batch endpoint**, so the transport issues one request per event
+(see [the drain](analytics-wire.md#failure-is-silent-and-the-drain-gives-up-early)); and the
+credential travels in headers rather than in the body, so there is no longer a
+code path by which it could reach a rendered payload.
 
 ## Identity
 
-`distinct_id` is opaque and stable, and it is one of two things:
+`profileId` is opaque and stable, and it is one of two things:
 
 - `t_<32 hex>` — an **HMAC-SHA256 of the tenant slug**, for a hosted tenant, and
   only when the platform also supplies `OPENCOMPANY_ANALYTICS_ID_KEY`. Hashed
@@ -154,31 +202,108 @@ symptom in analytics is inflated install counts, not lost data.
 |---|---|
 | `OPENCOMPANY_DEPLOYMENT` | `desktop` \| `self-hosted` \| `hosted-tenant`. Declared by whoever launches the process. Default and fallback: `self-hosted`, including when the declared value cannot be read. |
 | `OPENCOMPANY_ANALYTICS` | `on` forces reporting; `off` forbids it and outranks everything else. |
-| `OPENCOMPANY_ANALYTICS_TOKEN` | the Mixpanel project token. **Configuration, never a compiled-in constant** — a token baked into a public binary is a token everyone has. |
-| `OPENCOMPANY_ANALYTICS_ENDPOINT` | overrides the collector URL. Must be an absolute `http`/`https` URL with a host; anything else is silence with a reason. |
+| `OPENCOMPANY_ANALYTICS_CLIENT_ID` | the OpenPanel client id — a **UUIDv4** naming a `write` or `root` client. |
+| `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` | that client's secret. **Configuration, never a compiled-in constant** — a secret baked into a public binary is a secret everyone has. |
+| `OPENCOMPANY_ANALYTICS_ENDPOINT` | the collector URL. **Required; there is no default.** Must be an absolute URL with a host, and must be **`https`** — plain `http` is accepted only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`). |
 | `OPENCOMPANY_ANALYTICS_ID_KEY` | the secret a hosted tenant's analytics id is derived under. Injected by the platform, never given to the collector. Absent means the host is known by its random instance id instead. |
+
+For a self-hosted OpenPanel behind its bundled Caddy, the endpoint is
+`https://<your-domain>/api/track` — the reverse proxy strips the `/api` prefix
+before the API container sees it.
 
 Reporting happens only when **all** of these hold:
 
 1. the binary was built with `--features analytics`;
 2. `OPENCOMPANY_ANALYTICS` is not `off`;
 3. the deployment is `hosted-tenant`, **or** `OPENCOMPANY_ANALYTICS=on`;
-4. a project token is configured;
-5. the collector endpoint is one a client could actually POST to.
+4. both halves of the client credential are configured;
+5. both halves are values that can go in an HTTP header;
+6. an endpoint is configured, and it is one a client could actually POST to;
+7. and it is one the credential can safely cross — `https`, or `http` to loopback.
 
-The endpoint is validated with `url`, the same parser `reqwest` uses, rather
-than an approximation of the URL grammar. The first attempt hand-rolled the
-check and accepted eight shapes `reqwest` rejects — `http://[::1/track`,
-`:99999`, `:65536`, `:abc`, `host:8080:9090`, `]::1[`, `127.0.0.1.5` and
-`999.999.999.999` — each of which resolved to reporting and then dropped every
-batch, which is the failure the check exists to prevent. Issue #673 had already
-settled this rule for a different call site: it must be *the same* parser
-`reqwest` uses, because a second hand-rolled reader is a bypass waiting to be
-found.
+### Why there is no default endpoint
+
+Mixpanel had one — `https://api.mixpanel.com/track` — and dropping it rather
+than re-pointing it is the deliberate half of this change. A self-hosted
+collector has no canonical address; it lives wherever its operator runs it. Any
+default this crate picked would therefore be *somebody else's* collector, and a
+tenant that configured a credential but forgot the endpoint would ship its
+telemetry to a third party nobody named. That is the same accident condition 6
+already refuses to make from the other direction, and it is worse, because the
+boot line would name a destination that is perfectly real.
+
+So an absent or blank endpoint is silence with its own reason, a **malformed**
+one a second and an **insecure** one a third: "you never set this", "what you
+set will not parse" and "what you set would leak the secret" are three different
+edits, and send an operator to three different places.
+
+### Why HTTPS is required, and why loopback is the exception
+
+Mixpanel's token rode in the body of a request to one fixed `https` address this
+crate chose; nothing could downgrade it. The OpenPanel secret is a **header on
+every request**, to an address the operator types, so
+`OPENCOMPANY_ANALYTICS_ENDPOINT=http://collector.internal/track` puts a
+long-lived write credential on the wire in cleartext, once per event, for the
+life of the tenant ([CWE-319](https://cwe.mitre.org/data/definitions/319.html)),
+and a container cannot verify anyone's claim that the network in between is
+private. So it is **silence with its own reason**, not a warning-and-send — a
+warning is a line nobody reads while the secret ships anyway.
+
+**Loopback is the exception**, and a real one rather than a concession: traffic
+to `127.0.0.0/8`, `::1` or `localhost` does not leave the host, so the secret
+never crosses a network between machines — the claim CWE-319 is about, and
+narrower than "nobody can see it" (a privileged local process can capture `lo`).
+It is how the collector runs beside the workload in development, and how every
+gated test here reaches its own. `http://openpanel-api:3000/track`
+between two services on one Docker network is **refused**, so terminate TLS at
+the collector (its bundled Caddy does, the documented deployment) or use
+loopback; and **`localhost` is matched by exact name, not by suffix** (RFC 6761's
+`*.localhost` is something a resolver only *may* honour). Configuration cannot
+enforce this alone, so the client also **follows no redirect** and **sends a
+cleartext endpoint through no proxy** — `reqwest` would otherwise route
+`http://localhost` to `HTTP_PROXY`, off the host, in the clear:
+[analytics-wire.md](analytics-wire.md#where-the-credential-is-allowed-to-travel).
+
+### Why both credential halves, and why a header check
+
+OpenPanel authenticates a write client with an id **and** a secret, so there is
+no useful state in between them. Half a credential is what a half-finished
+secret rollout looks like — the id is in the manifest, the secret is still in
+the vault — and an operator staring at "no credential is configured" while
+`OPENCOMPANY_ANALYTICS_CLIENT_ID` is plainly set in their env file has been told
+something that reads as false. So there are three reasons, not one: neither
+half, no id, no secret.
+
+Condition 5 is new with OpenPanel and exists because of *where* the credential
+travels now. Mixpanel's token rode in the JSON body, where any string is legal,
+so a mangled one was simply refused by the collector. These two ride in headers,
+and `reqwest` will not build a request whose header value holds a control byte —
+so a secret that picked up a newline in the middle (`kubectl create secret` over
+a wrapped file is the usual way one arrives, and trimming does not save it)
+would install a tracker that never constructs a single request, forever, behind
+a `debug!` nobody has enabled.
+
+The check is written by hand in `config.rs` rather than deferred to `reqwest`,
+because that module is un-gated on purpose: the whole decision is provable in
+the default build, where `reqwest` may not be in the dependency graph at all. It
+is therefore deliberately **stricter** than `HeaderValue` — printable ASCII with
+no space — so anything it accepts, the transport can send. That subset claim is
+the only thing making a hand-written rule safe here, so the gated test
+`the_header_safety_check_is_a_subset_of_what_a_header_accepts` asserts it
+against `HeaderValue::from_str` directly, over every byte.
+
+The endpoint, separately, is validated with `url`, the same parser `reqwest`
+uses, rather than an approximation of the URL grammar. The first attempt
+hand-rolled the check and accepted eight shapes `reqwest` rejects —
+`http://[::1/track`, `:99999`, `:65536`, `:abc`, `host:8080:9090`, `]::1[`,
+`127.0.0.1.5` and `999.999.999.999` — each of which resolved to reporting and
+then dropped every batch. Issue #673 had already settled this rule for a
+different call site: it must be *the same* parser `reqwest` uses, because a
+second hand-rolled reader is a bypass waiting to be found.
 
 Condition 1 is met in exactly one place in this repository: `TENANT_FEATURES` in
 `.github/workflows/deploy-staging.yml`, the hosted tenant image's feature set.
-Nothing else compiles the feature — not the desktop (`src-tauri/Cargo.toml`),
+Nothing else compiles the feature — not the desktop (`crates/opencompany-app/Cargo.toml`),
 not the default build, not any CI lane but the scoped analytics one. A hosted
 image whose feature list drops `analytics` reports nothing however the manager
 configures it, and says so at boot rather than failing quietly.
@@ -193,9 +318,9 @@ from an absent one, so an explicitly-declared shared-single-DB tenant fell
 through to the inference and came back `hosted-tenant` — reporting switched
 **on** by a malformed variable, on the discriminator every other decision here
 rests on. A **blank** declaration is still absent, so a launcher that exports an
-empty variable changes nothing. A discriminator sniffed from something incidental (the
-data dir, the bind address, `harness_in_build`) inverts the day someone changes
-an unrelated setting, silently, and points at the wrong file.
+empty variable changes nothing. A discriminator sniffed from something
+incidental (the data dir, the bind address, `harness_in_build`) inverts the day
+someone changes an unrelated setting, silently, and points at the wrong file.
 
 An unrecognised value for either switch resolves to **silence**, never to
 reporting — on a hosted tenant too. Both directions of that typo matter and only
@@ -210,62 +335,63 @@ so a launcher that exports an empty variable changes nothing.
 
 ### How to turn it off
 
-Set `OPENCOMPANY_ANALYTICS=off`. It outranks the deployment kind and the token,
-and it is the first thing checked. Boot prints one line either way:
+Set `OPENCOMPANY_ANALYTICS=off`. It outranks the deployment kind and the
+credential, and it is the first thing checked. Boot prints one line either way:
 
 ```text
 analytics: off (not a hosted tenant and no explicit opt-in)
 analytics: off (operator opted out)
 analytics: off (the OPENCOMPANY_ANALYTICS value is not recognised)
+analytics: off (no collector credential is configured (OPENCOMPANY_ANALYTICS_CLIENT_ID and OPENCOMPANY_ANALYTICS_CLIENT_SECRET))
+analytics: off (OPENCOMPANY_ANALYTICS_CLIENT_SECRET is not configured)
+analytics: off (the configured collector credential contains bytes that cannot go in an HTTP header)
+analytics: off (OPENCOMPANY_ANALYTICS_ENDPOINT is not configured)
 analytics: off (the OPENCOMPANY_ANALYTICS_ENDPOINT value is not a usable http(s) URL)
-analytics: off (reporting to https://api.mixpanel.com/track was configured, but this build was compiled without the `analytics` feature)
-analytics: reporting to https://api.mixpanel.com/track
+analytics: off (reporting to https://collector.internal/track was configured, but this build was compiled without the `analytics` feature)
+analytics: reporting to https://collector.internal/track
 ```
 
-The fourth of those is the endpoint check. `OPENCOMPANY_ANALYTICS_ENDPOINT` is
-validated where the decision is made, not where the send is attempted:
-`collector.internal/track` — a proxy hostname written without a scheme, which is
-how anyone writes one the first time — used to resolve to reporting, so boot
-announced "reporting to collector.internal/track" and every batch then died
-inside `reqwest` behind a `debug!` line no operator has enabled. The product said
-something true-sounding and did nothing. Bytes that are not valid UTF-8 are
-rejected the same way rather than falling back to the default endpoint: a tenant
-that pointed analytics at its own proxy and mistyped it would otherwise have
-reported to Mixpanel instead, which is telemetry sent somewhere nobody
-configured. The reason line never quotes the rejected value, for the reason
-below.
+Every one of those exists because the alternative was a line that said
+"reporting to …" over a process that then sent nothing. `collector.internal/track`
+— a hostname written without a scheme, which is how anyone writes one the first
+time — used to resolve to reporting, so boot announced a destination and every
+batch died inside `reqwest` behind a `debug!` no operator has enabled. That
+matters more now than it did: with no default endpoint, every reporting
+deployment types that variable by hand.
 
-The endpoint is named; the token never is — and the endpoint is named
-**sanitized**. `OPENCOMPANY_ANALYTICS_ENDPOINT` exists so a deployment can front
-Mixpanel with its own proxy, and an authenticated proxy carries its key in the
-two places a URL can hold one: userinfo (`https://user:pass@host/track`) and the
-query string (`?key=…`). Both are stripped before the line is printed, leaving
-scheme, host and path, and the line says `(credentials redacted)` when it
-shortened anything — a silently truncated URL is its own hour of confusion. The
-`ProjectToken` redaction does not cover this; it guards a different string.
+The endpoint is named; the credential never is — and the endpoint is named
+**sanitized**. A self-hosted collector is routinely reached through an
+authenticated proxy, and such a proxy carries its key in the two places a URL
+can hold one: userinfo (`https://user:pass@host/track`) and the query string
+(`?key=…`), plus a third the other two miss — an opaque path segment, as in
+`https://collector.example/ingest/<token>`. All three are stripped before the
+line is printed, leaving scheme, host and leading path segment, and the line
+says `(credentials redacted)` when it shortened anything: a silently truncated
+URL is its own hour of confusion. The `ClientCredentials` redaction does not
+cover this; it guards two different strings.
 
 The same URL reaches one other log line: the `debug!` the transport writes when
 a send fails. `reqwest::Error` retains the request URL and prints it, so an
 unreachable collector wrote the proxy key into container logs by a path the boot
 line's redaction never touched. Measured against reqwest 0.12.28, userinfo is
-already stripped from what it prints and **the query string is not** — so `?key=…`
-was leaking and `user:pass@` was not. The transport calls `without_url`, which
-removes the URL rather than rewriting it, so neither shape can reach the line
-whatever a future reqwest decides to print; the destination on that same line
-comes from the one `loggable_endpoint` helper the boot line uses, so there is no
-second redaction to fall out of step with the first.
+already stripped from what it prints and **the query string is not** — so
+`?key=…` was leaking and `user:pass@` was not. The transport calls `without_url`,
+which removes the URL rather than rewriting it, so neither shape can reach the
+line whatever a future reqwest decides to print; the destination on that same
+line comes from the one `loggable_endpoint` helper the boot line uses, so there
+is no second redaction to fall out of step with the first.
 
-The fourth line is the one worth reading twice. It reports what the process will
-**do**, not what was configured: a build without the `analytics` feature
-resolves to reporting and then gets a `NullTracker`, because there is no
+The second-to-last line is the one worth reading twice. It reports what the
+process will **do**, not what was configured: a build without the `analytics`
+feature resolves to reporting and then gets a `NullTracker`, because there is no
 transport in it to hand back. Saying "reporting to …" there would be the exact
-opposite of the truth, and the `mixpanel::build` line that explains it is a
+opposite of the truth, and the `openpanel::build` line that explains it is a
 `tracing::info!` the CLI's default `EnvFilter` swallows — which is why every
 boot line here is a `println!` in the first place.
 
 ### Tenant identity is keyed, not merely hashed
 
-A hosted tenant's `distinct_id` is an HMAC-SHA256 of its slug under
+A hosted tenant's `profileId` is an HMAC-SHA256 of its slug under
 `OPENCOMPANY_ANALYTICS_ID_KEY`, truncated to 128 bits and prefixed `t_`.
 
 It used to be a plain `SHA-256(slug)`, and that did not deliver what it
@@ -326,15 +452,19 @@ configurable: a flat two seconds on top of `OPENCOMPANY_SHUTDOWN_GRACE_SECONDS=2
 — which fits in 30s exactly on its own — took it to 32 and recreated the same
 `SIGKILL`, for a value the operator had every reason to think was safe. A drain
 that already fills the budget leaves zero and the flush is skipped, and a flush
-that does not finish is abandoned. A dropped batch costs a line in a dashboard;
+that does not finish is abandoned. A dropped event costs a line in a dashboard;
 an overrun costs a half-finished turn.
 
-Failure is silent by construction: `Tracker::track` is synchronous and
-infallible and returns nothing, so a call site cannot await a network or branch
-on a telemetry error. A dead collector drops batches after one `debug!` line.
-The buffer is bounded at 500 events — if the collector is unreachable long
-enough to fill it, the right outcome is losing telemetry, not a tenant
-container.
+### Failure is silent
+
+`Tracker::track` is synchronous, infallible and returns nothing, so a call site
+cannot await a network or branch on a telemetry error. A dead collector drops
+events after one `debug!` line, the queue is bounded at 500 events, and a drain
+that cannot reach the collector abandons the rest of itself rather than paying a
+5s timeout per queued event. Three status classes — `401`, `3xx`, `429`/`5xx` —
+abandon it too, none being an answer about the event posted. The full reasoning,
+and the one loss said out loud (the tail a cancelled shutdown flush drops), is in
+[analytics-wire.md](analytics-wire.md#failure-is-silent-and-the-drain-gives-up-early).
 
 ## What is deliberately not instrumented yet
 
@@ -360,8 +490,11 @@ tests.
 
 The two tests that matter most are a pair, and they only mean something
 together: `a_self_hosted_build_makes_no_request` stands up a local collector,
-hands the process a token and an endpoint, declares no deployment, and asserts
-**zero** requests; `a_hosted_tenant_reports_with_the_full_envelope` is its
-positive control against the same collector, the same events and the same code
-path with one variable changed. Without the second, a zero request count would
-be indistinguishable from a test that never sends anything at all.
+hands the process a credential and an endpoint, declares no deployment, and
+asserts **zero** requests; `a_hosted_tenant_reports_with_the_full_envelope` is
+its positive control against the same collector, the same events and the same
+code path with one variable changed. Without the second, a zero request count
+would be indistinguishable from a test that never sends anything at all. The
+positive control also pins the wire contract: two events, **two** requests, both
+auth headers by their exact spelling, and the union body with the identity as
+`profileId`.

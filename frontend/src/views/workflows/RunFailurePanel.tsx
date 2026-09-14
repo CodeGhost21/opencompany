@@ -27,10 +27,10 @@ const DISPOSITION_COPY: Record<FailureDisposition, string> = {
   transport:
     "The request didn't complete, so the host may or may not have started this run. Run history is the answer either way.",
   "refusal-inference":
-    "The host did not start this run because inference needs attention. Update Settings → Inference, then try again.",
+    "The host did not start this run because inference needs attention. Update Connections → Inference, then try again.",
   "refusal-lifecycle":
     "This company is not running, so the host did not start this run. Resume it from the company's controls, then try again.",
-  "refusal-not-wired": "This host cannot run workflows, so it did not start this run.",
+  "refusal-not-wired": "This host cannot run automations, so it did not start this run.",
   journaled: "This console saw the run start. Run history has the step it stopped at.",
   cautious:
     "The host answered, but this console did not see the run start. Run history may have more detail if it started.",
@@ -78,7 +78,7 @@ export function RunFailurePanel({
           {/*
             Issue B-037: a refusal is not a failure. All three refusal
             dispositions are host answers that returned before anything was
-            spawned, so "Run failed" reads as "your workflow broke" when the
+            spawned, so "Run failed" reads as "your automation broke" when the
             truth is that it never started and the operator can clear the
             reason. The body copy below already says which reason.
           */}

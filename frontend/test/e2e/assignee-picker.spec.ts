@@ -51,7 +51,7 @@ async function dismissTour(page: Page) {
 
 /** Creates a card through the board's one prompt box (issue #301). */
 async function createViaPromptBox(page: Page, prompt: string) {
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
   await dismissTour(page);
   await page.getByRole("button", { name: "Add task" }).click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
@@ -61,7 +61,7 @@ async function createViaPromptBox(page: Page, prompt: string) {
 
 /** Opens a seeded card's edit dialog — where the assignee is now picked. */
 async function openEditDialog(page: Page, id: string) {
-  await page.goto(`/#/tasks/${id}`);
+  await page.goto(`/#/company/tasks/${id}`);
   await dismissTour(page);
   await page.getByRole("button", { name: "Edit" }).click();
   await expect(page.getByRole("heading", { name: "Edit task" })).toBeVisible();
@@ -81,7 +81,7 @@ function card(page: Page, title: string) {
   return page.locator("[draggable=true]").filter({ hasText: title }).first();
 }
 
-test("the edit dialog offers Unassigned, desks and teammates instead of a text field", async ({
+test("the edit dialog offers Unassigned, desks and agents instead of a text field", async ({
   page,
   request,
 }) => {
@@ -113,7 +113,7 @@ test("the edit dialog offers Unassigned, desks and teammates instead of a text f
   // order. (Scoped to the popup's own group labels: the sidebar also has a
   // "Desks" nav item.)
   const groups = page.locator('[data-slot="select-label"]');
-  await expect(groups).toHaveText(["Desks", "Teammates"]);
+  await expect(groups).toHaveText(["Desks", "Agents"]);
 
   await expect(page.getByRole("option", { name: /Engineering desk/ })).toBeVisible();
   await expect(page.getByRole("option", { name: /Content desk/ })).toBeVisible();
@@ -125,9 +125,9 @@ test("the edit dialog offers Unassigned, desks and teammates instead of a text f
   await expect(page.getByRole("option", { name: /^ceo —/ })).toBeVisible();
 
   // A desk with nobody on it stays assignable (EmptyDesk is real), and says so.
-  await expect(page.getByRole("option", { name: /Legal — no teammates yet/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Legal — no agents yet/ })).toBeVisible();
   // A staffed desk shows its headcount.
-  await expect(page.getByRole("option", { name: /Engineering desk — 1 teammate/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Engineering desk — 1 agent/ })).toBeVisible();
 });
 
 test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
@@ -140,7 +140,7 @@ test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
   await pickAssignee(page, "task-assignee", /Engineering desk/);
   await page.getByRole("button", { name: "Save" }).click();
 
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
   await dismissTour(page);
   const created = card(page, title);
   await expect(created).toBeVisible({ timeout: 15_000 });
@@ -149,7 +149,7 @@ test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
   await expect(created).not.toContainText(/\bengineer\b(?!ing)/);
 });
 
-test("a card can be assigned to a teammate, and created for nobody at all", async ({
+test("a card can be assigned to an agent, and created for nobody at all", async ({
   page,
   request,
 }) => {
@@ -158,7 +158,7 @@ test("a card can be assigned to a teammate, and created for nobody at all", asyn
   await openEditDialog(page, (await seeded.json()).id as string);
   await pickAssignee(page, "task-assignee", /^writer —/);
   await page.getByRole("button", { name: "Save" }).click();
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
   await dismissTour(page);
   await expect(card(page, forWriter)).toContainText("writer", { timeout: 15_000 });
 
@@ -213,7 +213,7 @@ test("the detail screen can hand a card back to the orchestrator", async ({ page
   });
   const id = (await created.json()).id as string;
 
-  await page.goto(`/#/tasks/${id}`);
+  await page.goto(`/#/company/tasks/${id}`);
   await dismissTour(page);
   await expect(page.getByRole("heading", { name: title })).toBeVisible();
   await page.getByRole("button", { name: "Reassign" }).click();
@@ -249,7 +249,7 @@ test("an assignee the roster no longer carries still renders, and the card stays
   const id = (await created.json()).id as string;
   expect((await request.delete(`${API}/team/${ghostId}`)).status()).toBe(204);
 
-  await page.goto(`/#/tasks/${id}`);
+  await page.goto(`/#/company/tasks/${id}`);
   await dismissTour(page);
   await page.getByRole("button", { name: "Edit" }).click();
 

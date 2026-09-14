@@ -48,7 +48,7 @@ describe("compareRuns", () => {
     ["weekly_review", "Weekly review"],
   ]);
 
-  it("sorts by workflow name, respecting direction", () => {
+  it("sorts by automation name, respecting direction", () => {
     const a = run({ workflowId: "weekly_review" });
     const b = run({ workflowId: "feature_pipeline" });
     expect(compareRuns(a, b, "workflow", "asc", nameById)).toBeGreaterThan(0);
@@ -144,7 +144,7 @@ describe("runMatchesFilters", () => {
     ).toBe(false);
   });
 
-  it("keeps only the checked workflows", () => {
+  it("keeps only the checked automations", () => {
     const filters = {
       now: NOW,
       rangeMs: null,

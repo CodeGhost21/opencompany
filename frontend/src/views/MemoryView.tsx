@@ -27,20 +27,15 @@ import { VirtualList } from "@/components/virtual-list";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { DropZone } from "@/views/memory/DropZone";
 import { EngineSection } from "@/views/memory/EngineSection";
+import { BRAIN_PAGES, resolveBrainPage, type BrainPage } from "@/views/memory/brain-pages";
+import { PageTabPanel, PageTabs } from "@/components/page-tabs";
+import { consoleHref } from "@/lib/console-paths";
 import { Markdown } from "@/components/markdown";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -57,6 +52,13 @@ import { cn } from "@/lib/utils";
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * The third hash segment — `upload` in `#/company/brain/upload`.
+   *
+   * Unvalidated here, as every sub-dispatching view takes it: only this view
+   * knows which of its pages exist, so `resolveBrainPage` does that check.
+   */
+  sub?: string | null;
 }
 
 const KIND_LABELS: Record<string, string> = {
@@ -112,7 +114,22 @@ function formatUpdated(ms: number): string {
  * Operators add and delete facts; a create is mirrored server-side into the
  * agents' recallable context so a note reaches an agent on its next turn.
  */
-export function MemoryView({ client, company }: Props) {
+export function MemoryView({ client, company, sub }: Props) {
+  // Which of the three this address names. Overview for a bare `#/company/brain`
+  // and for any segment that names nothing — a stale bookmark lands on the page
+  // the section is for rather than on an error.
+  const page = resolveBrainPage(sub ?? null);
+  // Brain's tabs ride the path segment they already owned rather than `?tab=`,
+  // so every `#/company/brain/upload` ever linked still opens Upload. A plain
+  // hash assignment, like every other address change in the console: it is a
+  // real history entry, so Back returns to the tab you came from.
+  //
+  // Overview clears the segment instead of writing it — `#/company/brain` and
+  // `#/company/brain/overview` are the same place, and only one of them should
+  // be the address you copy out of the bar.
+  const openPage = (next: BrainPage) => {
+    window.location.hash = consoleHref("brain", next === "overview" ? null : next);
+  };
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
   // The truncation metadata that rode in with the last list read, kept beside
@@ -125,7 +142,6 @@ export function MemoryView({ client, company }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState<string>("all");
-  const [addOpen, setAddOpen] = useState(false);
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   const lanes = useMediaQuery("(min-width: 640px)") ? 2 : 1;
   // A generation token so a response from a previous company scope (or after
@@ -209,14 +225,13 @@ export function MemoryView({ client, company }: Props) {
 
   async function add(fields: { kind: MemoryKind; title: string; body: string }) {
     await createMemory(client, company, fields);
-    // Close the moment the write is confirmed, then reload in the background.
-    // The dialog's catch owns the "could not save the memory" toast, so only
-    // createMemory — an actual save failure — may reach it. Awaiting the reload
-    // here instead would route a reload failure into that same catch (a false
-    // save error) and skip this close, stranding the dialog open so the operator
-    // retries and writes a duplicate. `void load` is fire-and-forget: load
-    // handles its own errors via the page banner and never leaks a rejection.
-    setAddOpen(false);
+    // Reload in the background once the write is confirmed. The panel's catch
+    // owns the "could not save the memory" toast, so only createMemory — an
+    // actual save failure — may reach it; awaiting the reload here instead
+    // would route a reload failure into that same catch and report a save that
+    // did happen as one that did not, prompting a duplicate. `void load` is
+    // fire-and-forget: load handles its own errors via the page banner and
+    // never leaks a rejection.
     void load({ silent: true });
   }
 
@@ -245,12 +260,21 @@ export function MemoryView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Brain"
-        width="5xl"
+        width="full"
         description={
           <>
             What your company remembers — facts, people, projects, and preferences your
-            teammates can recall.
+            agents can recall.
           </>
+        }
+        tabs={
+          <PageTabs
+            tabs={BRAIN_PAGES}
+            value={page}
+            onChange={openPage}
+            idBase="brain"
+            aria-label="Brain views"
+          />
         }
         actions={
           <>
@@ -280,36 +304,17 @@ export function MemoryView({ client, company }: Props) {
                 )}
               </span>
             )}
-            {/*
-              The reason rides on the wrapper, not the button: `Button` carries
-              `disabled:pointer-events-none`, so a `title` on a disabled button
-              never surfaces — the span still takes the hover and shows it.
-            */}
-            <span
-              title={
-                discarding
-                  ? "This engine discards every write — nothing saved here is retained."
-                  : undefined
-              }
-            >
-              <Button
-                onClick={() => setAddOpen(true)}
-                disabled={discarding}
-                // Rendered, not hidden: the operator should see that writing is
-                // the thing this engine cannot do, not find the control missing.
-                data-testid="memory-add"
-              >
-                <Plus className="size-4" /> New memory
-              </Button>
-            </span>
           </>
         }
       />
       <div
         ref={setScrollEl}
-        className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-5 overflow-y-auto px-4 py-6"
+        className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6"
       >
 
+        {/* Settings. The engine is chosen once and then almost never, so it
+            sat on top of the browser that is read constantly. */}
+        <PageTabPanel idBase="brain" id="settings" value={page}>
         <EngineSection
           client={client}
           company={company}
@@ -321,13 +326,20 @@ export function MemoryView({ client, company }: Props) {
             void load({ silent: true });
           }}
         />
+        </PageTabPanel>
 
+        {/* Upload. Its own page rather than a target above the list: dropping a
+            document is something an operator does when one arrives, not on the
+            way to reading what is already remembered. */}
+        <PageTabPanel idBase="brain" id="upload" value={page} className="space-y-5">
         <DropZone
           client={client}
           company={company}
           discarding={discarding}
           onIngested={() => void load({ silent: true })}
         />
+        <AddMemoryPanel discarding={discarding} onAdd={add} />
+        </PageTabPanel>
 
         {error && (
           <Alert variant="destructive">
@@ -335,6 +347,9 @@ export function MemoryView({ client, company }: Props) {
           </Alert>
         )}
 
+        {/* Overview: the health strip, the filters and the list — what the
+            section is for, and what a bare `#/company/brain` lands on. */}
+        <PageTabPanel idBase="brain" id="overview" value={page} className="space-y-5">
         <HealthStrip loading={loading} stats={stats} perType={perType} />
         {contextTruncated && (
           <Alert>
@@ -388,9 +403,9 @@ export function MemoryView({ client, company }: Props) {
             data-testid="memory-list"
           />
         )}
+        </PageTabPanel>
       </div>
 
-      <AddMemoryDialog open={addOpen} onOpenChange={setAddOpen} onAdd={add} />
     </div>
   );
 }
@@ -410,7 +425,7 @@ function HealthStrip({
   const tiles: { label: string; value: string }[] = [
     { label: "Total items", value: String(stats?.totalItems ?? 0) },
     { label: "Operator facts", value: String(stats?.facts ?? 0) },
-    { label: "Teammate memory", value: String(stats?.teammateMemory ?? 0) },
+    { label: "Agent memory", value: String(stats?.teammateMemory ?? 0) },
     { label: "Document chunks", value: String(stats?.documentMemory ?? 0) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
     // Across every memory source, not just operator facts — teammates write only
@@ -492,13 +507,24 @@ function EmptyMemory({ hasEntries }: { hasEntries: boolean }) {
   );
 }
 
-function AddMemoryDialog({
-  open,
-  onOpenChange,
+/**
+ * Add one memory by hand — inline, on the Upload page.
+ *
+ * This was a dialog opened from a button in the Brain header. The header is
+ * shared by all three sub-pages, so the control stood on Overview and Settings
+ * too — neither of which is about writing — while the one page whose whole job
+ * is putting things into memory had no visible way to do it by hand.
+ *
+ * On a page that already hosts the drop zone, a modal is packaging around a
+ * form with nowhere else to be. The two ways in — drop a document, type a fact
+ * — now sit one above the other, and neither covers the other while you read
+ * it.
+ */
+function AddMemoryPanel({
+  discarding,
   onAdd,
 }: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
+  discarding: boolean;
   onAdd: (fields: { kind: MemoryKind; title: string; body: string }) => Promise<void>;
 }) {
   const [kind, setKind] = useState<MemoryKind>("fact");
@@ -506,17 +532,17 @@ function AddMemoryDialog({
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
 
-  function reset() {
-    setKind("fact");
-    setTitle("");
-    setBody("");
-  }
-
   async function submit() {
     if (!title.trim()) return;
     setBusy(true);
     try {
       await onAdd({ kind, title: title.trim(), body: body.trim() });
+      // A dialog used to clear itself by closing. Nothing closes now, so the
+      // form has to reset explicitly — text left standing in the fields after a
+      // successful save reads as work that has not been saved yet.
+      setKind("fact");
+      setTitle("");
+      setBody("");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "could not save the memory");
     } finally {
@@ -525,18 +551,16 @@ function AddMemoryDialog({
   }
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        onOpenChange(o);
-        if (!o) reset();
-      }}
-    >
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>New memory</DialogTitle>
-          <DialogDescription>Capture something your company should remember.</DialogDescription>
-        </DialogHeader>
+    <Card data-testid="memory-add">
+      <CardContent className="grid gap-4">
+        <div className="grid gap-1">
+          <h3 className="flex items-center gap-1.5 text-sm font-medium">
+            <Plus className="size-4" /> New memory
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            Capture something your company should remember.
+          </p>
+        </div>
         <div className="grid gap-2">
           <Label htmlFor="mem-kind">Type</Label>
           <Select
@@ -577,20 +601,32 @@ function AddMemoryDialog({
             placeholder="The detail your company should recall."
           />
         </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
-            Cancel
-          </Button>
-          <Button
-            disabled={!title.trim() || busy}
-            onClick={() => void submit()}
-            data-testid="memory-save"
+        <div className="flex justify-end">
+          {/*
+            The reason rides on the wrapper, not the button: `Button` carries
+            `disabled:pointer-events-none`, so a `title` on a disabled button
+            never surfaces — the span still takes the hover and shows it.
+          */}
+          <span
+            title={
+              discarding
+                ? "This engine discards every write — nothing saved here is retained."
+                : undefined
+            }
           >
-            {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-            Save memory
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+            <Button
+              // Rendered, not hidden: the operator should see that writing is
+              // the thing this engine cannot do, not find the control missing.
+              disabled={discarding || !title.trim() || busy}
+              onClick={() => void submit()}
+              data-testid="memory-save"
+            >
+              {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
+              Save memory
+            </Button>
+          </span>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

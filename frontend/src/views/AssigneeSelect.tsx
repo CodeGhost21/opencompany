@@ -101,11 +101,11 @@ function settle<T>(p: Promise<T>): Promise<Settled<T>> {
  */
 export function rosterGapNotice(failed: RosterGap): string | null {
   if (failed.desks && failed.team)
-    return "Couldn’t load this company’s desks or teammates — this list is incomplete, not empty. Reopen it after a reload before reassigning.";
+    return "Couldn’t load this company’s desks or agents — this list is incomplete, not empty. Reopen it after a reload before reassigning.";
   if (failed.desks)
     return "Couldn’t load this company’s desks, so they’re missing from this list — it’s incomplete, not empty.";
   if (failed.team)
-    return "Couldn’t load this company’s teammates, so they’re missing from this list — it’s incomplete, not empty.";
+    return "Couldn’t load this company’s agents, so they’re missing from this list — it’s incomplete, not empty.";
   return null;
 }
 
@@ -191,8 +191,8 @@ export function AssigneeSelect({
         // to staff is a legitimate write. Say that it is empty; don't hide it.
         hint:
           desk.members.length === 0
-            ? "no teammates yet"
-            : `${desk.members.length} teammate${desk.members.length === 1 ? "" : "s"}`,
+            ? "no agents yet"
+            : `${desk.members.length} agent${desk.members.length === 1 ? "" : "s"}`,
       })),
     [desks],
   );
@@ -291,7 +291,7 @@ export function AssigneeSelect({
       disabled={disabled}
     >
       {/* `min-w-0` matters: the trigger's content is `whitespace-nowrap`, and a
-          long overlay-teammate id would otherwise set the min-content width of
+          long overlay-agent id would otherwise set the min-content width of
           whatever grid or flex track holds this control — squashing its
           neighbours (the edit dialog's Column and Priority) to nothing. */}
       <SelectTrigger id={id} className={cn("w-full min-w-0", className)}>
@@ -300,7 +300,7 @@ export function AssigneeSelect({
         </SelectValue>
       </SelectTrigger>
       {/* The popup defaults to the trigger's width, which clips the trailing
-          hints ("— hand it to the orchestrator", "— 2 teammates"). Let it grow
+          hints ("— hand it to the orchestrator", "— 2 agents"). Let it grow
           to its content instead, bounded so a long role cannot run off-screen —
           the label truncates first. */}
       <SelectContent className="max-h-72 w-auto min-w-(--anchor-width) max-w-[min(26rem,90vw)]">
@@ -353,7 +353,7 @@ export function AssigneeSelect({
           <>
             <SelectSeparator />
             <SelectGroup>
-              <SelectLabel>Teammates</SelectLabel>
+              <SelectLabel>Agents</SelectLabel>
               {teamOptions.map((option) => (
                 <SelectItem key={option.key} value={option.value}>
                   <OptionRow label={option.label} hint={option.hint} />

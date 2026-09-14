@@ -1723,6 +1723,7 @@ allow = [{allow}]
         ))
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -3512,7 +3513,7 @@ mode = "full"
         assert!(
             reports[0]
                 .detail
-                .contains("is not a workflow delivery channel"),
+                .contains("is not an automation delivery channel"),
             "{reports:?}"
         );
         assert!(reports[0].detail.contains(OPERATOR_CHANNEL), "{reports:?}");

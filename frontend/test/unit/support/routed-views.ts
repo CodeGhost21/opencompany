@@ -127,10 +127,10 @@ export const NAMED_BY: Record<View, Names> = {
   team: [{ pageHeader: "TeamView.tsx" }, { pageHeader: "team/AgentDetailView.tsx" }],
   /**
    * The channel bar names the loaded pane. The three channel-less states —
-   * desks failed, desks pending, no channel — are `ChatView`'s own panes, and
+   * desks failed, desks pending, no channel — are `RoomView`'s own panes, and
    * each carries a `hidden` header so the page is named before a channel is.
    */
-  chat: [{ handRolled: "chat/ChatHeader.tsx" }, { pageHeader: "ChatView.tsx" }],
+  chat: [{ handRolled: "room/ChatHeader.tsx" }, { pageHeader: "RoomView.tsx" }],
   inbox: [{ pageHeader: "InboxView.tsx" }],
   /**
    * `#/tasks/<id>` is the card detail pane, not the board. A `pageHeader` leaf
@@ -150,14 +150,23 @@ export const NAMED_BY: Record<View, Names> = {
     { pageHeader: "company/ManageListsView.tsx" },
   ],
   workspace: [{ pageHeader: "WorkspaceView.tsx" }],
-  approvals: [{ pageHeader: "ApprovalsView.tsx" }],
+  /**
+   * The page the title row's bell opens. `NotificationsView` draws the header
+   * for both of its tabs, which is why `ApprovalsView.tsx` is NOT a leaf here
+   * any more: it lost its own `hidden` header when this page gained a visible
+   * one, so holding it to a heading would fail on a view that correctly has
+   * none.
+   */
+  notifications: [{ pageHeader: "NotificationsView.tsx" }],
+  /** `#/approvals` renders the same page, with the Approvals tab forced. */
+  approvals: [{ pageHeader: "NotificationsView.tsx" }],
   workflows: [{ pageHeader: "WorkflowsView.tsx" }],
   observatory: [{ pageHeader: "observatory/ObservatoryView.tsx" }],
   pages: [{ pageHeader: "PagesView.tsx" }],
   /** See `FINANCE_NAMED_BY`: `#/finances/<page>` is a three-page section. */
   finances: [{ pageHeader: "FinancesView.tsx" }],
   /**
-   * See `CONNECTIONS_NAMED_BY`: `#/connections/<page>` is a two-page section.
+   * See `CONNECTIONS_NAMED_BY`: `#/connections/<page>` is an eight-page section.
    * `ConnectionsSection` is the rail frame; the pages carry the headings. The
    * bare route renders Apps, so that is the leaf named here.
    */
@@ -190,7 +199,7 @@ export const NAMED_BY: Record<View, Names> = {
 
 /**
  * The same question one level down: Settings is a single routed view whose
- * `sub` segment picks one of seven pages, each of which draws its own
+ * `sub` segment picks one of its pages, each of which draws its own
  * `PageHeader`. `#/settings/people` is an address an operator can bookmark, so
  * "the routed views are covered" is not the whole answer — `PeopleView`'s
  * loading state had no `h1` and no routed-view check could have seen it.
@@ -202,27 +211,32 @@ export const NAMED_BY: Record<View, Names> = {
 export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
   general: "SettingsView.tsx",
   people: "PeopleView.tsx",
-  inference: "InferenceView.tsx",
-  hosting: "HostingView.tsx",
-  search: "SearchView.tsx",
-  skills: "SkillsView.tsx",
+  // Two cards that were General's and are pages: the standing approval policy,
+  // and the theme. Inference, Skills, Hosting and Search left this table
+  // entirely for `CONNECTIONS_NAMED_BY` below.
+  approvals: "settings/ApprovalsSettingsView.tsx",
+  appearance: "settings/AppearanceView.tsx",
   // The run index is a settings page now; the shell hands the pane in rather
   // than `SettingsSection` importing it, so the lazy boundary and its loading
   // title stay in one place. A single run keeps its own `#/observatory/<runId>`
   // route, which is why this file is also `NAMED_BY.observatory`.
   observatory: "observatory/ObservatoryView.tsx",
+  // Feedback moved into Settings as a list item — it is not a place inside the
+  // company, which is what the sidebar enumerates, so it left the title row's
+  // glyph group for a settings page of its own.
+  feedback: "FeedbackView.tsx",
   usage: "UsageView.tsx",
 };
 
 /**
  * Connections is the third section like Settings: one routed view whose `sub`
- * segment picks one of two pages, each drawing its own `PageHeader`.
+ * segment picks one of eight pages, each drawing its own `PageHeader`.
  * `#/connections/mcp` is a bookmarkable address and `mcp` is not a `View`, so
  * the routed-view sweep cannot see it — the same blind spot `#/settings/people`
  * and `#/finances/wallet` have.
  *
- * `Record<ConnectionPage, …>` over `CONNECTION_PAGES`, so a third connections
- * page with no row is a compile error.
+ * `Record<ConnectionPage, …>` over `CONNECTION_PAGES`, so a ninth
+ * connections page with no row is a compile error.
  *
  * Both files were rows in `SETTINGS_NAMED_BY` until the section was built. The
  * pages did not change; only which table has to account for them did — and
@@ -233,8 +247,25 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
  * the leaf the bare route renders. Both sweeps read this table now.
  */
 export const CONNECTIONS_NAMED_BY: Record<ConnectionPage, string> = {
+  // The account every other page on this rail depends on, and the only one that
+  // lives under `connections/` rather than beside the section — it was written
+  // for this rail rather than re-parented onto it.
+  "api-key": "connections/ApiKeyView.tsx",
   apps: "OAuthView.tsx",
+  // The Composio credential, a tab of the Apps page until issue #2259 made it
+  // a page. `ProvidersSection` still renders from its state — through
+  // `use-composio-credential.ts`, which both pages mount — so the split is one
+  // of surfaces, not of the data.
+  composio: "connections/ComposioView.tsx",
   mcp: "McpServersView.tsx",
+  // The four that followed them off the settings rail. Each view is
+  // re-parented rather than rewritten, so these rows moved across from
+  // `SETTINGS_NAMED_BY` unchanged — which is the whole point of holding both
+  // tables to the same sweeps.
+  inference: "InferenceView.tsx",
+  skills: "SkillsView.tsx",
+  hosting: "HostingView.tsx",
+  search: "SearchView.tsx",
 };
 
 /**
@@ -252,7 +283,7 @@ export const CONNECTIONS_NAMED_BY: Record<ConnectionPage, string> = {
  * check was a grep over `src/views/**` for `sub ===`, `if (sub)` and
  * `resolve*Page`: it finds `CompanyView` (three leaves, enumerated above),
  * `TeamView` (`AgentDetailView`, enumerated), `app-shell`'s `MANAGE_SEGMENT`
- * split under `ledgers` (enumerated), `SettingsSection`, `ConnectionsSection`, and this. `ChatView`
+ * split under `ledgers` (enumerated), `SettingsSection`, `ConnectionsSection`, and this. `RoomView`
  * and `LedgersView` also read `sub`, but to select a channel or a list *within
  * themselves* rather than to render a different component, so they contribute
  * no leaf.

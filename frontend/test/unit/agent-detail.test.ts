@@ -271,7 +271,7 @@ describe("how a harness reads in the picker", () => {
 });
 
 describe("the draft a detail view starts from", () => {
-  it("shows a manifest teammate by its role, since it carries no name", () => {
+  it("shows a manifest agent by its role, since it carries no name", () => {
     expect(draftFrom(manifest()).name).toBe("");
     expect(draftFrom(manifest()).role).toBe("Chief Executive");
   });

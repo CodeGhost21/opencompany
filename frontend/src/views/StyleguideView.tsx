@@ -14,6 +14,22 @@ import {
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
+import { MOVE_KINDS } from "@/lib/hive/grammar";
+import { foldEpisodes } from "@/lib/hive/episode";
+import type { ChatMessage } from "@/lib/chat";
+import { BlindRoundBand } from "@/components/hive/BlindRoundBand";
+import { MoveChip } from "@/components/hive/MoveChip";
+import { StandingsRail } from "@/components/hive/StandingsRail";
+import { TopicChip } from "@/components/hive/TopicChip";
+import { VerdictCard } from "@/components/hive/VerdictCard";
+import { EpisodeBlock } from "@/views/room/EpisodeBlock";
+import { HiveGrammarPanel } from "@/views/company/hive/HiveGrammarPanel";
+import { CommsGraphView } from "@/views/comms/CommsGraphView";
+import { applyObservations, structuralGraph } from "@/views/comms/model";
+import type { OpenCompanyClient } from "@/api/client";
+import type { DeskHiveDto } from "@/api/types";
+import { MessageRow } from "@/views/room/MessageRow";
+import { buildTimeline, buildTimelineItems, type Channel, type TimelineItem } from "@/views/room/model";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -126,6 +142,7 @@ export function StyleguideView() {
           <ElevationSection />
           <RadiusSection />
           <MotionSection />
+          <DeliberationSection />
           <ComponentSection />
         </div>
       </div>
@@ -391,7 +408,7 @@ function ColorSection() {
               ink-hint — subtitles, empty-state prompts. 5.4:1
             </p>
             <p className="text-sm text-ink-muted">
-              ink-muted — teammate counts, metadata. 4.5:1
+              ink-muted — agent counts, metadata. 4.5:1
             </p>
             <p className="text-sm text-primary">primary — links and emphasis. 4.7:1</p>
             <p className="text-sm text-destructive">destructive — errors. 4.67:1</p>
@@ -839,7 +856,7 @@ function ComponentSection() {
               <code className="w-20 shrink-0 font-mono text-3xs text-muted-foreground">
                 {v}
               </code>
-              <Button variant={v}>Run workflow</Button>
+              <Button variant={v}>Run automation</Button>
               <Button variant={v} disabled>
                 Disabled
               </Button>
@@ -926,6 +943,18 @@ function ComponentSection() {
               <AlertTitle>Heads up</AlertTitle>
               <AlertDescription>
                 Two runs are waiting on your approval.
+              </AlertDescription>
+            </Alert>
+            {/* The variant that had no sample here, which is part of how its
+                text drifted out of its own colour family: nothing on this page
+                showed the two together. It carries inline `code` because a
+                warning naming a build feature or a flag is the common case. */}
+            <Alert variant="warning">
+              <AlertTriangle className="size-4" />
+              <AlertTitle>Stored, but inert</AlertTitle>
+              <AlertDescription>
+                This host was built without the agent tools, so these settings will be stored
+                and have no effect. Rebuild with the <code>openhuman</code> feature.
               </AlertDescription>
             </Alert>
             <Alert variant="destructive">
@@ -1019,10 +1048,10 @@ function ComponentSection() {
               <DialogTrigger render={<Button variant="outline" />}>Open dialog</DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Rename workflow</DialogTitle>
-                  <DialogDescription>Give this workflow a clear name.</DialogDescription>
+                  <DialogTitle>Rename automation</DialogTitle>
+                  <DialogDescription>Give this automation a clear name.</DialogDescription>
                 </DialogHeader>
-                <Input aria-label="Workflow name" defaultValue="Weekly brief" />
+                <Input aria-label="Automation name" defaultValue="Weekly brief" />
                 <DialogFooter showCloseButton>
                   <Button>Save name</Button>
                 </DialogFooter>
@@ -1061,7 +1090,7 @@ function ComponentSection() {
             <DropdownMenu>
               <DropdownMenuTrigger render={<Button variant="outline" />}>Open menu</DropdownMenuTrigger>
               <DropdownMenuContent>
-                <DropdownMenuLabel>Workflow</DropdownMenuLabel>
+                <DropdownMenuLabel>Automation</DropdownMenuLabel>
                 <DropdownMenuItem>Duplicate</DropdownMenuItem>
                 <DropdownMenuItem>Pause</DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -1101,11 +1130,11 @@ function ComponentSection() {
             <CardDescription className="text-2xs">Each outcome has a distinct toast severity.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" onClick={() => toast.success("Workflow saved")}>Success</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.success("Automation saved")}>Success</Button>
             <Button size="sm" variant="outline" onClick={() => toast.info("Sync started")}>Info</Button>
             <Button size="sm" variant="outline" onClick={() => toast.warning("Approval is due")}>Warning</Button>
-            <Button size="sm" variant="outline" onClick={() => toast.error("Could not save workflow")}>Error</Button>
-            <Button size="sm" variant="outline" onClick={() => toast.loading("Running workflow")}>Loading</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.error("Could not save automation")}>Error</Button>
+            <Button size="sm" variant="outline" onClick={() => toast.loading("Running automation")}>Loading</Button>
           </CardContent>
         </Card>
 
@@ -1167,3 +1196,305 @@ function ComponentSection() {
     </Section>
   );
 }
+
+/**
+ * The deliberation vocabulary.
+ *
+ * Rendered against a fixture rather than a live desk, because `#/styleguide` is
+ * served pre-auth and outside the shell — so the whole room surface can be
+ * designed and reviewed in both themes with no backend, no company and no
+ * episode having actually run. That is the point of prototyping it here first.
+ *
+ * The transcript below is the shape `companies/hive_math_lab` produces: a blind
+ * opening round, evidence cited by later support, an objection aimed at a
+ * message, and a closing report the desk wrote itself.
+ */
+function DeliberationSection() {
+  const { episode, items } = useMemo(() => {
+    const rows: ChatMessage[] = [
+      { id: "h1", from: "you", byPerson: true, at: 0, text: "Decide the rollout." },
+      { id: "h2", from: "company", channel: "planner", at: 1, text: "!propose #stage ship to staging first" },
+      { id: "h3", from: "company", channel: "critic", at: 2, text: "!propose #ship go straight to production" },
+      { id: "h4", from: "company", channel: "archivist", at: 3, text: "!evidence #stage ^1 the last full rollout took checkout down" },
+      { id: "h5", from: "company", channel: "critic", at: 4, text: "!support #stage ^4 that outage is enough for me" },
+      { id: "h6", from: "company", channel: "skeptic", at: 5, text: "!object >3 ^4 production first ignores the outage" },
+      { id: "h7", from: "company", channel: "planner", at: 6, text: "!commit #stage ^4 the room settled on staging" },
+      {
+        id: "h8",
+        from: "company",
+        channel: "hive-report",
+        at: 7,
+        text: "The desk settled on #stage after 6 turns (backed by planner, critic).",
+      },
+    ];
+    const folded = foldEpisodes(rows, { quorum: 2 });
+    const channel: Channel = {
+      id: "solvers",
+      name: "solvers",
+      voice: "Solvers desk",
+      kind: "channel",
+      purpose: "",
+    };
+    return {
+      episode: folded[0],
+      // Built through the real pipeline rather than hand-assembled, so this
+      // preview exercises the same grouping the Room does — a block that only
+      // looked right against a bespoke fixture would prove nothing.
+      items: buildTimelineItems(buildTimeline(rows, channel, []), [], {}, folded),
+    };
+  }, []);
+
+  return (
+    <Section
+      title="Deliberation"
+      hint="A desk of two or more answers as a room. These are the marks that make an episode legible — every move is told apart by its icon, never by colour."
+    >
+      <div className="space-y-6">
+        <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">Moves</p>
+          <div className="flex flex-wrap gap-1.5">
+            {MOVE_KINDS.map((kind) => (
+              <MoveChip key={kind} kind={kind} />
+            ))}
+            <MoveChip kind="propose" demoted />
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            The last chip is <em>demoted</em> — a move the speaking seat does not hold.
+            The host records the line with its marker stripped, so it says what its
+            author meant and counts for nothing.
+          </p>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">Topics</p>
+          <div className="flex flex-wrap gap-1.5">
+            <TopicChip topic="stage" standing={episode?.topics.find((t) => t.id === "stage")} quorum={2} />
+            <TopicChip topic="ship" standing={episode?.topics.find((t) => t.id === "ship")} quorum={2} />
+            <TopicChip topic="unsettled" />
+          </div>
+        </div>
+
+        {episode ? (
+          <>
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
+                The opening round
+              </p>
+              <BlindRoundBand derived={episode.derived}>
+                <ul className="space-y-1 text-sm">
+                  {episode.turns.slice(0, episode.blindCount).map((turn) => (
+                    <li key={turn.messageId} className="flex items-center gap-2">
+                      <span className="w-20 shrink-0 text-xs text-muted-foreground">
+                        {turn.agentId}
+                      </span>
+                      {turn.move ? <MoveChip kind={turn.move.kind} /> : null}
+                      <span className="text-muted-foreground">{turn.move?.body}</span>
+                    </li>
+                  ))}
+                </ul>
+              </BlindRoundBand>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <StandingsRail episode={episode} />
+              <VerdictCard episode={episode} />
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
+                A room still talking
+              </p>
+              {/*
+                The same transcript with its closing report removed, so the block
+                renders the state an operator actually watches: turns landing
+                against a budget, with no verdict yet.
+              */}
+              {RUNNING_ITEMS.map((item) =>
+                item.kind === "episode" ? (
+                  <EpisodeBlock
+                    key={item.key}
+                    item={item}
+                    renderRow={(row: TimelineItem) =>
+                      row.kind === "message" ? (
+                        <MessageRow
+                          key={row.key}
+                          entry={row.entry}
+                          threadOpen={false}
+                          onOpenThread={() => {}}
+                          onReact={() => {}}
+                          onDismissCard={() => {}}
+                          dismissingCardId={null}
+                          turn={item.turnByMessageId[row.entry.message.id]}
+                        />
+                      ) : null
+                    }
+                  />
+                ) : null,
+              )}
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
+                Who talks to whom
+              </p>
+              <CommsGraphView graph={FIXTURE_COMMS} />
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
+                Installing a grammar
+              </p>
+              <HiveGrammarPanel client={FIXTURE_HIVE_CLIENT} deskId="solvers" />
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">
+                In the transcript
+              </p>
+              {items.map((item) =>
+                item.kind === "episode" ? (
+                  <EpisodeBlock
+                    key={item.key}
+                    item={item}
+                    renderRow={(row: TimelineItem) =>
+                      row.kind === "message" ? (
+                        <MessageRow
+                          key={row.key}
+                          entry={row.entry}
+                          threadOpen={false}
+                          onOpenThread={() => {}}
+                          onReact={() => {}}
+                          onDismissCard={() => {}}
+                          dismissingCardId={null}
+                          turn={item.turnByMessageId[row.entry.message.id]}
+                        />
+                      ) : null
+                    }
+                  />
+                ) : item.kind === "message" ? (
+                  <MessageRow
+                    key={item.key}
+                    entry={item.entry}
+                    threadOpen={false}
+                    onOpenThread={() => {}}
+                    onReact={() => {}}
+                    onDismissCard={() => {}}
+                    dismissingCardId={null}
+                  />
+                ) : null,
+              )}
+            </div>
+          </>
+        ) : null}
+      </div>
+    </Section>
+  );
+}
+
+/**
+ * A desk's grammar, as `companies/hive_math_lab` actually ships it.
+ *
+ * Six seats with a real `moves` table and `quorum = 3` — the one company in the
+ * repo that exercises the grammar, and the shape every live run used. Served
+ * from a stub so the editor can be reviewed with no host at all.
+ */
+const FIXTURE_HIVE: DeskHiveDto = {
+  deskId: "solvers",
+  source: "manifest",
+  deliberates: true,
+  declared: {
+    turn_budget: 18,
+    quorum: 3,
+    require_evidential: true,
+    moves: {
+      theorist: ["support", "object", "evidence", "pin"],
+      programmer: ["propose", "evidence", "support"],
+      verifier: ["support", "object", "evidence"],
+      skeptic: ["object", "evidence"],
+      brute_forcer: ["support", "evidence", "object"],
+      archivist: ["evidence", "pin"],
+    },
+  },
+  effective: {
+    turnBudget: 18,
+    quorum: 3,
+    blindRound: true,
+    dominanceCap: 50,
+    repetitionCap: 3,
+    requireGrounded: true,
+    requireEvidential: true,
+  },
+  moveKinds: [
+    "propose", "support", "object", "refute", "evidence",
+    "question", "defer", "commit", "pin",
+  ],
+  ungatedKinds: ["question", "defer", "commit"],
+  seats: [
+    { agentId: "theorist", label: "Theorist", role: "Reduces the problem", moves: [], governed: true },
+    { agentId: "programmer", label: "Programmer", role: "Programs it", moves: [], governed: true },
+    { agentId: "verifier", label: "Verifier", role: "Reads it literally", moves: [], governed: true },
+    { agentId: "skeptic", label: "Skeptic", role: "Looks for the trap", moves: [], governed: true },
+    { agentId: "brute_forcer", label: "Brute forcer", role: "Checks small cases", moves: [], governed: true },
+    { agentId: "archivist", label: "Archivist", role: "Remembers", moves: [], governed: true },
+  ],
+  eligibleSupporters: 4,
+  reachesQuorum: true,
+};
+
+/** Enough of the client for the panel; the styleguide never writes. */
+const FIXTURE_HIVE_CLIENT = {
+  getDeskHive: () => Promise.resolve(FIXTURE_HIVE),
+  putDeskHive: () => Promise.resolve(FIXTURE_HIVE),
+  resetDeskHive: () => Promise.resolve(FIXTURE_HIVE),
+} as unknown as OpenCompanyClient;
+
+/**
+ * A small company's wiring: declared reach, plus what has actually happened.
+ *
+ * Deliberately mixed — two dashed structural edges an operator has never used,
+ * one solid hand-off that has run four times, and a teammate the orchestrator
+ * created at runtime — because the whole point of the drawing is telling those
+ * three apart.
+ */
+const FIXTURE_COMMS = applyObservations(
+  structuralGraph(
+    [
+      { id: "orchestrator", name: "Orchestrator", role: "Runs the company", isOrchestrator: true, delegatesTo: ["*"] },
+      { id: "planner", name: "Planner", role: "Plans the work", delegatesTo: ["solvers"] },
+      { id: "archivist", name: "Archivist", role: "Remembers", delegatesTo: [] },
+    ],
+    [
+      { id: "solvers", name: "Solvers desk", members: ["planner", "archivist"] },
+      { id: "records", name: "Records desk", members: ["archivist"] },
+    ],
+  ),
+  [
+    { kind: "handed-off", from: "orchestrator", to: "solvers", via: "delegate_to_desk", atMillis: 1 },
+    { kind: "handed-off", from: "orchestrator", to: "solvers", via: "delegate_to_desk", atMillis: 2 },
+    { kind: "handed-off", from: "orchestrator", to: "solvers", via: "delegate_to_desk", atMillis: 3 },
+    { kind: "handed-off", from: "planner", to: "records", via: "spawn_task", atMillis: 4 },
+    { kind: "spawned", by: "orchestrator", agentId: "researcher", atMillis: 5 },
+    { kind: "speaking", agentId: "planner" },
+  ],
+);
+
+/** The same desk, mid-argument: three turns in, nothing carried, no report. */
+const RUNNING_ROWS: ChatMessage[] = [
+  { id: "h1", from: "you", byPerson: true, at: 0, text: "Decide the rollout." },
+  { id: "h2", from: "company", channel: "planner", at: 1, text: "!propose #stage ship to staging first" },
+  { id: "h3", from: "company", channel: "critic", at: 2, text: "!propose #ship go straight to production" },
+  { id: "h4", from: "company", channel: "archivist", at: 3, text: "!evidence #stage ^1 the last rollout took checkout down" },
+];
+const RUNNING_FOLD = foldEpisodes(RUNNING_ROWS, { quorum: 2, members: 6 });
+const RUNNING_ITEMS = buildTimelineItems(
+  buildTimeline(RUNNING_ROWS, {
+    id: "solvers",
+    name: "solvers",
+    voice: "Solvers desk",
+    kind: "channel",
+    purpose: "",
+  }, []),
+  [],
+  {},
+  RUNNING_FOLD,
+);

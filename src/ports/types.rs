@@ -617,6 +617,29 @@ impl StartedBy {
     }
 }
 
+/// Separates the other desk's actual answer from the note addressed to the
+/// asker, in a returning relay.
+///
+/// # Why the two have to be separable
+///
+/// The relay is normally dropped from the projection, so the note is private to
+/// the asker and can say things only the asker should read. But the drop is
+/// conditional: if the asker's report never lands — a failed turn, an empty
+/// model response — the relay renders instead, because a line in the wrong
+/// voice is a smaller failure than an answer nobody can see.
+///
+/// That fallback used to publish the note along with it. An operator watching
+/// #engineering was told "you are the only one who has seen it" by an agent
+/// that is not on their desk. So the answer goes FIRST and everything the host
+/// added goes after this marker, and the projection renders only what precedes
+/// it — which is exactly the other desk's own words, the thing the fallback
+/// exists to preserve.
+///
+/// Written to be unmistakable rather than pretty: a bare `---` is a markdown
+/// rule an answer may legitimately contain, and truncating on one would eat
+/// half of it.
+pub const RELAY_NOTE_MARKER: &str = "\n\n[referral-note]\n";
+
 /// An external stimulus fed into a company's cycle loop.
 ///
 /// Serialized internally-tagged under `kind` so each JSONL line is
@@ -624,6 +647,90 @@ impl StartedBy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum CompanyEvent {
+    /// A crossing referral's child turn was durably created (tinyhivemind P15).
+    ///
+    /// The idempotency marker, and the only reason this is journaled at all: a
+    /// referral is triggered by a COMMITTED reply, so anything that reprocesses
+    /// that reply — a restart, a redelivered frame, a retry — would decide the
+    /// same referral again and ask the target desk twice. The queue writes this
+    /// under the trigger's identity and refuses a second enqueue that finds it.
+    ///
+    /// Not a conversational line: `chat_history::owns` does not admit it and no
+    /// transcript renders it.
+    ReferralEnqueued {
+        /// The desk the triggering reply was committed on.
+        from_desk: String,
+        /// Sequence of that reply — with `from_desk`, the idempotency key.
+        trigger_sequence: u64,
+        /// The asking desk's display name, captured now.
+        ///
+        /// The console renders this on the referred message, and a desk renamed
+        /// later must not rewrite what the transcript said at the time — the
+        /// same rule `SessionAuthor` follows for its own labels.
+        ///
+        /// **Defaulted, because the journal is append-only.** Markers written
+        /// before this field existed must still deserialize: a required field
+        /// here made every older marker unreadable, and because the history
+        /// projection reads the journal, that took the whole transcript with
+        /// it. Any field added to a journaled event has to default.
+        #[serde(default)]
+        from_desk_name: String,
+        /// Whether this marker is a RETURN — the answer coming home — rather
+        /// than the outbound ask. Defaulted for the reason above.
+        ///
+        /// The console draws a different word for each ("Asked by Design" vs
+        /// "Answered by Design"), and it cannot work this out for itself: both
+        /// legs are agent-authored lines on a desk, so every signal the console
+        /// holds says the same thing about each. `tinyhivemind` decided it
+        /// already — `ReferralKind` — and this carries that decision rather
+        /// than letting the render side infer a second, disagreeing answer.
+        #[serde(default)]
+        returning: bool,
+        /// On a RETURN, the journal sequence of the forward marker this answers.
+        /// `None` on a forward leg, and on returns written before this field
+        /// existed.
+        ///
+        /// **The host already knew this and was discarding it.** Authorizing a
+        /// return means finding the forward it answers (`answering_a_forward`),
+        /// which locates the exact marker and then kept only a bool — leaving
+        /// the console to re-derive the same pairing at read time, from a
+        /// different window and a separately-written set of match rules. Two
+        /// readers of one fact, free to disagree, and they did: a crossing whose
+        /// ask fell outside the console's window rendered as though the question
+        /// had never been asked.
+        ///
+        /// Recorded here, the pairing is a fact rather than an inference, and
+        /// the projection reads one event instead of scanning for it. Defaulted
+        /// for the reason above, so older markers still deserialize and fall
+        /// back to the scan.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answers: Option<u64>,
+        /// The conversation the exchange actually happened in, when it was not
+        /// a desk — the two teammates' own thread (`dm:a+b`).
+        ///
+        /// The desk fields stay what they are: who asked, from where, and whose
+        /// home desk the answerer keeps. Those name the PEOPLE, and the console
+        /// labels a crossing with them. This names the PLACE, which is what a
+        /// reader needs to find the rows. Keeping them apart is why a crossing
+        /// can move off the answerer's channel without the label following it
+        /// somewhere meaningless.
+        ///
+        /// Absent on a crossing that ran on a desk, and on markers written
+        /// before pairs had their own conversation. Defaulted for the reason
+        /// every other field here is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<String>,
+        /// The agent that asked. Defaulted for the reason above.
+        #[serde(default)]
+        asker: String,
+        /// That agent's display label, captured now, for the same reason.
+        #[serde(default)]
+        asker_label: String,
+        /// The desk the child turn runs on.
+        to_desk: String,
+        /// The agent the child turn runs as.
+        target: String,
+    },
     /// A human sent a chat message.
     OperatorMessage {
         /// The message text.
@@ -1263,6 +1370,87 @@ pub enum CompanyEvent {
         name: String,
         /// Who removed it, when known. `None` from the current unattributed
         /// surfaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A teammate was minted at runtime — by the orchestrator's `add_agent`
+    /// tool, or by the console's `POST {scope}/team`.
+    ///
+    /// Journaled because **no durable row otherwise records that it happened**,
+    /// still less who did it. The record carries the teammate's current
+    /// existence; nothing carries its creation, so "who spawned whom" was
+    /// unanswerable from the journal and the console could only infer it from a
+    /// redacted tool-call frame that does not survive a reload.
+    ///
+    /// Both creation paths journal this, deliberately: two paths that answer
+    /// "was a teammate added" differently is how the first hole got here.
+    ///
+    /// Carries no prompt, no tool grant and no instructions — the same rule
+    /// [`WorkflowUpdated`](Self::WorkflowUpdated) follows, since the journal
+    /// reaches readers with no business holding an agent's configuration. The
+    /// current state is on the record and one read away.
+    ///
+    /// Best-effort and appended **after** the write lands, so it records a
+    /// completed change: a failed audit append must never fail the mint.
+    TeammateAdded {
+        /// The new teammate's roster id.
+        agent_id: String,
+        /// Its role, so a reader need not resolve an id that may later retire.
+        role: String,
+        /// The teammate that created it, when an agent did. `None` when the
+        /// operator did it from the console.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_agent_id: Option<String>,
+        /// Who asked, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// An operator-created desk came into existence.
+    ///
+    /// Journaled for the same reason as [`TeammateAdded`](Self::TeammateAdded):
+    /// a desk's existence is on the record, its creation is nowhere.
+    DeskCreated {
+        desk_id: String,
+        name: String,
+        /// The seats it opened with.
+        members: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// An operator-created desk was removed.
+    DeskDeleted {
+        desk_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A desk gained or lost a seat at runtime.
+    ///
+    /// One variant for both directions rather than two, because a reader
+    /// reconstructing membership over time wants one ordered stream, and a
+    /// move between desks is a removal and an addition that belong together.
+    DeskMembersChanged {
+        desk_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        added: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A desk's move grammar was installed, replaced, or reset to the manifest's.
+    ///
+    /// Carries **no config body**, same rule as
+    /// [`WorkflowUpdated`](Self::WorkflowUpdated): the row answers "who changed
+    /// how this desk thinks, and when", and the table itself is one read away.
+    ///
+    /// Permanent under the retention rule — only the workflow-run kinds and
+    /// `McpCallFailed` may ever be pruned — which is the right trade for an
+    /// audit fact whose lifetime cardinality is "how often does an operator
+    /// re-author a grammar".
+    DeskHiveConfigured {
+        desk_id: String,
+        /// True when the override was dropped and the manifest restored.
+        reset: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
@@ -2025,6 +2213,7 @@ impl CompanyEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::OperatorMessage { .. } => "OperatorMessage",
+            Self::ReferralEnqueued { .. } => "ReferralEnqueued",
             Self::TurnStarted { .. } => "TurnStarted",
             Self::TurnFailed { .. } => "TurnFailed",
             Self::RunStatusChanged { .. } => "RunStatusChanged",
@@ -2046,6 +2235,11 @@ impl CompanyEvent {
             Self::WorkflowCreated { .. } => "WorkflowCreated",
             Self::WorkflowUpdated { .. } => "WorkflowUpdated",
             Self::WorkflowDeleted { .. } => "WorkflowDeleted",
+            Self::TeammateAdded { .. } => "TeammateAdded",
+            Self::DeskCreated { .. } => "DeskCreated",
+            Self::DeskDeleted { .. } => "DeskDeleted",
+            Self::DeskMembersChanged { .. } => "DeskMembersChanged",
+            Self::DeskHiveConfigured { .. } => "DeskHiveConfigured",
             Self::TaskSteered { .. } => "TaskSteered",
             Self::TaskCardChanged { .. } => "TaskCardChanged",
             Self::WorkspaceChanged { .. } => "WorkspaceChanged",
@@ -2100,6 +2294,16 @@ impl CompanyEvent {
     pub fn retention_class(&self) -> crate::ports::events::RetentionClass {
         use crate::ports::events::RetentionClass::{Permanent, Prunable};
         match self {
+            // **Permanent, and this one is load-bearing** (tinyhivemind P15).
+            //
+            // It is the idempotency marker for a crossing referral: the queue
+            // refuses a second enqueue that finds it. Prune it and a replayed
+            // trigger stops finding it, so the target desk is asked twice —
+            // silently, and only for triggers old enough to have been swept.
+            // It passes the doc's three questions the other way round from its
+            // neighbours: nothing points at it, but something very much reads
+            // it back, and that read is the whole reason it exists.
+            Self::ReferralEnqueued { .. } => Permanent,
             Self::WorkflowRunStarted { .. }
             | Self::WorkflowRunFinished { .. }
             | Self::WorkflowNodeStarted { .. }
@@ -2183,6 +2387,18 @@ impl CompanyEvent {
             | Self::WorkflowCreated { .. }
             | Self::WorkflowUpdated { .. }
             | Self::WorkflowDeleted { .. }
+            // The structural audit trail: who created a teammate or a desk, who
+            // moved a seat, and who changed how a desk deliberates. Permanent
+            // for the plainest of the three reasons above — it *is* evidence,
+            // and it is the only record that these things happened at all: the
+            // company record carries current state and nothing carries the
+            // change. Low cardinality by construction (an operator authors these
+            // by hand), so permanence costs almost nothing.
+            | Self::TeammateAdded { .. }
+            | Self::DeskCreated { .. }
+            | Self::DeskDeleted { .. }
+            | Self::DeskMembersChanged { .. }
+            | Self::DeskHiveConfigured { .. }
             | Self::TaskSteered { .. }
             | Self::TaskCardChanged { .. }
             | Self::DeskTaskCompleted { .. }
@@ -3403,6 +3619,33 @@ pub struct OverlayDeskOrder {
     pub ordered: Vec<String>,
 }
 
+/// The operator's runtime replacement for a desk's `hive` block — the console's
+/// "install a move grammar" write.
+///
+/// A **sibling collection rather than a field on [`OverlayDesk`]**, and that is
+/// the whole design. `OverlayDesk` covers only console-*created* desks, so
+/// hanging the grammar off it would leave the interesting case — installing a
+/// table on a desk the manifest declared, without rewriting `company.toml` —
+/// needing a second mechanism. This mirrors [`AgentOverride`] instead, which is
+/// the layer that already exists for "the operator edited a manifest-declared
+/// thing".
+///
+/// **Wholesale replacement, not a field-wise patch**, unlike `AgentOverride`. A
+/// `moves` table is a single artefact: merging one seat into a stored table is
+/// how a desk ends up running a grammar nobody authored. It also makes "clear
+/// `quorum` back to the derived default" expressible, which a merge cannot do —
+/// every field is an `Option` whose `None` already means something.
+///
+/// Reset is therefore a `retain`, and nothing else: drop the row and
+/// [`CompanyRecord::effective_desk_hive`] falls through to the manifest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeskHiveOverride {
+    /// The desk (group-chat) id this grammar is installed on.
+    pub desk_id: String,
+    /// The block as authored, in the manifest's own shape.
+    pub hive: crate::hivemind::HiveConfig,
+}
+
 /// How a desk's unmentioned messages find their answerer (issue #1835).
 ///
 /// `Lead` is the model every desk has always had: `members[0]` is the desk
@@ -3467,6 +3710,26 @@ pub struct OverlayDesk {
     /// no such field.
     #[serde(default, skip_serializing_if = "ResponderMode::is_lead")]
     pub responder: ResponderMode,
+    /// How this desk deliberates and whether it may refer across desks — the
+    /// overlay analogue of `[[group_chat]].hive`.
+    ///
+    /// Without it a console-created desk could not answer either question. The
+    /// hive config was read from the manifest only, and the responder mode from
+    /// the overlay only, so the two surfaces each carried half the settings and
+    /// a desk could never hold both: an overlay desk deliberated because the
+    /// default says so and could not opt out, and could never opt IN to
+    /// referral, because there was no `[[group_chat]]` entry to hang the block
+    /// on. A company whose desks are all operator-created — which is every
+    /// company that builds its desks in the console — therefore had cross-desk
+    /// referral permanently unavailable.
+    ///
+    /// Defaulted and skipped when empty, so every record written before this
+    /// field existed deserializes and re-serializes unchanged.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::hivemind::HiveConfig::is_default"
+    )]
+    pub hive: crate::hivemind::HiveConfig,
 }
 
 /// A workflow graph body authored at runtime (the console's create dialog or
@@ -3801,9 +4064,22 @@ pub(crate) fn effective_policy(manifest: &Policy, override_: Option<&PolicyOverr
 /// on `[tools]` exists to prevent. `media` is absent for the same reason: it
 /// spends real money and has no connect page to be dead-ended on.
 ///
+/// `mcp_registry` joins the list for the same reason `composio` is in it: the
+/// registry's own install form (`McpRegistryBrowser`) is the credential step —
+/// some servers ask for one, some do not, but installing is always the
+/// deliberate act the grant is the second half of — and without an entry here
+/// a hosted tenant, whose manifest is a read-only boot snapshot, could install
+/// a registry server no agent could ever be granted access to.
+///
 /// Sorted, so the console's own ordering is not a second source of truth.
-pub const CONSOLE_GRANTABLE_NAMESPACES: [&str; 5] =
-    ["chargebee", "composio", "hosting", "paypal", "search"];
+pub const CONSOLE_GRANTABLE_NAMESPACES: [&str; 6] = [
+    "chargebee",
+    "composio",
+    "hosting",
+    "mcp_registry",
+    "paypal",
+    "search",
+];
 
 /// Whether `namespace` is one the console is allowed to grant.
 pub fn console_grantable(namespace: &str) -> bool {
@@ -3987,6 +4263,11 @@ pub struct OverlayBlob {
     /// which is exactly how those companies ran.
     #[serde(default)]
     pub agent_edits: Vec<AgentOverride>,
+    /// The move grammars the operator has installed on desks. Absent on rows
+    /// written before a grammar could be installed from the console, which
+    /// `#[serde(default)]` loads as empty — "the manifest still decides".
+    #[serde(default)]
+    pub desk_hive: Vec<DeskHiveOverride>,
     /// The ids of manifest teammates the operator has removed. Absent on rows
     /// written before a blueprint teammate could be removed, which
     /// `#[serde(default)]` loads as empty — "nobody was removed".
@@ -4096,6 +4377,7 @@ impl OverlayBlob {
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
             agent_edits: record.overlay_agent_edits.clone(),
+            desk_hive: record.overlay_desk_hive.clone(),
             retired_agents: record.overlay_retired_agents.clone(),
             policy: record.overlay_policy.clone(),
             tool_grants: record.overlay_tool_grants.clone(),
@@ -4130,6 +4412,7 @@ impl OverlayBlob {
                     workflows: Vec::new(),
                     budgets: Vec::new(),
                     agent_edits: Vec::new(),
+                    desk_hive: Vec::new(),
                     retired_agents: Vec::new(),
                     policy: None,
                     tool_grants: None,
@@ -4179,8 +4462,8 @@ impl OverlayBlob {
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
 ///
-/// [`MAIN_THREAD_ID`](crate::server::chat_history::MAIN_THREAD_ID) and
-/// [`DEFAULT_DESK`](crate::server::ops::language::DEFAULT_DESK) join them for
+/// [`MAIN_THREAD_ID`](tinyhivemind_core::chat::MAIN_THREAD_ID) and
+/// [`GENERAL_DESK`](tinyhivemind_core::chat::GENERAL_DESK) join them for
 /// issue #1743, and both are ordinary slugs — a teammate named "Main" or
 /// "General" mints straight onto one. That id is a chat address: `responder_for`
 /// checks roster ids before it falls back to the orchestrator, so the teammate
@@ -4188,13 +4471,22 @@ impl OverlayBlob {
 /// console would render the line's transcript as that teammate's DM. Desk ids
 /// and names are already excluded a few lines below; these are the two keys
 /// that route like a desk without being one.
+///
+/// The General entry is the **identity** constant, not
+/// `server::ops::language::DEFAULT_DESK`, the operator-facing glossary word
+/// that happens to be the same literal. What is reserved here is a chat
+/// address, and this is the port layer: a port naming a server constant is the
+/// upward reach the shared crate exists to remove. The two cannot drift — a
+/// `const` assertion in [`crate::server::chat_history`] pins them together at
+/// compile time — so the reservation still covers a teammate named "General"
+/// however the host chooses to spell that word.
 pub const RESERVED_AGENT_IDS: [&str; 6] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
-    crate::server::chat_history::MAIN_THREAD_ID,
-    crate::server::ops::language::DEFAULT_DESK,
+    tinyhivemind_core::chat::MAIN_THREAD_ID,
+    tinyhivemind_core::chat::GENERAL_DESK,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -4262,6 +4554,19 @@ pub struct CompanyRecord {
     /// [`Self::upsert_agent_override`].
     #[serde(default)]
     pub overlay_agent_edits: Vec<AgentOverride>,
+    /// The move grammars the operator has installed on desks, replacing the
+    /// `[[group_chat]].hive` block the manifest declared (or supplying one for a
+    /// desk that declared none).
+    ///
+    /// Absent on every record written before a grammar could be installed from
+    /// the console, which `#[serde(default)]` loads as empty — "the manifest
+    /// still decides", which is exactly how those companies ran.
+    ///
+    /// **At most one entry per `desk_id`**; mutate through
+    /// [`Self::upsert_desk_hive`], and read through
+    /// [`Self::effective_desk_hive`] rather than reaching in here.
+    #[serde(default)]
+    pub overlay_desk_hive: Vec<DeskHiveOverride>,
     /// Ids of **manifest-declared** teammates the operator has removed from the
     /// console — the tombstone half of the same layer
     /// [`Self::overlay_agent_edits`] is the edit half of.
@@ -4480,6 +4785,43 @@ impl CompanyRecord {
     /// them. With no order override the base order is returned unchanged, so the
     /// first declared member stays the lead by default.
     pub fn effective_desk_members(&self, desk_id: &str) -> Vec<String> {
+        // **The general desk seats the whole roster, and keeps doing so.**
+        //
+        // It is a desk like any other except in one respect: who belongs to it
+        // is not a list somebody maintains, it is "everyone who works here".
+        // `POST {scope}/team` adds a teammate and touches no desk at all, so a
+        // fixed `members = [...]` would be right on the day it was written and
+        // wrong from the next hire onward — the newest teammate would be the one
+        // person unable to speak on the company's own line.
+        //
+        // Deriving it from the roster makes that unmaintainable-by-construction
+        // rather than merely maintained, and it is what `[company].general_desk`
+        // is for: the manifest names WHICH desk owns the line, and the runtime
+        // keeps its membership current.
+        if self
+            .manifest
+            .company
+            .general_desk
+            .as_deref()
+            .is_some_and(|named| named == desk_id)
+        {
+            // The same two sources `is_roster_agent` consults, manifest before
+            // overlay, so who the room seats and who the roster says works here
+            // cannot drift.
+            let mut all: Vec<String> = Vec::new();
+            for id in self
+                .manifest
+                .agents
+                .iter()
+                .map(|a| a.id.clone())
+                .chain(self.overlay_agents.iter().map(|a| a.id.clone()))
+            {
+                if !self.is_retired(&id) && !all.contains(&id) {
+                    all.push(id);
+                }
+            }
+            return all;
+        }
         let mut members: Vec<String> = self
             .manifest
             .group_chats
@@ -4611,11 +4953,39 @@ impl CompanyRecord {
         if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
             return Some(exact.id.clone());
         }
-        if !crate::server::chat_history::is_general_chat(Some(key))
+        // **The company's own line, pointed at a desk that owns it.**
+        //
+        // Without this, General resolves to nothing: the desk selector bails
+        // out and the message falls to a *root* agent picked off the fallback
+        // ladder — in practice whichever agent file sorts first. Observed: a
+        // delivered-order case answered by the pending-order seat, holding
+        // three write tools and no tool for the job.
+        //
+        // The target is required to exist and is required NOT to be a General
+        // spelling itself. tinyhivemind refuses an episode on a desk whose id
+        // or name is one, so resolving General onto such a desk would trade a
+        // message answered by the wrong agent for a message that fails
+        // outright. Silently declining leaves the historical behaviour, which
+        // is the same thing every other rung of this function does.
+        if tinyhivemind_core::chat::is_general_chat(Some(key))
+            && let Some(target) = self.manifest.company.general_desk.as_deref()
+            && let Some(desk) = self
+                .manifest
+                .group_chats
+                .iter()
+                .find(|c| c.id == target)
+                .filter(|c| {
+                    !tinyhivemind_core::chat::is_general_chat(Some(&c.id))
+                        && !tinyhivemind_core::chat::is_general_chat(Some(&c.name))
+                })
+        {
+            return Some(desk.id.clone());
+        }
+        if !tinyhivemind_core::chat::is_general_chat(Some(key))
             && let Some(exact) = self
                 .overlay_desks
                 .iter()
-                .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
                 .find(|d| d.id == key)
         {
             return Some(exact.id.clone());
@@ -4627,7 +4997,7 @@ impl CompanyRecord {
             .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
             .map(|c| c.id.clone())
             .or_else(|| {
-                if crate::server::chat_history::is_general_chat(Some(key)) {
+                if tinyhivemind_core::chat::is_general_chat(Some(key)) {
                     return None;
                 }
                 self.overlay_desks
@@ -4640,7 +5010,7 @@ impl CompanyRecord {
                     // that every desk mutation refuses. Its lead would answer,
                     // and the reply would be journaled under a thread the
                     // console renders no channel for.
-                    .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+                    .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
@@ -4667,10 +5037,11 @@ impl CompanyRecord {
     /// overlay tier only when the manifest has no match at all.
     pub fn desk_alias_is_ambiguous(&self, key: &str) -> bool {
         if self.manifest.group_chats.iter().any(|c| c.id == key)
-            || (!crate::server::chat_history::is_general_chat(Some(key))
-                && self.overlay_desks.iter().any(|d| {
-                    d.id == key && !crate::server::chat_history::is_general_chat(Some(&d.id))
-                }))
+            || (!tinyhivemind_core::chat::is_general_chat(Some(key))
+                && self
+                    .overlay_desks
+                    .iter()
+                    .any(|d| d.id == key && !tinyhivemind_core::chat::is_general_chat(Some(&d.id))))
         {
             return false;
         }
@@ -4683,12 +5054,12 @@ impl CompanyRecord {
         if manifest_matches > 0 {
             return manifest_matches > 1;
         }
-        if crate::server::chat_history::is_general_chat(Some(key)) {
+        if tinyhivemind_core::chat::is_general_chat(Some(key)) {
             return false;
         }
         self.overlay_desks
             .iter()
-            .filter(|d| !crate::server::chat_history::is_general_chat(Some(&d.id)))
+            .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
             .filter(|d| d.name.eq_ignore_ascii_case(key))
             .count()
             > 1
@@ -5122,6 +5493,63 @@ impl CompanyRecord {
     /// The one way a write path should add to [`Self::overlay_agent_edits`], for
     /// the reason [`Self::upsert_budget_override`] gives: a second row for one
     /// teammate is not a harmless duplicate, it is a silently unreachable edit.
+    /// The `hive` block in force on `desk_id`.
+    ///
+    /// The operator's installed grammar if there is one, else the manifest's
+    /// `[[group_chat]].hive`, else the default. **The one place this precedence
+    /// lives** — `desk_episode`, `desk_federation` and the console read through
+    /// here, so a desk cannot deliberate under one table while the console shows
+    /// another.
+    #[must_use]
+    pub fn effective_desk_hive(&self, desk_id: &str) -> crate::hivemind::HiveConfig {
+        if let Some(installed) = self
+            .overlay_desk_hive
+            .iter()
+            .find(|held| held.desk_id == desk_id)
+        {
+            return installed.hive.clone();
+        }
+        self.manifest
+            .group_chats
+            .iter()
+            .find(|group| group.id == desk_id)
+            .map(|group| group.hive.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether an operator-installed grammar is what `effective_desk_hive`
+    /// returned, as opposed to the manifest's own block or the default.
+    ///
+    /// The console needs the difference to offer "restore the manifest's
+    /// version", which is meaningless when there is nothing installed.
+    #[must_use]
+    pub fn desk_hive_is_installed(&self, desk_id: &str) -> bool {
+        self.overlay_desk_hive
+            .iter()
+            .any(|held| held.desk_id == desk_id)
+    }
+
+    /// Install or replace a desk's move grammar.
+    ///
+    /// Wholesale, for the reason [`DeskHiveOverride`] gives. One row per desk,
+    /// so a second install replaces the first rather than stacking behind it.
+    pub fn upsert_desk_hive(&mut self, entry: DeskHiveOverride) {
+        self.overlay_desk_hive
+            .retain(|held| held.desk_id != entry.desk_id);
+        self.overlay_desk_hive.push(entry);
+    }
+
+    /// Drop a desk's installed grammar, restoring whatever the manifest says.
+    ///
+    /// Returns whether anything was installed to drop, so a route can answer
+    /// "there was nothing to reset" without a second read.
+    pub fn clear_desk_hive(&mut self, desk_id: &str) -> bool {
+        let before = self.overlay_desk_hive.len();
+        self.overlay_desk_hive
+            .retain(|held| held.desk_id != desk_id);
+        before != self.overlay_desk_hive.len()
+    }
+
     pub fn upsert_agent_override(&mut self, entry: AgentOverride) {
         if let Some(held) = self
             .overlay_agent_edits
@@ -5651,6 +6079,7 @@ mod test {
             automate: "meta ads, order dispatch".into(),
         };
         let mut record = CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -6989,6 +7418,7 @@ mod test {
 
     fn desk_record(toml_src: &str, overlay: Vec<OverlayDeskMember>) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -7023,6 +7453,48 @@ mod test {
         let mut record = desk_record(toml_src, overlay);
         record.overlay_desk_order = order;
         record
+    }
+
+    #[test]
+    fn desk_hive_overrides_precede_manifest_and_are_replaced_or_cleared() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[group_chat]]\nid = \"studio\"\nname = \"Studio\"\nmembers = []\n\
+             [group_chat.hive]\nquorum = 2\n";
+        let mut record = desk_record(manifest, Vec::new());
+
+        // The manifest wins where no edit exists, and an unknown desk falls
+        // through to the default rather than borrowing another desk's table.
+        assert_eq!(record.effective_desk_hive("studio").quorum, Some(2));
+        assert_eq!(
+            record.effective_desk_hive("unknown"),
+            crate::hivemind::HiveConfig::default()
+        );
+        assert!(!record.desk_hive_is_installed("studio"));
+
+        let first = crate::hivemind::HiveConfig {
+            quorum: Some(1),
+            ..Default::default()
+        };
+        record.upsert_desk_hive(DeskHiveOverride {
+            desk_id: "studio".into(),
+            hive: first,
+        });
+        assert!(record.desk_hive_is_installed("studio"));
+        assert_eq!(record.effective_desk_hive("studio").quorum, Some(1));
+
+        let replacement = crate::hivemind::HiveConfig {
+            quorum: Some(3),
+            ..Default::default()
+        };
+        record.upsert_desk_hive(DeskHiveOverride {
+            desk_id: "studio".into(),
+            hive: replacement,
+        });
+        assert_eq!(record.overlay_desk_hive.len(), 1);
+        assert_eq!(record.effective_desk_hive("studio").quorum, Some(3));
+        assert!(record.clear_desk_hive("studio"));
+        assert!(!record.clear_desk_hive("studio"));
+        assert_eq!(record.effective_desk_hive("studio").quorum, Some(2));
     }
 
     /// The effective membership is the manifest members first, then overlay
@@ -7393,6 +7865,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "sales".into(),
@@ -7400,6 +7873,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         assert_eq!(
@@ -7428,6 +7902,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
 
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -7457,6 +7932,7 @@ mod test {
             description: None,
             members: Vec::new(),
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         assert_eq!(record.mint_agent_id("Design Studio"), "design_studio");
         // …while the overlay desk's id is reserved exactly like a manifest one.
@@ -7670,9 +8146,9 @@ mod test {
     fn overlay_blob_carries_template_provenance() {
         let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
         record.template_provenance = Some(TemplateProvenance {
-            source_id: "agentic_law_firm".to_string(),
+            source_id: "law_firm".to_string(),
             version: Some("2.0.0".to_string()),
-            path: Some("companies/agentic_law_firm".to_string()),
+            path: Some("companies/law_firm".to_string()),
         });
         let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
         let blob = OverlayBlob::parse(&json).expect("reparse");
@@ -8507,6 +8983,7 @@ mod test {
             description: None,
             members: vec!["eng".into()],
             responder: crate::ports::types::ResponderMode::default(),
+            hive: Default::default(),
         });
         // Resolves by id and by case-insensitive name.
         assert_eq!(record.resolve_desk_id("growth").as_deref(), Some("growth"));
@@ -8553,6 +9030,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         record.overlay_desks.push(OverlayDesk {
             id: "ops".into(),
@@ -8560,6 +9038,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["ceo".into()],
+            hive: Default::default(),
         });
 
         for spelling in ["", "main", "Main", "MAIN", "general", "General"] {
@@ -8604,6 +9083,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         assert_eq!(
             record.resolve_desk_id("Front office"),
@@ -8628,6 +9108,7 @@ mod test {
             description: None,
             responder: Default::default(),
             members: vec!["eng".into()],
+            hive: Default::default(),
         });
         assert_eq!(
             ordinary.resolve_desk_id("Front office").as_deref(),

@@ -84,6 +84,20 @@ export interface PolicyStatus {
    * because it cannot be a workflow node. Absent on a host predating the field.
    */
   knownTools?: string[];
+  /**
+   * Whether the live gate currently turns policy — the tier, `always_approve`,
+   * the spend cap — into approval requests, rather than allowing everything
+   * the hard denials (read-only, the emergency stop) do not already refuse.
+   *
+   * Read from the host rather than assumed: every build ships this `false`
+   * today (`src/runtime/builder.rs` disables it unconditionally), but that is
+   * a fact about the running gate, not a constant the console gets to invent —
+   * see `src/server/ops/policy.rs`'s module doc for why a copy here would
+   * drift from the gate it claims to describe. Absent on a host predating the
+   * field, which is read the same way an absent field always is here: as the
+   * state every deployed host actually has, not an optimistic guess.
+   */
+  policyHitlEnabled?: boolean;
 }
 
 /**

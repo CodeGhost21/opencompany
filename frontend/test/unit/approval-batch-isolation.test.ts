@@ -5,8 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, Verdict } from "@/api/types";
-import { MessageTimeline } from "@/views/chat/MessageTimeline";
-import { buildTimelineItems, type Channel } from "@/views/chat/model";
+import { MessageTimeline } from "@/views/room/MessageTimeline";
+import { buildTimelineItems, type Channel } from "@/views/room/model";
 
 /**
  * One card is not disabled by another card's decision (#842, over #373).

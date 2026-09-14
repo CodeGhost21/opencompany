@@ -25,13 +25,13 @@ describe("destinationTargetProblem — unwired channel", () => {
   it("rejects a channel that is not in the wired set, naming what is", () => {
     const problem = destinationTargetProblem("channel", "ghost", wired);
     expect(problem).toBe(
-      "`ghost` is not a workflow delivery channel — this runtime has: engineering, product_design.",
+      "`ghost` is not an automation delivery channel — this runtime has: engineering, product_design.",
     );
   });
 
   it("rejects `operator` when the host's wired set doesn't include it", () => {
     expect(destinationTargetProblem("channel", "operator", wired)).toContain(
-      "is not a workflow delivery channel",
+      "is not an automation delivery channel",
     );
   });
 
@@ -57,7 +57,7 @@ describe("destinationTargetProblem — unwired channel", () => {
   // host's own words for the empty case (`undeliverable_channel_message`).
   it("rejects any channel when the host answered with an empty set", () => {
     expect(destinationTargetProblem("channel", "engineering", ready())).toBe(
-      "`engineering` is not a workflow delivery channel — this runtime has: no durable channels.",
+      "`engineering` is not an automation delivery channel — this runtime has: no durable channels.",
     );
   });
 

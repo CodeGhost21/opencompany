@@ -160,8 +160,8 @@ const idsWithin = (id: string) =>
     (el) => el.dataset.testid,
   );
 
-describe("the detail toolbar carries only this workflow's controls (#1135)", () => {
-  it("drops the workflow picker — the name is the heading and the index is the switch", async () => {
+describe("the detail toolbar carries only this automation's controls (#1135)", () => {
+  it("drops the automation picker — the name is the heading and the index is the switch", async () => {
     await mountAt("#/workflows/alpha", makeClient());
 
     expect(testId("workflow-detail-name")?.textContent).toBe("Daily Agent Harness Tweets");
@@ -172,10 +172,10 @@ describe("the detail toolbar carries only this workflow's controls (#1135)", () 
     expect(testId("workflow-back-to-index")).not.toBeNull();
   });
 
-  it("leaves `New workflow` to the index, where the list it makes one for lives", async () => {
+  it("leaves `New automation` to the index, where the list it makes one for lives", async () => {
     const client = makeClient();
     await mountAt("#/workflows/alpha", client);
-    expect(named("New workflow")).toBeNull();
+    expect(named("New automation")).toBeNull();
     expect(testId("workflow-create")).toBeNull();
 
     await act(async () => {
@@ -204,9 +204,9 @@ describe("one filled button per screen (#1135)", () => {
     }
   });
 
-  it("makes New workflow the index's primary, and nothing else", async () => {
+  it("makes New automation the index's primary, and nothing else", async () => {
     await mountAt("#/workflows", makeClient());
-    expect(filled()).toEqual(["New workflow"]);
+    expect(filled()).toEqual(["New automation"]);
   });
 });
 

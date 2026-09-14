@@ -43,7 +43,7 @@ async function expectModal(dialog: Locator, backgroundControl: Locator) {
 test("the task dialog is modal and restores keyboard focus for every close path", async ({
   page,
 }) => {
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
   await dismissTour(page);
 
   const addTask = page.getByRole("button", { name: "Add task" });

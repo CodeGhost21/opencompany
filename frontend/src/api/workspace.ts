@@ -58,7 +58,7 @@ export function originLabel(
 ): string | null {
   switch (origin?.kind) {
     case "agent":
-      return `Teammate · ${rosterDisplayName(origin.id, names)}`;
+      return `Agent · ${rosterDisplayName(origin.id, names)}`;
     case "seed":
       return "Seeded";
     default:

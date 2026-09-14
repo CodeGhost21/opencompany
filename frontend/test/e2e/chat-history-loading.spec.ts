@@ -14,7 +14,7 @@ import { expect, test, type Page } from "@playwright/test";
  *
  * `historyReady()` — the decision itself — *is* unit-tested, in
  * `test/unit/chat-history-hydration.test.ts`. What cannot be tested there is
- * the thing that actually broke: two independent fetches (`ChatView`'s own desk
+ * the thing that actually broke: two independent fetches (`RoomView`'s own desk
  * list, `AppShell`'s hydration pass) racing to paint a pane. That race only
  * exists in a browser with a real host behind it, and the bug lived precisely
  * in the window between them.

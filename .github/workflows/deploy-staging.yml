@@ -36,8 +36,11 @@ on:
     # something that is?
     paths:
       - 'src/**'
+      - 'crates/opencompany-core/**' # the host's manifest: features and dependencies
+      - 'crates/opencompany-tui/**' # a workspace member the builder has to COPY
       - 'frontend/**'
       - 'companies/**'
+      - 'globals/**' # COPYed into the builder (Dockerfile) and embedded by build.rs
       - 'skills/**' # COPYed into the runtime image (Dockerfile) as the shared library
       - 'docker/**' # entrypoint.sh, which is COPYed and is the container's ENTRYPOINT
       - 'Cargo.toml'
@@ -82,16 +85,17 @@ env:
   # `OPENCOMPANY_MEMORY_DRIVER=supermemory|mem0|cognee` (plus `null`), inert
   # until an operator sets those.
   #
-  # `analytics` (issue #1739) is the Mixpanel transport, and this list is the
+  # `analytics` (issue #1739) is the OpenPanel transport, and this list is the
   # only place it is ever compiled: product analytics reports from **hosted
   # tenants only**, so the image built here is the one build that needs it,
   # while the desktop and self-hosted builds deliberately do not have it.
   # Without it every tenant compiles the `cfg(not(feature = "analytics"))` arm
-  # of `mixpanel::build`, installs a `NullTracker`, and reports nothing however
-  # the deployment kind and token are injected. It costs the image nothing —
-  # `analytics = ["dep:reqwest"]`, and `reqwest` is already here via `openhuman`
-  # — and stays inert until the manager injects `OPENCOMPANY_ANALYTICS_TOKEN`
-  # (`docs/spec/runtime/analytics.md`).
+  # of `openpanel::build`, installs a `NullTracker`, and reports nothing however
+  # the deployment kind and credential are injected. It costs the image nothing
+  # — `analytics = ["dep:reqwest"]`, and `reqwest` is already here via
+  # `openhuman` — and stays inert until the manager injects
+  # `OPENCOMPANY_ANALYTICS_CLIENT_ID`, `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` and
+  # `OPENCOMPANY_ANALYTICS_ENDPOINT` (`docs/spec/runtime/analytics.md`).
   #
   # `crash-reporting` is the Sentry client, and this list is the ONLY thing that
   # decides whether a tenant has one. The feature is the sole path that compiles
@@ -140,7 +144,7 @@ jobs:
           scripts/ci/init-vendored-submodules.sh
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -227,17 +231,38 @@ jobs:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Add server to known hosts
-        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
 
       - name: Point the manager at the new tenant image
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:staging-${{ github.sha }}
+          K8S_NAMESPACE: ${{ env.K8S_NAMESPACE }}
+          MANAGER_DEPLOY: ${{ env.MANAGER_DEPLOY }}
+          TENANT_IMAGE_CM: ${{ env.TENANT_IMAGE_CM }}
           REFRESH_ALL: ${{ inputs.refresh_all_tenants }}
         run: |
-          ssh root@${SSH_HOST} \
-            "IMAGE='${IMAGE}' K8S_NAMESPACE='${{ env.K8S_NAMESPACE }}' MANAGER_DEPLOY='${{ env.MANAGER_DEPLOY }}' TENANT_IMAGE_CM='${{ env.TENANT_IMAGE_CM }}' REFRESH_ALL='${REFRESH_ALL:-false}' bash -s" << 'EOF'
+          REFRESH_ALL="${REFRESH_ALL:-false}"
+          IMAGE_B64=$(printf '%s' "$IMAGE" | base64 | tr -d '\n')
+          K8S_NAMESPACE_B64=$(printf '%s' "$K8S_NAMESPACE" | base64 | tr -d '\n')
+          MANAGER_DEPLOY_B64=$(printf '%s' "$MANAGER_DEPLOY" | base64 | tr -d '\n')
+          TENANT_IMAGE_CM_B64=$(printf '%s' "$TENANT_IMAGE_CM" | base64 | tr -d '\n')
+          REFRESH_ALL_B64=$(printf '%s' "$REFRESH_ALL" | base64 | tr -d '\n')
+          {
+            printf 'IMAGE_B64=%s\n' "$IMAGE_B64"
+            printf 'K8S_NAMESPACE_B64=%s\n' "$K8S_NAMESPACE_B64"
+            printf 'MANAGER_DEPLOY_B64=%s\n' "$MANAGER_DEPLOY_B64"
+            printf 'TENANT_IMAGE_CM_B64=%s\n' "$TENANT_IMAGE_CM_B64"
+            printf 'REFRESH_ALL_B64=%s\n' "$REFRESH_ALL_B64"
+            cat <<'EOF'
           set -euo pipefail
+          IMAGE=$(printf '%s' "$IMAGE_B64" | base64 -d)
+          K8S_NAMESPACE=$(printf '%s' "$K8S_NAMESPACE_B64" | base64 -d)
+          MANAGER_DEPLOY=$(printf '%s' "$MANAGER_DEPLOY_B64" | base64 -d)
+          TENANT_IMAGE_CM=$(printf '%s' "$TENANT_IMAGE_CM_B64" | base64 -d)
+          REFRESH_ALL=$(printf '%s' "$REFRESH_ALL_B64" | base64 -d)
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
           # The manager namespace's ecr-creds Secret expires after 12h and is
@@ -511,3 +536,4 @@ jobs:
               -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}fleet tenant image (env, authoritative)={.value}{"\n"}{end}'
           fi
           EOF
+          } | ssh root@"${SSH_HOST}" bash -s

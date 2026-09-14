@@ -155,7 +155,7 @@ afterEach(() => {
   container.remove();
 });
 
-describe("the workflow copilot's grounding across a company switch", () => {
+describe("the automation copilot's grounding across a company switch", () => {
   it("does not carry the previous company's unwired tools into the next one", async () => {
     await showCopilot("acme");
     // Acme's own turn names them, which is the #874 behaviour being protected —

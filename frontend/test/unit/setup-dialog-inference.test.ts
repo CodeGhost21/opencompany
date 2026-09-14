@@ -256,7 +256,7 @@ describe("readiness is the addressed company's, not the host's", () => {
     // names, and the control that performs it renders on the Inference card.
     // This asserted `#/settings/connections` — an address that named no
     // settings page and was repaired onto General, where the control is not.
-    expect(restartLink).toHaveProperty("hash", "#/settings/inference");
+    expect(restartLink).toHaveProperty("hash", "#/connections/inference");
 
     // Following it is starting setup, not declining it — same as "Set up a
     // model", so the return reopens the dialog.
@@ -400,7 +400,7 @@ describe('"Set up a model" is starting setup, not declining it', () => {
     expect(link, "no model link on the notice").toBeTruthy();
     // Where a model is actually set up. See the restart assertion above for
     // why this used to name a page that did not exist.
-    expect(link).toHaveProperty("hash", "#/settings/inference");
+    expect(link).toHaveProperty("hash", "#/connections/inference");
 
     await click(link!);
 
@@ -570,7 +570,7 @@ describe("the finished build-out points at what would actually help", () => {
 });
 
 describe("a replacing build-out clears the team it replaces", () => {
-  it("removes operator-staffed teammates before creating the new roster", async () => {
+  it("removes operator-staffed agents before creating the new roster", async () => {
     const client = clientWith({
       source: "fallback",
       reason: "model_unreachable",

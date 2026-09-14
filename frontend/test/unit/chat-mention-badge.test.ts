@@ -95,10 +95,10 @@ describe("mentionCountsByChannel", () => {
     const feed = [
       note({ id: "main", context: "main" }),
       note({ id: "general", context: "General" }),
-      note({ id: "dm", context: "dm:teammate" }),
+      note({ id: "dm", context: "dm:agent" }),
     ];
-    expect(mentionCountsByChannel(feed, undefined, new Set(["dm:teammate"]))).toEqual({
-      "dm:teammate": 1,
+    expect(mentionCountsByChannel(feed, undefined, new Set(["dm:agent"]))).toEqual({
+      "dm:agent": 1,
     });
   });
 

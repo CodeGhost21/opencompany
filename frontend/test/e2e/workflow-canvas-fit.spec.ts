@@ -119,7 +119,7 @@ for (const width of [1440, 1100]) {
   });
 }
 
-test("a short workflow still fits whole, untouched", async ({ page }) => {
+test("a short automation still fits whole, untouched", async ({ page }) => {
   await open(page, SHORT, 1440);
 
   const flow = await box(canvas(page));

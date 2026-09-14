@@ -1,4 +1,4 @@
-import { channelForThread } from "@/views/chat/model";
+import { channelForThread } from "@/views/room/model";
 
 /**
  * The drain half of app-shell's deferred transcript re-read (issue #1701).

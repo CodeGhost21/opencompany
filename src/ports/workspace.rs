@@ -58,6 +58,20 @@ pub fn binary_write_refusal(name: &str, mime: &str) -> String {
     )
 }
 
+pub(crate) fn next_write_revision(current: u64, expected: Option<u64>) -> Result<u64> {
+    if let Some(expected) = expected
+        && expected != current
+    {
+        return Err(crate::error::OpenCompanyError::Conflict(format!(
+            "workspace note changed since you read it: expected revision {expected}, current revision {current}; re-read and re-apply your change"
+        )));
+    }
+    let next = current.checked_add(1).ok_or_else(|| {
+        crate::error::OpenCompanyError::Conflict("workspace revision exhausted".to_string())
+    })?;
+    Ok(crate::ports::now_millis().max(next))
+}
+
 /// The size and content digest of a blob, computed from the bytes themselves.
 ///
 /// Callers never supply either value. A `sha256` a caller could pass would be a
@@ -570,6 +584,20 @@ pub trait WorkspaceStore: Send + Sync {
         id: &str,
         content: &str,
         author: WorkspaceOrigin,
+    ) -> Result<WorkspaceNode> {
+        self.write_with_revision(company, id, content, author, None)
+            .await
+    }
+    /// Overwrites text atomically with its revision check. A mismatched revision
+    /// returns `Conflict` without changing the body or metadata. `None` requests
+    /// an unconditional write. Every successful write advances the revision.
+    async fn write_with_revision(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        content: &str,
+        author: WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode>;
     /// Creates a node (folder or file). The node's `id` must be fresh; the
     /// `parent_id`, when set, must name an existing folder. `content` seeds a
@@ -836,6 +864,23 @@ pub trait WorkspaceStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_revisions_refuse_stale_tokens_and_never_wrap() {
+        let current = i64::MAX as u64 / 2;
+        assert_eq!(
+            next_write_revision(current, Some(current)).unwrap(),
+            current + 1
+        );
+        assert_eq!(next_write_revision(current, None).unwrap(), current + 1);
+        let stale = next_write_revision(current, Some(current - 1)).unwrap_err();
+        assert!(matches!(stale, crate::error::OpenCompanyError::Conflict(_)));
+        let exhausted = next_write_revision(u64::MAX, Some(u64::MAX)).unwrap_err();
+        assert!(matches!(
+            exhausted,
+            crate::error::OpenCompanyError::Conflict(_)
+        ));
+    }
 
     /// Every backend persists a node as opaque JSON, so a node written before
     /// authorship existed has neither field. It must still load — and must load

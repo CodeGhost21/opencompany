@@ -69,6 +69,21 @@ export const DESKS_SEGMENT = "desks";
  */
 export const GRAPH_SEGMENT = "graph";
 
+/**
+ * The roster's own segment — `#/company/agents`.
+ *
+ * The roster is what a bare `#/company` has always rendered, and it still is:
+ * this names the same page so the sidebar's "Agents" row can point at an
+ * address that says what it opens. `#/company` said "company" and drew the
+ * agents, which is the mismatch the `/company` prefix work set out to remove
+ * everywhere else.
+ *
+ * Reserved exactly like {@link DESKS_SEGMENT} and {@link GRAPH_SEGMENT}, with
+ * the same accepted collision: a desk declared with the literal id `agents`
+ * cannot be focused through its own link.
+ */
+export const AGENTS_SEGMENT = "agents";
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -88,8 +103,18 @@ interface Props {
    * The roster's detail page is `#/team/<agentId>`, an address of its own
    * (issue #264) rather than a second segment of `#/company` — so this page
    * never renders it, and always hands the roster `sub={null}`.
+   *
+   * `edit` opens that page with its edit form already showing (issue #1989),
+   * which is where the reduced Add-teammate dialog lands: it collects a name
+   * and a sentence, and the copilot that drafts the rest lives in that form.
+   *
+   * Spelled out here rather than left to structural typing. A callback taking
+   * only `agentId` is assignable to one taking an optional second argument, so
+   * a hop that forgot the option would compile, drop the flag, and land the
+   * operator on a read-only profile with no copilot in sight — the redesign
+   * failing silently, which is the failure this whole change has to avoid.
    */
-  onOpenAgent: (agentId: string | null) => void;
+  onOpenAgent: (agentId: string | null, options?: { edit?: boolean }) => void;
   /** Bumped when first-run setup staffs the company, so the roster re-reads. */
   refreshKey?: number;
   /** Reopen first-run setup, so skipping it is not a dead end. */
@@ -117,7 +142,7 @@ export function CompanyView({
     return <Overview client={client} company={company} companyName={companyName} />;
   }
 
-  if (sub) {
+  if (sub && sub !== AGENTS_SEGMENT) {
     return (
       <OrgChartView
         client={client}
@@ -125,6 +150,10 @@ export function CompanyView({
         // The reserved segment names the chart, not a desk on it.
         focusDeskId={sub === DESKS_SEGMENT ? null : sub}
         onBack={() => onNavigate(null)}
+        // The chart's own Add-teammate dialog lands a created teammate on its
+        // detail page (issue #1989), the same `#/team/<agentId>` address the
+        // roster half opens — not a segment of this view.
+        onOpenAgent={onOpenAgent}
       />
     );
   }

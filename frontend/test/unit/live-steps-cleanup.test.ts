@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const appShell = readFileSync("src/components/app-shell.tsx", "utf8");
-const threadPanel = readFileSync("src/views/chat/ThreadPanel.tsx", "utf8");
-const chatView = readFileSync("src/views/ChatView.tsx", "utf8");
+const threadPanel = readFileSync("src/views/room/ThreadPanel.tsx", "utf8");
+const chatView = readFileSync("src/views/RoomView.tsx", "utf8");
 
 /**
  * The four gaps the Codex review on #2069 found in per-query live rows, each
@@ -35,7 +35,7 @@ describe("a threaded query's rows have somewhere to render", () => {
     expect(threadPanel).toContain("<StepTimeline steps={[...liveSteps]} defaultOpen />");
   });
 
-  it("ChatView supplies it, so the panel is never handed an empty map", () => {
+  it("RoomView supplies it, so the panel is never handed an empty map", () => {
     expect(chatView).toMatch(/<ThreadPanel[\s\S]{0,600}liveStepsByMessage=\{liveStepsByMessage\}/);
   });
 });
@@ -75,8 +75,14 @@ describe("cleanup is addressed by the message that was answered", () => {
    * a row still marked `running` — a result that never arrived cannot flip it.
    */
   it("retires a failed turn's bucket on the terminal settle, inside the guard", () => {
+    // Located by text, so the string tracks the source. The guard read
+    // `openTurnsRef.current` while the shell mirrored its own state into a ref;
+    // that state moved to `room/store.ts` and the mirror went with it, so the
+    // read is now the store's synchronous one. Same guard, and strictly fresher:
+    // the ref was written in an effect and so lagged a commit behind, which is
+    // the direction that MISSES a turn just added.
     const guardAt = appShell.indexOf(
-      "if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {",
+      "if (!hasOtherOpenTurns(room.readRoom().openTurns, liveKey, settledTurnId)) {",
     );
     expect(guardAt, "the settle guard must be present").toBeGreaterThan(-1);
     // Inside the guard: a queued sibling still running owns its rows.

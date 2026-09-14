@@ -70,7 +70,7 @@ test("the MCP page lists the company's servers instead of crashing on open", asy
     await expect(bridgeAbsent).toHaveCount(0);
   } else {
     await expect(bridgeAbsent).toBeVisible();
-    await expect(bridgeAbsent).toContainText("no teammate ever receives their tools");
+    await expect(bridgeAbsent).toContainText("no agent ever receives their tools");
   }
 
   // The page must not be one that renders and throws. `.length` of `undefined`

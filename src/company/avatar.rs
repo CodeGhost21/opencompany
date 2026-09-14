@@ -1650,12 +1650,13 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, String, u64)>> {
             crate::ports::workspace::read_capped_by_reading(self, company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             _company: &crate::ports::types::CompanyId,
             _id: &str,
             _content: &str,
             _author: WorkspaceOrigin,
+            _expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
             unreachable!("resolve does not write prose")
         }

@@ -28,6 +28,10 @@ pub struct AppConfig {
     pub openhuman_root: Option<PathBuf>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
+    /// TinyHumans **site** base URL, when this deployment states one
+    /// (`TINYHUMANS_WEB_URL`). Read through [`Self::hub_site`], which derives it
+    /// from [`Self::api_url`] when unset — the normal case.
+    pub web_url: Option<String>,
     /// An operator-set display name for this instance
     /// (`OPENCOMPANY_INSTANCE_NAME`), surfaced by `/spec` so a client holding
     /// several connections can show something friendlier than a URL. Purely
@@ -128,6 +132,7 @@ impl Default for AppConfig {
             bind: "127.0.0.1:8080".to_string(),
             openhuman_root: None,
             api_url: crate::app::config::DEFAULT_API_URL.to_string(),
+            web_url: None,
             instance_name: None,
             brain_mode: BrainMode::Hosted,
             tinyplace_api_url: crate::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
@@ -200,6 +205,23 @@ pub fn canonical_tenant(tenant: &str) -> &str {
 }
 
 impl AppConfig {
+    /// The TinyHumans **site** this deployment belongs to: the dashboard whose
+    /// API keys and balance are the ones this host's credential spends.
+    ///
+    /// [`web_url`](Self::web_url) when a deployment states one, else derived
+    /// from [`api_url`](Self::api_url) — so pointing a host at the staging hub
+    /// points its "manage keys" and "top up" links at the staging dashboard
+    /// with nothing else to set, and a host pointed at a backend the convention
+    /// does not describe gets `None` and the console renders no link rather
+    /// than a guess. See [`hub_account`](crate::server::hub_account).
+    pub fn hub_site(&self) -> Option<String> {
+        self.web_url
+            .clone()
+            .map(|url| url.trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .or_else(|| crate::server::hub_account::site_for_api(&self.api_url))
+    }
+
     /// True when hosted cognition can run: hosted brain mode plus a credential
     /// this instance can **obtain** — see [`Self::credential_available`].
     pub fn cycles_available(&self) -> bool {
@@ -439,6 +461,11 @@ pub struct AppState {
     /// self-hosted host) means the console offers no ecosystem sign-in at all,
     /// rather than offering a button that leads nowhere.
     hub_identity: Option<Arc<dyn crate::server::hub_identity::HubIdentityExchange>>,
+    /// Key-grant flows started and not yet finished, keyed by the opaque
+    /// `state` the browser carries. Holds the PKCE verifier, which is why it is
+    /// in memory and swept rather than persisted — see
+    /// [`hub_link`](crate::server::hub_link).
+    hub_links: Arc<crate::server::hub_link::HubLinks>,
     /// Cross-origin allowlist. Empty (the default) means CORS is off, which is
     /// correct for every same-origin deployment.
     cors: crate::server::cors::CorsConfig,
@@ -484,6 +511,16 @@ pub struct AppState {
     /// request. Gated behind `tinyplace` so the default build links no crypto.
     #[cfg(feature = "tinyplace")]
     nonce: std::sync::Arc<crate::economy::NonceCache>,
+    /// Host-global spent-nonce set for inbound x402 payment authorizations.
+    ///
+    /// Separate from `nonce` because the two guard different values over
+    /// different windows: a SIWX signature is good for the clock-skew window,
+    /// an authorization nonce for
+    /// [`x402::MAX_AGE_SECS`](crate::economy::x402::MAX_AGE_SECS). Sharing one
+    /// set would let either keyspace prune the other's record, and a forgotten
+    /// payment nonce is a free task.
+    #[cfg(feature = "tinyplace")]
+    x402_nonce: std::sync::Arc<crate::economy::NonceCache>,
     /// In-flight console MCP OAuth flows, keyed by the opaque `state` the browser
     /// round-trips (issue #90). The `/mcp/servers/{name}/oauth/start` route parks
     /// a [`PendingOAuth`](crate::company::mcp_oauth::PendingOAuth) here; the
@@ -576,9 +613,14 @@ impl AppState {
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
             hub_identity: None,
+            hub_links: Arc::new(crate::server::hub_link::HubLinks::new()),
             cors: crate::server::cors::CorsConfig::default(),
             #[cfg(feature = "tinyplace")]
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
+            #[cfg(feature = "tinyplace")]
+            x402_nonce: std::sync::Arc::new(crate::economy::NonceCache::with_ttl(
+                crate::economy::x402::MAX_AGE_SECS,
+            )),
             #[cfg(feature = "mcp")]
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             analytics: crate::analytics::null_tracker(),
@@ -652,6 +694,40 @@ impl AppState {
     #[cfg(feature = "acp")]
     pub fn acp_sessions(&self) -> Arc<crate::server::acp::SessionRegistry> {
         Arc::clone(&self.acp_sessions)
+    }
+
+    /// Starts the process-wide ACP-session sweeper, reclaiming sessions idle
+    /// past their TTL. A no-op join handle when this build lacks the `acp`
+    /// feature.
+    ///
+    /// Always compiled and always callable, unlike [`Self::acp_sessions`] —
+    /// so an embedder linking this crate as a library (the desktop host,
+    /// `src-tauri/src/embedded.rs`) can call this the same way whether or not
+    /// its own default dependency features happen to include `acp`, rather
+    /// than needing `#[cfg(feature = "acp")]` of its own — which would need a
+    /// same-named feature declared on that crate purely to gate a `cfg`, and
+    /// this crate's own `acp`/`composio` are deliberately *not* forwarded
+    /// that way (see `src-tauri/Cargo.toml`'s comment on why: keeping its
+    /// `Cargo.lock` byte-identical between the default and release feature
+    /// sets is what lets a release still build `--locked`). The standalone
+    /// binary's own `spawn_acp_session_sweeper` mirrors this one line for
+    /// line; it stays `#[cfg(feature = "acp")]` there because it is not
+    /// compiled by anything but this crate itself.
+    #[cfg(feature = "acp")]
+    pub fn spawn_acp_session_sweeper(
+        &self,
+        shutdown: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        crate::server::acp::SessionSweeper::new(self.acp_sessions()).spawn(shutdown)
+    }
+
+    /// See the feature-enabled [`Self::spawn_acp_session_sweeper`] above.
+    #[cfg(not(feature = "acp"))]
+    pub fn spawn_acp_session_sweeper(
+        &self,
+        _shutdown: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {})
     }
 
     /// This host's in-place runtime rebuilder, when one is wired.
@@ -918,6 +994,16 @@ impl AppState {
         self.hub_identity.as_ref()
     }
 
+    /// The pending key-grant flows for this host.
+    ///
+    /// Always present, unlike [`Self::hub_identity`]: the map costs nothing on a
+    /// host that never starts a link, and making it optional would put a
+    /// `None` branch on a path that already refuses earlier when there is no
+    /// exchange to redeem against.
+    pub fn hub_links(&self) -> &Arc<crate::server::hub_link::HubLinks> {
+        &self.hub_links
+    }
+
     /// Installs platform (multi-tenant) auth. Mirrors [`Self::with_home`].
     pub fn with_platform_auth(mut self, platform_auth: PlatformAuthConfig) -> Self {
         self.config.platform_auth = Some(platform_auth);
@@ -1073,6 +1159,12 @@ impl AppState {
     #[cfg(feature = "tinyplace")]
     pub fn nonce(&self) -> &std::sync::Arc<crate::economy::NonceCache> {
         &self.nonce
+    }
+
+    /// The host-global spent-nonce set for inbound x402 authorizations.
+    #[cfg(feature = "tinyplace")]
+    pub fn x402_nonce(&self) -> &std::sync::Arc<crate::economy::NonceCache> {
+        &self.x402_nonce
     }
 
     /// How long a parked OAuth flow stays reclaimable before it's swept. Longer
@@ -1280,6 +1372,29 @@ mod tests {
     #[test]
     fn workspace_git_checkpoints_default_off() {
         assert!(!AppConfig::default().workspace_git_enabled);
+    }
+
+    /// Callable and finite in every build, `acp` feature or not — the whole
+    /// point of the facade: an embedder linking this crate as a library
+    /// (`src-tauri/src/embedded.rs`) cannot know at its own compile time
+    /// whether this crate's default dependency features happened to include
+    /// `acp`, so the call site must never need a `cfg` of its
+    /// own to stay buildable.
+    #[tokio::test]
+    async fn spawn_acp_session_sweeper_is_always_callable_and_stoppable() {
+        let state = AppState::new(AppConfig::default());
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let handle = state.spawn_acp_session_sweeper(Arc::clone(&shutdown));
+        // `notify_one`, not `notify_waiters`: this test is the only holder of
+        // `shutdown` and the sweeper its only waiter, and unlike
+        // `notify_waiters`, `notify_one` stores a permit for a task that has
+        // not registered as waiting yet — so this cannot lose the
+        // notification to a scheduling race.
+        shutdown.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("the sweeper task must stop once notified, in every build")
+            .expect("the sweeper task must not panic");
     }
 
     fn bound_to(bind: &str) -> AppConfig {
@@ -1576,7 +1691,7 @@ mod tests {
     #[test]
     fn skill_registry_loads_the_repo_library_and_caches() {
         let state = AppState::new(AppConfig::default());
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
 
         let first = state.skill_registry(&dir).expect("registry loads");
         assert!(first.iter().any(|skill| skill.slug == "web-research"));

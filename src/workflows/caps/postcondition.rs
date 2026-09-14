@@ -15,19 +15,24 @@
 //! gated on #1861's blocker-park plumbing landing first — this module only
 //! ever returns `Ok` or a plain-English gap sentence.
 //!
-//! # Fail-open on the unknown case, fail-closed on the broken one
+//! # A gate that cannot be evaluated fails the node
 //!
 //! [`evaluate_postcondition`] is validated at author time
 //! ([`crate::company::workflow_file::validate`] rejects an unknown `require`
 //! before a graph is ever saved), so an unrecognized `require` reaching this
 //! function at runtime can only mean a graph saved by an older or newer
-//! version of the validator disagreeing with this binary. Observability must
-//! never be able to fail the work it is observing (the same rule
-//! [`super::HarnessAgentRunner::run_turn`] already applies to a failed
-//! attempt-row mint) — so the unknown case warns and lets the node through
-//! rather than halting a run over a predicate this binary cannot evaluate.
+//! version of the validator disagreeing with this binary.
 //!
-//! That reasoning does NOT extend to `field_present` losing its own `field`.
+//! A postcondition is not observability — it is the author saying "this
+//! output is not good enough to hand downstream unless it has this shape".
+//! Advancing on a `require` this build cannot check does not skip a
+//! measurement, it silently deletes the check: the node flows its output on
+//! with its declared quality gate having done nothing, and the run reads as
+//! healthy. So an unrecognized `require` FAILS the node, with a gap sentence
+//! naming the predicate and the version disagreement behind it. An author who
+//! meant the check to be optional expresses that by not declaring it.
+//!
+//! `field_present` losing its own `field` fails closed for a related reason.
 //! `validate` requires every `field_present` postcondition to carry a
 //! non-empty `field`, so this function is never handed one the validator
 //! approved without it — a `field_present` spec reaching here with a
@@ -69,9 +74,9 @@ use serde_json::Value;
 ///   element.
 ///
 /// Any OTHER `require` value (one this function does not recognize at all)
-/// fails OPEN: a `tracing::warn!` is emitted and the node is allowed to
-/// proceed. See the module doc for why that case, specifically, is
-/// different from `field_present` losing its `field`.
+/// fails CLOSED: the node is failed with a gap naming the predicate this
+/// build cannot check. See the module doc for why advancing instead would
+/// silently delete an authored gate.
 pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(), String> {
     let require = spec.get("require").and_then(Value::as_str).unwrap_or("");
     let field = spec
@@ -90,11 +95,7 @@ pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(),
         }
         "field_present" => {
             let Some(path) = field else {
-                // Codex #3894038816 on #1937 — deliberately NOT the same
-                // fail-open shape as the unknown-`require` case below. That
-                // one is genuinely ambiguous (a future/older validator this
-                // binary disagrees with — see the module doc). This one is
-                // not: `workflow_file::validate` REQUIRES a `field` on every
+                // `workflow_file::validate` REQUIRES a `field` on every
                 // `field_present` postcondition it ever saves, so a spec
                 // reaching here with no usable `field` cannot be a graph the
                 // validator approved as written — it means something
@@ -188,11 +189,17 @@ pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(),
             }
         }
         other => {
-            tracing::warn!(
+            tracing::error!(
                 require = other,
-                "workflow postcondition: unknown `require` — passing the node through unevaluated"
+                "workflow postcondition: unrecognized `require` — failing the node rather than \
+                 advancing on a declared gate this binary cannot evaluate"
             );
-            Ok(())
+            Err(format!(
+                "the node's postcondition requires `{other}`, which this build does not know how \
+                 to check — refusing to advance rather than silently pass an unevaluated gate. \
+                 The graph was saved by a build whose validator recognizes predicates this one \
+                 does not."
+            ))
         }
     }
 }
@@ -452,11 +459,40 @@ mod tests {
         );
     }
 
+    /// An unrecognized `require` is a declared gate this binary cannot
+    /// evaluate. Advancing on it would let the node through with its authored
+    /// quality check having done nothing at all, which is the one outcome a
+    /// postcondition exists to prevent — so it fails the node instead.
     #[test]
-    fn unknown_require_fails_open() {
+    fn unknown_require_fails_closed() {
         let output = json!({});
+        let gap = evaluate_postcondition(&spec("some_future_predicate"), &output)
+            .expect_err("an unevaluable gate must not advance the node");
+        assert!(
+            gap.contains("some_future_predicate"),
+            "the gap names the predicate this binary could not evaluate: {gap:?}"
+        );
+    }
+
+    /// ...and a `require` this binary DOES understand still advances on output
+    /// that clears it. Failing closed on the unknown case must not turn every
+    /// postcondition into a halt.
+    #[test]
+    fn a_recognized_require_still_passes_on_good_output() {
+        let output = json!({ "text": "the report is done", "json": { "items": [1] } });
+        assert_eq!(evaluate_postcondition(&spec("non_empty"), &output), Ok(()));
         assert_eq!(
-            evaluate_postcondition(&spec("some_future_predicate"), &output),
+            evaluate_postcondition(&spec_with_field("field_present", "json.items"), &output),
+            Ok(())
+        );
+        assert_eq!(
+            evaluate_postcondition(&spec_with_field("non_empty_list", "json.items"), &output),
+            Ok(())
+        );
+
+        let listed = json!({ "text": "two of them", "json": [1, 2] });
+        assert_eq!(
+            evaluate_postcondition(&spec("non_empty_list"), &listed),
             Ok(())
         );
     }

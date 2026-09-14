@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { TeamMember } from "@/lib/team";
-import { buildChannels, directMessageForId } from "@/views/chat/model";
+import { buildChannels, directMessageForId } from "@/views/room/model";
 
 function member(id: string, name: string): TeamMember {
   return {
@@ -18,7 +18,7 @@ function member(id: string, name: string): TeamMember {
 }
 
 describe("direct-message channels", () => {
-  it("shows only conversations with messages, newest first", () => {
+  it("shows every agent, conversations first and newest of those on top", () => {
     const ada = member("ada", "Ada");
     const ben = member("ben", "Ben");
     const cy = member("cy", "Cy");
@@ -31,7 +31,11 @@ describe("direct-message channels", () => {
       ],
     }).find((section) => section.id === "dms")?.channels;
 
-    expect(dms?.map((channel) => channel.id)).toEqual(["dm:ben", "dm:ada"]);
+    // Ben and Ada have transcripts, so they lead in recency order. Cy has
+    // none and is listed anyway — the section is the roster, not an inbox — and
+    // ties with every other untouched row at `latestMessageAt` 0, which falls
+    // through to the name.
+    expect(dms?.map((channel) => channel.id)).toEqual(["dm:ben", "dm:ada", "dm:cy"]);
   });
 
   it("resolves an unused DM by its stable id for the picker and saved links", () => {

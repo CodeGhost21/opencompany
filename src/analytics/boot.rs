@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::analytics::config::{Decision, resolve};
 use crate::analytics::types::{Envelope, OpaqueId};
-use crate::analytics::{DeferredTracker, Event, Tracker, mixpanel};
+use crate::analytics::{DeferredTracker, Event, Tracker, openpanel};
 use crate::app::AppState;
 use crate::app::config::EnvSource;
 use crate::app::deployment::Deployment;
@@ -69,7 +69,7 @@ pub fn install(state: &AppState, handle: &DeferredTracker, env: &dyn EnvSource) 
         .unwrap_or_default();
 
     let envelope = Envelope::new(id, deployment, cognition);
-    let tracker: Arc<dyn Tracker> = mixpanel::build(&decision, envelope);
+    let tracker: Arc<dyn Tracker> = openpanel::build(&decision, envelope);
     handle.install(tracker);
 
     handle.track(Event::InstanceStarted {
@@ -117,9 +117,9 @@ pub(crate) fn identify(state: &AppState, env: &dyn EnvSource) -> OpaqueId {
 /// and those differ in exactly one case: a build compiled without the
 /// `analytics` feature resolves [`Decision::Report`] and then gets a
 /// [`NullTracker`](crate::analytics::NullTracker) from
-/// [`mixpanel::build`](crate::analytics::mixpanel::build), because there is no
+/// [`openpanel::build`](crate::analytics::openpanel::build), because there is no
 /// transport in it to hand back. Saying "reporting to …" there is the exact
-/// opposite of the truth, and the `mixpanel::build` line that explains it is a
+/// opposite of the truth, and the `openpanel::build` line that explains it is a
 /// `tracing::info!` the CLI's default `EnvFilter` swallows — which is why every
 /// other boot line here is a `println!`. So the build is named on this line
 /// instead.
@@ -128,7 +128,7 @@ pub fn describe(decision: &Decision) -> String {
         Decision::Silent(reason) => {
             format!("analytics: off ({})", reason.as_str())
         }
-        // The endpoint, never the token — in either arm.
+        // The endpoint, never the credential — in either arm.
         Decision::Report { endpoint, .. }
             if crate::analytics::BuildFlags::of_this_build().analytics =>
         {
@@ -144,12 +144,13 @@ pub fn describe(decision: &Decision) -> String {
 
 /// The collector URL with anything credential-shaped removed.
 ///
-/// `OPENCOMPANY_ANALYTICS_ENDPOINT` exists so a deployment can front Mixpanel
-/// with its own proxy, and an authenticated proxy carries its key in exactly the
-/// two places a URL can hold one: userinfo (`https://user:pass@host/track`) and
-/// the query string (`https://host/track?key=…`). Printing the raw value writes
-/// that secret verbatim into container logs, which the [`ProjectToken`]
-/// redaction does nothing about — it guards a different string.
+/// `OPENCOMPANY_ANALYTICS_ENDPOINT` names the collector the operator self-hosts,
+/// and such a collector is routinely reached through an authenticated proxy —
+/// which carries its key in exactly the two places a URL can hold one: userinfo
+/// (`https://user:pass@host/track`) and the query string
+/// (`https://host/track?key=…`). Printing the raw value writes that secret
+/// verbatim into container logs, which the [`ClientCredentials`] redaction does
+/// nothing about — it guards two different strings.
 ///
 /// A third place, which the two above do not reach: an opaque **path segment**,
 /// as in `https://collector.example/ingest/<token>`, which is how a signed-URL
@@ -165,12 +166,12 @@ pub fn describe(decision: &Decision) -> String {
 /// confusion.
 ///
 /// `pub(crate)` because the transport logs the same destination when a send
-/// fails (`crate::analytics::mixpanel`). One helper, deliberately: a second
+/// fails (`crate::analytics::openpanel`). One helper, deliberately: a second
 /// redaction of the same string is a second thing to keep correct, and the two
 /// diverge the first time only one of them learns about a new place a URL can
 /// hold a secret.
 ///
-/// [`ProjectToken`]: crate::analytics::config::ProjectToken
+/// [`ClientCredentials`]: crate::analytics::config::ClientCredentials
 pub(crate) fn loggable_endpoint(raw: &str) -> String {
     // Query and fragment first: `?key=…` is at least as common as userinfo.
     let trimmed = raw.split(['?', '#']).next().unwrap_or(raw);
@@ -196,8 +197,8 @@ pub(crate) fn loggable_endpoint(raw: &str) -> String {
                 // elided rather than guessed at, because "does this look like a
                 // secret?" is not a question worth answering heuristically.
                 //
-                // The default endpoint has one segment (`/track`), so the
-                // ordinary line is unchanged.
+                // An OpenPanel collector's route is one segment (`/track`), so
+                // the ordinary line is unchanged.
                 Some(path) => {
                     let mut segments = path.split('/');
                     let first = segments.next().unwrap_or("");
@@ -223,10 +224,37 @@ pub(crate) fn loggable_endpoint(raw: &str) -> String {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::analytics::config::{ENABLE_ENV, Silence, TOKEN_ENV};
+    use crate::analytics::config::{
+        CLIENT_ID_ENV, CLIENT_SECRET_ENV, ClientCredentials, ENABLE_ENV, ENDPOINT_ENV, Silence,
+    };
     use crate::app::config::MapEnv;
     use crate::app::deployment::DEPLOYMENT_ENV;
     use crate::{AppConfig, AppState};
+
+    /// A collector address that resolves nowhere. Named in every reporting
+    /// environment below: there is no default endpoint any more, so an
+    /// environment without one resolves to `NoEndpoint` rather than to
+    /// reporting.
+    const TEST_ENDPOINT: &str = "https://collector.invalid/track";
+
+    /// The three variables a reporting deployment configures.
+    fn credential_env(pairs: &[(&str, &str)]) -> MapEnv {
+        let mut all = vec![
+            (CLIENT_ID_ENV, "not-a-real-client-id"),
+            (CLIENT_SECRET_ENV, "not-a-real-client-secret"),
+            (ENDPOINT_ENV, TEST_ENDPOINT),
+        ];
+        all.extend_from_slice(pairs);
+        MapEnv::new(all)
+    }
+
+    /// A reporting decision, for the pure `describe` tests.
+    fn reporting(endpoint: &str) -> Decision {
+        Decision::Report {
+            endpoint: endpoint.to_string(),
+            credentials: ClientCredentials::new("not-a-real-client-id", "not-a-real-client-secret"),
+        }
+    }
 
     fn state() -> (AppState, tempfile::TempDir) {
         let home = tempfile::tempdir().expect("tempdir");
@@ -236,16 +264,12 @@ mod test {
 
     /// **The default posture, asserted end to end at the boot seam.** A host
     /// that says nothing installs a tracker that sends nothing, even with a
-    /// token sitting in its environment.
+    /// working credential and a collector sitting in its environment.
     #[test]
     fn an_undeclared_host_installs_silence() {
         let (state, _home) = state();
         let handle = DeferredTracker::new();
-        let decision = install(
-            &state,
-            &handle,
-            &MapEnv::new([(TOKEN_ENV, "not-a-real-token")]),
-        );
+        let decision = install(&state, &handle, &credential_env(&[]));
         assert_eq!(decision, Decision::Silent(Silence::NotHosted));
         assert_eq!(
             describe(&decision),
@@ -263,17 +287,16 @@ mod test {
         let decision = install(
             &state,
             &handle,
-            &MapEnv::new([
-                (DEPLOYMENT_ENV, "hosted-tenant"),
-                (TOKEN_ENV, "not-a-real-token"),
-            ]),
+            &credential_env(&[(DEPLOYMENT_ENV, "hosted-tenant")]),
         );
         assert!(decision.reports(), "{decision:?}");
-        assert!(
-            !describe(&decision).contains("not-a-real-token"),
-            "the boot line must not carry the token: {}",
-            describe(&decision)
-        );
+        for half in ["not-a-real-client-id", "not-a-real-client-secret"] {
+            assert!(
+                !describe(&decision).contains(half),
+                "the boot line must not carry {half}: {}",
+                describe(&decision)
+            );
+        }
     }
 
     /// **The boot line reports behaviour, not configuration.** A build with no
@@ -284,12 +307,9 @@ mod test {
     /// pass by ignoring the build.
     #[test]
     fn the_boot_line_says_when_the_build_has_no_transport() {
-        let decision = Decision::Report {
-            endpoint: "https://collector.invalid/track".to_string(),
-            token: crate::analytics::config::ProjectToken::new("not-a-real-token"),
-        };
+        let decision = reporting(TEST_ENDPOINT);
         let line = describe(&decision);
-        assert!(!line.contains("not-a-real-token"), "{line}");
+        assert!(!line.contains("not-a-real-client-secret"), "{line}");
 
         if cfg!(feature = "analytics") {
             assert_eq!(
@@ -312,10 +332,11 @@ mod test {
 
     /// **A credential in the endpoint must not reach a log line.**
     ///
-    /// `OPENCOMPANY_ANALYTICS_ENDPOINT` is there so a deployment can front
-    /// Mixpanel with its own proxy, and an authenticated proxy carries its key
-    /// in userinfo or in the query string. `ProjectToken`'s redaction guards a
-    /// different string entirely and does nothing here.
+    /// `OPENCOMPANY_ANALYTICS_ENDPOINT` names the collector the operator
+    /// self-hosts, which is routinely reached through an authenticated proxy,
+    /// and such a proxy carries its key in userinfo or in the query string.
+    /// `ClientCredentials`' redaction guards two different strings entirely and
+    /// does nothing here.
     ///
     /// Asserted case-insensitively: a redaction that merely lowercased the
     /// secret would still have leaked it, and an exact-case search would read
@@ -332,10 +353,7 @@ mod test {
             "https://collector.invalid/ingest/NotARealCollectorKey",
             "https://collector.invalid/v1/ingest/NotARealCollectorKey/track",
         ] {
-            let line = describe(&Decision::Report {
-                endpoint: raw.to_string(),
-                token: crate::analytics::config::ProjectToken::new("not-a-real-token"),
-            });
+            let line = describe(&reporting(raw));
             assert!(
                 !line
                     .to_ascii_lowercase()
@@ -383,14 +401,8 @@ mod test {
     /// redaction. The control: without it, "redact everything" would pass.
     #[test]
     fn an_ordinary_endpoint_is_printed_unchanged() {
-        let line = describe(&Decision::Report {
-            endpoint: crate::analytics::config::DEFAULT_ENDPOINT.to_string(),
-            token: crate::analytics::config::ProjectToken::new("not-a-real-token"),
-        });
-        assert!(
-            line.contains(crate::analytics::config::DEFAULT_ENDPOINT),
-            "{line}"
-        );
+        let line = describe(&reporting(TEST_ENDPOINT));
+        assert!(line.contains(TEST_ENDPOINT), "{line}");
         assert!(!line.contains("credentials redacted"), "{line}");
     }
 
@@ -403,11 +415,7 @@ mod test {
         let decision = install(
             &state,
             &handle,
-            &MapEnv::new([
-                (DEPLOYMENT_ENV, "hosted-tenant"),
-                (ENABLE_ENV, "of"),
-                (TOKEN_ENV, "not-a-real-token"),
-            ]),
+            &credential_env(&[(DEPLOYMENT_ENV, "hosted-tenant"), (ENABLE_ENV, "of")]),
         );
         assert_eq!(decision, Decision::Silent(Silence::Unreadable));
         assert!(describe(&decision).contains("not recognised"));
@@ -443,10 +451,7 @@ mod test {
         let (state, _home) = tenant_state("acmecorp-holdings");
         let chosen = identify(
             &state,
-            &MapEnv::new([
-                (DEPLOYMENT_ENV, "hosted-tenant"),
-                (TOKEN_ENV, "not-a-real-token"),
-            ]),
+            &credential_env(&[(DEPLOYMENT_ENV, "hosted-tenant")]),
         );
 
         assert_eq!(
@@ -468,9 +473,8 @@ mod test {
         let (state, _home) = tenant_state("acmecorp-holdings");
         let chosen = identify(
             &state,
-            &MapEnv::new([
+            &credential_env(&[
                 (DEPLOYMENT_ENV, "hosted-tenant"),
-                (TOKEN_ENV, "not-a-real-token"),
                 (crate::analytics::config::ID_KEY_ENV, "not-a-real-id-key"),
             ]),
         );
@@ -498,9 +502,8 @@ mod test {
         for blank in ["", "   ", "\n"] {
             let chosen = identify(
                 &state,
-                &MapEnv::new([
+                &credential_env(&[
                     (DEPLOYMENT_ENV, "hosted-tenant"),
-                    (TOKEN_ENV, "not-a-real-token"),
                     (crate::analytics::config::ID_KEY_ENV, blank),
                 ]),
             );
@@ -529,11 +532,7 @@ mod test {
         let decision = install(
             &state,
             &handle,
-            &MapEnv::new([
-                (DEPLOYMENT_ENV, "hosted-tenant"),
-                (ENABLE_ENV, "off"),
-                (TOKEN_ENV, "not-a-real-token"),
-            ]),
+            &credential_env(&[(DEPLOYMENT_ENV, "hosted-tenant"), (ENABLE_ENV, "off")]),
         );
         assert_eq!(decision, Decision::Silent(Silence::OptedOut));
         assert!(describe(&decision).contains("operator opted out"));

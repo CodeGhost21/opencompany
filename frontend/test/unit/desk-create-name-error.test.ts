@@ -27,7 +27,7 @@ import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
 
 const ROSTER: TeamMemberDto[] = Array.from({ length: 12 }, (_, i) => ({
   id: `member-${i}`,
-  name: `Teammate ${i}`,
+  name: `Agent ${i}`,
   role: "engineer",
 }));
 
@@ -215,21 +215,21 @@ describe("the desk creator when the host refuses", () => {
   });
 });
 
-describe("the desk creator teammate picker", () => {
+describe("the desk creator agent picker", () => {
   it("filters a long roster and makes the chosen order visible", async () => {
     await open(stubClient(() => Promise.reject(new Error("must not be called"))));
 
     const filter = inDialog<HTMLInputElement>('[data-testid="desk-member-filter"]');
     expect(filter, "long rosters need a name filter").toBeTruthy();
-    expect(rosterButton("Teammate 0").getAttribute("aria-pressed")).toBe("false");
+    expect(rosterButton("Agent 0").getAttribute("aria-pressed")).toBe("false");
 
     await act(async () => {
-      rosterButton("Teammate 0").click();
-      rosterButton("Teammate 2").click();
+      rosterButton("Agent 0").click();
+      rosterButton("Agent 2").click();
     });
 
-    const lead = rosterButton("Teammate 0");
-    const second = rosterButton("Teammate 2");
+    const lead = rosterButton("Agent 0");
+    const second = rosterButton("Agent 2");
     expect(lead.getAttribute("aria-pressed")).toBe("true");
     // The lead carries the "Lead" badge (a row sibling of the toggle), the
     // non-lead carries a "Make lead" promote control instead.
@@ -239,13 +239,13 @@ describe("the desk creator teammate picker", () => {
     expect(second.parentElement!.querySelector('[data-testid="desk-make-lead"]')).toBeTruthy();
 
     await act(async () => {
-      type(filter!, "Teammate 2");
+      type(filter!, "Agent 2");
     });
 
-    expect(rosterButton("Teammate 2")).toBeTruthy();
+    expect(rosterButton("Agent 2")).toBeTruthy();
     expect(
       Array.from(document.querySelectorAll('[data-slot="dialog-content"] [aria-pressed]')).some((button) =>
-        button.textContent?.includes("Teammate 0"),
+        button.textContent?.includes("Agent 0"),
       ),
     ).toBe(false);
   });

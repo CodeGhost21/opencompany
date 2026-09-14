@@ -98,5 +98,5 @@ foundation commit.
 
 Per view: sample module deleted, fallback retained, typecheck+build+vitest
 green, manual pass against a live host running
-`companies/agentic_marketing_agency`. Playwright flows follow once the
+`companies/marketing_agency`. Playwright flows follow once the
 majority of views are wired ([09-verification.md §4](09-verification.md)).

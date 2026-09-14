@@ -137,6 +137,6 @@ on its own while a webhook is registered.
 value, and what's missing per optional capability:
 
 ```sh
-opencompany doctor --company companies/agentic_marketing_agency
+opencompany doctor --company companies/marketing_agency
 opencompany doctor --json
 ```

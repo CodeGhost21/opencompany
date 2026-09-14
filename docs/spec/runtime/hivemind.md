@@ -27,11 +27,29 @@ budget and by nothing else — the same bound a single-responder desk has at 1.
 
 What a room buys over one responder is not parallelism. It is:
 
-- **Independence.** The opening round is *blind*: a member forms its own
-  position before it can read its peers'. A shared transcript destroys
-  independence — the third speaker has already read the first two — and this is
-  the cheapest available repair, costing a projection flag rather than any
-  concurrency.
+- **Independence.** The opening round is *blind*: a member forms its own view
+  before it can read its peers'. A shared transcript destroys independence —
+  the third speaker has already read the first two — and this is the cheapest
+  available repair, costing a projection flag rather than any concurrency.
+
+  **What a blind member is asked for is a deposit, not a position**, and that
+  distinction is load-bearing rather than stylistic. The prompt used to say
+  "form your own first". On any question where members hold correlated priors
+  and one member holds the decisive fact — which is what a desk of specialists
+  *is*, since the fleet technician holds machine facts nobody else does — that
+  instruction is fatal: every member opens by advocating what its own reading
+  favours, a proposal counts as its own author's support, and the option the
+  shared prior favours reaches quorum **inside the blind round**, before the
+  informed member has said anything. The room is not converging; it is
+  amplifying a shared error and calling the result agreement.
+
+  Measured on the deliberation benchmark over 2000 seeded rooms
+  (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench`): asking for a
+  deposit instead takes a hidden-profile room from **16.2% to 66.6%** correct,
+  and costs 3.7 points (78.8% → 75.1%) where every member's reading is equally
+  good. Raising `quorum` was tried first and does not work — at unanimity the
+  room simply stops deciding (31% of episodes reach one, accuracy 10.1%). The
+  bar is not the problem; what the bar counts is.
 - **A reason to stop.** The episode ends on a quorum it can name, not when one
   agent decides it is finished.
 
@@ -328,6 +346,48 @@ thing the runtime reliably knows. A quorum that is a simple majority *and still
 leaves somebody outside it* means a decision is never contingent on the whole
 room agreeing; for a pair that is exactly one supporter, which is the only
 number available.
+
+## Installing a grammar without editing the manifest
+
+`company.toml` is not the only way in. `PUT {scope}/desks/{id}/hive` installs or
+replaces a desk's whole `hive` block at runtime, `DELETE` on the same path drops
+the override and restores whatever the manifest declares, and `GET` reports the
+block in force alongside the numbers it derives.
+
+The override is a **sibling collection** (`CompanyRecord::overlay_desk_hive`),
+not a field on `OverlayDesk`, and that is the design rather than an accident:
+`OverlayDesk` covers only console-created desks, so hanging the grammar there
+would leave the interesting case — installing a table on a desk the manifest
+declares — needing a second mechanism. It mirrors `AgentOverride`, which is the
+layer that already exists for "the operator edited a manifest-declared thing".
+Reset is therefore a `retain` and nothing else, because
+`CompanyRecord::effective_desk_hive` falls through to `manifest.group_chats`.
+
+Replacement is **wholesale**, unlike `AgentOverride`'s field-wise merge. A
+`moves` table is a single artefact — merging one seat into a stored table is how
+a desk ends up running a grammar nobody authored — and every knob is an `Option`
+whose `None` already means something, so "clear `quorum` back to the derived
+default" is only expressible if the block is replaced entire.
+
+The route runs `manifest::hive_problems`, the **same** function the manifest
+loader calls, so the runtime cannot accept a block a `company.toml` carrying it
+would be refused for. It judges the table against the desk's **effective**
+roster rather than its declared one, so overlay additions and Team-API
+retirements count — which means it can legitimately refuse a table the manifest
+accepted, because a table valid when `company.toml` was written stops being
+valid once a seat retires.
+
+An episode already running is unaffected: `EpisodeDriver` holds its `HiveDesk`
+as a snapshot for the episode's life, so a room cannot have its quorum moved
+underneath it mid-argument. The change takes effect on the next message that
+opens one.
+
+Deleting a desk drops its installed grammar with it — without that, an overlay
+desk re-created under the same id silently inherits a table nobody installed.
+
+Each write journals a `DeskHiveConfigured` row carrying the desk, whether it was
+a reset, and who asked — but **not the table**, the same no-body rule
+`WorkflowUpdated` follows. See [`events.md`](events.md).
 
 ## How an episode ends
 

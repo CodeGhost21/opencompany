@@ -43,8 +43,8 @@ export const CATEGORY_STYLES: Record<SkillCategory, string> = {
  * teammates **read** skills, and **running** one is the orchestrator's job.
  */
 export const SKILLS_READ_ONLY_NOTE =
-  "Skills are reference material your teammates read — playbooks they follow, not buttons they press. " +
-  "Enabling one puts it in front of every teammate; executing a saved workflow stays the orchestrator's job.";
+  "Skills are reference material your agents read — playbooks they follow, not buttons they press. " +
+  "Enabling one puts it in front of every agent; executing a saved automation stays the orchestrator's job.";
 
 /**
  * What an installed skill's on/off state means for the company's teammates.
@@ -54,7 +54,7 @@ export const SKILLS_READ_ONLY_NOTE =
  * whether one can execute it.
  */
 export function skillReachLabel(enabled: boolean): string {
-  return enabled ? "Teammates can read this" : "Hidden from teammates";
+  return enabled ? "Agents can read this" : "Hidden from agents";
 }
 
 /**

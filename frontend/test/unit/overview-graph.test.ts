@@ -121,7 +121,7 @@ describe("adapt", () => {
   });
 });
 
-describe("a teammate's tools", () => {
+describe("an agent's tools", () => {
   it("are the grants the host resolved, verbatim", () => {
     const { agents } = adapt({
       ...BASE,
@@ -348,7 +348,7 @@ describe("workflows", () => {
     expect(graph.nodes.filter((n) => n.kind === "step")).toEqual([]);
   });
 
-  it("draws a stage only to the teammate the flow names", () => {
+  it("draws a stage only to the agent the flow names", () => {
     const { agents, departments, workflows } = adapt({
       ...BASE,
       members: [
@@ -387,7 +387,7 @@ describe("workflows", () => {
 
 describe("DERIVED_NOTICE", () => {
   it("names flow placement and no longer claims departments or tools are invented", () => {
-    expect(DERIVED_NOTICE).toMatch(/workflow/i);
+    expect(DERIVED_NOTICE).toMatch(/automation/i);
     // The acceptance criterion for #601, asserted rather than assumed: the
     // notice must not still be telling operators that rings the host now
     // answers for are placeholders.

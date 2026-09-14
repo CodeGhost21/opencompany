@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildTimeline, type Channel } from "@/views/chat/model";
+import { buildTimeline, type Channel } from "@/views/room/model";
 import type { ChatMessage } from "@/lib/chat";
 
 /**

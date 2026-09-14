@@ -1,6 +1,7 @@
-import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 
 import { workflowDetailName } from "./workflows";
+import { COMPANY_SCOPE, dismissTour, openEditForm, removeWorkflow } from "./workflow-dialog";
 
 /**
  * Issue #541: the five withheld node kinds (`tool_call`, `http_request`,
@@ -15,41 +16,25 @@ import { workflowDetailName } from "./workflows";
  * transforms (`workflow-node-config.test.ts`); this pins that the form is wired
  * to them and that the host stored what it produced.
  *
+ * It used to author the node on the create form, which no longer exists as a
+ * route: creating a workflow is one description box. The claim under test is
+ * about the config form and the host, not about which write carries it, so it
+ * is authored on the same form reached the way an operator reaches it now — by
+ * editing (`test/e2e/workflow-dialog.ts`). What is lost by moving is nothing
+ * this spec was ever asserting; what would have been lost by deleting it is the
+ * only browser coverage `tool_call` config has.
+ *
  * Runs against the live host the harness brings up (see `playwright.config.ts`).
- * Not run by CI, which has no host.
  */
-
-const COMPANY_SCOPE = "/api/v1/company";
-
-/** Dismisses the first-run tour if it is up; its overlay swallows pointer
- * events. Tolerates its absence. */
-async function dismissTour(page: Page) {
-  const skip = page.getByRole("button", { name: "Skip for now" });
-  try {
-    await skip.waitFor({ state: "visible", timeout: 10_000 });
-  } catch {
-    return;
-  }
-  await skip.click();
-  await expect(skip).toBeHidden();
-}
-
-/** Best-effort teardown so a failed spec does not poison the next run. */
-/**
- * Best-effort teardown so a failed spec does not poison the next run.
- * `expectedVersion` is required (issue #1013), so this reads the workflow's
- * current token first.
- */
-async function removeWorkflow(request: APIRequestContext, id: string) {
-  const version = await request
-    .get(`${COMPANY_SCOPE}/workflows/${id}`)
-    .then(async (res) => (res.ok() ? ((await res.json()).version as string | null) : null))
-    .catch(() => null);
-  const query = version ? `?expectedVersion=${encodeURIComponent(version)}` : "";
-  await request.delete(`${COMPANY_SCOPE}/workflows/${id}${query}`).catch(() => undefined);
-}
 
 const SUBMIT = "workflow-dialog-submit";
+
+/** Reads a workflow's stored graph back from the host. */
+async function readGraph(request: APIRequestContext, id: string) {
+  const res = await request.get(`${COMPANY_SCOPE}/workflows/${id}`);
+  if (!res.ok()) return null;
+  return res.json();
+}
 
 test("authoring a tool_call node's config through the form round-trips to the host", async ({
   page,
@@ -60,20 +45,12 @@ test("authoring a tool_call node's config through the form round-trips to the ho
   const name = `Config probe ${stamp}`;
 
   try {
-    await page.goto("/#/workflows");
-    await dismissTour(page);
+    // The starter is a lone trigger, exactly what the create form opened on, so
+    // the row added below is still index 1.
+    const dialog = await openEditForm(page, request, id, name);
 
-    // Open the creator.
-    await page.getByRole("button", { name: "New workflow" }).click();
-    const dialog = page.getByRole("dialog");
-    await expect(dialog.getByText("New workflow", { exact: true })).toBeVisible();
-
-    // Name the workflow.
-    await dialog.getByLabel("Workflow ID", { exact: true }).fill(id);
-    await dialog.getByLabel("Name", { exact: true }).fill(name);
-
-    // The starter trigger row is already `start`. Add a second node and make it
-    // a tool call — its config form appears only once the kind is chosen.
+    // Add a second node and make it a tool call — its config form appears only
+    // once the kind is chosen.
     await dialog.getByRole("button", { name: "Add node" }).click();
     const nodeId = dialog.getByRole("textbox", { name: "Node id" }).nth(1);
     await nodeId.fill("act");
@@ -97,12 +74,9 @@ test("authoring a tool_call node's config through the form round-trips to the ho
     await dialog.getByRole("combobox", { name: "Edge to" }).click();
     await page.getByRole("option", { name: "act", exact: true }).click();
 
-    // Issue #1808: create mode gates the write behind an id-confirm. The first
-    // click only opens it (portalled onto `document.body`, so it is reached by
-    // test id on the page, not scoped to `dialog`); the confirm's own action —
-    // also rendered "Create workflow" — is what fires the write.
+    // Edit mode writes with no id confirm (issue #1808 gates create only): the
+    // id keys the saved graph and cannot change, so there is nothing to confirm.
     await dialog.getByTestId(SUBMIT).click();
-    await page.getByTestId("workflow-id-confirm-create").click();
     await expect(dialog).toBeHidden({ timeout: 15_000 });
 
     // The host stored exactly the keys the form emitted — not the node-id
@@ -110,9 +84,8 @@ test("authoring a tool_call node's config through the form round-trips to the ho
     await expect
       .poll(
         async () => {
-          const res = await request.get(`${COMPANY_SCOPE}/workflows/${id}`);
-          if (!res.ok()) return null;
-          const graph = await res.json();
+          const graph = await readGraph(request, id);
+          if (!graph) return null;
           return graph.nodes.find((n: { id: string }) => n.id === "act")?.config ?? null;
         },
         { timeout: 15_000 },
@@ -121,10 +94,9 @@ test("authoring a tool_call node's config through the form round-trips to the ho
 
     // Reopen from the saved graph (a fresh load, not local state) and click the
     // node: the inspector's Config block shows the slug the host round-tripped.
-    //
-    // Issue #1110: creating landed on the new workflow's own URL, so the reload
-    // comes back on its detail view with no picking to do — which is also this
-    // spec's incidental proof that a `#/workflows/<id>` survives a reload.
+    // Issue #1110: the detail view lives at the workflow's own URL, so the
+    // reload comes back on it with no picking to do — which is also this spec's
+    // incidental proof that a `#/workflows/<id>` survives a reload.
     await expect(page).toHaveURL(new RegExp(`#/workflows/${id}$`));
     await page.reload();
     await dismissTour(page);

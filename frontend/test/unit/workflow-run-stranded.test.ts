@@ -152,7 +152,7 @@ describe("a gate run whose cards the queue no longer holds", () => {
     // The copy may not claim either.
     expect(text).not.toMatch(/lost|expired|deleted|discarded/i);
     // Re-run is offered as an option, not as a remedy for a stated cause.
-    expect(text).toContain("Run the workflow again if you still need it");
+    expect(text).toContain("Run the automation again if you still need it");
   });
 
   it("keeps the reports it routed before the gate", async () => {

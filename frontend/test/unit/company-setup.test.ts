@@ -131,7 +131,7 @@ describe("shouldOfferSetup", () => {
    * fifth global has to fall out of the gate the same way — which it does only
    * because the rule reads provenance rather than a copied list.
    */
-  it("keeps offering when the baseline gains a teammate", () => {
+  it("keeps offering when the baseline gains an agent", () => {
     const grown = [...BASELINE_ONLY, baseline("scheduler")];
     expect(shouldOfferSetup({ roster: grown, skipped: false })).toBe(true);
   });
@@ -140,7 +140,7 @@ describe("shouldOfferSetup", () => {
    * The moment setup creates the first teammate the gate closes, which is what
    * stops a reload building a second team on top of the first.
    */
-  it("stops offering as soon as one non-baseline teammate exists", () => {
+  it("stops offering as soon as one non-baseline agent exists", () => {
     const staffed = [...BASELINE_ONLY, member("meta-ads-specialist")];
     expect(shouldOfferSetup({ roster: staffed, skipped: false })).toBe(false);
   });

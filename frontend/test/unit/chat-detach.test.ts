@@ -41,6 +41,8 @@ function stubTransport(status: number, body: unknown) {
     },
     // Never opened here: these cases are about the POST's answer, not the feed.
     subscribe: () => () => {},
+    // Test double: an abort stops the caller; there is no real work to cancel.
+    cancelsInFlight: true,
   };
   return { transport, sent };
 }
@@ -506,7 +508,7 @@ describe("reconciling the optimistic id from a 202", () => {
     const answer = await postDetached(c, "do the long thing");
     if (!isDetachedChat(answer)) throw new Error("expected the accepted shape");
 
-    // What `ChatView.send` does with it, before it branches on the shape at all.
+    // What `RoomView.send` does with it, before it branches on the shape at all.
     const before = [{ id: "m1", from: "you", text: "do the long thing", at: 1_000 } as ChatMessage];
     const after = reconcileIds(before, "m1", answer.messageId);
 

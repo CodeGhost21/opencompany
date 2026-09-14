@@ -330,6 +330,42 @@ async fn only_a_person_may_delete_a_row() {
     );
 }
 
+/// A second delete of the same id must stay the quiet `Ok(false)`
+/// `purge_entry` already reports for "nothing there" — never an error, and
+/// never a second entry in the log. Nothing before this called `delete_entry`
+/// twice on one id.
+#[tokio::test]
+async fn deleting_an_already_deleted_row_reports_false_not_an_error() {
+    let (ctx, runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
+        .await
+        .expect("recorded");
+
+    assert!(
+        delete_entry(&ctx, &spec, &person(), "r1")
+            .await
+            .expect("the first delete removes the row")
+    );
+    assert!(
+        !delete_entry(&ctx, &spec, &person(), "r1")
+            .await
+            .expect("deleting an already-deleted row is not an error"),
+        "a second delete of the same id must report false, not recreate anything"
+    );
+
+    let events = runtime
+        .ledgers()
+        .events(runtime.id(), "hazards")
+        .await
+        .expect("events");
+    assert!(
+        events.is_empty(),
+        "the row's event was purged by the first delete; a no-op second \
+         delete must not resurrect it: {events:?}"
+    );
+}
+
 /// The runtime is not exempt either: a sweep that could delete rows is the same
 /// loss with nobody to ask about it.
 #[tokio::test]
@@ -370,6 +406,46 @@ async fn only_a_person_may_retire_a_ledger_and_the_rows_survive_it() {
         .await
         .expect("events");
     assert_eq!(events.len(), 1, "the log survives the retirement");
+}
+
+/// A second `retire` of the same slug must stay a clean [`NotFound`], not
+/// panic, not silently succeed, and not touch the rows the first retirement
+/// already left alone.
+///
+/// [`NotFound`]: crate::error::OpenCompanyError::NotFound
+#[tokio::test]
+async fn retiring_an_already_retired_ledger_is_refused_not_silently_repeated() {
+    let (ctx, runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
+        .await
+        .expect("recorded");
+
+    retire(&ctx, &person(), "hazards", false)
+        .await
+        .expect("the first retirement succeeds");
+
+    let error = retire(&ctx, &person(), "hazards", false)
+        .await
+        .expect_err("a second retirement of the same slug must be refused");
+    assert!(
+        matches!(error, OpenCompanyError::NotFound(_)),
+        "a repeat retirement must be reported as not-found, not any other \
+         error shape: {error:?}"
+    );
+
+    // The rows the first retirement left in place are still there — the
+    // refused second call did not fall through to a purge.
+    let events = runtime
+        .ledgers()
+        .events(runtime.id(), "hazards")
+        .await
+        .expect("events");
+    assert_eq!(
+        events.len(),
+        1,
+        "the refused repeat retirement must not have purged anything"
+    );
 }
 
 #[tokio::test]
@@ -512,6 +588,15 @@ async fn a_read_narrows_by_status_entry_and_text() {
     )
     .await
     .expect("recorded");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "hiring",
+        fields(&[("risk", "the role stays open")]),
+    )
+    .await
+    .expect("recorded");
     close(&ctx, &spec, &agent(), "hiring", "closed", "role filled")
         .await
         .expect("recorded");
@@ -552,6 +637,291 @@ async fn a_read_narrows_by_status_entry_and_text() {
     .await
     .expect("read");
     assert_eq!(found.entries.len(), 1);
+}
+
+/// A ledger whose required fields the read path polices, so a write that skips
+/// one is exactly the write that folds into an unreadable row.
+fn decisions() -> serde_json::Value {
+    json!({
+        "slug": "choices",
+        "title": "Choices",
+        "purpose": "What the work chose.",
+        "derived": "derived/choices.md",
+        "fields": [
+            { "name": "id", "role": "id" },
+            { "name": "decision", "role": "title", "required": true },
+            { "name": "status", "role": "status", "required": true },
+            { "name": "constraint", "role": "prose", "required": true },
+            { "name": "reason", "role": "prose" }
+        ],
+        "statuses": [
+            { "name": "proposed" },
+            { "name": "settled" },
+            { "name": "superseded", "closed": true, "needs_reason": true }
+        ],
+        "checks": ["required-field", "known-status", "closed-needs-reason"]
+    })
+}
+
+/// The same shape with no `checks` at all — what `define_ledger` produces when
+/// a caller omits them, where nothing reported the corruption either.
+fn decisions_unchecked() -> serde_json::Value {
+    let mut spec = decisions();
+    spec["slug"] = json!("unchecked");
+    spec["derived"] = json!("derived/unchecked.md");
+    spec.as_object_mut().expect("object").remove("checks");
+    spec
+}
+
+#[tokio::test]
+async fn a_write_missing_a_required_field_is_refused_not_folded_unreadable() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &decisions()).await.expect("declared");
+
+    let error = record(
+        &ctx,
+        &spec,
+        &agent(),
+        "palette",
+        fields(&[
+            ("constraint", "the accessibility bar"),
+            ("status", "proposed"),
+        ]),
+    )
+    .await
+    .expect_err("a row the ledger cannot read back must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("`decision`"), "names the field: {message}");
+    assert!(message.contains("choices"), "names the ledger: {message}");
+
+    // Refused, not merely reported: nothing landed to be read back.
+    let after = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert!(after.entries.is_empty(), "{:?}", after.entries);
+    assert!(after.faults.is_empty(), "{:?}", after.faults);
+}
+
+/// The write refuses exactly what the read would have called unreadable. Two
+/// implementations of "required" would drift; this pins them to each other.
+#[tokio::test]
+async fn the_write_refuses_what_the_read_would_report_unreadable() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &decisions()).await.expect("declared");
+    let missing = fields(&[("constraint", "the accessibility bar")]);
+
+    let refused = record(&ctx, &spec, &agent(), "palette", missing.clone())
+        .await
+        .expect_err("refused");
+
+    let folded = crate::ledger::engine::fold(
+        &spec,
+        &[crate::ledger::LedgerEvent {
+            ledger: spec.slug.clone(),
+            id: "palette".into(),
+            author: agent(),
+            at_millis: 0,
+            fields: missing,
+        }],
+    );
+    for name in ["decision", "status"] {
+        assert!(
+            folded.faults.iter().any(|fault| fault.contains(name)),
+            "read reports `{name}` unreadable: {:?}",
+            folded.faults
+        );
+        assert!(
+            refused.to_string().contains(name),
+            "write refuses for `{name}`: {refused}"
+        );
+    }
+}
+
+/// A required field already on the row does not have to be resent: the check
+/// judges the merged row, so amending one field is a complete write.
+#[tokio::test]
+async fn an_amendment_need_not_resend_fields_the_row_already_holds() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &decisions()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "palette",
+        fields(&[
+            ("decision", "a four-tone ramp"),
+            ("status", "proposed"),
+            ("constraint", "the accessibility bar"),
+        ]),
+    )
+    .await
+    .expect("recorded");
+
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "palette",
+        fields(&[("status", "settled")]),
+    )
+    .await
+    .expect("an amendment carrying only what changed is complete");
+
+    let after = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert!(after.faults.is_empty(), "{:?}", after.faults);
+    assert_eq!(after.entries[0].get("decision"), "a four-tone ramp");
+}
+
+/// Clearing a required field is the same corruption arriving by another route.
+#[tokio::test]
+async fn clearing_a_required_field_is_refused() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &decisions()).await.expect("declared");
+    record(
+        &ctx,
+        &spec,
+        &agent(),
+        "palette",
+        fields(&[
+            ("decision", "a four-tone ramp"),
+            ("status", "proposed"),
+            ("constraint", "the accessibility bar"),
+        ]),
+    )
+    .await
+    .expect("recorded");
+
+    let mut clearing = BTreeMap::new();
+    clearing.insert("decision".to_string(), None);
+    let error = record(&ctx, &spec, &agent(), "palette", clearing)
+        .await
+        .expect_err("clearing a required field must be refused");
+    assert!(error.to_string().contains("`decision`"), "{error}");
+}
+
+/// A ledger declared without `checks` still refuses the write. `required` is
+/// the ledger's schema; `checks` only chooses what a read reports — and a
+/// declaration that omitted them accepted the corruption *and* stayed silent
+/// about it, which is the worse of the two failures.
+#[tokio::test]
+async fn a_ledger_declaring_no_checks_still_refuses_a_missing_required_field() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &decisions_unchecked())
+        .await
+        .expect("declared");
+    assert!(spec.checks.is_empty(), "fixture declares no checks");
+
+    let error = record(
+        &ctx,
+        &spec,
+        &agent(),
+        "palette",
+        fields(&[("constraint", "the accessibility bar")]),
+    )
+    .await
+    .expect_err("refused even with nothing set to report it");
+    assert!(error.to_string().contains("`decision`"), "{error}");
+}
+
+/// Closing an id that does not exist opened a fresh row instead: closed, empty,
+/// and named by the typo that produced it.
+#[tokio::test]
+async fn closing_an_unknown_id_is_refused_rather_than_opening_a_closed_row() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+
+    let error = close(&ctx, &spec, &agent(), "typo", "closed", "role filled")
+        .await
+        .expect_err("closing a row that does not exist must be refused");
+    let message = error.to_string();
+    assert!(message.contains("typo"), "names the id: {message}");
+    assert!(message.contains("hazards"), "names the ledger: {message}");
+
+    let after = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert!(after.entries.is_empty(), "no row was opened: {:?}", after);
+}
+
+/// `tasks` is the one built-in the runtime renders itself, and the only ledger
+/// that can be native at all — `define` refuses the source for anything a
+/// company declares — so this is the whole class, not one example of it.
+async fn tasks_spec(ctx: &Ledgers) -> crate::ledger::LedgerSpec {
+    registry(ctx)
+        .await
+        .expect("registry")
+        .require("tasks")
+        .expect("tasks is a built-in")
+        .clone()
+}
+
+/// Closing an id on a ledger this tool does not write must say so, rather than
+/// report on a row. "There is no such row" sends the caller looking for a row;
+/// the ledger's own `written_by` sends them to the tool that owns the write.
+#[tokio::test]
+async fn closing_a_native_ledger_names_the_owning_tool_not_a_missing_row() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = tasks_spec(&ctx).await;
+
+    let error = close(&ctx, &spec, &agent(), "never-existed", "done", "finished")
+        .await
+        .expect_err("a native ledger is not written here");
+
+    let message = error.to_string();
+    assert!(
+        !message.contains("there is no"),
+        "must not report on a row the caller cannot write anyway: {message}"
+    );
+    assert!(
+        message.contains("record_entry"),
+        "names the tool that does not own this write: {message}"
+    );
+    assert!(
+        message.contains(spec.written_by.split_whitespace().next().unwrap_or("task")),
+        "keeps the ledger's own written_by guidance: {message}"
+    );
+}
+
+/// The same precedence one level down: a caller who may not write the ledger
+/// hears that, not that the status they chose does not close a row on it.
+#[tokio::test]
+async fn a_native_ledger_outranks_the_closing_status_check() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = tasks_spec(&ctx).await;
+
+    let error = close(&ctx, &spec, &agent(), "any", "not-a-closing-status", "why")
+        .await
+        .expect_err("a native ledger is not written here");
+    assert!(
+        error.to_string().contains("record_entry"),
+        "the write guard outranks the status vocabulary: {error}"
+    );
+}
+
+/// A value the caller got wrong outranks one they left out: told only that a
+/// field is missing, a caller resends with the same rejected status and learns
+/// the second half on a further round trip.
+#[tokio::test]
+async fn a_status_the_ledger_rejects_is_named_before_the_rows_gaps() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &decisions()).await.expect("declared");
+
+    let error = record(
+        &ctx,
+        &spec,
+        &agent(),
+        "palette",
+        fields(&[("status", "banana")]),
+    )
+    .await
+    .expect_err("refused");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("banana"),
+        "names the bad status: {message}"
+    );
+    assert!(
+        !message.contains("leaves"),
+        "the missing-field report must not shadow it: {message}"
+    );
 }
 
 #[tokio::test]
@@ -766,9 +1136,11 @@ async fn an_amendment_need_not_repeat_a_required_field_the_row_holds() {
 }
 
 /// Clearing one is the same loss as never writing it, and a merge is the only
-/// way to express a clear — so it is refused on the same ground.
+/// way to express a clear — so it is refused on the same ground. Blank text is
+/// the other route to that clear: it normalizes to a null before the check
+/// runs.
 #[tokio::test]
-async fn clearing_a_required_field_is_refused() {
+async fn blanking_a_required_field_is_refused() {
     let (ctx, _runtime, _home) = ledgers().await;
     let spec = define(&ctx, &findings()).await.expect("declared");
     record(
@@ -925,19 +1297,80 @@ async fn a_purge_racing_the_required_field_check_cannot_recreate_a_row_missing_i
     }
 }
 
-/// The write refuses exactly what the read would fault, and no more: a ledger
-/// that does not declare the check is not silently held to it.
+/// `close`'s own existence check is subject to the same race: read before the
+/// lock and appended after it, a purge landing in the gap could remove the
+/// row the check saw and let the append that followed recreate it — closed,
+/// carrying none of the fields the deleted row held, on a ledger that
+/// declares no field required.
+///
+/// Same [`PausingStore`] technique, now pausing `close`'s existence read.
+/// Under the fix that read runs inside the same locked section as the
+/// append, so the purge cannot land until `close` has already finished with
+/// the row it actually saw.
 #[tokio::test]
-async fn a_ledger_that_does_not_declare_the_check_is_not_held_to_it() {
-    let (ctx, _runtime, _home) = ledgers().await;
-    let mut document = findings();
-    document["slug"] = json!("loose");
-    document["derived"] = json!("derived/loose.md");
-    document["checks"] = json!(["known-status"]);
-    let spec = define(&ctx, &document).await.expect("declared");
-    record(&ctx, &spec, &agent(), "f1", fields(&[("status", "noted")]))
+async fn a_purge_racing_close_cannot_reopen_the_deleted_row() {
+    let (runtime, _home) = runtime().await;
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let store: Arc<dyn LedgerStore> = Arc::new(PausingStore {
+        inner: runtime.ledgers().clone(),
+        armed: armed.clone(),
+        paused: paused.clone(),
+        resume: resume.clone(),
+    });
+    let ctx = Ledgers::new(runtime.id().clone(), store);
+
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    record(&ctx, &spec, &agent(), "h1", fields(&[("risk", "a leak")]))
         .await
-        .expect("no required-field check, so nothing to enforce");
+        .expect("recorded");
+
+    armed.store(true, Ordering::SeqCst);
+
+    let close_ctx = ctx.clone();
+    let close_spec = spec.clone();
+    let closer = tokio::spawn(async move {
+        close(&close_ctx, &close_spec, &agent(), "h1", "closed", "handled").await
+    });
+
+    paused.notified().await;
+
+    let purge_ctx = ctx.clone();
+    let purge_spec = spec.clone();
+    let purger =
+        tokio::spawn(async move { delete_entry(&purge_ctx, &purge_spec, &person(), "h1").await });
+
+    // Under the fix the purge blocks on the same lock `close` is holding;
+    // this just gives it the chance to run first when it is not blocked,
+    // which is the whole bug.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    resume.notify_one();
+
+    let close_result = tokio::time::timeout(std::time::Duration::from_secs(5), closer)
+        .await
+        .expect("close did not finish")
+        .expect("close task panicked");
+    let purge_result = tokio::time::timeout(std::time::Duration::from_secs(5), purger)
+        .await
+        .expect("purge did not finish")
+        .expect("purge task panicked");
+    purge_result.expect("purge does not error");
+
+    if let Ok(entry) = close_result {
+        assert!(
+            !entry.get("risk").trim().is_empty(),
+            "closed a ghost row missing the fields the deleted row held: {entry:?}"
+        );
+    }
+
+    let after = read(&ctx, &spec, &Query::default()).await.expect("read");
+    assert!(
+        after.entries.is_empty(),
+        "a deleted row was reopened: {:?}",
+        after
+    );
 }
 
 /// The briefing is what a turn carries: every ledger named, every open row
@@ -979,4 +1412,306 @@ async fn republish_writes_every_ledgers_file() {
             "`{name}` was not written"
         );
     }
+}
+
+/// `limit` reaches [`read`] straight off a tool argument, so `0` is as
+/// reachable as any other number, and so is one past every bound. Neither may
+/// become an empty page or a panic: the clamp answers both, and `matched`
+/// still reports how many there really were.
+#[tokio::test]
+async fn a_limit_of_zero_or_past_every_bound_clamps_rather_than_emptying_the_page() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+    for n in 0..3 {
+        record(
+            &ctx,
+            &spec,
+            &agent(),
+            &format!("r{n}"),
+            fields(&[("risk", "a"), ("status", "open")]),
+        )
+        .await
+        .expect("recorded");
+    }
+
+    let none = read2(&ctx, &spec, 0).await;
+    assert_eq!(
+        none.entries.len(),
+        1,
+        "a zero limit must clamp to a row, not return a page that reads as an empty ledger"
+    );
+    assert_eq!(
+        none.matched, 3,
+        "the count must stay honest whatever the page was truncated to"
+    );
+
+    let past = read2(&ctx, &spec, usize::MAX).await;
+    assert_eq!(
+        past.entries.len(),
+        3,
+        "a limit past every bound returns what there is: {past:?}"
+    );
+    assert_eq!(past.matched, 3);
+}
+
+/// A [`LedgerStore`] that yields inside `list_specs`, after the read and
+/// before the caller can act on it.
+///
+/// The window a declaration races in is between reading the registry and
+/// writing to it. Yielding there hands the runtime to whatever else is ready,
+/// so on the single-threaded test runtime two concurrent declarations
+/// deterministically interleave inside that window rather than doing so only
+/// when thread timing happens to arrange it. A declaration that is properly
+/// serialized never reaches the yield concurrently with another.
+struct YieldingSpecStore {
+    inner: Arc<dyn LedgerStore>,
+}
+
+#[async_trait::async_trait]
+impl LedgerStore for YieldingSpecStore {
+    async fn list_specs(&self, company: &CompanyId) -> Result<Vec<LedgerSpec>> {
+        let read = self.inner.list_specs(company).await;
+        tokio::task::yield_now().await;
+        read
+    }
+
+    async fn put_spec(&self, company: &CompanyId, spec: &LedgerSpec) -> Result<()> {
+        self.inner.put_spec(company, spec).await
+    }
+
+    async fn delete_spec(&self, company: &CompanyId, slug: &str) -> Result<bool> {
+        self.inner.delete_spec(company, slug).await
+    }
+
+    async fn append(&self, company: &CompanyId, event: &LedgerEvent) -> Result<()> {
+        self.inner.append(company, event).await
+    }
+
+    async fn events(&self, company: &CompanyId, ledger: &str) -> Result<Vec<LedgerEvent>> {
+        self.inner.events(company, ledger).await
+    }
+
+    async fn purge_entry(&self, company: &CompanyId, ledger: &str, entry: &str) -> Result<bool> {
+        self.inner.purge_entry(company, ledger, entry).await
+    }
+
+    async fn purge_ledger(&self, company: &CompanyId, ledger: &str) -> Result<bool> {
+        self.inner.purge_ledger(company, ledger).await
+    }
+}
+
+/// A ledger named twice at once must be declared once.
+///
+/// `record`, `close` and `retire` all take their lock before they read the
+/// store, so their check and their write are one section. A declaration that
+/// took none would list the specs, ask the registry whether the slug collides,
+/// and only then write: two declarations of a slug that does not exist yet
+/// both read a registry without it, both pass `admits`, and both write — so
+/// the second silently replaces the first, and the caller that lost is told
+/// its ledger was created.
+///
+/// [`YieldingSpecStore`] puts both inside that window deterministically.
+/// Exactly one of the two must be refused.
+#[tokio::test]
+async fn two_declarations_of_one_new_slug_cannot_both_be_admitted() {
+    let (runtime, _home) = runtime().await;
+
+    let store: Arc<dyn LedgerStore> = Arc::new(YieldingSpecStore {
+        inner: runtime.ledgers().clone(),
+    });
+    let ctx = Ledgers::new(runtime.id().clone(), store);
+
+    let mut first = hazards();
+    first["title"] = json!("Hazards, as the first caller named them");
+    let mut second = hazards();
+    second["title"] = json!("Hazards, as the second caller named them");
+
+    let (first_result, second_result) = tokio::join!(define(&ctx, &first), define(&ctx, &second));
+
+    assert!(
+        first_result.is_err() ^ second_result.is_err(),
+        "one of two declarations of `hazards` must be refused; both were admitted — first: \
+         {first_result:?}, second: {second_result:?}"
+    );
+
+    let stored = registry(&ctx).await.expect("registry");
+    let survivor = stored
+        .require("hazards")
+        .expect("one hazards ledger survives");
+    let winner = if first_result.is_ok() {
+        first_result
+    } else {
+        second_result
+    };
+    assert_eq!(
+        survivor.title,
+        winner.expect("the admitted declaration").title,
+        "the stored ledger must be the one whose caller was told it was created"
+    );
+}
+
+/// How many ledgers this company has declared, built-ins aside.
+async fn declared_count(ctx: &Ledgers) -> usize {
+    registry(ctx)
+        .await
+        .expect("registry")
+        .specs()
+        .iter()
+        .filter(|spec| !spec.builtin)
+        .count()
+}
+
+/// Builds a declaration that collides with nothing but its own slug.
+fn ledger_named(slug: &str) -> serde_json::Value {
+    let mut doc = hazards();
+    doc["slug"] = json!(slug);
+    doc["title"] = json!(slug);
+    doc["derived"] = json!(format!("derived/{slug}.md"));
+    doc
+}
+
+/// The cap counts declarations, so two of *different* slugs contend too.
+///
+/// A lock taken per slug serializes only the callers naming one ledger. Both
+/// of `admits`' rules range over every declaration — how many the company has,
+/// and which derived file each writes — so two declarations of different slugs
+/// read the same registry, both find room under the cap, and both write. The
+/// company ends up past a cap it is the only thing enforcing.
+///
+/// With one slot left, exactly one must win.
+#[tokio::test]
+async fn two_declarations_of_different_slugs_cannot_both_take_the_last_slot() {
+    let (runtime, _home) = runtime().await;
+    let plain = Ledgers::new(runtime.id().clone(), runtime.ledgers().clone());
+
+    let declared = declared_count(&plain).await;
+    for n in declared..crate::ledger::registry::MAX_DECLARED - 1 {
+        define(&plain, &ledger_named(&format!("filler-{n}")))
+            .await
+            .expect("filler declaration");
+    }
+
+    let store: Arc<dyn LedgerStore> = Arc::new(YieldingSpecStore {
+        inner: runtime.ledgers().clone(),
+    });
+    let ctx = Ledgers::new(runtime.id().clone(), store);
+
+    let (first_doc, second_doc) = (
+        ledger_named("first-past-the-post"),
+        ledger_named("second-past-the-post"),
+    );
+    let (first, second) = tokio::join!(define(&ctx, &first_doc), define(&ctx, &second_doc));
+
+    assert!(
+        first.is_ok() ^ second.is_ok(),
+        "exactly one declaration may take the last slot — first: {first:?}, second: {second:?}"
+    );
+    assert_eq!(
+        declared_count(&plain).await,
+        crate::ledger::registry::MAX_DECLARED,
+        "the cap is the only thing bounding declarations, so it must hold under a race"
+    );
+}
+
+#[tokio::test]
+async fn independently_constructed_contexts_share_declaration_admission() {
+    let (runtime, _home) = runtime().await;
+    let first_ctx = Ledgers::new(runtime.id().clone(), runtime.ledgers().clone());
+    let second_ctx = Ledgers::new(runtime.id().clone(), runtime.ledgers().clone());
+    let mut first = hazards();
+    first["title"] = json!("First declaration");
+    let mut second = hazards();
+    second["title"] = json!("Second declaration");
+
+    let (first_result, second_result) =
+        tokio::join!(define(&first_ctx, &first), define(&second_ctx, &second));
+
+    assert!(first_result.is_ok() ^ second_result.is_ok());
+    let winner = first_result
+        .or(second_result)
+        .expect("one declaration wins");
+    let stored = registry(&first_ctx).await.expect("registry");
+    assert_eq!(stored.require("hazards").expect("stored ledger"), &winner);
+}
+
+/// A ledger with a `required` field, but no `Check::RequiredField` in its
+/// `checks` list.
+///
+/// [`Field::required`] is documented to be enforced at the write "whether or
+/// not the spec also declares `Check::RequiredField`" — `checks` only selects
+/// what a *read* reports about rows that predate the requirement. This
+/// fixture pins that: `checks` deliberately omits `required-field` so a test
+/// against it cannot pass by accident of the read-time check firing instead.
+fn hazards_with_a_required_field_and_no_required_field_check() -> serde_json::Value {
+    json!({
+        "slug": "hazards",
+        "title": "Hazards",
+        "purpose": "What could go wrong.",
+        "derived": "derived/hazards.md",
+        "fields": [
+            { "name": "id", "role": "id" },
+            { "name": "risk", "role": "title", "required": true },
+            { "name": "status", "role": "status" },
+            { "name": "reason", "role": "prose" }
+        ],
+        "statuses": [
+            { "name": "open" },
+            { "name": "closed", "closed": true, "needs_reason": true }
+        ],
+        "sections": [
+            { "heading": "Live", "statuses": ["open"], "order": "recent" },
+            { "heading": "Closed", "statuses": ["closed"] }
+        ],
+        "checks": ["known-status", "closed-needs-reason"]
+    })
+}
+
+/// `record` must refuse a row missing a `required` field even when the ledger
+/// declares no `Check::RequiredField` — the field's own `required` flag is
+/// the schema, and `checks` only selects what a read reports about rows that
+/// predate the requirement (see [`crate::ledger::Field::required`]).
+#[tokio::test]
+async fn a_required_field_is_refused_at_write_with_no_required_field_check_declared() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(
+        &ctx,
+        &hazards_with_a_required_field_and_no_required_field_check(),
+    )
+    .await
+    .expect("declared");
+    assert!(
+        !spec.checks.contains(&crate::ledger::Check::RequiredField),
+        "the fixture's premise is a ledger with no required-field check declared"
+    );
+
+    let out = record(&ctx, &spec, &agent(), "r-1", fields(&[("status", "open")])).await;
+
+    assert!(
+        out.is_err(),
+        "a row missing `risk`, a required field, must be refused even though `checks` does not \
+         name `required-field`: {out:?}"
+    );
+}
+
+/// `close` must refuse an id that names no existing row rather than
+/// fabricating one that carries only the status and reason the caller
+/// passed.
+#[tokio::test]
+async fn closing_an_id_that_does_not_exist_is_refused_not_fabricated() {
+    let (ctx, _runtime, _home) = ledgers().await;
+    let spec = define(&ctx, &hazards()).await.expect("declared");
+
+    let out = close(&ctx, &spec, &agent(), "never-recorded", "closed", "n/a").await;
+    assert!(
+        out.is_err(),
+        "closing an id that was never recorded must be refused, not create a new closed row: \
+         {out:?}"
+    );
+
+    let read = read2(&ctx, &spec, usize::MAX).await;
+    assert!(
+        read.entries.is_empty(),
+        "a refused close must not leave a fabricated row behind: {:?}",
+        read.entries
+    );
 }

@@ -243,24 +243,93 @@ fn every_string_in_a_payload_comes_from_the_compiled_vocabulary() {
 
     for event in hostile_events() {
         let rendered = payload(&envelope, &event);
-        assert_eq!(rendered["event"], event.name());
+        assert_eq!(rendered["type"], "track", "the OpenPanel operation");
+        assert_eq!(rendered["payload"]["name"], event.name());
+        assert_eq!(rendered["payload"]["profileId"], envelope.id.as_str());
 
-        let properties = rendered["properties"]
+        let properties = rendered["payload"]["properties"]
             .as_object()
             .expect("properties is an object");
         assert!(!properties.is_empty(), "an event with no properties");
 
-        for (key, value) in properties {
-            let Some(text) = value.as_str() else { continue };
-            let known = vocabulary.contains(&text)
-                || allowed_platform.iter().any(|allowed| allowed == text);
+        // Walked over the **whole** body rather than only the property bag.
+        // OpenPanel's shape moved the identity and the event name out of the
+        // properties and up beside them (`profileId`, `name`), so a check that
+        // still looked only at `properties` would have stopped covering two of
+        // the three strings that were always the point.
+        let mut strings = Vec::new();
+        collect_strings(&rendered, String::new(), &mut strings);
+        assert!(!strings.is_empty(), "a payload with no strings at all");
+
+        for (path, text) in strings {
+            // The one string that is neither a literal nor an id: the event
+            // time OpenPanel reads out of `__timestamp`. Asserted by **shape**
+            // rather than waved through, so "every string here is an id, a
+            // platform constant or a hand-written word" keeps its one exception
+            // pinned to a fixed grammar that no runtime value could satisfy by
+            // accident.
+            if path == "payload.properties.__timestamp" {
+                assert!(
+                    is_rfc3339_utc_seconds(&text),
+                    "the event time must be RFC-3339 UTC to the second, and nothing \
+                     else, or it is a free-form string in a payload: {text:?}"
+                );
+                continue;
+            }
+            let known = vocabulary.contains(&text.as_str())
+                || allowed_platform.iter().any(|allowed| allowed == &text)
+                || text == "track"
+                || text == event.name();
             assert!(
                 known,
-                "the property {key:?} carried the string {text:?}, which is not in this \
+                "the field {path:?} carried the string {text:?}, which is not in this \
                  module's compiled vocabulary. Either it is a leak, or a new literal was \
                  added without recording it in `vocabulary()`."
             );
         }
+    }
+}
+
+/// Exactly `YYYY-MM-DDTHH:MM:SSZ`, and nothing else.
+///
+/// Written out rather than approximated with a `len()` check, because the
+/// property it is standing in for is "this field cannot carry text", and a
+/// looser check would let one through.
+fn is_rfc3339_utc_seconds(text: &str) -> bool {
+    let shape = b"dddd-dd-ddTdd:dd:ddZ";
+    text.len() == shape.len()
+        && text
+            .bytes()
+            .zip(shape)
+            .all(|(byte, expected)| match expected {
+                b'd' => byte.is_ascii_digit(),
+                other => byte == *other,
+            })
+}
+
+/// Every string **value** in `value`, with a dotted path to each, so a failure
+/// names the field rather than only the leaked text. Keys are not collected:
+/// they are `&'static str` literals written in this repository by construction,
+/// which is the same argument [`PropValue`] rests on.
+fn collect_strings(value: &serde_json::Value, path: String, out: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::String(text) => out.push((path, text.clone())),
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_strings(child, child_path, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                collect_strings(child, format!("{path}[{index}]"), out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -444,7 +513,7 @@ fn a_metered_event_names_the_model_it_spent_on() {
 
     let rendered = payload(&envelope(), &Event::metered(&sample));
     assert_eq!(
-        rendered["properties"]["model"], "anthropic-sonnet",
+        rendered["payload"]["properties"]["model"], "anthropic-sonnet",
         "the slug the harness already classified, forwarded verbatim: {rendered}"
     );
 }
@@ -472,7 +541,7 @@ fn a_sample_with_no_model_carries_no_model_property() {
     };
 
     let rendered = payload(&envelope(), &Event::metered(&sample));
-    let properties = rendered["properties"]
+    let properties = rendered["payload"]["properties"]
         .as_object()
         .expect("properties is an object");
     assert!(
@@ -529,13 +598,17 @@ async fn the_null_tracker_is_a_no_op() {
 
 /// A default build resolves to silence for the two deployments that must never
 /// report, whatever else is configured. The transport-level proof is in
-/// `mixpanel.rs`; this is the same decision asserted where every lane runs it.
+/// `openpanel.rs`; this is the same decision asserted where every lane runs it.
 #[test]
 fn the_default_build_chooses_silence_for_desktop_and_self_hosted() {
-    use crate::analytics::config::{Silence, TOKEN_ENV};
+    use crate::analytics::config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENDPOINT_ENV, Silence};
     use crate::app::config::MapEnv;
 
-    let env = MapEnv::new([(TOKEN_ENV, "not-a-real-token")]);
+    let env = MapEnv::new([
+        (CLIENT_ID_ENV, "not-a-real-client-id"),
+        (CLIENT_SECRET_ENV, "not-a-real-client-secret"),
+        (ENDPOINT_ENV, "https://collector.invalid/track"),
+    ]);
     for deployment in [Deployment::Desktop, Deployment::SelfHosted] {
         assert_eq!(
             resolve(deployment, &env),
@@ -606,8 +679,11 @@ fn an_envelope_relabels_its_cognition() {
 
     // The premise: an unprovisioned host really does report the default.
     let before = payload(&envelope, &event);
-    assert_eq!(before["properties"]["cognition_path"], "custom");
-    assert_eq!(before["properties"]["cognition_provider"], "unknown");
+    assert_eq!(before["payload"]["properties"]["cognition_path"], "custom");
+    assert_eq!(
+        before["payload"]["properties"]["cognition_provider"],
+        "unknown"
+    );
 
     envelope.set_cognition(Cognition {
         path: "harness",
@@ -617,9 +693,15 @@ fn an_envelope_relabels_its_cognition() {
     });
 
     let after = payload(&envelope, &event);
-    assert_eq!(after["properties"]["cognition_path"], "harness");
-    assert_eq!(after["properties"]["cognition_provider"], "openrouter");
-    assert_eq!(after["properties"]["cognition_metering"], "per-turn");
+    assert_eq!(after["payload"]["properties"]["cognition_path"], "harness");
+    assert_eq!(
+        after["payload"]["properties"]["cognition_provider"],
+        "openrouter"
+    );
+    assert_eq!(
+        after["payload"]["properties"]["cognition_metering"],
+        "per-turn"
+    );
 }
 
 /// And a relabel cannot widen what a payload may say: an unrecognised provider
@@ -696,5 +778,71 @@ async fn the_held_buffer_is_bounded() {
         held.last(),
         Some(&event(4_999)),
         "the newest survives; it is the oldest that is dropped"
+    );
+}
+
+/// **The event names this crate emits are ones OpenPanel will accept.**
+///
+/// The collector refuses `session_start` and `session_end` outright, refuses a
+/// name over 80 characters or containing a newline, and refuses a long
+/// anti-abuse substring list (`${`, `%{`, `../`, `union select`, …). Every one
+/// of those refusals arrives as a 400 that this module turns into a `debug!`
+/// line and nothing else — so a collision introduced later would look exactly
+/// like an instance that happens to report one fewer event, forever.
+///
+/// The vocabulary is closed and tiny, so checking it is a few microseconds
+/// against a failure nothing else in the tree could detect.
+#[test]
+fn no_event_name_is_one_the_collector_refuses() {
+    use crate::analytics::openpanel::OPENPANEL_RESERVED_EVENT_NAMES;
+
+    for event in hostile_events() {
+        let name = event.name();
+        assert!(
+            !OPENPANEL_RESERVED_EVENT_NAMES.contains(&name),
+            "{name:?} is reserved by OpenPanel and every such event is refused with a 400"
+        );
+        assert!(
+            !name.is_empty() && name.len() <= 80,
+            "{name:?} is outside the 1..=80 characters the collector accepts"
+        );
+        assert!(
+            !name.starts_with('/'),
+            "{name:?} starts with a slash, which the collector's path-scan blocklist rejects"
+        );
+        assert!(
+            name.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+            "{name:?} is not lowercase-and-underscores, so it may reach one of the \
+             collector's anti-abuse substring rules — none of which this test transcribes, \
+             because a copied fifty-entry blocklist goes stale"
+        );
+    }
+
+    // The control: the guard above would pass trivially against no events.
+    assert!(hostile_events().len() >= 3, "the event vocabulary is empty");
+}
+
+/// **The event carries the time it happened, not the time it was sent.**
+///
+/// The transport queues for up to thirty seconds, and longer after an outage,
+/// and OpenPanel stamps arrival time unless the body says otherwise. Without
+/// this field a burst of turns would all be recorded at the moment a drain
+/// finally succeeded, which flattens exactly the orderings and durations
+/// `turn_finished` exists to measure.
+#[test]
+fn a_payload_carries_the_time_the_event_happened() {
+    let rendered = crate::analytics::payload_at(
+        &envelope(),
+        &Event::InstanceStarted {
+            companies: 1,
+            storage: "fs",
+            setup_complete: true,
+        },
+        1_788_868_800_000,
+    );
+    assert_eq!(
+        rendered["payload"]["properties"]["__timestamp"],
+        "2026-09-08T12:00:00Z"
     );
 }

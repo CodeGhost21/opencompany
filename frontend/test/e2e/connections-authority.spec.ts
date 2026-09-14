@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { COMPOSIO, COMPOSIO_REASON } from "./capabilities";
+
 /**
  * Issue #403 — the connection pages must not offer a member controls the host
  * refuses.
@@ -42,6 +44,24 @@ const tourDismissed = new WeakMap<Page, boolean>();
 
 async function openSettingsPage(page: Page, sub: string) {
   await page.goto(`/#/settings/${sub}`);
+  if (tourDismissed.has(page)) return;
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await skip
+    .waitFor({ state: "visible", timeout: 10_000 })
+    .then(() => skip.click())
+    .catch(() => {
+      /* already seen in this context — nothing to dismiss */
+    });
+  tourDismissed.set(page, true);
+}
+
+/**
+ * The same, for a page under `#/connections` that no settings address rewrites
+ * onto. Composio is one since issue #2259 — it was a tab of Apps, and the
+ * `#/settings/*` rewrites predate it, so there is no legacy spelling to reuse.
+ */
+async function openConnectionsPage(page: Page, sub: string) {
+  await page.goto(`/#/connections/${sub}`);
   if (tourDismissed.has(page)) return;
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
@@ -102,17 +122,12 @@ test("a member sees what is connected but is offered nothing that changes it", a
     // The page says why, in the operator's language.
     await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({ timeout: 30_000 });
 
-    // No credential field anywhere on the page. This is the assertion that
-    // matters most: a member must never be handed somewhere to paste a token.
-    await expect(memberPage.locator("#composio-token")).toHaveCount(0);
-
     // Nor the controls behind the other refused writes. `exact` matters here:
     // role-name matching is substring by default, and the Settings rail carries
     // a "Who can sign in, and as what" item that a loose "Sign in" matches —
     // which would make this assertion fail for an admin too, and so prove
     // nothing about either role.
     const button = (name: string) => memberPage.getByRole("button", { name, exact: true });
-    await expect(button("Save token")).toHaveCount(0);
     await expect(button("Sign in")).toHaveCount(0);
     await expect(button("Add")).toHaveCount(0);
 
@@ -122,6 +137,64 @@ test("a member sees what is connected but is offered nothing that changes it", a
     const status = await memberPage.request.get("/api/v1/company/composio");
     expect(status.ok()).toBeTruthy();
     expect(await status.text()).not.toContain("token");
+
+    // ---- Composio: the key the whole catalog runs on -----------------------
+    //
+    // GATED on `COMPOSIO`, and that gate is a fix rather than a convenience.
+    // `ComposioSection` renders NOTHING when the host was built without the
+    // feature: `get_status` answers `inBuild: false` and the section returns
+    // `null`. The binary this lane downloads is `--features openhuman,mcp`, so
+    // there is no credential surface here for a member OR an admin — no rows,
+    // no field, no controls.
+    //
+    // Both halves of this spec were therefore wrong on this lane, in opposite
+    // directions: the member assertion passed for a reason that has nothing to
+    // do with authority, and the admin assertion FAILED outright. That second
+    // one is `connections-authority.spec.ts` failing on `main` today, on this
+    // exact line. A lane that cannot render the surface cannot make a statement
+    // about who may use it.
+    //
+    // `Console E2E (live brain)` runs a `--features composio` host with
+    // `PW_COMPOSIO=1`, and that is where this half is exercised.
+    //
+    // What it asserts there: the WRITE CONTROLS, not the field. The credential
+    // opens in a modal now, so "the field is not on the page" is true of an
+    // admin too. `ComposioRowList` renders Add / Replace / Remove / Test only
+    // for a viewer who may manage, and they are the only things that open the
+    // form — so they are what separates the two roles.
+    //
+    // All of them, on BOTH rows, rather than the own-account pair alone. Which
+    // controls a row offers depends on the route the company is on — a company
+    // on the managed route offers the own-account row no Add at all — so
+    // asserting only that pair is absent would pass for an ADMIN and read as
+    // coverage. The set below is empty for a member on every route.
+    //
+    // The radio (`composio-row-*-select`) is deliberately NOT asserted absent:
+    // a member sees which account the company is on, disabled, and that is what
+    // tells them why their agents can reach Gmail.
+    if (COMPOSIO) {
+      await openConnectionsPage(memberPage, "composio");
+      await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(memberPage.getByTestId("composio-rows")).toBeVisible({ timeout: 30_000 });
+      for (const control of [
+        "composio-row-managed-add",
+        "composio-row-managed-replace",
+        "composio-row-managed-remove",
+        "composio-row-byok-add",
+        "composio-row-byok-replace",
+        "composio-row-byok-test",
+      ]) {
+        await expect(memberPage.getByTestId(control), `a member is offered ${control}`).toHaveCount(
+          0,
+        );
+      }
+      await expect(memberPage.locator("#composio-api-key")).toHaveCount(0);
+      await expect(button("Save key")).toHaveCount(0);
+    } else {
+      test.info().annotations.push({ type: "skipped-half", description: COMPOSIO_REASON });
+    }
 
     // ---- MCP: the tool servers, rows and the file both ---------------------
     await openSettingsPage(memberPage, "mcp");
@@ -135,22 +208,90 @@ test("a member sees what is connected but is offered nothing that changes it", a
     await expect(memberPage.getByTestId("mcp-json-save")).toHaveCount(0);
 
     // ---- Inference: what every teammate's turn costs -----------------------
+    //
+    // This used to assert `inference-save` has count 0. That id went with the
+    // single-provider form (#2262), so the assertion held for an admin too and
+    // proved nothing.
+    //
+    // The LLM page gates by DISABLING, not hiding: `ProvidersTab` renders
+    // "Add a provider" for every viewer with `disabled={!canManage}`, and the
+    // Routing tab's controls do the same. So the member assertion is the one
+    // the code actually makes — the control is there, and it is disabled — plus
+    // the page's own read-only notice. Absence would be the wrong contract, and
+    // `toHaveCount(0)` on any of these ids would pass for a reason unrelated to
+    // authority.
+    //
+    // A member does reach this render: `useInference` treats the member's `403`
+    // on the admin-only routes read as readable and still settles `ready`, so
+    // the tab is not replaced by its unreachable state.
     await openSettingsPage(memberPage, "inference");
-    await expect(memberPage.getByTestId("inference-save")).toHaveCount(0);
+    await expect(memberPage.getByTestId("inference-read-only")).toBeVisible({ timeout: 30_000 });
+    const addProvider = memberPage.getByTestId("inference-add-open");
+    await expect(addProvider).toBeVisible({ timeout: 30_000 });
+    await expect(addProvider).toBeDisabled();
   } finally {
     await memberContext.close();
   }
 });
 
-test("an admin is still offered every control across the three pages", async ({ page }) => {
+test("an admin is still offered every control across the four pages", async ({ page }) => {
   await openSettingsPage(page, "oauth");
-  // The member's banner is absent, and the credential surface is present.
-  // The company-credential key is the Apps page's write surface on every
-  // build: the Composio token card only renders when the host reports a
-  // composio credential the admin may override (default-feature hosts never
-  // do), so it is not the invariant to assert here.
+  // The member's banner is absent, and the control it was refused is present.
+  //
+  // This used to assert `#company-credential`, on the reasoning that the
+  // company-credential key is the Apps page's write surface on every build.
+  // `src/product-scope.ts` hides the OpenHuman-managed Composio route and
+  // `OAuthView` hides that card with it — deliberately, since a company
+  // reaching Composio through its own account has nothing to spend that key on.
+  // It is no longer a surface on any build, so it cannot be the invariant.
+  //
+  // What survives is the provider grid's own "Sign in", which is exactly the
+  // control the member case above asserts a member does NOT get. Presence, not
+  // enabledness: with no credential there is nothing to authorize against, so it
+  // renders disabled on a host with no Composio compiled in — which is this
+  // lane. Asserting it is enabled would pass only on the gated build and turn
+  // this into a second Composio test.
   await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
-  await expect(page.locator("#company-credential")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(1, {
+    timeout: 30_000,
+  });
+
+  // The credential the member above is refused, on the page it lives on. This
+  // is what stops that assertion going vacuous: if the controls ever stop
+  // rendering here, this fails rather than the member case quietly passing.
+  //
+  // Gated on `COMPOSIO` for the same reason the member half is — on a host
+  // built without the feature `ComposioSection` renders nothing at all, and
+  // this assertion is the one that fails on `main` today because of it.
+  //
+  // It takes a click to reach the field: the credential form is a modal opened
+  // from the row that owns the credential. Which control opens it depends on
+  // the route the company is on, so this asks for either rather than pinning
+  // itself to a route it is not about — but NOT as one `.first()` over all
+  // three testids. The own-account row renders its radio whenever it is active,
+  // the radio comes first in the DOM, and `ComposioRowList` makes a click on an
+  // already-checked radio a deliberate no-op, so `.first()` would silently pick
+  // an inert control on a company already on BYOK.
+  if (COMPOSIO) {
+    await openConnectionsPage(page, "composio");
+    await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
+    await expect(page.getByTestId("composio-rows")).toBeVisible({ timeout: 30_000 });
+    const writeControl = page.locator(
+      '[data-testid="composio-row-byok-add"], [data-testid="composio-row-byok-replace"]',
+    );
+    // "Use this" on a row that is not already the active one. That is the
+    // hand-off the own-account route is chosen through: it cannot be selected
+    // without the key that makes it resolve, so it opens the field instead of
+    // writing (`ComposioSection`'s `onSelect`).
+    const handOff = page.locator('[data-testid="composio-row-byok-select"][aria-checked="false"]');
+    const opener = (await writeControl.count()) > 0 ? writeControl.first() : handOff.first();
+    await expect(opener).toBeVisible({ timeout: 30_000 });
+    await opener.click();
+    await expect(page.getByTestId("composio-form-dialog")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator("#composio-api-key")).toBeVisible({ timeout: 30_000 });
+  } else {
+    test.info().annotations.push({ type: "skipped-half", description: COMPOSIO_REASON });
+  }
 
   await openSettingsPage(page, "mcp");
   await expect(page.getByTestId("mcp-read-only")).toHaveCount(0);
@@ -158,6 +299,16 @@ test("an admin is still offered every control across the three pages", async ({ 
   await page.getByTestId("mcp-tab-json").click();
   await expect(page.getByTestId("mcp-json-revert")).toBeVisible();
 
+  // The same control the member case asserts is disabled, enabled here — which
+  // is what stops that assertion being true of every viewer. `useCanManage`
+  // fails closed until the role read answers, so `toBeEnabled` waits for the
+  // resolved role rather than reading the first render.
+  //
+  // "Add a provider" and not the Routing tab's Save (`inference-own-save`):
+  // that Save renders only when the company's routing mode is `own`, so it
+  // would pass or fail by the mode the harness company happens to boot in.
+  // "Add a provider" is on the default tab in every mode, on both lanes.
   await openSettingsPage(page, "inference");
-  await expect(page.getByTestId("inference-save")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("inference-read-only")).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByTestId("inference-add-open")).toBeEnabled({ timeout: 30_000 });
 });

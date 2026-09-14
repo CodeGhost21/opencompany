@@ -40,7 +40,7 @@ const ROWS = [
   { id: "researcher", name: "Researcher" },
 ];
 
-describe("teammate mascot seeding", () => {
+describe("agent mascot seeding", () => {
   it("the id seed and the name seed are genuinely different faces", () => {
     // Not a theoretical hazard: every one of these disagrees. If this ever
     // starts passing by coincidence the test is worthless, so assert on all.
@@ -62,7 +62,7 @@ describe("teammate mascot seeding", () => {
     }
   });
 
-  it("the name seed is stable, so two surfaces naming a teammate alike agree", () => {
+  it("the name seed is stable, so two surfaces naming an agent alike agree", () => {
     // This is the property the Company cards, the detail header and the chat
     // member pane rely on: they all pass the same display name, so they all
     // resolve the same mascot.

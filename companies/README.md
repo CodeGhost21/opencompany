@@ -42,27 +42,27 @@ The operator console is a separate, company-agnostic app at
 
 | Harness | Output | Human keeps |
 | --- | --- | --- |
-| [`agentic_venture_studio`](agentic_venture_studio/) | A portfolio of startups | Capital allocation, major strategy |
-| [`agentic_software_company`](agentic_software_company/) | An entire SaaS product | Product direction |
-| [`agentic_product_team`](agentic_product_team/) | A triaged queue, a groomed backlog, a defended roadmap | Prioritization calls & roadmap sign-off |
+| [`venture_studio`](venture_studio/) | A portfolio of startups | Capital allocation, major strategy |
+| [`software_company`](software_company/) | An entire SaaS product | Product direction |
+| [`product_team`](product_team/) | A triaged queue, a groomed backlog, a defended roadmap | Prioritization calls & roadmap sign-off |
 | [`startup_accelerator`](startup_accelerator/) | A funded, mentored cohort | Investment & demo-day decisions |
-| [`agentic_venture_capital`](agentic_venture_capital/) | Investment memos & a managed portfolio | Investment decisions |
-| [`agentic_consultation_firm`](agentic_consultation_firm/) | Strategy decks & implementation plans | Executive workshops |
-| [`agentic_marketing_agency`](agentic_marketing_agency/) | Campaigns across channels | Campaign review & sign-off |
-| [`agentic_design_studio`](agentic_design_studio/) | Brand & product design systems | Creative direction sign-off |
-| [`agentic_media_company`](agentic_media_company/) | Published, distributed stories | Editorial standards |
-| [`agentic_influencer_business`](agentic_influencer_business/) | A creator that never sleeps | Occasional appearance / avatar |
-| [`agentic_game_studio`](agentic_game_studio/) | Shippable games | Creative & design direction |
-| [`agentic_game_business`](agentic_game_business/) | LiveOps, UA & monetization for a game | Monetization & growth strategy |
-| [`agentic_recruiting_company`](agentic_recruiting_company/) | Sourced, screened, scheduled candidates | Final hiring decisions |
-| [`agentic_enterprise_sales`](agentic_enterprise_sales/) | Qualified pipeline & proposals | Closing strategic accounts |
-| [`agentic_customer_support`](agentic_customer_support/) | Resolved tickets & docs | Escalation & policy |
-| [`agentic_realestate_company`](agentic_realestate_company/) | Underwritten deals & managed tenants | Purchase approvals |
-| [`agentic_accounting_firm`](agentic_accounting_firm/) | Books, taxes, forecasts | Sign-off on filings |
-| [`agentic_law_firm`](agentic_law_firm/) | Drafts, research, discovery | Approving filings |
-| [`agentic_pharma_startup`](agentic_pharma_startup/) | Candidate molecules & trial plans | Laboratory work |
-| [`agentic_research_lab`](agentic_research_lab/) | Source-backed research reports with the evidence attached | Setting the question & accepting findings |
-| [`agentic_math_lab`](agentic_math_lab/) | Verified answers to computational problems, with the programs that produced them | Stating the problem & accepting the answer |
+| [`venture_capital`](venture_capital/) | Investment memos & a managed portfolio | Investment decisions |
+| [`consultation_firm`](consultation_firm/) | Strategy decks & implementation plans | Executive workshops |
+| [`marketing_agency`](marketing_agency/) | Campaigns across channels | Campaign review & sign-off |
+| [`design_studio`](design_studio/) | Brand & product design systems | Creative direction sign-off |
+| [`media_company`](media_company/) | Published, distributed stories | Editorial standards |
+| [`influencer_business`](influencer_business/) | A creator that never sleeps | Occasional appearance / avatar |
+| [`game_studio`](game_studio/) | Shippable games | Creative & design direction |
+| [`game_business`](game_business/) | LiveOps, UA & monetization for a game | Monetization & growth strategy |
+| [`recruiting_company`](recruiting_company/) | Sourced, screened, scheduled candidates | Final hiring decisions |
+| [`enterprise_sales`](enterprise_sales/) | Qualified pipeline & proposals | Closing strategic accounts |
+| [`customer_support`](customer_support/) | Resolved tickets & docs | Escalation & policy |
+| [`realestate_company`](realestate_company/) | Underwritten deals & managed tenants | Purchase approvals |
+| [`accounting_firm`](accounting_firm/) | Books, taxes, forecasts | Sign-off on filings |
+| [`law_firm`](law_firm/) | Drafts, research, discovery | Approving filings |
+| [`pharma_startup`](pharma_startup/) | Candidate molecules & trial plans | Laboratory work |
+| [`research_lab`](research_lab/) | Source-backed research reports with the evidence attached | Setting the question & accepting findings |
+| [`math_lab`](math_lab/) | Verified answers to computational problems, with the programs that produced them | Stating the problem & accepting the answer |
 | [`signals_opportunity_studio`](signals_opportunity_studio/) | A ranked weekly opportunity brief | Which opportunities to fund |
 
 Signals and the Opportunity Engine ship as the
@@ -77,8 +77,8 @@ Validate a definition, then launch it on the host (`--company` points at any
 folder here):
 
 ```sh
-cargo run --bin opencompany -- check companies/agentic_marketing_agency
-cargo run --bin opencompany -- serve --company companies/agentic_marketing_agency
+cargo run --bin opencompany -- check companies/marketing_agency
+cargo run --bin opencompany -- serve --company companies/marketing_agency
 ```
 
 Or bring up the host + console together with the attached, hot-reloading Docker

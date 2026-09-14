@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 /**
  * **Issue #2028 — reachability, which only a real click can prove.**
@@ -26,8 +26,17 @@ import { expect, test, type Page } from "@playwright/test";
  * Real: the host, the console bundle, the session, the routing, the polling
  * feed, and every DOM interaction.
  *
- * Like the rest of `test/e2e`, this drives a running host and is not wired into
- * CI; `npm run typecheck:e2e` compiles it, nothing runs it automatically.
+ * Runs in both Console E2E lanes. On fixed main b4cab3ea3, twenty serial
+ * repetitions without retries failed 10/200 cases across two-step Skip,
+ * single Skip, Cancel, and Retry, all at the company-read stub's response.json.
+ * The verdict assertions finished while the post-resolve company refresh was
+ * still in flight; context teardown disposed the response underneath it.
+ *
+ * Thirty isolated Retry runs with tracing passed: a trace showed the company
+ * fetch finishing 1.6 ms AFTER After Hooks began; with tracing, the context
+ * stayed alive another 65 ms. This is consistent with tracing masking the
+ * teardown race. Drain this spec's routes before context teardown, without
+ * ignoring callback errors or adding sleeps to the verdict assertions.
  */
 
 const BLOCKER_ID = "e2e-2028-blocker";
@@ -65,15 +74,7 @@ function parkedBlocker() {
   };
 }
 
-/**
- * A parked blocker whose stopped step is a paused board card (#2028).
- *
- * `skip` and `cancel` do not do the same thing here that they do to a
- * workflow node: skip puts the card back in progress (there is no
- * card-level skip yet — see `resume_task_card` in `src/company/runtime.rs`)
- * and cancel returns it to To-do, neither of which is "produces nothing" or
- * "stops the run". The consequence text must say so, not the node's wording.
- */
+/** A parked blocker whose stopped step is a paused board card. */
 function parkedTaskBlocker() {
   return {
     ...parkedBlocker(),
@@ -114,6 +115,40 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+const pendingRoutes = new WeakMap<Page, Set<Promise<void>>>();
+
+async function stubRoute(
+  page: Page,
+  matches: (url: URL) => boolean,
+  handle: (route: Route) => Promise<void>,
+) {
+  let pending = pendingRoutes.get(page);
+  if (!pending) {
+    pending = new Set();
+    pendingRoutes.set(page, pending);
+  }
+  const calls = pending;
+  await page.route(matches, async (route) => {
+    const call = handle(route);
+    calls.add(call);
+    try {
+      await call;
+    } finally {
+      calls.delete(call);
+    }
+  });
+}
+
+test.afterEach(async ({ page }) => {
+  // Drain while handlers remain registered. unrouteAll(wait) alone failed
+  // 5/200 cases: Playwright removed its handler list before waiting,
+  // so one callback finishing could disable interception under another's
+  // pending fulfill, which then failed with "Route is already handled!".
+  const pending = pendingRoutes.get(page);
+  while (pending?.size) await Promise.all(pending);
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 /**
  * Serve a fixed queue, with the company status stubbed in step with it — both
  * project the journal's parked set, and a fixture that fakes one and leaves the
@@ -121,14 +156,14 @@ test.beforeEach(async ({ page }) => {
  */
 async function stubQueue(page: Page, parked: unknown[]) {
   await advertiseFourWayBlockers(page);
-  await page.route(isApprovalList, async (route) => {
+  await stubRoute(page, isApprovalList, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(parked),
     });
   });
-  await page.route(isCompanyRead, async (route) => {
+  await stubRoute(page, isCompanyRead, async (route) => {
     const response = await route.fetch();
     if (!response.ok()) return route.fulfill({ response });
     const body = await response.json();
@@ -166,7 +201,7 @@ async function stubQueue(page: Page, parked: unknown[]) {
  * side by taking it back off.
  */
 async function advertiseFourWayBlockers(page: Page) {
-  await page.route(isSpec, async (route) => {
+  await stubRoute(page, isSpec, async (route) => {
     const response = await route.fetch();
     if (!response.ok()) return route.fulfill({ response });
     const body = await response.json();
@@ -187,7 +222,7 @@ async function advertiseFourWayBlockers(page: Page) {
 /** Capture the resolve body the console composes, and answer it plausibly. */
 async function captureResolve(page: Page) {
   const bodies: Record<string, unknown>[] = [];
-  await page.route(isApprovalResolve, async (route) => {
+  await stubRoute(page, isApprovalResolve, async (route) => {
     const raw = route.request().postData();
     bodies.push(raw ? JSON.parse(raw) : {});
     await route.fulfill({
@@ -232,14 +267,6 @@ test("a blocker card offers four verdicts where an ordinary card offers two", as
   await expect(page.getByText("Stops it here.", { exact: false })).toBeVisible();
 });
 
-/**
- * **The headline of #2028's follow-up.** A card's `skip` and `cancel` do not
- * do what a workflow node's do — a card redispatches on skip (there is no
- * card-level skip yet) and returns to To-do on cancel — so the consequence
- * line must say a different thing for each, and neither may be the node's
- * wording. Real DOM text, on the same three fixtures the resolve-body tests
- * below click through.
- */
 test("a blocker's consequence text is worded by which step it stopped, not one shared line", async ({
   page,
 }) => {
@@ -253,13 +280,10 @@ test("a blocker's consequence text is worded by which step it stopped, not one s
   await expect(node.getByText("Moves past this step. It produces nothing", { exact: false })).toBeVisible();
   await expect(node.getByText("Stops the run here. Nothing after this step will run.", { exact: false })).toBeVisible();
 
-  // The task card must NOT claim the node's behaviour — "produces nothing" /
-  // "stops the run" would tell the operator work is skipped or a run is
-  // halted when the card in fact redispatches on skip and only returns to
-  // To-do on cancel.
-  await expect(task.getByText("Moves past this step. It produces nothing", { exact: false })).toHaveCount(0);
+  await expect(task.getByText("Moves past this step", { exact: false })).toHaveCount(0);
   await expect(task.getByText("Stops the run here.", { exact: false })).toHaveCount(0);
-  await expect(task.getByText("Puts the card back in progress", { exact: false }).first()).toBeVisible();
+  await expect(task.getByText("Moves the card to In review without running it again", { exact: false })).toBeVisible();
+  await expect(task.getByText("No output is produced", { exact: false })).toBeVisible();
   await expect(task.getByText("Moves the card back to To-do without running it.", { exact: false })).toBeVisible();
 
   // A blocker with no step behind it (or an old host) must not borrow either
@@ -336,7 +360,7 @@ test("a skip is refused, not lowered, on a host that cannot perform it", async (
   const bodies = await captureResolve(page);
   await openApprovals(page, [parkedBlocker()]);
   // Registered after `stubQueue`'s, and Playwright prefers the newest match.
-  await page.route(isSpec, async (route) => {
+  await stubRoute(page, isSpec, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     await route.fulfill({

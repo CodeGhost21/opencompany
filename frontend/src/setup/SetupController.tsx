@@ -6,7 +6,7 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 import type { LocalScope } from "@/connections/types";
 import { shouldOfferSetup, teamIsUnstaffed } from "@/lib/company-setup";
 import { ReadTimeoutError, withReadTimeout } from "@/lib/read-timeout";
-import { settingsHref } from "@/views/settings-pages";
+import { connectionsHref } from "@/views/connection-pages";
 import { SetupDialog } from "./SetupDialog";
 import {
   clearSetupRedesign,
@@ -24,17 +24,33 @@ import {
 /**
  * Where "Set up a model" sends the operator.
  *
- * `#/settings/inference`, via the typed helper, so this cannot name a page that
- * does not exist. It said `#/settings/connections` for as long as the pre-split
- * Connections page was where a model was wired — an address that matched no
- * `SETTINGS_PAGES` id after the split and was therefore repaired onto
- * **General**, which is not where a model is set up. The constant is named
- * `MODEL_SETTINGS` and it now points at the model.
+ * `#/connections/inference`, via the typed helper, so this cannot name a page
+ * that does not exist. It said `#/settings/connections` for as long as the
+ * pre-split Connections page was where a model was wired — an address that
+ * matched no `SETTINGS_PAGES` id after the split and was therefore repaired
+ * onto **General**, which is not where a model is set up. Then it was
+ * `#/settings/inference`, until the model moved to the Connections section
+ * (`views/connection-pages.ts`). The constant is named `MODEL_SETTINGS` and it
+ * has pointed at the model throughout.
  *
  * `onModelSettings` below compares the live hash against this, so the two
  * cannot drift: the check is the same string as the destination.
  */
-const MODEL_SETTINGS = settingsHref("inference");
+const MODEL_SETTINGS = connectionsHref("inference");
+
+/**
+ * The address this used to send people to.
+ *
+ * `onModelSettings` reads `window.location.hash` raw, before the router has
+ * had anything to say about it — and `console-route-rewrites.ts` resolves
+ * `#/settings/inference` onto the Connections page without rewriting the bar.
+ * So an operator who arrives from a bookmark, or from a link minted while the
+ * page lived on the settings rail, is standing on the model page with a hash
+ * this check would not recognise: setup would reopen over the top of the page
+ * they were sent to wire a model on, which is the one thing this gate exists
+ * not to do.
+ */
+const MODEL_SETTINGS_LEGACY = "#/settings/inference";
 
 /**
  * How long the gate's roster read (`client.listTeam`, just below) is allowed
@@ -103,7 +119,8 @@ async function readRoster(
 
 /** Whether the operator is still on the page they left setup for. */
 function onModelSettings(): boolean {
-  return window.location.hash.startsWith(MODEL_SETTINGS);
+  const hash = window.location.hash;
+  return hash.startsWith(MODEL_SETTINGS) || hash.startsWith(MODEL_SETTINGS_LEGACY);
 }
 
 /**

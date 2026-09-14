@@ -13,6 +13,7 @@
 // still the right trade where the alternative is no console at all.
 
 import type { OpenCompanyClient } from "./client";
+import { ApiError } from "./types";
 
 /** What a company may call a user. */
 export type UserRole = "admin" | "member";
@@ -242,6 +243,23 @@ export async function me(client: OpenCompanyClient, company: string | null): Pro
   return client.get<Me>(`${client.scopeFor(company)}/auth/me`);
 }
 
+/**
+ * Whether {@link me} failed because there is confirmedly no session, rather
+ * than for some other reason.
+ *
+ * A caller falling back to a platform bearer's own authority on *any* {@link
+ * me} failure (codex review) would also fall back on a network error, a
+ * timeout, or a `5xx` — none of which mean "no session"; a member's session
+ * could still be live and would still take precedence on the host. The
+ * host's own `no_session()` answers `401` with `code: "unauthorized"` from
+ * its own `{error, code}` envelope, which {@link ApiError.fromHost}
+ * distinguishes from a `401` (or any other status) synthesised between the
+ * browser and the host giving up before reaching it at all.
+ */
+export function hasNoSession(err: unknown): boolean {
+  return err instanceof ApiError && err.fromHost && err.status === 401 && err.code === "unauthorized";
+}
+
 /** Sets or replaces the signed-in user's own password. */
 export async function setPassword(
   client: OpenCompanyClient,
@@ -301,9 +319,11 @@ export async function verifyWalletSignature(
   });
 }
 
+const LOGOUT_TIMEOUT_MS = 30_000;
+
 /** Revokes this session, server-side and in the browser. */
 export async function logout(client: OpenCompanyClient, company: string | null): Promise<void> {
-  await client.post(`${client.scopeFor(company)}/auth/logout`, {});
+  await client.post(`${client.scopeFor(company)}/auth/logout`, {}, { timeoutMs: LOGOUT_TIMEOUT_MS });
 }
 
 // ---------------------------------------------------------------------------

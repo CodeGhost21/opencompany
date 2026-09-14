@@ -114,7 +114,7 @@ describe("writeObservatoryQuery", () => {
 
 describe("observatoryHref", () => {
   it("addresses the index and a run", () => {
-    expect(observatoryHref()).toBe("#/observatory");
+    expect(observatoryHref()).toBe("#/settings/observatory");
     expect(observatoryHref("wr-1")).toBe("#/observatory/wr-1");
   });
 
@@ -128,7 +128,7 @@ describe("observatoryHref", () => {
   });
 
   it("omits a default tab and includes a real one", () => {
-    expect(observatoryHref(null, { tab: "runs" })).toBe("#/observatory");
-    expect(observatoryHref(null, { tab: "analytics" })).toBe("#/observatory?tab=analytics");
+    expect(observatoryHref(null, { tab: "runs" })).toBe("#/settings/observatory");
+    expect(observatoryHref(null, { tab: "analytics" })).toBe("#/settings/observatory?tab=analytics");
   });
 });

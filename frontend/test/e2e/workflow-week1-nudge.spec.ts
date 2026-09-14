@@ -40,7 +40,7 @@ const NUDGE_ROW = {
   kind: "workflow_nudge",
   subjectKind: "workflow",
   subjectId: "week1-first-workflow",
-  title: "Save your first workflow",
+  title: "Save your first automation",
   createdAt: Date.now(),
 };
 
@@ -117,7 +117,7 @@ async function mockEventsWithCreate(page: Page) {
           seq: 1,
           atMillis: Date.now(),
           workflowId: "wf-e2e",
-          name: "A workflow created elsewhere",
+          name: "An automation created elsewhere",
         })}\n\n`,
     }),
   );
@@ -137,7 +137,7 @@ test("the banner renders when the host has an unread week-1 nudge", async ({ pag
   await dismissTour(page);
 
   await expect(banner(page)).toBeVisible();
-  await expect(banner(page)).toContainText("Save your first workflow");
+  await expect(banner(page)).toContainText("Save your first automation");
   await expect(page.getByTestId("workflow-week1-nudge-create")).toBeVisible();
 });
 
@@ -154,7 +154,7 @@ test("a host with no unread nudge shows no banner", async ({ page }) => {
   await expect(banner(page)).toHaveCount(0);
 });
 
-test("the CTA opens the same create dialog the toolbar's New workflow button does", async ({
+test("the CTA opens the same create dialog the toolbar's New automation button does", async ({
   page,
 }) => {
   await mockNotifications(page, NUDGE_ROW);
@@ -166,7 +166,7 @@ test("the CTA opens the same create dialog the toolbar's New workflow button doe
 
   await page.getByTestId("workflow-week1-nudge-create").click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("New workflow", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("New automation", { exact: true })).toBeVisible();
 });
 
 test("Dismiss marks the nudge read and hides the banner, without creating anything", async ({

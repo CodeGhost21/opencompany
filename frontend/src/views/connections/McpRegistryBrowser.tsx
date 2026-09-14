@@ -188,7 +188,7 @@ export function McpRegistryBrowser({ client, company, onInstalled }: Props) {
         </h3>
         <p className="text-xs text-muted-foreground">
           Search the official MCP registry. An installed server joins the list above and every
-          teammate can call it.
+          agent can call it.
         </p>
       </div>
 

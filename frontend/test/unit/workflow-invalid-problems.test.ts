@@ -30,6 +30,9 @@ import { ApiError, workflowProblemLocator } from "@/api/types";
 
 /** Answers with whatever the test staged, so no `fetch` is involved. */
 class StubTransport implements Transport {
+  /** Test double: an abort stops the caller; there is no real work to cancel. */
+  readonly cancelsInFlight = true;
+
   constructor(private readonly staged: Partial<TransportResponse>) {}
 
   async request(req: TransportRequest): Promise<TransportResponse> {
@@ -67,7 +70,7 @@ const invalid = (problems: unknown) => ({
   problems,
 });
 
-describe("a refused workflow graph carries its per-node problems", () => {
+describe("a refused automation graph carries its per-node problems", () => {
   it("keeps the node and field the host named", async () => {
     const err = await refusal(
       invalid([

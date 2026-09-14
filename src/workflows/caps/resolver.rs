@@ -510,6 +510,7 @@ mod tests {
         ))
         .expect("valid manifest");
         Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),
@@ -539,6 +540,7 @@ mod tests {
         let manifest: CompanyManifest =
             toml::from_str("[company]\nname = \"Acme\"\n").expect("valid manifest");
         Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: CompanyId::new("acme"),

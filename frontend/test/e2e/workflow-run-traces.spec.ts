@@ -46,7 +46,7 @@ async function openRunsTab(page: import("@playwright/test").Page) {
     list
       .getByTestId("workflow-run-trace-row")
       .first()
-      .or(list.getByText(/No workflow runs yet/)),
+      .or(list.getByText(/No automation runs yet/)),
   ).toBeVisible({ timeout: 30_000 });
   return list;
 }
@@ -67,7 +67,7 @@ test("the Runs tab lists the company-wide run page, or says there is none yet", 
   const rows = list.getByTestId("workflow-run-trace-row");
   const count = await rows.count();
   if (count === 0) {
-    await expect(list.getByText(/No workflow runs yet/)).toBeVisible();
+    await expect(list.getByText(/No automation runs yet/)).toBeVisible();
   } else {
     // Every row says which workflow, when it fired, and how — the four facts
     // the issue asks for, minus duration (absent on a run with no recorded
@@ -101,7 +101,7 @@ test("opening a run from the traces list shows its transcript without navigating
   await expect(sheet.getByText("NODE OUTPUT")).toBeVisible();
 });
 
-test("running a workflow surfaces it in the traces list, and its sheet's canvas link navigates there", async ({
+test("running an automation surfaces it in the traces list, and its sheet's canvas link navigates there", async ({
   page,
 }) => {
   // The two specs above read whatever history the host already holds and
@@ -128,7 +128,7 @@ test("running a workflow surfaces it in the traces list, and its sheet's canvas 
   await page.getByTestId("workflow-back-to-index").click();
   const list = await openRunsTab(page);
 
-  expect(name, "could not read the first workflow card's name").toBeTruthy();
+  expect(name, "could not read the first automation card's name").toBeTruthy();
   const row = list.getByTestId("workflow-run-trace-row").filter({ hasText: name! }).first();
   await expect(row).toBeVisible({ timeout: 60_000 });
   await row.click();

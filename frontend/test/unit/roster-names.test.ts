@@ -23,7 +23,7 @@ describe("rosterDisplayName", () => {
     expect(rosterDisplayName("backend_engineer", names)).toBe("backend dev");
   });
 
-  it("resolves the kebab spelling the runtime mints the teammate's folder under (issue #1723)", () => {
+  it("resolves the kebab spelling the runtime mints the agent's folder under (issue #1723)", () => {
     // `agents/`/`artifacts/` member folders go through the host's `kebab_name`
     // (`src/company/workspace_names.rs`), which turns `backend_engineer` into
     // `backend-engineer` on every company that had not already created the
@@ -35,7 +35,7 @@ describe("rosterDisplayName", () => {
     expect(rosterDisplayName("backend_engineer", names)).toBe("Backend Engineer");
   });
 
-  it("never lets one teammate's alias shadow another's real id", () => {
+  it("never lets one agent's alias shadow another's real id", () => {
     // A teammate whose id genuinely IS the kebab form owns that key. The alias
     // is a fallback for a spelling nobody claimed, not an overwrite.
     // Asserted in BOTH roster orders: an alias that merely lost a race to the

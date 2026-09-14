@@ -191,7 +191,7 @@ export const FIRST_RUN_COMPANY = "companies/e2e_setup";
 
 /**
  * Whether this run is the **Project Euler lane**: the live-LLM host, but
- * serving `companies/agentic_math_lab` and running the one spec whose verdict
+ * serving `companies/math_lab` and running the one spec whose verdict
  * is a published integer rather than a shape on the board.
  *
  * Set `PW_EULER=1` alongside `PW_LIVE_LLM=1`, or run `npm run e2e:euler`, which
@@ -216,11 +216,11 @@ export const FIRST_RUN_COMPANY = "companies/e2e_setup";
 export const EULER = process.env.PW_EULER === "1";
 
 /** The company a Project Euler run must be serving, relative to the repository root. */
-export const EULER_COMPANY = "companies/agentic_math_lab";
+export const EULER_COMPANY = "companies/math_lab";
 
 /** The reason string a `EULER` skip carries, so no skip is ever bare. */
 export const EULER_REASON =
-  "needs a host serving companies/agentic_math_lab and thinking with a real model; " +
+  "needs a host serving companies/math_lab and thinking with a real model; " +
   "run `npm run e2e:euler` (which sets PW_EULER=1 and PW_LIVE_LLM=1). " +
   "Point it at another problem with PW_EULER_PROBLEM=<number>.";
 

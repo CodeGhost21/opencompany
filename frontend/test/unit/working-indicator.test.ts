@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { TurnStep } from "@/api/types";
-import { GENERIC_LABEL, WorkingIndicator, runningStepLabel } from "@/views/chat/WorkingIndicator";
+import { GENERIC_LABEL, WorkingIndicator, runningStepLabel } from "@/views/room/WorkingIndicator";
 
 /**
  * The working indicator (issue #787), following OpenHuman's handling: the line

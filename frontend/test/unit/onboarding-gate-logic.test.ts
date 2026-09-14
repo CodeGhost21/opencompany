@@ -237,7 +237,7 @@ describe("shouldPollActivationForRole", () => {
     expect(shouldPollActivationForRole(true)).toBe(true);
   });
 
-  it("keeps polling for a confirmed non-admin too (round 7) — a member can still be the read that observes the workflow step complete after an admin who already cleared the other two steps closes their tab", () => {
+  it("keeps polling for a confirmed non-admin too (round 7) — a member can still be the read that observes the automation step complete after an admin who already cleared the other two steps closes their tab", () => {
     expect(shouldPollActivationForRole(false)).toBe(true);
   });
 });

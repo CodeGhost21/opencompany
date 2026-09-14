@@ -43,16 +43,16 @@ export function Week1NudgeBanner({
           <Sparkles className="size-3.5" />
         </span>
         <div>
-          <p className="text-sm font-medium leading-tight">Save your first workflow</p>
+          <p className="text-sm font-medium leading-tight">Save your first automation</p>
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-            A workflow is the thing this company actually runs, on a schedule or on
+            An automation is the thing this company actually runs, on a schedule or on
             demand. Describe one in plain words and the copilot drafts it for you.
           </p>
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <Button size="sm" onClick={onCreate} data-testid="workflow-week1-nudge-create">
-          Create a workflow
+          Create an automation
         </Button>
         <Button
           size="sm"

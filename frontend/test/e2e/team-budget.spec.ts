@@ -26,7 +26,7 @@ import { expect, test } from "@playwright/test";
  * Runs against the same live host as `wiring.spec.ts` (see that file's header).
  */
 
-test("the Team page shows a capped teammate's daily budget and omits it for uncapped ones", async ({
+test("the Team page shows a capped agent's daily budget and omits it for uncapped ones", async ({
   page,
 }) => {
   await page.goto("/#/company");

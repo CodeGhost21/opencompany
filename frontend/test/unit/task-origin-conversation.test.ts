@@ -79,19 +79,24 @@ describe("where a card's origin conversation lives", () => {
  * The resolved thread id has to actually ride the jump, not just come back
  * from `originConversation` — pinned by source-text, the idiom
  * `chat-general-channel.test.ts` already uses for wiring a full `AppShell` /
- * `ChatView` render is too heavy to stand up.
+ * `RoomView` render is too heavy to stand up.
  */
 describe("the origin thread rides the card → Room jump, not just the channel", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const shell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
-  const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+  const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
   it("the shell carries the resolved thread id into the chat navigation's query", () => {
     expect(shell).toContain('navigate("chat", channelId, { thread: threadId ?? null })');
   });
 
   it("Room reads the thread the query names and opens it", () => {
-    expect(chatView).toContain('params.get("thread")');
-    expect(chatView).toContain("setOpenThreadId(threadId)");
+    // Read reactively since #2130: `useHashView` parses only the path segments,
+    // so a link that changes nothing but `?thread=` re-renders nothing an effect
+    // keyed on the channel would see. The read moved into its own `hashchange`
+    // subscription — the one `useHashFlag` uses — and the effect opens whatever
+    // it names.
+    expect(chatView).toContain('new URLSearchParams(query).get("thread")');
+    expect(chatView).toContain("setOpenThreadId(threadQuery.value)");
   });
 });

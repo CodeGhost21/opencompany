@@ -18,7 +18,7 @@ test infrastructure — do not invent parallel harnesses:
 
 | Module | Location | Cases |
 |---|---|---|
-| Workflow TOML parser | `src/company/workflow_file.rs` | happy graph; edge referencing missing node → error; no trigger node → error; empty workflow; unknown keys tolerated; round-trip against `companies/agentic_marketing_agency/workflows/campaign_pipeline.toml` |
+| Workflow TOML parser | `src/company/workflow_file.rs` | happy graph; edge referencing missing node → error; no trigger node → error; empty workflow; unknown keys tolerated; round-trip against `companies/marketing_agency/workflows/campaign_pipeline.toml` |
 | SKILL.md parser | `src/company/skill_file.rs` | frontmatter name/description(+category); missing/malformed frontmatter → error; body preserved verbatim; parses both existing repo skills (`web-research`, `weekly-report`) |
 | Workspace walker | `src/company/workspace_seed.rs` | nested tree; wikilink extraction incl. `[[target\|alias]]`; non-markdown files skipped; `../` path traversal rejected |
 | Conformance extensions | `src/store/conformance.rs` + backend test mods | one `assert_*` suite per new port (tasks, workspace, facts, inbox, usage, skills-state): CRUD, company isolation, ordering; every backend runs the identical suite |
@@ -114,7 +114,7 @@ First use of the crate's `tests/` integration dir. The test:
 1. Builds the router in-process but serves over a **real ephemeral port**
    (`TcpListener::bind("127.0.0.1:0")` + `axum::serve`) — exercises real HTTP,
    unlike oneshot.
-2. Loads `companies/agentic_marketing_agency` with sqlite storage in a
+2. Loads `companies/marketing_agency` with sqlite storage in a
    tempdir and a mock `Provider` harness.
 3. Drives with `reqwest` (dev-dependency):
    - GraphQL `team`/`chats`/`skills`/`workflow("campaign_pipeline")` match the

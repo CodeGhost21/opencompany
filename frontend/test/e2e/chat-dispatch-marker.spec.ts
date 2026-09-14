@@ -145,7 +145,7 @@ test("a settled dispatch marks the channel its card was raised in — and only t
   // and without this line nothing says the card stopped short of finishing.
   await expect(markers(page)).toHaveCount(1, { timeout: 30_000 });
   await expect(markers(page)).toHaveText("finished → Paused");
-  expect(await markers(page).getAttribute("href")).toBe(`#/tasks/${raised}`);
+  expect(await markers(page).getAttribute("href")).toBe(`#/company/tasks/${raised}`);
 
   // The origin-less frame wrote nothing here — and nothing anywhere else
   // either. A fallback to "whatever channel is open" is issue #368's bug, and
@@ -203,7 +203,7 @@ test("the marker lands live and survives a reload exactly once", async ({ page, 
   // Addressed by the card's own href rather than by the marker text, so a
   // marker left in this channel by an earlier run cannot be mistaken for this
   // one — the harness company's data root outlives a single test.
-  const marker = page.locator(`a[href="#/tasks/${id}"]`);
+  const marker = page.locator(`a[href="#/company/tasks/${id}"]`);
 
   // Live: the settle reaches the open channel with no reload. *Which* column it
   // lands in depends on how the scripted run ends, and that is not what this
@@ -284,7 +284,7 @@ test("a card raised on the board leaves no channel marker", async ({ page, reque
   // The load-bearing assertion: nothing anywhere links *this* card. It is
   // addressed by href rather than by count, so it cannot be satisfied or
   // broken by any other test's marker.
-  await expect(page.locator(`[href="#/tasks/${id}"]`)).toHaveCount(0);
+  await expect(page.locator(`[href="#/company/tasks/${id}"]`)).toHaveCount(0);
   // …and the channel grew nothing at all.
   await expect(markers(page)).toHaveCount(before);
 });

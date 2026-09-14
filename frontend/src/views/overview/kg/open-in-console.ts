@@ -68,7 +68,7 @@ function deskIdOf(departmentId: string): string | null {
 export function destinationFor(nodeId: string): ConsoleDestination | null {
   if (nodeId.startsWith("emp:")) {
     const id = nodeId.slice("emp:".length);
-    return id ? { hash: `#/team/${encodeURIComponent(id)}`, label: "Open teammate" } : null;
+    return id ? { hash: `#/team/${encodeURIComponent(id)}`, label: "Open agent" } : null;
   }
   if (nodeId.startsWith("task:")) {
     const id = nodeId.slice("task:".length);
@@ -76,7 +76,7 @@ export function destinationFor(nodeId: string): ConsoleDestination | null {
   }
   if (nodeId.startsWith("flow:")) {
     const id = nodeId.slice("flow:".length);
-    return id ? { hash: `#/workflows/${encodeURIComponent(id)}`, label: "Open workflow" } : null;
+    return id ? { hash: `#/workflows/${encodeURIComponent(id)}`, label: "Open automation" } : null;
   }
   if (nodeId.startsWith("team:")) {
     const deskId = deskIdOf(nodeId.slice("team:".length));

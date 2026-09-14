@@ -72,7 +72,7 @@ async function historyToggle(page: import("@playwright/test").Page) {
 /** The host route these specs are about. */
 const RUNS_ROUTE = /\/workflows\/runs\b/;
 
-test("the console asks the host for the selected workflow's runs, not the whole company's", async ({
+test("the console asks the host for the selected automation's runs, not the whole company's", async ({
   page,
 }) => {
   // Capture every run-history request the view makes.
@@ -108,7 +108,7 @@ test("the console asks the host for the selected workflow's runs, not the whole 
     .toBe(true);
 });
 
-test("the run-history panel opens and shows only the selected workflow's runs", async ({
+test("the run-history panel opens and shows only the selected automation's runs", async ({
   page,
 }) => {
   await page.goto("/#/workflows");
@@ -135,7 +135,7 @@ test("the run-history panel opens and shows only the selected workflow's runs", 
   }
 });
 
-test("running a workflow adds it to the durable history and it survives a reload", async ({
+test("running an automation adds it to the durable history and it survives a reload", async ({
   page,
 }) => {
   // Per-test: the two above read history the host already holds and pass on a

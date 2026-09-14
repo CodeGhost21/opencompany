@@ -83,7 +83,7 @@ async function mockApi(page: Page) {
     const agent = path.match(/\/team\/([^/]+)$/);
     if (agent) {
       const found = ROSTER.find((m) => m.id === agent[1]);
-      if (!found) return json({ error: "no such teammate" }, 404);
+      if (!found) return json({ error: "no such agent" }, 404);
       return json({
         ...found,
         source: "overlay",
@@ -115,7 +115,7 @@ async function mockApi(page: Page) {
 const card = (page: Page, name: string) =>
   page.getByTestId("team-card").filter({ hasText: name }).first();
 
-test("#1440 teammates on a desk show the desk's name on the card", async ({ page }) => {
+test("#1440 agents on a desk show the desk's name on the card", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
 
@@ -128,7 +128,7 @@ test("#1440 teammates on a desk show the desk's name on the card", async ({ page
   await expect(mayaDesks.getByTestId("team-card-desk-research")).toContainText("(lead)");
 });
 
-test("#1440 a teammate on no desk says so on the card", async ({ page }) => {
+test("#1440 an agent on no desk says so on the card", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
 
@@ -169,7 +169,7 @@ test("#1440 clicking a desk chip navigates to its own address", async ({ page })
   await expect.poll(() => page.url()).toContain("#/company/research");
 });
 
-test("#1391 the teammate action is a focused title button, not an interactive card", async ({ page }) => {
+test("#1391 the agent action is a focused title button, not an interactive card", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
 
@@ -186,10 +186,10 @@ test("#1391 the teammate action is a focused title button, not an interactive ca
   await open.focus();
   await expect(open).toBeFocused();
   await open.press("Enter");
-  await expect(page).toHaveURL(/#\/team\/maya$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/maya$/);
 });
 
-test("#1810 the teammate card opens without swallowing its actions menu", async ({ page }) => {
+test("#1810 the agent card opens without swallowing its actions menu", async ({ page }) => {
   await mockApi(page);
   await page.goto("/#/company");
 
@@ -201,14 +201,14 @@ test("#1810 the teammate card opens without swallowing its actions menu", async 
   const description = await maya.getByTestId("team-card-description").boundingBox();
   if (!description) throw new Error("Maya's description has no clickable bounds");
   await page.mouse.click(description.x + 4, description.y + 4);
-  await expect(page).toHaveURL(/#\/team\/maya$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/maya$/);
 
   await page.goto("/#/company");
   await expect(maya).toBeVisible({ timeout: 30_000 });
 
   // The overflow stays above the stretched target: it opens Remove without
   // navigating to the teammate underneath it.
-  await maya.getByRole("button", { name: "Teammate actions" }).click();
+  await maya.getByRole("button", { name: "Agent actions" }).click();
   await expect(page.getByRole("menuitem", { name: "Remove" })).toBeVisible();
   await expect(page).toHaveURL(/#\/company$/);
 });

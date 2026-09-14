@@ -176,7 +176,7 @@ records apart:
   authoritative for this workload's data scope. So even a full-platform token
   provisioning on behalf of another tenant yields a workload-local id rather
   than one prefixed with a foreign tenant. This keeps the same boot template
-  (`OPENCOMPANY_COMPANY=agentic_software_company` for every tenant) from
+  (`OPENCOMPANY_COMPANY=software_company` for every tenant) from
   colliding on the `companies` collection's unique `company_id` index. The
   prefix is idempotent — an already-prefixed id passes through unchanged.
 - **Ownership.** A provisioned or boot company's `company_id -> tenant_id`

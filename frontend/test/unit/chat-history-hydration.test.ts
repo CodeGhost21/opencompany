@@ -5,7 +5,7 @@ import {
   HISTORY_UNTRACKED,
   historyReady,
   type HistoryHydration,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * The question issue #934 was filed over: may the timeline say this channel is
@@ -39,7 +39,7 @@ describe("whether a channel may be called empty", () => {
   });
 
   it("holds before the rehydration pass has reached the channel", () => {
-    // The window that made the bug reachable at all: `ChatView` resolves its
+    // The window that made the bug reachable at all: `RoomView` resolves its
     // own desk list independently of the shell's, so it can paint a channel
     // the shell's pass has not marked yet. No entry here does NOT mean
     // "nothing is coming" — it means "ask again in a moment".
@@ -60,7 +60,7 @@ describe("whether a channel may be called empty", () => {
   });
 
   it("releases every channel when nothing is tracking hydration", () => {
-    // A `ChatView` mounted without the shell behind it: there is no pass to
+    // A `RoomView` mounted without the shell behind it: there is no pass to
     // wait for, so it must render exactly as it did before this existed.
     expect(historyReady(HISTORY_UNTRACKED, "dm:pm")).toBe(true);
     expect(historyReady(HISTORY_UNTRACKED, "main")).toBe(true);

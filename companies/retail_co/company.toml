@@ -1,0 +1,218 @@
+# retail-co — the tau2-bench retail domain run as a company of three desks.
+#
+# The business is not modelled in this manifest. It lives behind five
+# role-scoped MCP servers from the `opencompany-tau2` repo, each serving one
+# slice of the tau2 retail domain and all five sharing ONE state file under an
+# exclusive `flock`. So a cancellation is visible to triage on its next read,
+# and every fact an agent states is a tool call somebody can replay.
+#
+# WHY THIS BUNDLE EXISTS: scope enforced below the model, and a room that has
+# something to argue about.
+#
+# Each seat is granted exactly one MCP server, and each server registers only
+# the tools its role is scoped to. A seat reaching outside its role does not
+# violate a policy it was asked to respect — it calls a tool that was never
+# registered, and fails at the protocol layer. `triage` has nine tools and no
+# mutating one at all; it cannot cancel an order however the conversation goes.
+#
+# The two write desks are staffed by PAIRS holding different remedies for the
+# same situation, because a desk of one cannot deliberate (`deliberates()`
+# requires two). A delivered-order problem can be answered with an exchange or
+# with a refund; a pending-order problem by cancelling or by amending. Neither
+# seat can reach the other's tool, so the room has to argue rather than quietly
+# do both — and `quorum = 2` on a two-seat desk means the remedy that carries
+# is unanimous, which is the right bar for a write nobody can reverse.
+#
+# What tau2's own orchestrator cannot ask, and this can: it wires exactly one
+# agent to one user simulator, with no agent-to-agent path. Here a customer's
+# problem arrives at `triage`, which can establish what is true and nothing
+# more, and the remedy belongs to a desk that has to settle it internally.
+
+[company]
+name = "retail-co"
+output = "A customer's order problem resolved by the desk that owns the remedy, with every read and write recorded as a tool call"
+human_role = "Read the transcript and say whether the desks did what the retail policy required"
+# The desk that owns the company's own line. Without this, General resolves to
+# no desk and a message there falls to a root agent picked by filename order.
+# The target is deliberately NOT called General: tinyhivemind refuses an
+# episode on a desk whose id or name is a General spelling.
+general_desk = "company_line"
+
+[brain]
+mode = "hosted"
+max_passes = 12
+
+[policy]
+# `full`: tools run without approval. Acting on the customer's order IS the job
+# here, and tau2 scores the end state of the database, so a write parked for a
+# human makes the task unscoreable rather than safe.
+#
+# `supervised` was worse than unscoreable — it was invisible. An external-effect
+# tool parks for approval, and openhuman then feeds the model a REFUSAL and lets
+# it carry on, so a seat that tried to write finished its turn writing prose
+# about the write instead. `exchanges` closed a room with "I'll perform the
+# exchange now" having called nothing, and the transcript read like a model that
+# simply declined to act.
+#
+# The limits that matter here are structural anyway, and they are unaffected:
+# each seat's MCP server registers only its own role's tools, so `triage` cannot
+# cancel an order however autonomous the policy is. Scope is enforced below the
+# model; approval was only ever enforced above it.
+mode = "full"
+
+[users]
+admins = ["harness-e2e@tinyhumans.ai"]
+
+[tools]
+# Each `mcp:` grant is named literally. `grants_cover_server` refuses to let `*`
+# reach an MCP server (`src/runtime/tools.rs`), so a wildcard here would silently
+# acquire any server an operator later installed — and the whole point of this
+# bundle is that a seat's reach is exactly its role's.
+#
+# No `web` and no `search`: every fact about this business is in the shared
+# retail state. A desk that could look things up would answer questions about
+# online retail in general instead of about THIS customer's order.
+allow = [
+    "mcp:tau2-retail-triage",
+    "mcp:tau2-retail-exchanges",
+    "mcp:tau2-retail-refunds",
+    "mcp:tau2-retail-cancellations",
+    "mcp:tau2-retail-amendments",
+]
+
+[channels.operator]
+enabled = true
+
+# BYOK routing. The KEY is never in the bundle — it is a company secret
+# (`inference/key`), set from the console's Inference card or
+# `PUT {scope}/inference`. A company that declares this block consults that
+# secret rather than `OPENCOMPANY_INFERENCE_KEY`, so a host-level env var does
+# not stand in for it: the first turn fails with a 401 from the platform
+# endpoint, not from the provider named here.
+[inference]
+provider = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+
+# Every tier on one model, deliberately. The seats differ by the tools they
+# hold and the policy they carry, not by the model behind them — so a run that
+# routes them apart would be measuring the models rather than the org chart.
+# `vision-v1` is mapped too: nothing here sends an image, and leaving a tier
+# unmapped is what makes a stray request fall back to a provider default
+# nobody chose.
+[inference.models]
+chat-v1 = "deepseek/deepseek-v4-flash"
+reasoning-v1 = "deepseek/deepseek-v4-flash"
+agentic-v1 = "deepseek/deepseek-v4-flash"
+vision-v1 = "deepseek/deepseek-v4-flash"
+
+# ---------------------------------------------------------------------------
+# There is no `triage` DESK. `triage` is an agent, and a desk whose id equals
+# one of its own members' id is ceremony that the runtime does not even
+# represent consistently: the manifest says `triage`, `POST /chat` accepts
+# `triage`, and `GET /desks` reports the same block back as `front_desk`.
+#
+# A desk exists to hold a ROOM — two or more seats with something to settle
+# between them (`deliberates()` needs two). One seat is not a room, so the
+# front door is the company's own `general` channel: the customer arrives,
+# the responder ladder picks `triage` because reading the order is what it is
+# for, and it refers the case on to whichever desk owns the remedy.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# The company's own line, as a real desk.
+#
+# The id is NOT a General spelling: tinyhivemind refuses a desk whose identity
+# collides with one (`reserved desk identity`), and a company that declares
+# `id = "general"` boots clean and then fails every message on its main thread.
+# The NAME is `General`, and `resolve_desk_id` matches a manifest desk by name
+# as well as by id — with no General guard on that pass — so the company's own
+# line resolves here instead of resolving to nothing.
+#
+# That is the actual defect this fixes. With general resolving to no desk, the
+# desk selector bails out and the message falls to a *root* agent chosen by
+# filename order: a delivered-order case was answered by `amendments`, the
+# pending-order seat, holding three write tools and no exchange tool.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "company_line"
+name = "Company Line"
+description = "The company's own line. Everybody who works here."
+# Documentation only — the runtime seats the live roster here, so a
+# teammate created tomorrow is in this room without anybody editing
+members = ["triage", "exchanges", "refunds", "cancellations", "amendments"]
+
+[group_chat.hive]
+enabled = true
+turn_budget = 12
+quorum = 2
+blind_round = true
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2
+
+# ---------------------------------------------------------------------------
+# Pending orders. Two seats, competing remedies.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "order_ops"
+name = "Order Operations"
+description = "Pending orders: cancel outright, or amend items, address or payment in place."
+members = ["cancellations", "amendments"]
+
+[group_chat.hive]
+enabled = true
+# Two seats, and enough budget to survive ONE bad proposal.
+#
+# Eight was too tight, and the way it failed is instructive: `exchanges`
+# proposed with item ids it had invented, `refunds` objected and named the real
+# ones — cross-inhibition working exactly as intended — and the correction then
+# had nowhere to go. `exchanges` spent its remaining turns supporting its own
+# corrected option, which adds no quorum (two DIFFERENT members must back it),
+# and the budget ran out on "refunds, do you agree?". Three of the eight turns
+# were a duplicate evidence line, an unmarked line that folds to nothing, and
+# that self-support.
+#
+# Twelve leaves room for the correction cycle a two-seat desk needs. It is still
+# short on purpose: conformity in a group of language models rises with
+# interaction time, so a long episode buys correlated error rather than scrutiny.
+turn_budget = 12
+quorum = 2
+blind_round = true
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2
+
+# ---------------------------------------------------------------------------
+# Delivered orders. Same shape.
+# ---------------------------------------------------------------------------
+
+[[group_chat]]
+id = "returns"
+name = "Returns and Exchanges"
+description = "Delivered orders: exchange an item for a variant of the same product, or take a return for refund."
+members = ["exchanges", "refunds"]
+
+[group_chat.hive]
+enabled = true
+# Twelve, not eight: one bad proposal plus its correction does not fit in
+# eight when self-support adds no quorum. See the order_ops note above.
+turn_budget = 12
+quorum = 2
+blind_round = true
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2

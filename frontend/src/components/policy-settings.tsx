@@ -12,6 +12,7 @@ import {
   setPolicy,
 } from "@/api/policy";
 import { listWorkflowToolSlugs } from "@/api/workflows";
+import { AdminOnlyNotice } from "@/components/admin-only-notice";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +40,7 @@ import { Label } from "@/components/ui/label";
 import { applyAutonomy } from "@/hooks/use-autonomy";
 import { usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { SETTINGS_FIELD_COLUMN } from "@/views/settings-pages";
 
 /**
  * Tools worth naming as an *example* of something to always ask about, most
@@ -116,7 +118,7 @@ export function widensAutonomy(
  * reset) and only the tier one is shared, so a component would have to carry
  * all three.
  */
-export const AUTONOMY_CONFIRM_TITLE = "Give teammates more autonomy?";
+export const AUTONOMY_CONFIRM_TITLE = "Give agents more autonomy?";
 
 /** The cancel label. It names the outcome, not the gesture: nothing changes. */
 export const AUTONOMY_CONFIRM_CANCEL = "Keep current setting";
@@ -127,13 +129,19 @@ export const AUTONOMY_CONFIRM_ACTION = "Give more autonomy";
 /**
  * The standing note under a tier widening.
  *
- * True in this build and load-bearing: the gate runs with policy HITL disabled
- * (`src/runtime/builder.rs`), so what still stops an agent is an explicit
- * `request_approval` rather than the tier. An operator agreeing to a wider tier
- * is entitled to read that wherever they can agree to it.
+ * A function of the host's own `policyHitlEnabled`, not a fixed sentence: every
+ * deployed build reports it `false` today, so `false` is also the fallback for
+ * a host predating the field (`PolicyStatus.policyHitlEnabled`) — but the
+ * console states that as what the gate reports, not as a fact it is entitled to
+ * assume, so the sentence changes the day a gate does. An operator agreeing to
+ * a wider tier is entitled to read what still stops an agent under it,
+ * wherever they can agree to it.
  */
-export const AUTONOMY_PROMPTS_NOTE =
-  "Approval prompts remain explicit through request_approval.";
+export function autonomyPromptsNote(policyHitlEnabled: boolean): string {
+  return policyHitlEnabled
+    ? "The always-ask list and the spend cap still apply under the new tier."
+    : "Approval prompts remain explicit through request_approval.";
+}
 
 /**
  * What changes, in the host's own words on both sides of the move.
@@ -260,6 +268,18 @@ export function gatedBy(list: string[], target: string): boolean {
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * Whether this viewer may change the policy.
+   *
+   * Both writes behind this card call `require_admin`, so `false` renders the
+   * tiers and the deadline as a statement of what the company's policy IS,
+   * with nothing on the card that offers to change it.
+   *
+   * Required, and deliberately not defaulted, for the reason `GrantNamespace`
+   * gives: a caller that has not worked out the viewer's role must not get an
+   * enabled control by omission.
+   */
+  canManage: boolean;
 }
 
 /**
@@ -285,7 +305,7 @@ interface Props {
  *   edits, but editing `[policy]` in `company.toml` clears it. An operator who
  *   cannot see that would be surprised by a redeploy.
  */
-export function PolicySettings({ client, company }: Props) {
+export function PolicySettings({ client, company, canManage }: Props) {
   const [status, setStatus] = useState<PolicyStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -346,7 +366,7 @@ export function PolicySettings({ client, company }: Props) {
   // drafts with the old company's policy. The effect-driven read is already
   // guarded by its cleanup's `live` flag; this is the same guard for the write
   // path and the manual retry, following the `scopeRef` pattern `app-shell`
-  // hands `ChatView` so sends cannot cross a company switch.
+  // hands `RoomView` so sends cannot cross a company switch.
   const scopeRef = useRef({ client, company });
   useEffect(() => {
     scopeRef.current = { client, company };
@@ -581,6 +601,11 @@ export function PolicySettings({ client, company }: Props) {
   // backend's own matcher (`SHELL` for the `shell` tool, `invoice` for a
   // `invoice.send` kind), so a fence the gate accepts is never called a mistake
   // outright.
+  // Read from the host's own report, not assumed: every deployed build reports
+  // `false` today, so a host predating the field falls back to the same value
+  // every real deployment already has — see `PolicyStatus.policyHitlEnabled`.
+  const policyHitlEnabled = status?.policyHitlEnabled ?? false;
+
   const knownTools = status?.knownTools ?? null;
   const gateableSet = knownTools ?? (wiredToolsLoaded ? wiredTools : null);
   const unmatchedWiredTools = gateableSet
@@ -606,7 +631,7 @@ export function PolicySettings({ client, company }: Props) {
       } match any ${
         knownTools
           ? "tool the approval gate recognizes"
-          : "of the workflow tools wired here"
+          : "of the automation tools wired here"
       }. ${
         unmatchedWiredTools.length === 1 ? "It may" : "They may"
       } still be ${
@@ -947,10 +972,35 @@ export function PolicySettings({ client, company }: Props) {
           </div>
         ) : (
           <>
-            <div className="rounded-md border border-status-blocked/30 bg-status-blocked-soft p-3 text-xs text-muted-foreground">
-              Policy-based approval prompts are disabled. Teammates ask through{" "}
-              <code>request_approval</code>; read-only mode and the emergency stop still
-              hard-deny applicable calls.
+            {!canManage && (
+              <AdminOnlyNotice
+                testId="policy-read-only"
+                title="Only an admin can change this company's approval policy"
+              >
+                The tier decides how much every agent here may do without asking
+                first, so it is the company&rsquo;s to set rather than any one
+                member&rsquo;s. You can see which tier is in force.
+              </AdminOnlyNotice>
+            )}
+            <div
+              data-testid="policy-hitl-status"
+              className="rounded-md border border-status-blocked/30 bg-status-blocked-soft p-3 text-xs text-muted-foreground"
+            >
+              {policyHitlEnabled ? (
+                <>
+                  Policy-based approval prompts are active. The selected tier, the
+                  always-ask list below and the spend cap can each raise an approval
+                  card.
+                </>
+              ) : (
+                <>
+                  Policy-based approval prompts are disabled. Agents ask through{" "}
+                  <code>request_approval</code>; the paid-media tools stage their own
+                  approval and an authored workflow can add its own{" "}
+                  <code>requires_approval</code> gate. Read-only mode and the emergency
+                  stop still hard-deny applicable calls.
+                </>
+              )}
             </div>
             <div
               className="space-y-2"
@@ -972,7 +1022,7 @@ export function PolicySettings({ client, company }: Props) {
                       tierButtons.current[index] = el;
                     }}
                     type="button"
-                    disabled={saving}
+                    disabled={saving || !canManage}
                     onClick={() => chooseTier(tier)}
                     role="radio"
                     aria-checked={active}
@@ -1010,10 +1060,13 @@ export function PolicySettings({ client, company }: Props) {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="spend-cap">Spend approval threshold (inactive)</Label>
+              <Label htmlFor="spend-cap">
+                Spend approval threshold{!policyHitlEnabled && " (inactive)"}
+              </Label>
               <p className="text-xs text-muted-foreground">
-                Stored for a future policy-HITL mode. It does not create approval
-                prompts while policy HITL is disabled.
+                {policyHitlEnabled
+                  ? "Spends strictly under this amount are auto-approved; everything else parks for approval."
+                  : "Stored for a future policy-HITL mode. It does not create approval prompts while policy HITL is disabled."}
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <Input
@@ -1023,7 +1076,7 @@ export function PolicySettings({ client, company }: Props) {
                   step="0.01"
                   inputMode="decimal"
                   value={draftSpend}
-                  disabled
+                  disabled={saving || !canManage || !policyHitlEnabled}
                   placeholder="No cap"
                   onChange={(event) => setDraftSpend(event.target.value)}
                   className="max-w-40"
@@ -1033,7 +1086,7 @@ export function PolicySettings({ client, company }: Props) {
                   size="sm"
                   type="button"
                   variant={noSpendCap ? "secondary" : "outline"}
-                  disabled
+                  disabled={saving || !canManage || !policyHitlEnabled}
                   onClick={() => {
                     setNoSpendCap((current) => !current);
                     if (noSpendCap) setDraftSpend("");
@@ -1041,7 +1094,11 @@ export function PolicySettings({ client, company }: Props) {
                 >
                   {noSpendCap ? "No cap" : "Set no cap"}
                 </Button>
-                <Button size="sm" disabled onClick={() => void saveSpendCap()}>
+                <Button
+                  size="sm"
+                  disabled={saving || !canManage || !policyHitlEnabled}
+                  onClick={() => void saveSpendCap()}
+                >
                   Save cap
                 </Button>
               </div>
@@ -1060,19 +1117,23 @@ export function PolicySettings({ client, company }: Props) {
                   step="1"
                   inputMode="numeric"
                   value={draftDeadline}
-                  disabled={saving}
+                  disabled={saving || !canManage}
                   className="max-w-32"
                   onChange={(event) => setDraftDeadline(event.target.value)}
                 />
                 <span className="text-sm text-muted-foreground">hours</span>
-                <Button size="sm" disabled={saving} onClick={() => void saveDeadline()}>
-                  Save deadline
-                </Button>
+                {canManage && (
+                  <Button size="sm" disabled={saving} onClick={() => void saveDeadline()}>
+                    Save deadline
+                  </Button>
+                )}
               </div>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="always-approve">Always ask first (inactive)</Label>
+              <Label htmlFor="always-approve">
+                Always ask first{!policyHitlEnabled && " (inactive)"}
+              </Label>
               {/* Issue #1226: what an entry IS, said here rather than left to
                   the placeholder. `payment.send, filing.submit,
                   external.publish` used to be the only worked example this
@@ -1089,13 +1150,26 @@ export function PolicySettings({ client, company }: Props) {
                   what `always_approve::matches` implements and nothing in the
                   console said it. */}
               <p className="text-xs text-muted-foreground">
-                Stored for a future policy-HITL mode. These entries do not create
-                prompts now; teammates use <code>request_approval</code> explicitly.
+                {policyHitlEnabled ? (
+                  <>
+                    Every entry here wins over the selected tier, Full included, and
+                    raises an approval card before the matching tool runs.
+                  </>
+                ) : (
+                  <>
+                    Stored for a future policy-HITL mode. These entries do not create
+                    prompts now; agents use <code>request_approval</code> explicitly.
+                  </>
+                )}
               </p>
               <Input
                 id="always-approve"
+                // The settings pane is full width (#2131), and a bare comma
+                // list stretched to 1400px puts the label and the caret a
+                // head-turn apart. Capped where every other settings field is.
+                className={SETTINGS_FIELD_COLUMN}
                 value={draftAlways}
-                disabled
+                disabled={saving || !canManage || !policyHitlEnabled}
                 list={wiredTools.length > 0 ? "always-approve-tools" : undefined}
                 placeholder={alwaysAskPlaceholder(wiredTools)}
                 onChange={(event) => {
@@ -1121,7 +1195,7 @@ export function PolicySettings({ client, company }: Props) {
               {dirty && (
                 <Button
                   size="sm"
-                  disabled
+                  disabled={saving || !policyHitlEnabled}
                   onClick={() => void saveAlways()}
                 >
                   Save list
@@ -1137,16 +1211,18 @@ export function PolicySettings({ client, company }: Props) {
                   <code>[policy]</code> in <code>company.toml</code> clears it —
                   version control wins when it speaks.
                 </p>
-                <Button
-                  ref={resetButtonRef}
-                  size="sm"
-                  variant="outline"
-                  disabled={saving}
-                  onClick={() => requestReset()}
-                >
-                  <RotateCcw className="mr-1 h-3 w-3" />
-                  Use the manifest's policy
-                </Button>
+                {canManage && (
+                  <Button
+                    ref={resetButtonRef}
+                    size="sm"
+                    variant="outline"
+                    disabled={saving}
+                    onClick={() => requestReset()}
+                  >
+                    <RotateCcw className="mr-1 h-3 w-3" />
+                    Use the manifest&apos;s policy
+                  </Button>
+                )}
               </div>
             )}
             <AlertDialog
@@ -1258,10 +1334,12 @@ export function PolicySettings({ client, company }: Props) {
                   </AlertDialogDescription>
                   <p className="text-sm text-muted-foreground">
                     {pendingCapRaise !== null
-                      ? "This threshold remains inactive while policy HITL is disabled."
+                      ? policyHitlEnabled
+                        ? "Raising the cap lets qualifying spends pass without asking; the daily budget still stops spending after its limit."
+                        : "This threshold remains inactive while policy HITL is disabled."
                       : resetAwaitingConfirmation
-                        ? "Reset restores the stored policy fields; approval prompts remain explicit."
-                        : AUTONOMY_PROMPTS_NOTE}
+                        ? `Reset restores the stored policy fields. ${autonomyPromptsNote(policyHitlEnabled)}`
+                        : autonomyPromptsNote(policyHitlEnabled)}
                   </p>
                 </AlertDialogHeader>
                 <AlertDialogFooter>

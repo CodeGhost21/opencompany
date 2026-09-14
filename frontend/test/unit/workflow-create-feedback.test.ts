@@ -31,11 +31,19 @@ import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 function stubClient(post: (path: string, body?: unknown) => Promise<unknown>) {
   return {
     scopeFor: () => "/api/companies/acme",
-    // Every GET the dialog fires on open is an optional picker source (roster,
-    // sub-workflow list, wired channels, cognition path) and each has a
+    // Every other GET the dialog fires on open is an optional picker source
+    // (roster, sub-workflow list, wired channels) and each has a
     // degrade-on-failure path, so one rejection stands in for "this host offers
     // none of them" and leaves the form fully authorable.
-    get: () => Promise.reject(new Error("not offered by this host")),
+    // Creating a workflow is one description box now, on every company —
+    // `echo`, the offline brain, included. This suite is about the manual
+    // Name/ID/Description/Nodes/Connections form, which `open` below reaches
+    // the way an operator does. See `createSurface` in
+    // `@/lib/workflow-create-surface`.
+    get: (path: string) =>
+      path.endsWith("/inference")
+        ? Promise.resolve({ cognition: "echo" })
+        : Promise.reject(new Error("not offered by this host")),
     listTeam: () => Promise.reject(new Error("not offered by this host")),
     post,
   } as unknown as OpenCompanyClient;
@@ -83,6 +91,31 @@ function type(selector: string, value: string, nth = 0) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/** Sets a controlled textarea the way a keystroke would. */
+function typeDescription(value: string) {
+  const box = document.querySelector<HTMLTextAreaElement>(
+    '[data-testid="workflow-describe-box"]',
+  );
+  expect(box, "the create dialog should open as one description box").toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value",
+  )!.set!;
+  setter.call(box, value);
+  box!.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+/**
+ * Opens the create dialog **on its manual form**, by the route an operator
+ * takes to it.
+ *
+ * Create mode opens as one description box. The fields come back when the
+ * dialog cannot finish without them, and the shortest such case is driven here:
+ * this company cannot draft (`echo`), and a sentence with no words in it
+ * derives no name — so rather than mint an empty id the dialog hands over the
+ * fields and asks for one. What is left is the blank create form this suite is
+ * about, with its starter trigger node.
+ */
 async function open(client: OpenCompanyClient) {
   await act(async () => {
     root.render(
@@ -95,6 +128,20 @@ async function open(client: OpenCompanyClient) {
       }),
     );
   });
+  await act(async () => {
+    typeDescription("...");
+  });
+  await act(async () => {
+    submitButton().click();
+  });
+  expect(
+    inDialog('[placeholder="e.g. campaign_pipeline"]'),
+    "the hand-over should have put the fields back",
+  ).toBeTruthy();
+  // The hand-over asks for a name through `showError`, which scrolls. Cleared
+  // so "the refusal was taken to" below is a claim about the refusal, not about
+  // the setup that reached the form.
+  vi.mocked(Element.prototype.scrollIntoView).mockClear();
 }
 
 /** The smallest draft `validate()` accepts: the starter trigger node already
@@ -181,9 +228,9 @@ describe("the create dialog while a create is in flight", () => {
     // content attribute is on the ancestor. Asserting `.disabled` here would
     // read false and hide a working lock.
     for (const [what, selector] of [
-      ["the workflow id", '[placeholder="e.g. campaign_pipeline"]'],
-      ["the workflow name", '[placeholder="e.g. Campaign pipeline"]'],
-      ["the description", '[placeholder="What does this workflow do?"]'],
+      ["the automation id", '[placeholder="e.g. campaign_pipeline"]'],
+      ["the automation name", '[placeholder="e.g. Campaign pipeline"]'],
+      ["the description", '[placeholder="What does this automation do?"]'],
       ["a node id", '[aria-label="Node id"]'],
       ["a node name", '[placeholder="display name"]'],
       ["the node kind select", '[aria-label="Node kind"]'],
@@ -236,7 +283,7 @@ describe("the create dialog while a create is in flight", () => {
 describe("the create dialog when the host refuses", () => {
   it("keeps the dialog open with the draft intact and announces the reason", async () => {
     const post = vi.fn(() =>
-      Promise.reject(new ApiError(409, "conflict", "a workflow named “Campaign pipeline” already exists", true)),
+      Promise.reject(new ApiError(409, "conflict", "an automation named “Campaign pipeline” already exists", true)),
     );
     await open(stubClient(post));
     await fillValidDraft();

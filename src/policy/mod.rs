@@ -16,6 +16,12 @@
 //! console card) while the tool policy that parks calls compiles only under the
 //! `openhuman` feature.
 
+//! The [`floor`] module owns the consequence rule itself — which calls commit
+//! the company — read by [`judgement`] and by the shadow measurement above the
+//! `policy_hitl_enabled` bypass (issue #2147). It is one implementation with
+//! two readers for the reason [`always_approve`] is: this is the second time a
+//! single approval rule has needed to be read from two places.
+//!
 //! The [`judgement`] module answers the question neither of the above asks:
 //! which calls should stop for a human *on their own merits*, in the gap the
 //! static configuration leaves (issue #338). Always compiled for the same
@@ -24,6 +30,7 @@
 
 pub mod always_approve;
 pub mod consequence;
+pub mod floor;
 pub mod gate;
 pub mod judgement;
 

@@ -45,7 +45,7 @@ export interface SetupField {
 
 /** A company template this instance can be seeded from. */
 export interface SetupTemplate {
-  /** Stable preset slug, e.g. `agentic_marketing_agency`. */
+  /** Stable preset slug, e.g. `marketing_agency`. */
   id: string;
   /** Human-readable name. */
   name: string;
@@ -386,6 +386,15 @@ export function proposeSetupRoster(
     inferenceProvider?: string | null;
     inferenceBaseUrl?: string | null;
     inferenceModel?: string | null;
+    /**
+     * The operator chose "no model" and means it, so no model designs this
+     * roster whatever the host itself holds.
+     *
+     * Sending no credential does not say this: the host reads that as "use
+     * what you have", and a hosted tenant has one injected — which would
+     * design a roster with a model the operator had just declined.
+     */
+    forceCurated?: boolean;
   },
 ): Promise<SetupRoster> {
   return client.post<SetupRoster>("/api/v1/setup/roster", body);

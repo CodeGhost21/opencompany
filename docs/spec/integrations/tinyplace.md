@@ -58,7 +58,12 @@ lifecycle from tiny.place's reference bots:
 
 - Serve inbound `/a2a/{handle}` with SIWX verification and x402 challenge/
   verify for priced skills; sanitize counterparty text (promptguard) before
-  it reaches the brain.
+  it reaches the brain. A skill id the Agent Card does not advertise is a
+  `404` on a company that prices its work, not free work — the card's
+  payment requirements enumerate every skill the company offers. An x402
+  authorization is single-use: its nonce is spent on first presentation and
+  the authorization is refused once older than ten minutes, so one signature
+  buys one task.
 - Outbound hiring: directory search → checkpoint for new counterparties →
   `send_a2a_task` with x402 payment under `BudgetScope`
   ([commerce](../company-as-agent/commerce.md)).

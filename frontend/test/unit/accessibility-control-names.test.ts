@@ -27,7 +27,7 @@ describe("operator control names (issue #1395)", () => {
   });
 
   it("keeps the composer named after its placeholder disappears", () => {
-    const composer = read("views/chat/MessageComposer.tsx");
+    const composer = read("views/room/MessageComposer.tsx");
 
     expect(composer).toContain("aria-label={placeholder}");
   });

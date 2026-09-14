@@ -1,6 +1,6 @@
 # Hive Math Lab
 
-The [Agentic Math Lab](../agentic_math_lab/README.md), re-seated on **one
+The [Agentic Math Lab](../math_lab/README.md), re-seated on **one
 desk** instead of four, so a stated problem is answered by a tinyhivemind
 deliberation episode rather than by an orchestrator handing work from lead to
 lead. The desk keeps the parent lab's three working roles and adds three more

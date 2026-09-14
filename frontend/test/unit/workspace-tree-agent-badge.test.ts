@@ -80,7 +80,7 @@ function badges(): HTMLElement[] {
 }
 
 describe("the workspace tree's agent provenance badge", () => {
-  it("reads the teammate's display name, not the raw roster handle", async () => {
+  it("reads the agent's display name, not the raw roster handle", async () => {
     const tree = [
       node({ id: "standards", name: "standards", kind: "folder" }),
       node({
@@ -118,7 +118,7 @@ describe("the workspace tree's agent provenance badge", () => {
 
     await render(client(tree, [member("seo_specialist", "SEO Specialist")]));
 
-    expect(badges()[0].getAttribute("title")).toBe("Created by teammate seo_specialist");
+    expect(badges()[0].getAttribute("title")).toBe("Created by agent seo_specialist");
   });
 
   it("falls back to the handle when the roster has no name for it", async () => {
@@ -141,7 +141,7 @@ describe("the workspace tree's agent provenance badge", () => {
     expect(badges()[0].textContent).toBe("analytics_analyst");
   });
 
-  it("says nothing on a teammate's own folder, whose label already names them", async () => {
+  it("says nothing on an agent's own folder, whose label already names them", async () => {
     // The row's label IS the resolved teammate name here, so the pill would
     // repeat it back verbatim — which is the redundancy #1723 opens with, and
     // resolving the pill without suppressing it would only have made both
@@ -266,7 +266,7 @@ describe("the workspace tree's agent provenance badge", () => {
     expect(badges().map((b) => b.textContent)).toEqual(["Frontend Engineer"]);
   });
 
-  it("still badges an agent-authored node inside a teammate's own folder", async () => {
+  it("still badges an agent-authored node inside an agent's own folder", async () => {
     // Suppression is scoped to the teammate's own roster folder, not to the
     // subtree beneath it: a deliverable one teammate published into another's
     // folder is exactly the case the marker exists for.

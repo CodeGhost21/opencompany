@@ -117,8 +117,8 @@ export const DELIVERABLE_OPTIONS: { value: TaskDeliverable; label: string; hint:
   { value: "once", label: "Do it once", hint: "A one-off result." },
   {
     value: "workflow",
-    label: "Build me the workflow",
-    hint: "A reusable workflow you can open, edit and re-run.",
+    label: "Build me the automation",
+    hint: "A reusable automation you can open, edit and re-run.",
   },
 ];
 
@@ -263,7 +263,7 @@ export function CreateTaskDialog({
           />
           <p className="text-2xs text-muted-foreground">
             Leave unassigned and the card is routed for you. If more than one
-            teammate fits, it waits and asks rather than picking one.
+            agent fits, it waits and asks rather than picking one.
           </p>
         </div>
 

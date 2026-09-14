@@ -21,6 +21,9 @@ pub trait WorkspaceStore: Send + Sync {
         -> Result<Option<(WorkspaceNode, String, u64)>>;
     async fn write(&self, company: &CompanyId, id: &str, content: &str,
                    author: WorkspaceOrigin) -> Result<WorkspaceNode>;
+    async fn write_with_revision(&self, company: &CompanyId, id: &str, content: &str,
+                                 author: WorkspaceOrigin, expected_updated_at: Option<u64>)
+        -> Result<WorkspaceNode>;
     async fn create(&self, /* parent, name, kind, content */) -> Result<WorkspaceNode>;
     async fn adopt_or_create_folder(&self, company: &CompanyId, parent: Option<&str>,
                                     name: &str, origin: WorkspaceOrigin)
@@ -42,6 +45,18 @@ pub trait WorkspaceStore: Send + Sync {
 
 Nodes are folders or files (`NodeKind`); `[[wikilink]]` backlinks are derived
 at read time by the GraphQL layer.
+
+**Conditional text writes.** `write_with_revision` checks `Some(revision)` at
+the storage boundary and returns `Conflict` without modifying the note when
+its revision no longer matches. `None` is unconditional; `write` delegates to
+that form. Successful text writes advance `updated_at_millis` strictly, even
+within the same millisecond. Renames, moves, and promotions advance the current
+revision too; concurrent metadata updates preserve the latest text revision and
+authorship. All decorators forward the condition unchanged.
+`FsOps` checks under the workspace-index lock (single process per data dir),
+SQLite uses an `IMMEDIATE` transaction, and MongoDB conditions its document
+update on the metadata it read. `workspace_write` passes the revision supplied
+by the agent, so two edits based on one revision cannot both succeed.
 
 **No torn reads (#887).** A `read` concurrent with a `write` on the same node
 returns one whole revision or the other — never an error, and never a prefix.
@@ -267,4 +282,3 @@ result; a minter returns the collision as an error, since its caller needs the
 id. The agent/desks folders are organizational and attribution units only;
 agents may create and write ordinary shared content anywhere. `secrets/` is
 the operator-only exception on the workspace tool surface.
-

@@ -10,7 +10,7 @@ import type {
   WorkflowRunOutcome,
   WorkflowRunResult,
 } from "@/api/workflows";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 import { RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
 

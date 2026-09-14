@@ -74,6 +74,53 @@ fn move_line(kind: &str) -> Option<&'static str> {
 }
 
 /// The rules those moves are read under.
+/// **Write about yourself in the first person.**
+///
+/// The transcript attributes every row, the reader's own included — `[20]
+/// refunds (you):` — so a member can see which lines are its own. Seeing them
+/// is not the same as writing that way: rows are labelled by id, and a member
+/// copies the convention it was shown, which produced commits like "both
+/// refunds and exchanges agreed" written BY refunds — a member describing
+/// itself as somebody else in the one line whose job is to say who carried the
+/// decision.
+///
+/// Naming a COLLEAGUE by id stays right: that is how a citation is read back
+/// and how the fold counts them.
+const FIRST_PERSON_RULE: &str = "Lines marked `(you)` in the transcript are your own. Write about \
+yourself in the first person — never by your own id — and name colleagues by their id as usual.";
+
+/// **A turn is work, then one line — not one line instead of work.**
+///
+/// The move grammar describes the LINE a turn ends with, and a seat reading only
+/// that treats the whole turn as speech: it reasons from whatever facts happen to
+/// be in the transcript, and when there are none it asks the room instead of
+/// looking. Observed, with the tools sitting in its own belt: a two-seat desk
+/// spent all eight turns asking each other who held which tool and exhausted its
+/// budget without a single read; a seat wrote "I hold the tool and can produce the
+/// answer this turn" and then produced a line about the answer rather than the
+/// answer. The one time a seat did call a tool, the operator's message had
+/// literally told it to.
+///
+/// Nothing was blocking those calls. `speak()` runs the ordinary turn machinery,
+/// the belt is built the same way, and the same agent on the same desk calls the
+/// same tools freely when it answers outside a room. What was missing is that
+/// nobody asked it to: the prompt requested a position and it gave one.
+///
+/// So the one-line contract stays exactly as it was — the fold reads the final
+/// line and nothing else — and this says what the turn is allowed to do BEFORE
+/// that line, which is everything an ordinary turn may do.
+const WORK_BEFORE_LINE: &str = "\
+Before you write that line, USE YOUR TOOLS. A turn is work and then one line, \
+not one line instead of work. Look up what you need — the order, the item, the \
+product's variants, the customer — rather than asking the room for a fact you \
+can fetch yourself, and rather than reasoning from what happens to be in the \
+transcript already. A seat that asks its colleagues what it could have read \
+costs the room a turn and adds nothing.\n\
+And when the room has already carried an option that YOUR tool performs, \
+perform it in this turn, then write the line saying you did. Deciding is not \
+doing: no step after the room closes will carry out what it settled on, so an \
+action nobody performs never happens, however clearly it was agreed.";
+
 const DELIBERATE_RULES: &str = "\
 The # on a topic and the ^ on a citation are part of the grammar: `!propose \
 #canary ...` names an option, `!propose canary ...` names nothing and is \
@@ -113,6 +160,52 @@ an aside you never surface bought the room nothing. Some rows in the transcript 
 show only that an aside happened, with its author and who was in it — you \
 cannot read those, and if one matters, ask its author here on the desk.";
 
+/// What a member is told on a turn it cannot see its peers on.
+///
+/// **Deposit what you know, do not advocate what you want.** This sentence used
+/// to read "Form your own first", and that instruction is the single biggest
+/// measured defect in the deliberation protocol.
+///
+/// The blind round exists so members form positions independently. But on any
+/// question where members hold *correlated* priors and one member holds the
+/// decisive fact — the shape the literature calls a hidden profile, and the
+/// shape this company's desks actually have, since the fleet technician holds
+/// machine facts nobody else does — independence is exactly what makes it
+/// fatal. Every member opens by advocating what its own reading favours, a
+/// proposal counts as its own author's support in `tinyhivemind`, and the
+/// option the shared prior favours therefore reaches quorum *inside the blind
+/// round*, before the one informed member has been able to say anything. A
+/// traced episode shows it happening in five turns: four seats propose the
+/// decoy, the fifth proposes the truth, the room enters the Commit phase, and
+/// the dissenting fact arrives one turn too late to count.
+///
+/// The room is not converging there. It is amplifying a shared error and
+/// calling the result agreement.
+///
+/// Depositing instead is measured, on the deliberation benchmark over 2000
+/// seeded rooms (`vendor/tinyhivemind/crates/tinyhivemind-hive/examples/bench`,
+/// `--blind-evidence`):
+///
+/// | profile | advocate first | deposit first |
+/// | --- | --- | --- |
+/// | hidden (one member holds the fact) | 16.2% | **66.6%** |
+/// | uniform (everyone holds a noisy copy) | 78.8% | 75.1% |
+///
+/// It costs 3.7 points where every member's reading is equally good, and buys
+/// **fifty** where one member knows something the others do not. A desk of
+/// specialists is the second case by construction, which is why this host takes
+/// the trade for every desk rather than making it a knob.
+///
+/// Raising `quorum` was tried first and does not work: at unanimity the room
+/// simply stops deciding (31% of episodes reach a decision, and accuracy falls
+/// to 10.1%). The bar is not the problem; what the bar is counting is.
+const BLIND_SIGHT: &str = "\
+You cannot yet see your peers' positions. Put what you *know* on the floor — \
+the fact, figure or reading you hold that the others may not — rather than the \
+option you already favour. If your seat may deposit evidence, deposit it: the \
+room can weigh a fact it has been shown, and cannot weigh one you kept while \
+arguing from it.";
+
 /// The extra sentence a room under `require_evidential` is given.
 ///
 /// Rendered only when the desk actually requires it, because on a desk that
@@ -151,7 +244,7 @@ fn commit_protocol(topic: &str) -> String {
          topic and the ^ on the citation; without them the line records nothing. Angle brackets \
          are not part of the line — write the sentence itself. This is bookkeeping, not a fresh \
          judgement: record the topic the room actually settled on rather than the one you would \
-         have preferred, and do not re-derive the answer. Write nothing before or after the \
+         have preferred, and do not re-derive the answer. {FIRST_PERSON_RULE} Write nothing before or after the \
          single marker line."
     )
 }
@@ -280,7 +373,7 @@ impl<'a> EpisodePrompt<'a> {
     #[must_use]
     pub fn render(&self, turn: &HiveTurn, visible: &[SessionMessage]) -> String {
         let sight = match turn.visibility {
-            Visibility::Blind => "You cannot yet see your peers' positions. Form your own first.",
+            Visibility::Blind => BLIND_SIGHT,
             Visibility::Full => "You can see the whole room.",
         };
         // Folded once and read twice: the block a member reads its standings
@@ -305,7 +398,7 @@ impl<'a> EpisodePrompt<'a> {
             self.missing(),
             self.peers(),
             self.last_line(visible),
-            render_transcript(visible, self.trigger),
+            render_transcript(visible, self.trigger, Some(&self.member.id)),
         )
     }
 
@@ -366,6 +459,10 @@ impl<'a> EpisodePrompt<'a> {
         );
         let head = "Reply with ONE line only, beginning with exactly one of these markers:";
         let mut tail = DELIBERATE_RULES.to_owned();
+        tail.push('\n');
+        tail.push_str(WORK_BEFORE_LINE);
+        tail.push('\n');
+        tail.push_str(FIRST_PERSON_RULE);
         if self.quorum.require_evidential {
             tail.push('\n');
             tail.push_str(EVIDENTIAL_RULE);
@@ -710,7 +807,11 @@ const EPISODE_DIVIDER: &str = "--- Above: earlier conversation on this desk, fro
 /// parameter existed) renders exactly as it always has, and a caller that
 /// never learned a trigger passes `None` and gets the same guarantee.
 #[must_use]
-pub fn render_transcript(visible: &[SessionMessage], trigger: Option<Sequence>) -> String {
+pub fn render_transcript(
+    visible: &[SessionMessage],
+    trigger: Option<Sequence>,
+    viewer: Option<&str>,
+) -> String {
     let split = trigger
         .map(|trigger| visible.partition_point(|message| message.sequence <= trigger))
         .filter(|&split| split > 0 && split < visible.len());
@@ -719,13 +820,41 @@ pub fn render_transcript(visible: &[SessionMessage], trigger: Option<Sequence>) 
         if split == Some(index) {
             lines.push(EPISODE_DIVIDER.to_owned());
         }
-        lines.push(render_transcript_line(message));
+        lines.push(render_transcript_line(message, viewer));
     }
     lines.join("\n")
 }
 
 /// One transcript row: `[sequence] author: content`.
-fn render_transcript_line(message: &SessionMessage) -> String {
+///
+/// The reading member's own rows carry a `(you)` marker after their author id,
+/// and everyone else's render by name alone. Without that distinction a member
+/// read its own turns in exactly the third person it read its colleagues' —
+/// and wrote back in the same voice.
+/// Observed live: `software_engineer` closed a room with "carried with support
+/// from software_engineer and junior_engineer", crediting itself by name as
+/// though it were someone else, because the transcript it had just read gave it
+/// no other convention to copy.
+///
+/// This is the same fix `Speaker::Viewer` is for the chat seed (issue #1956),
+/// which the episode's own renderer never had: "there were no colleagues in the
+/// room" is one failure, and "there is no *self* in the room" is its twin.
+///
+/// The id stays in front of the marker rather than being replaced by a bare
+/// `You`, because the transcript is the citation surface: a member is named by
+/// its id when a colleague objects to `>N` or backs `^N`, so a row it cannot
+/// tie back to that id is one it cannot recognise as the thing being argued
+/// with. Attribution is upstream's contract here — `tests/hivemind_e2e.rs`
+/// parses these rows by author id — and this adds to it rather than
+/// substituting for it.
+///
+/// `None` renders every row by name, for a caller with no reader to speak of.
+fn render_transcript_line(message: &SessionMessage, viewer: Option<&str>) -> String {
+    if let (Some(viewer), SessionAuthor::Agent { id, .. }) = (viewer, &message.author)
+        && id == viewer
+    {
+        return format!("[{}] {id} (you): {}", message.sequence, message.content);
+    }
     let author = match &message.author {
         SessionAuthor::Agent { label, .. }
         | SessionAuthor::Person { label, .. }

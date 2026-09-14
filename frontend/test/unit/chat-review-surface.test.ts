@@ -6,15 +6,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { TaskStatus } from "@/api/tasks";
 import { makeMessage, type ChatMessage } from "@/lib/chat";
-import { isTaskInReview, MessageRow } from "@/views/chat/MessageRow";
+import { isTaskInReview, MessageRow } from "@/views/room/MessageRow";
 import {
   canSubmitReview,
   repliesInThread,
   reviewAnchorForThread,
   reviewAnchorsForThread,
   reviewCardIdForThread,
-} from "@/views/chat/model";
-import type { Sender, TimelineEntry } from "@/views/chat/model";
+} from "@/views/room/model";
+import type { Sender, TimelineEntry } from "@/views/room/model";
 
 const IN_REVIEW: Readonly<Record<string, TaskStatus>> = {
   "t-1": { column: "in_review" },

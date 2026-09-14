@@ -10,7 +10,7 @@ import { expect, test, type Page } from "@playwright/test";
  * nobody else's. A stubbed `listRuns` proves the component; only a host proves
  * the selector.
  *
- * The walk navigates to `/#/team/engineer` and accepts either a populated
+ * The walk navigates to `/#/company/agent/engineer` and accepts either a populated
  * attempt list or the "hasn't run yet" state — whether the host's data
  * directory holds any attempts decides which, and both are correct. The
  * journey is the operator's, and it had no surface at all before this.
@@ -38,8 +38,8 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("a teammate's page lists the attempts it has made", async ({ page }) => {
-  await page.goto("/#/team/engineer");
+test("an agent's page lists the attempts it has made", async ({ page }) => {
+  await page.goto("/#/company/agent/engineer");
   await dismissOnboarding(page);
 
   const section = page.getByTestId("agent-runs");

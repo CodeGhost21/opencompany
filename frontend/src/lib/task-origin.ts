@@ -10,7 +10,7 @@
 // from drifting apart.
 
 import { hostMessageId } from "@/lib/chat";
-import { channelForThread } from "@/views/chat/model";
+import { channelForThread } from "@/views/room/model";
 
 export type OriginConversation =
   /** The card was not opened from a conversation; the row renders nothing. */

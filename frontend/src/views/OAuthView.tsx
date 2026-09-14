@@ -1,17 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { openOutward } from "@/lib/external-links";
 import { Info, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
-import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import {
-  CATALOG_READ_TIMEOUT_MS,
   disconnectComposioConnection,
-  getComposioStatus,
   listComposioConnections,
   startComposioAuthorize,
   type ComposioConnectedAccount,
-  type ComposioStatus,
 } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
@@ -19,20 +16,20 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { catalogWarning } from "@/lib/composio-catalog";
 import { toolkitSlug, type ComposioReach } from "@/lib/connections";
-import { classifyLoadFailure } from "@/lib/section-load";
 import {
   buildGridProviders,
   connectedProviderCount,
   disconnectRouteFor,
   type GridProvider,
 } from "@/lib/provider-grid";
-import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
+import {
+  ProviderDetail,
+  type ConnectionSubject,
+} from "@/views/connections/ProviderDetail";
 import { grantNamespace } from "@/components/grant-namespace";
 import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
-import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
-import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
-import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
+import { useComposioCredential } from "@/views/connections/use-composio-credential";
 
 interface Props {
   client: OpenCompanyClient;
@@ -62,64 +59,56 @@ type Load = "loading" | "ready" | "unavailable";
  * diff across the module for no surface benefit. The same split Rule 1 of
  * `docs/spec/runtime/ledgers-console-ia.md` makes for "ledger".
  *
- * Composio stays on this page. `ComposioSection` looks self-contained, but
- * `ProvidersSection` reads its `credentialSource`, `granted`, `openMode` and
- * catalog warning to decide what every provider tile renders — the credential
- * is the engine the provider list runs on, and splitting them would separate a
- * credential from what it unlocks.
+ * # Composio is its own page now, and that is not a reversal of the comment
+ * this replaces
+ *
+ * What stood here said Composio could not leave: `ComposioSection` looks
+ * self-contained, but `ProvidersSection` reads the credential's
+ * `credentialSource`, `granted`, `openMode` and catalog warning to decide what
+ * every provider tile renders — the credential is the engine the provider list
+ * runs on, so splitting them would separate a credential from what it unlocks.
+ *
+ * Every word of that about the dependency is still true. What it got wrong is
+ * the conclusion: it is a **data** dependency, and it argued a **layout** one
+ * from it. What the grid needs is the credential's *state*, not the
+ * credential's *form* sitting above it in the same scroll — so the two
+ * surfaces are two pages (`#/connections/composio`, issue #2259) and the state
+ * they share lifted into `useComposioCredential`, which both of them mount and
+ * neither of them fetches for itself. Two surfaces disagreeing about whether
+ * the company has a credential is what the old comment was really guarding
+ * against (issues #582 and #586); one shared read is what prevents it, and
+ * colocation was only ever a proxy for that.
+ *
+ * The page's own tabs went with it. Providers *was* one of two tabs here —
+ * credentials on top of one column first, then a tab strip — and with the
+ * credential gone there is one question left, so the page answers it directly.
  */
 export function OAuthView({ client, company }: Props) {
+  // The credential this page's tiles are rendered from, and the same read the
+  // Composio page makes. Destructured under the names the rest of this file
+  // already used, so the split is a change of *where the state lives* and not a
+  // rewrite of the 400 lines that consume it.
+  const credential = useComposioCredential(client, company);
+  const { status, attested, canManage } = credential;
+  const reachSettled = credential.settled;
+  const probeFailed = credential.failed;
   const [load, setLoad] = useState<Load>("loading");
   const [states, setStates] = useState<Record<string, ConnectionState>>({});
   // The Composio connection objects behind those booleans, keyed by normalized
   // toolkit slug (issue #404). `states` still decides *whether* a provider is
   // connected — this decides *what* is connected, which is what a revoke has to
   // be addressed to and what the detail view opens.
-  const [accounts, setAccounts] = useState<Record<string, ComposioConnectedAccount[]>>({});
+  const [accounts, setAccounts] = useState<
+    Record<string, ComposioConnectedAccount[]>
+  >({});
   // The slug of the provider whose detail view is open, or `null`. A slug rather
   // than the row itself, so the open panel re-derives from `providers` after a
   // refresh instead of showing a snapshot of the state before the revoke.
   const [opened, setOpened] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  // Bumped when the company credential changes, to remount the sections whose
-  // reported tier is downstream of it (issue #586).
-  const [credentialGeneration, setCredentialGeneration] = useState(0);
-  // Whether this viewer may change what the company connects through (issue
-  // #403). A connection belongs to the company, so changing one is an admin's
-  // call; reading the page is everyone's.
-  //
-  // **Courtesy, not enforcement.** The host refuses every write on this page
-  // with a 403 whatever this says. All hiding the controls prevents is offering
-  // an operator a button that cannot work — which on this page would be a
-  // particularly poor greeting, since the failure arrives only after they have
-  // pasted a live credential into a form that could never submit it.
-  const [canManage, setCanManage] = useState(false);
-  // The host's Composio answer, or `null` while unknown / not reachable.
-  //
-  // The whole status, not just the routing facts it used to be narrowed to: the
-  // page's one provider grid is built from `effectiveCatalog` (issue #582), and
-  // the catalog's honesty markers (`catalogSource`, `catalogNotice`) travel with
-  // it. Narrowing here and re-fetching the same call elsewhere for the rest is
-  // how the page ended up with two lists.
-  const [status, setStatus] = useState<ComposioStatus | null>(null);
   // Slugs connected through the by-slug escape hatch this session, so they keep
   // a tile instead of vanishing after a successful sign-in (issue #397).
   const [extraToolkits, setExtraToolkits] = useState<string[]>([]);
-  // Whether this instance carries a platform-projected identity, as Composio
-  // reports it. A second witness for the same host-level fact the connection
-  // rows carry — and the only one available when the manifest declares no
-  // connections, which is exactly when the #319 guard used to go dark.
-  const [attested, setAttested] = useState(false);
-  // Whether the Composio probe has answered. The grid must not paint before it
-  // has: `refresh()` routinely resolves first, and a tile rendered on a null
-  // `reach` reads "Not available on this host" — so every tile would flash that
-  // and then flip to Connect a moment later.
-  const [reachSettled, setReachSettled] = useState(false);
-  // Whether the Composio probe could not be answered at all. Distinct from
-  // `status === null`, which is also what a genuine "no Composio surface"
-  // answer sets — collapsing the two renders "we could not check" as a
-  // confident "this host has no providers to offer yet".
-  const [probeFailed, setProbeFailed] = useState(false);
   // Poll timers for Composio sign-ins in flight, keyed by toolkit, so a company
   // switch or unmount cannot leave one running.
   const pollTimers = useRef<Record<string, number>>({});
@@ -153,7 +142,9 @@ export function OAuthView({ client, company }: Props) {
     ]);
     setAccounts(
       Object.fromEntries(
-        rows.filter((r) => r.accounts?.length).map((r) => [toolkitSlug(r.toolkit), r.accounts!]),
+        rows
+          .filter((r) => r.accounts?.length)
+          .map((r) => [toolkitSlug(r.toolkit), r.accounts!]),
       ),
     );
     // Bumped here rather than on the success path: the account-choice section
@@ -177,58 +168,6 @@ export function OAuthView({ client, company }: Props) {
     void refresh();
   }, [refresh]);
 
-  // Composio status drives the only route this page offers (issue #822). A host
-  // without the feature, without the grant, or without a credential simply
-  // leaves `reach` null, and `connectRoute` falls back to managed/unavailable —
-  // there is no native arm to fall back to any more.
-  useEffect(() => {
-    let live = true;
-    const abort = new AbortController();
-    setReachSettled(false);
-    setProbeFailed(false);
-    void (async () => {
-      try {
-        // Bounded and cancellable through the client itself. The bound must
-        // outlast the host's own upstream-catalog budget, or a cold catalog is
-        // abandoned at exactly the moment the host is about to answer with its
-        // flagged fallback — and the grid renders "couldn't check" for a host
-        // that could have explained itself.
-        const probed = await getComposioStatus(client, company, {
-          timeoutMs: CATALOG_READ_TIMEOUT_MS,
-          signal: abort.signal,
-        });
-        if (!live) return;
-        setStatus(probed);
-        setAttested(probed?.credentialSource === "attested");
-      } catch (err) {
-        // A read this page tore down itself — a company switch, an unmount —
-        // says nothing about the host, so it must not leave a warning behind.
-        if (err instanceof Error && err.name === "AbortError") return;
-        // A 404 is the honest "no Composio surface on this host": leave the
-        // page in its no-route state. Anything else — a 5xx, an offline
-        // network, an expired session, a host that did not answer in time — is
-        // UNKNOWN, not absent, and says so.
-        if (live) {
-          setStatus(null);
-          setAttested(false);
-          if (classifyLoadFailure(err) === "error") setProbeFailed(true);
-        }
-      } finally {
-        if (live) setReachSettled(true);
-      }
-    })();
-    return () => {
-      live = false;
-      abort.abort();
-    };
-    // `credentialGeneration` is load-bearing, not decoration: this probe feeds
-    // `reach.hasCredential` and `attested`, both of which are downstream of the
-    // company credential. Setting a key flips `credentialSource` from `none` to
-    // `company`, and without a re-probe the grid would keep every tile on the
-    // "no credential" route while the Composio section right below it correctly
-    // reported the opposite (issue #586).
-  }, [client, company, credentialGeneration]);
-
   useEffect(() => {
     const timers = pollTimers.current;
     return () => {
@@ -236,22 +175,6 @@ export function OAuthView({ client, company }: Props) {
       pollTimers.current = {};
     };
   }, [company]);
-
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      let admin = false;
-      try {
-        admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No user plane on this host, or not signed in — treat as non-admin.
-      }
-      if (live) setCanManage(admin);
-    })();
-    return () => {
-      live = false;
-    };
-  }, [client, company]);
 
   /**
    * The hosted route: Composio runs the OAuth on its own side, so there is no
@@ -271,7 +194,10 @@ export function OAuthView({ client, company }: Props) {
    * happened. Comparing ids answers both cases with one rule, since the first
    * connect starts from an empty set.
    */
-  async function connectComposio(p: { providerId: string; label: string }, toolkit: string) {
+  async function connectComposio(
+    p: { providerId: string; label: string },
+    toolkit: string,
+  ) {
     // A sign-in for this toolkit is already polling (it can have been started
     // from a different tile sharing the slug). Clear the flag we just set rather
     // than leaving this tile spinning on someone else's flow.
@@ -279,7 +205,11 @@ export function OAuthView({ client, company }: Props) {
       setBusy((b) => (b === p.providerId ? null : b));
       return;
     }
-    const { connectUrl } = await startComposioAuthorize(client, company, toolkit);
+    const { connectUrl } = await startComposioAuthorize(
+      client,
+      company,
+      toolkit,
+    );
     // `noopener` keeps the Composio tab from reaching back through
     // `window.opener` — it is a third-party page carrying an OAuth flow, so it
     // stays. The cost is that the handle is ALWAYS null: with `noopener` (or
@@ -293,30 +223,51 @@ export function OAuthView({ client, company }: Props) {
     // and trading a real security property for a nicer error, which is the
     // wrong trade on a tab we hand an OAuth URL to. `ComposioSection.signIn`
     // opens the same URL the same way and likewise does not check.
-    window.open(connectUrl, "_blank", "noopener,noreferrer");
+    // The desktop shell first: a webview cannot create the tab this asks for,
+    // so `window.open` there opens nothing while the toast below and the poll
+    // both proceed — the operator is told to finish a sign-in on a page that
+    // never appeared. `openOutward` returns false in a browser, where the
+    // original call is still the right one.
+    if (!openOutward(connectUrl)) {
+      window.open(connectUrl, "_blank", "noopener,noreferrer");
+    }
     toast.message(`Complete ${p.label} sign-in in the new tab.`);
     // What was already there before the tab opened. Read from the page's own
     // state rather than re-fetched: it is the same list the operator is looking
     // at, and a fresh read here could race the sign-in they have already
     // completed in another tab.
-    const before = new Set((accounts[toolkitSlug(toolkit)] ?? []).map((a) => a.id));
-    const wasConnected = providers.some((row) => row.slug === toolkitSlug(toolkit) && row.connected);
+    const before = new Set(
+      (accounts[toolkitSlug(toolkit)] ?? []).map((a) => a.id),
+    );
+    const wasConnected = providers.some(
+      (row) => row.slug === toolkitSlug(toolkit) && row.connected,
+    );
     const deadline = Date.now() + 120_000;
     const poll = async () => {
       delete pollTimers.current[toolkit];
       if (Date.now() > deadline) {
         setBusy((b) => (b === p.providerId ? null : b));
-        toast.message(`${p.label} sign-in timed out. Try again if it didn't complete.`);
+        toast.message(
+          `${p.label} sign-in timed out. Try again if it didn't complete.`,
+        );
         return;
       }
       try {
         const rows = await listComposioConnections(client, company);
-        const row = rows.find((r) => r.toolkit.toLowerCase() === toolkit.toLowerCase());
+        const row = rows.find(
+          (r) => r.toolkit.toLowerCase() === toolkit.toLowerCase(),
+        );
         // An id we had not seen settles it. Falling back to `connected` covers a
         // host predating the `accounts` field, where the first connect is the
         // only one this poll can observe at all.
-        const arrived = row?.accounts?.some((a) => a.connected && !before.has(a.id)) === true;
-        if (arrived || (row?.accounts === undefined && row?.connected === true && !wasConnected)) {
+        const arrived =
+          row?.accounts?.some((a) => a.connected && !before.has(a.id)) === true;
+        if (
+          arrived ||
+          (row?.accounts === undefined &&
+            row?.connected === true &&
+            !wasConnected)
+        ) {
           setBusy((b) => (b === p.providerId ? null : b));
           toast.success(`Connected ${p.label}.`);
           // Re-read the host's reconciled view so the tile flips to connected.
@@ -382,11 +333,18 @@ export function OAuthView({ client, company }: Props) {
    * it answered 200, the toast said "Disconnected Gmail", and Gmail was still
    * connected on the next refresh.
    */
-  async function disconnectAccount(p: GridProvider, account: ComposioConnectedAccount) {
+  async function disconnectAccount(
+    p: GridProvider,
+    account: ComposioConnectedAccount,
+  ) {
     if (busy) return;
     setBusy(p.providerId);
     try {
-      const { note } = await disconnectComposioConnection(client, company, account.id);
+      const { note } = await disconnectComposioConnection(
+        client,
+        company,
+        account.id,
+      );
       // The host's own words rather than ours: it is the side that knows what a
       // revoke reached, and restating it here is a second place to drift from
       // what actually happened.
@@ -453,7 +411,8 @@ export function OAuthView({ client, company }: Props) {
   // up offering a Connect that could only 400.
   const platformManaged =
     load === "ready" &&
-    (Object.values(states).some((s) => s.credentialSource === "attested") || attested);
+    (Object.values(states).some((s) => s.credentialSource === "attested") ||
+      attested);
 
   // The routing facts, narrowed out of the status the page already holds.
   const reach: ComposioReach | null = useMemo(
@@ -483,7 +442,14 @@ export function OAuthView({ client, company }: Props) {
         platformManaged,
         accounts,
       ),
-    [status?.effectiveCatalog, extraToolkits, states, reach, platformManaged, accounts],
+    [
+      status?.effectiveCatalog,
+      extraToolkits,
+      states,
+      reach,
+      platformManaged,
+      accounts,
+    ],
   );
 
   // Re-derived from the grid every render, so the open panel reflects the last
@@ -513,7 +479,8 @@ export function OAuthView({ client, company }: Props) {
           provider: openedProvider,
           noCredential: status?.credentialSource === "none",
           onConnectAnother: (p) => void connect(p),
-          onDisconnectAccount: (p, account) => void disconnectAccount(p, account),
+          onDisconnectAccount: (p, account) =>
+            void disconnectAccount(p, account),
         };
 
   // Counted off the rendered grid, not off the raw host rows. The badge used to
@@ -528,11 +495,11 @@ export function OAuthView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Apps"
-        width="5xl"
+        width="full"
         description={
           <>
-            The third-party accounts your company signs in to and acts through. It only uses
-            what you connect.
+            The third-party accounts your company signs in to and acts through.
+            It only uses what you connect.
           </>
         }
         trailing={
@@ -541,14 +508,17 @@ export function OAuthView({ client, company }: Props) {
           ) : null
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {load === "unavailable" && (
           <Alert>
             <Info className="size-4" />
-            <AlertTitle>OAuth connections aren&apos;t wired on this host yet</AlertTitle>
+            <AlertTitle>
+              OAuth connections aren&apos;t wired on this host yet
+            </AlertTitle>
             <AlertDescription>
-              The catalog below shows what your company can connect once the host exposes its OAuth
-              endpoints. Connecting is disabled until then.
+              The catalog below shows what your company can connect once the
+              host exposes its OAuth endpoints. Connecting is disabled until
+              then.
             </AlertDescription>
           </Alert>
         )}
@@ -558,9 +528,10 @@ export function OAuthView({ client, company }: Props) {
             <ShieldCheck className="size-4" />
             <AlertTitle>Connections are managed by the platform</AlertTitle>
             <AlertDescription>
-              This instance signs in with its own platform identity, so there is no provider key to
-              register here and nothing stored on this instance. Connect a provider from the
-              platform and it shows up here.
+              This instance signs in with its own platform identity, so there is
+              no provider key to register here and nothing stored on this
+              instance. Connect a provider from the platform and it shows up
+              here.
             </AlertDescription>
           </Alert>
         )}
@@ -568,42 +539,17 @@ export function OAuthView({ client, company }: Props) {
         {!canManage && (
           <Alert data-testid="connections-read-only">
             <Info className="size-4" />
-            <AlertTitle>Only an admin can change what this company connects through</AlertTitle>
+            <AlertTitle>
+              Only an admin can change what this company connects through
+            </AlertTitle>
             <AlertDescription>
-              A connection belongs to the company — it is the account your teammates act
-              through — so an admin manages it. You can see everything that is wired here; ask an
-              admin to add, change or remove one.
+              A connection belongs to the company — it is the account your
+              agents act through — so an admin manages it. You can see
+              everything that is wired here; ask an admin to add, change or
+              remove one.
             </AlertDescription>
           </Alert>
         )}
-
-        {/* The general answer sat above the Composio-specific one: one key
-            authorizing every brokered surface, with the Composio credential as
-            the escape hatch (issue #586). While this company reaches Composio
-            through its own account and nothing else, that key buys nothing —
-            and asking for it on the first-run screen sends an operator after a
-            credential this console can no longer use. The Composio section
-            below is the whole answer now. */}
-        {!COMPOSIO_MANAGED_HIDDEN && (
-          <CompanyCredentialCard
-            client={client}
-            company={company}
-            canManage={canManage}
-            onChanged={() => setCredentialGeneration((n) => n + 1)}
-          />
-        )}
-
-        {/* Remounted on a credential change so its status is re-read: the tier
-            it reports (`company` vs `attested` vs `none`) is downstream of the
-            key that was just set, and a stale badge would tell the operator
-            their change did not land. */}
-        <ComposioSection
-          key={credentialGeneration}
-          client={client}
-          company={company}
-          canManage={canManage}
-          onChanged={() => setCredentialGeneration((n) => n + 1)}
-        />
 
         {/* The page's one provider list (issue #582). It used to be two — this
             grid and a categorised grid of eleven hardcoded tiles below it — and
@@ -624,12 +570,14 @@ export function OAuthView({ client, company }: Props) {
             void (async () => {
               setGrantingComposio(true);
               try {
-                // Both generations bump: the grant changes what the page's
-                // status says about `granted`, and `ComposioSection` reads the
-                // same flag one card up. Refreshing one and not the other is
-                // the two-surfaces-disagreeing failure #582 is about.
+                // The shared credential is told, not just this page: the
+                // grant changes what `granted` says, and the Composio page
+                // renders from the same hook. Refreshing one view of it and
+                // not the other is the two-surfaces-disagreeing failure #582
+                // is about — which is why the state is shared rather than
+                // fetched twice.
                 if (await grantNamespace(client, company, "composio")) {
-                  setCredentialGeneration((n) => n + 1);
+                  credential.changed();
                   await refresh();
                 }
               } finally {
@@ -644,13 +592,13 @@ export function OAuthView({ client, company }: Props) {
         />
 
         {/* Only renders for a provider this company holds two or more accounts
-            for — the one case where "which account do teammates act as" is a
+            for — the one case where "which account do agents act as" is a
             question the product can answer (issue #820). */}
         <AccountChoiceSection
           client={client}
           company={company}
           canManage={canManage}
-          generation={connectionsGeneration + credentialGeneration}
+          generation={connectionsGeneration + credential.generation}
         />
 
         {/* A connection as an object you open rather than a row with a button

@@ -145,7 +145,7 @@ export function UsageView({ client, company }: Props) {
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         title="Usage"
-        width="6xl"
+        width="full"
         description={
           <>
             What your company is burning — tokens and OAuth calls.
@@ -168,7 +168,7 @@ export function UsageView({ client, company }: Props) {
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {usageFailed ? (
           <Alert data-testid="usage-load-error">
             <TriangleAlert className="size-4" />
@@ -517,8 +517,8 @@ function PublishStatusRow({ caps }: { caps: CapabilityStatusDto }) {
       <div className="space-y-0.5">
         <span className="font-medium">Publishing deliverables</span>
         <p className="text-xs text-muted-foreground">
-          Handing a file a teammate wrote to the board as a deliverable — the only way work in a
-          teammate&apos;s sandbox becomes something you can open. It rides the same{" "}
+          Handing a file an agent wrote to the board as a deliverable — the only way work in a
+          agent&apos;s sandbox becomes something you can open. It rides the same{" "}
           <code className="font-mono">files</code> / <code className="font-mono">docs</code> grant
           as their file tools: add one of those to{" "}
           <code className="font-mono">[tools].allow</code> in the company manifest. Unlike{" "}

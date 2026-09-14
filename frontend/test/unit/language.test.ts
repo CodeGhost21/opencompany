@@ -45,7 +45,7 @@ const PER_CALL: Record<string, string> = {
   read_workspace_state: "Check its workspace's git status",
   mcp_call_tool: "Use a tool on a connected server",
   publish_artifact: "Publish a file it produced",
-  run_workflow: "Run one of its saved workflows",
+  run_workflow: "Run one of its saved automations",
 };
 
 /** The four an operator may grant standing on, so the #374 list renders them. */
@@ -431,13 +431,13 @@ describe("whether a payload lead was cut to fit the compact row", () => {
 });
 
 describe("a kind nobody has named", () => {
-  it("says a teammate wants a tool rather than inventing one", () => {
+  it("says an agent wants a tool rather than inventing one", () => {
     expect(
       approvalAction(approval({ kind: "some_tool_nobody_declared" })),
     ).toBe("Use one of its tools");
   });
 
-  it("says less again when there is no teammate to name", () => {
+  it("says less again when there is no agent to name", () => {
     expect(
       approvalAction(approval({ kind: "some.native.effect", agent: null })),
     ).toBe("Do something that needs your sign-off");

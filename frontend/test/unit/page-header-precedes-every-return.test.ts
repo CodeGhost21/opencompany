@@ -139,7 +139,7 @@ function headerConsts(body: string): string[] {
  */
 function isJsx(block: string): boolean {
   const after = block
-    // `if (cond) return <Pane />;` is a state like any other. ChatView's
+    // `if (cond) return <Pane />;` is a state like any other. RoomView's
     // `if (!desks) return <LoadingPane />;` is one, and a check anchored on
     // `return` at the start of the line could not see it.
     .replace(/^\s*if \([^\n]*?\)\s*/, "")
@@ -160,7 +160,7 @@ function isJsx(block: string): boolean {
  * `page-header-adoption.test.ts` — two rules, one each, rather than both
  * half-enforced in two places.
  *
- * `carriers` is what makes a multi-component file checkable. `ChatView`'s
+ * `carriers` is what makes a multi-component file checkable. `RoomView`'s
  * loaded return draws no heading of its own — its title is `ChatHeader`'s
  * channel name, the `handRolled` leaf enumerated under `chat` — and its three
  * channel-less returns hand the screen to `LoadingPane` and `EmptyPane`, two
@@ -201,10 +201,10 @@ function hasHeading(block: string, consts: string[], carriers: string[]): boolea
  * The earlier version anchored on the *first* `<PageHeader` in the file and
  * walked back to the nearest top-level declaration. That is the routed
  * component only when the routed component happens to hold the first header,
- * and in `ChatView.tsx` it does not: the first one is at line 1987, inside the
+ * and in `RoomView.tsx` it does not: the first one is at line 1987, inside the
  * `LoadingPane` helper at the bottom, so `start` landed on `LoadingPane`, `end`
  * landed on `EmptyPane`'s declaration 29 lines later, and the scan inspected a
- * single helper. `ChatView` itself — its loaded return and its three
+ * single helper. `RoomView` itself — its loaded return and its three
  * channel-less returns — and `EmptyPane` were never read at all. Deleting the
  * header from `EmptyPane` left two states with no `h1` and this suite green.
  *
@@ -246,7 +246,7 @@ function componentBlocks(lines: string[]): { name: string; start: number; end: n
  *
  * The earlier version looked for a line matching exactly `\s{indent}\);`, which
  * is the shape a JSX return closes with and *not* the shape a chained
- * expression closes with. `ChatView`'s `return Object.values(decidedApprovals)`
+ * expression closes with. `RoomView`'s `return Object.values(decidedApprovals)`
  * at line 980 therefore ran on until it met the `);` closing a *different*
  * return 112 lines later, swallowing the `desksError` state at 1086 — a whole
  * page state the scan then never inspected, reported as nothing.

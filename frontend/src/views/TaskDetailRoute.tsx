@@ -31,7 +31,7 @@ import {
 } from "@/lib/task-output";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { withHostParam } from "@/hooks/use-host-route";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 import { TaskDetailView } from "@/views/TaskDetailView";
 
 export function TaskDetailRoute({

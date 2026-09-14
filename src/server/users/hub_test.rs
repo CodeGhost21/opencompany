@@ -61,6 +61,7 @@ async fn state_with_public_url(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -264,7 +265,7 @@ async fn a_malformed_from_is_dropped_not_obeyed() {
 }
 
 #[tokio::test]
-async fn a_hosted_console_offers_no_providers_while_the_hub_refuses_its_origin() {
+async fn a_hosted_console_offers_the_buttons_pointed_at_its_own_origin() {
     let home = home();
     let state = state_with_public_url(
         home.path(),
@@ -275,15 +276,22 @@ async fn a_hosted_console_offers_no_providers_while_the_hub_refuses_its_origin()
 
     let body = providers(&state).await;
 
-    // Issue #512: the hub's redirect gate accepts loopback origins only, so
-    // every one of these buttons answers 400 before Google is ever reached.
-    // Empty is the same "no honest button to offer" the no-exchange case takes,
-    // and it leaves the magic-link form — which does work hosted — standing
-    // alone rather than under three that cannot.
-    //
-    // Fails when `tinyhumansai/backend#1243` lands and the guard comes out,
-    // which is the point: this test is the reminder to delete it.
-    assert_eq!(body["providers"].as_array().unwrap().len(), 0);
+    // Issue #512 is over. The hub's redirect gate was loopback-only, so this
+    // console used to answer with nothing rather than render three buttons that
+    // could only reach a `400`. `tinyhumansai/backend#1243` taught that gate to
+    // accept a provisioned tenant origin, and the local copy of the old rule
+    // came out with it — by then the copy, not the hub, was what hid the
+    // buttons on every hosted console.
+    assert_eq!(body["providers"].as_array().unwrap().len(), 3);
+
+    // Pointed back at the configured public origin, percent-encoded as one
+    // value. Whether that origin is provisioned is the hub's question to answer,
+    // and it answers it against a registry this crate cannot mirror.
+    let start = body["providers"][0]["startUrl"].as_str().unwrap();
+    assert!(
+        start.ends_with("redirectUri=https%3A%2F%2Fsmoke1.example.com%2F%3Fcompany%3Dacme"),
+        "the redirect must be this console's own hosted origin: {start}"
+    );
 }
 
 #[tokio::test]

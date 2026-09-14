@@ -301,6 +301,7 @@ fn brain_with(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        emergency_gate: None,
         notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
@@ -359,6 +360,7 @@ fn brain_with(
         deep_trace: None,
     };
     let record = CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         id: CompanyId::new("acme"),

@@ -114,7 +114,7 @@ describe("buildOrgTree", () => {
     expect(nameless.desks[0].seats.every((s) => !s.known)).toBe(true);
   });
 
-  it("lists teammates on no desk instead of losing them", () => {
+  it("lists agents on no desk instead of losing them", () => {
     const partial = buildOrgTree("Acme", [ENGINEERING], ROSTER);
     expect(partial.unassigned.map((m) => m.id)).toEqual(["linus", "hedy"]);
     // And nobody is listed twice: a seated teammate is not also unassigned.
@@ -159,7 +159,7 @@ describe("the three-level cap", () => {
 });
 
 describe("addableTo", () => {
-  it("offers only teammates not already on that desk", () => {
+  it("offers only agents not already on that desk", () => {
     const built = tree();
     expect(addableTo(built, built.desks[0]).map((m) => m.id)).toEqual(["linus", "hedy"]);
     expect(addableTo(built, built.desks[1]).map((m) => m.id)).toEqual(["ada", "grace"]);

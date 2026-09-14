@@ -73,11 +73,11 @@ const HAND_ROLLED: Record<string, { count: number; why: string }> = {
     count: 1,
     why:
       "The workflow detail identity row (#1135/#1138), pinned by " +
-      "`workflow-toolbar-layout.test.ts`: two rows, because identity-and-state and " +
-      "act-on-it are different questions. It names the open workflow, not the page — " +
+      "`automation-toolbar-layout.test.ts`: two rows, because identity-and-state and " +
+      "act-on-it are different questions. It names the open automation, not the page — " +
       "the page's own header is the index's, and that one is a `PageHeader`.",
   },
-  "chat/ChatHeader.tsx": {
+  "room/ChatHeader.tsx": {
     count: 1,
     why:
       "The channel bar. It names the open channel and changes as you switch, and its " +
@@ -95,9 +95,9 @@ const HAND_ROLLED: Record<string, { count: number; why: string }> = {
   "team/AgentDetailView.tsx": {
     count: 1,
     why:
-      "The teammate profile block: a 56px avatar that is itself the control for " +
+      "The agent profile block: a 56px avatar that is itself the control for " +
       "changing it (#1181), the name, the role, and a row of desk and tier badges. " +
-      "It also renders only once the teammate has loaded, so it cannot be hoisted " +
+      "It also renders only once the agent has loaded, so it cannot be hoisted " +
       "to a header that has to exist through the loading and error states too.",
   },
 };

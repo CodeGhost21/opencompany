@@ -47,7 +47,7 @@ async function selectWorkflow(page: Page, name: string) {
   await openWorkflow(page, name);
 }
 
-test("running a workflow shows its per-node output in the result drawer", async ({
+test("running an automation shows its per-node output in the result drawer", async ({
   page,
 }) => {
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);

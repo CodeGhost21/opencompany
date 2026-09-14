@@ -23,14 +23,14 @@ afterEach(() => {
   host.remove();
 });
 
-describe("the workflow placement caveat", () => {
+describe("the automation placement caveat", () => {
   it("is a visible, keyboard- and touch-operable disclosure of the canonical notice", () => {
     const disclosure = host.querySelector("details");
     const summary = disclosure?.querySelector("summary");
     const notice = disclosure?.querySelector("p");
 
     expect(disclosure).not.toBeNull();
-    expect(summary?.textContent).toContain("workflow placement is inferred");
+    expect(summary?.textContent).toContain("automation placement is inferred");
     expect(summary?.className).toContain("cursor-pointer");
     expect(summary?.className).toContain("focus-visible:ring-1");
     expect(notice?.textContent).toBe(DERIVED_NOTICE);

@@ -2,17 +2,14 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   ChevronRight,
   Cpu,
-  Mail,
   Pencil,
   Server,
   Sparkles,
   Users,
-  Wallet,
   Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { listTasks, type Task } from "@/api/tasks";
@@ -26,13 +23,14 @@ import { ApiError, type AgentDetailDto, type EditAgentInput, type HarnessDto } f
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
+import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
+import { useHashTab } from "@/hooks/use-hash-tab";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -71,11 +69,11 @@ import {
 import { draftAgentField } from "@/api/agent-copilot";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import { FieldCopilot } from "@/views/team/FieldCopilot";
+import { consoleHref } from "@/lib/console-paths";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
 import { usd } from "@/lib/money";
-import { personName } from "@/lib/person";
 import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
@@ -164,6 +162,31 @@ async function classifyFailure(
  * disagreement as a failed save instead of as a field that will not take an
  * edit.
  */
+/**
+ * A teammate's page, as tabs.
+ *
+ * It was six cards in one scrolling column — what it is doing, its
+ * instructions, its tools, its harness, its inbox, its budget — so every edit
+ * began by scrolling to find the card, and the page's own length hid how much
+ * of a teammate is configurable at all.
+ *
+ * **Overview leads** because it is the question the page is opened to answer:
+ * what is this teammate doing, and what has it done. The five that follow are
+ * its definition, and each one is a thing you change rather than read.
+ */
+const AGENT_TABS = [
+  { id: "overview", label: "Overview", hint: "What it is doing, and what it has done" },
+  { id: "instructions", label: "Instructions", hint: "What it owns and how it is told to work" },
+  { id: "tools", label: "Tools", hint: "What it is allowed to call" },
+  { id: "model", label: "Model", hint: "The harness and model it thinks with" },
+  // Inbox and Budget are not tabs. Both are one control each — a switch, and a
+  // cap — and a tab is a promise of a surface worth navigating to; a whole view
+  // holding a single toggle spends a click to show almost nothing. They live on
+  // Overview, beside the other facts about how this teammate is set up.
+] as const satisfies readonly PageTab<string>[];
+
+type AgentTab = (typeof AGENT_TABS)[number]["id"];
+
 export function AgentDetailView({
   client,
   company,
@@ -202,7 +225,22 @@ export function AgentDetailView({
    */
   const [editRequested, setEditRequested] = useHashFlag("edit");
   const setEditing = setEditRequested;
+  const [tab, setTab] = useHashTab<AgentTab>(
+    AGENT_TABS.map((t) => t.id),
+    "overview",
+  );
   const editing = editRequested && (agent?.editable.length ?? 0) > 0;
+  // The edit form lives on the Instructions tab, so an address that asks to
+  // edit has to open that tab — `#/team/<id>?edit` is what the chat profile
+  // panel's "Edit agent" links, and it would otherwise land on Overview with
+  // the form it asked for on a tab the operator has to know to look under.
+  //
+  // Written into the address rather than used as a dynamic fallback: a fallback
+  // that changes with `editing` would yank the operator back to Overview the
+  // moment they pressed Cancel.
+  useEffect(() => {
+    if (editing && tab !== "instructions") setTab("instructions");
+  }, [editing, tab, setTab]);
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft());
   const [saving, setSaving] = useState(false);
   /**
@@ -217,9 +255,27 @@ export function AgentDetailView({
    */
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
   /** An icon save is in flight — the picker is disabled until it settles, so two
-      avatar PATCHes for the same teammate can never be pending at once and
+      avatar PATCHes for the same agent can never be pending at once and
       resolve out of order (the older one overwriting the newer choice). */
   const [avatarSaving, setAvatarSaving] = useState(false);
+  /**
+   * Agent ids with an inbox write in flight (issue #1190's own page-level
+   * control — the host's `InboxStore` is the source of truth, so a switch
+   * stays disabled until the `PUT` it triggered actually lands).
+   *
+   * Keyed by agent id, not a single shared flag: `AgentDetailView` stays
+   * mounted across a same-document navigation to a different agent (`TeamView`
+   * renders it with no `key`), so a bare boolean disabled every agent's
+   * switch for the duration of any ONE agent's write, and — because its own
+   * cleanup checked `displayedAgentIdRef` against the *stale* agent id
+   * that write belonged to — left the switch on whichever agent the operator
+   * had navigated to disabled permanently once that stale check failed to
+   * match. A write's own id is what both the disable and the cleanup key on,
+   * so a write in flight for one agent never touches another's switch.
+   */
+  const [pendingInboxAgentIds, setPendingInboxAgentIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   /**
    * What this teammate is on and carrying (issue #1141), or `null` when the
    * board could not be read — in which case the header states neither rather
@@ -228,8 +284,6 @@ export function AgentDetailView({
   const [workload, setWorkload] = useState<Workload | null>(null);
   /** The open cards assigned directly to this teammate, when the board is readable. */
   const [openTasks, setOpenTasks] = useState<Task[] | null>(null);
-  /** An inbox write is in flight; the switch is held until the host answers. */
-  const [inboxSaving, setInboxSaving] = useState(false);
   /**
    * The Harness & Model editor (issue #1245's harness-picker follow-up). Its
    * own small state, separate from `draft`/`editing`: both fields are
@@ -249,51 +303,6 @@ export function AgentDetailView({
    * just has nothing to offer beyond the free-text model field it already had.
    */
   const [harnesses, setHarnesses] = useState<HarnessDto[]>([]);
-  /**
-   * Whether this viewer may edit the daily budget (issue #1206, ported from
-   * `TeamView.tsx`). Courtesy, not enforcement — the host refuses the write
-   * with a 403 regardless; hiding the control from a non-admin only spares
-   * them a control they cannot use. Every agent this page can show is
-   * host-backed by construction (`boot` only reaches `ready` once `getAgent`
-   * answers), so there is no `fromHost` half to this check the way the roster
-   * card needed.
-   */
-  const [isAdmin, setIsAdmin] = useState(false);
-  // Who set the cap override, for the attribution line. Only an admin may read
-  // the user directory, so this stays empty for a member and the attribution
-  // degrades to "an admin" rather than disappearing.
-  const [people, setPeople] = useState<Person[]>([]);
-  /** Whether the daily-budget dialog is open. */
-  const [budgetOpen, setBudgetOpen] = useState(false);
-  const [avatarOpen, setAvatarOpen] = useState(false);
-
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      let admin = false;
-      try {
-        admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No user plane on this host, or not signed in — treat as non-admin.
-      }
-      if (!live) return;
-      setIsAdmin(admin);
-      if (!admin) {
-        setPeople([]);
-        return;
-      }
-      try {
-        const dir = await listPeople(client, company);
-        if (live) setPeople(dir);
-      } catch {
-        // Attribution falls back to "an admin"; not worth a toast.
-        if (live) setPeople([]);
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [client, company]);
 
   /**
    * The required fields the draft leaves blank, so the form can say why Save is
@@ -301,6 +310,8 @@ export function AgentDetailView({
    *
    * Empty until the teammate loads — there is nothing to require a value of.
    */
+  const [avatarOpen, setAvatarOpen] = useState(false);
+
   const missing = agent ? missingRequired(draft, (key) => isEditable(agent, key)) : [];
 
   // Issue #1776: read the cognition path while the edit form is open, so the
@@ -326,11 +337,6 @@ export function AgentDetailView({
     };
   }, [editing, client, company]);
 
-  /** A human label for whoever set a cap — never a raw user id. */
-  function whoSet(userId: string): string {
-    const person = people.find((p) => p.id === userId);
-    return person ? personName(person) : "an admin";
-  }
 
   const boot = useCallback(async () => {
     setLoad("loading");
@@ -428,101 +434,8 @@ export function AgentDetailView({
     };
   }, [client, company]);
 
-  /**
-   * Give this teammate an inbox, or take it away (issue #1190).
-   *
-   * Moved here from the roster card, where it was the only control that wrote
-   * to the host and sat one mis-click away while scanning thirteen cards. This
-   * page already *reported* inbox state as a badge and offered no way to change
-   * it; the read and the write live together now.
-   *
-   * Optimistic, then reverted on failure — the switch must never be left
-   * claiming a state the host refused. Keyed on the roster agent id, which is
-   * the `InboxStore` key the Inbox page reads and the ingest webhook files mail
-   * under; nothing is persisted client-side.
-   */
-  async function toggleInbox(next: boolean) {
-    if (!agent || inboxSaving) return;
-    // Scoped to the teammate this call is *about*. This screen does not remount
-    // when the hash names a different agent — it re-reads into the same state —
-    // so a slow write for A that fails after the operator has stepped to B would
-    // otherwise roll back B's switch, for a request B never made.
-    const apply = (enabled: boolean) =>
-      setAgent((held) => (held?.id === agentId ? { ...held, inboxEnabled: enabled } : held));
-    apply(next);
-    // One write in flight at a time. Two quick taps otherwise race, and the
-    // host's last-writer-wins can settle on the opposite of what the switch shows.
-    setInboxSaving(true);
-    try {
-      await setInboxEnabled(client, company, agentId, next);
-    } catch (error) {
-      apply(!next);
-      toast.error(
-        error instanceof ApiError && error.status === 404
-          ? "This host doesn't offer teammate inboxes yet."
-          : error instanceof Error
-            ? error.message
-            : "Couldn't change the inbox.",
-      );
-    } finally {
-      setInboxSaving(false);
-    }
-  }
 
-  /**
-   * Set, change, or remove this teammate's daily cap (issue #1206, moved here
-   * from the roster card for the same reason Inbox moved in #1190: a card in
-   * a grid of thirteen is for recognising a teammate, not configuring one).
-   *
-   * `cap` is `null` to remove the cap and a number to set one — `0` included,
-   * which caps the teammate at nothing. The two are different states on the
-   * host and must stay different here, which is why this takes `number | null`
-   * and never an optional.
-   *
-   * Merges the host's answer into `agent` rather than refetching, the same way
-   * `toggleInbox` does — and the same `held?.id === agentId` guard, so a slow
-   * write does not clobber state after the operator has navigated elsewhere.
-   */
-  async function applyBudget(cap: number | null) {
-    try {
-      const row = await client.setTeamBudget(agentId, cap, company);
-      setAgent((held) =>
-        held?.id === agentId
-          ? {
-              ...held,
-              budgetUsdDaily: row.budgetUsdDaily,
-              spentTodayUsd: row.spentTodayUsd,
-              budgetSetBy: row.budgetSetBy,
-              budgetSetAtMillis: row.budgetSetAtMillis,
-            }
-          : held,
-      );
-      toast.success(cap === null ? "Daily cap removed." : `Daily cap set to ${usd(cap)}.`);
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't change the daily cap."));
-    }
-  }
 
-  /** Drop the override so the company's own default applies again. */
-  async function resetBudget() {
-    try {
-      const row = await client.clearTeamBudgetOverride(agentId, company);
-      setAgent((held) =>
-        held?.id === agentId
-          ? {
-              ...held,
-              budgetUsdDaily: row.budgetUsdDaily,
-              spentTodayUsd: row.spentTodayUsd,
-              budgetSetBy: row.budgetSetBy,
-              budgetSetAtMillis: row.budgetSetAtMillis,
-            }
-          : held,
-      );
-      toast.success("Reset to the company default.");
-    } catch (error) {
-      toast.error(budgetError(error, "Couldn't reset the daily cap."));
-    }
-  }
 
   /**
    * Save a chosen face, or `undefined` to go back to the hashed default.
@@ -546,10 +459,56 @@ export function AgentDetailView({
       toast.success(avatar ? "Icon updated." : "Back to the default icon.");
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Couldn't change this teammate's icon.",
+        error instanceof Error ? error.message : "Couldn't change this agent's icon.",
       );
     } finally {
       setAvatarSaving(false);
+    }
+  }
+
+  /**
+   * Give this teammate an inbox, or take it away (issue #1190 — the control
+   * moved off the roster card, onto the agent it belongs to).
+   *
+   * Flips `inboxEnabled` on screen before the `PUT` resolves — the switch is
+   * the only signal an operator watches while the write is in flight, and a
+   * control that waits for the round trip to move reads as broken rather than
+   * slow. `pendingInboxAgentIds` holds THIS agent's switch disabled for that
+   * stretch, so a second click on it cannot race the first, and a failure
+   * rolls the optimistic flip back rather than leaving the switch lying about
+   * what the host actually has.
+   *
+   * `id` is captured once, up front, and used everywhere below instead of
+   * `agent.id` or the `agentId` prop — the prop can change out from under this
+   * closure if the operator navigates to a different agent before the write
+   * settles, and every decision here (which agent to revert, which agent's
+   * pending entry to clear) has to stay about the agent this call was made
+   * for, not whichever agent is on screen when it resolves.
+   */
+  async function toggleInbox(enabled: boolean) {
+    if (!agent) return;
+    const id = agent.id;
+    const previous = agent;
+    setAgent({ ...agent, inboxEnabled: enabled });
+    setPendingInboxAgentIds((pending) => new Set(pending).add(id));
+    try {
+      await setInboxEnabled(client, company, id, enabled);
+    } catch (error) {
+      if (displayedAgentIdRef.current === id) setAgent(previous);
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't change this agent's inbox.",
+      );
+    } finally {
+      // Cleared unconditionally, unlike the `setAgent` revert above — the
+      // pending entry belongs to `id` regardless of which agent is currently
+      // displayed, and leaving it set because the operator moved on is
+      // exactly the bug this rewrite fixes.
+      setPendingInboxAgentIds((pending) => {
+        if (!pending.has(id)) return pending;
+        const next = new Set(pending);
+        next.delete(id);
+        return next;
+      });
     }
   }
 
@@ -570,14 +529,14 @@ export function AgentDetailView({
       setAgent(updated);
       setDraft(draftFrom(updated));
       setEditing(false);
-      toast.success("Teammate updated.");
+      toast.success("Agent updated.");
     } catch (error) {
       toast.error(
         error instanceof ApiError && error.status === 409
           ? error.message
           : error instanceof Error
             ? error.message
-            : "Couldn't save this teammate.",
+            : "Couldn't save this agent.",
       );
     } finally {
       setSaving(false);
@@ -663,7 +622,7 @@ export function AgentDetailView({
           ? error.message
           : error instanceof Error
             ? error.message
-            : "Couldn't save this teammate's harness.",
+            : "Couldn't save this agent's harness.",
       );
     } finally {
       setSavingHarness(false);
@@ -704,36 +663,48 @@ export function AgentDetailView({
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
+      <div className="w-full space-y-6 px-4 py-6">
         {/*
           A breadcrumb rather than a Back button (issue #1141). Back said where
-          the operator had been; this says where they *are* — one teammate,
+          the operator had been; this says where they *are* — one agent,
           inside the company — which is the question a linked page has to answer,
           and this page is linked from the org chart, the chat member pane and
           every "Not on a desk" chip. Arriving from any of those, "Back to team"
           named a page they had never seen.
         */}
+        {/*
+          Both crumbs are the same text, on one baseline.
+          The parent used to be a `Button variant="ghost" size="sm"` — 28px
+          tall, `px-2`, pulled back by `-ml-2` — beside a bare `<li>` of plain
+          text. So the two halves of one line disagreed about height, weight and
+          left edge, and the separator floated between them at neither's centre.
+          A crumb is a link, not a control with a hit area of its own; it is
+          typeset like the text it sits in and coloured to say which half you
+          can press.
+        */}
         <nav aria-label="Breadcrumb" data-testid="agent-breadcrumb">
-          <ol className="flex flex-wrap items-center gap-1 text-sm">
-            <li>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="-ml-2 h-7 px-2 text-muted-foreground"
+          <ol className="flex flex-wrap items-center gap-1.5 text-sm leading-6">
+            <li className="flex items-center">
+              <button
+                type="button"
                 onClick={onBack}
                 data-testid="agent-breadcrumb-company"
+                className="rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               >
                 Company
-              </Button>
+              </button>
             </li>
-            <li aria-hidden className="text-muted-foreground">
+            <li aria-hidden className="flex items-center text-muted-foreground/60">
               <ChevronRight className="size-3.5" />
             </li>
-            <li aria-current="page" className="min-w-0 truncate font-medium">
-              {/* Named as soon as there is a name, and "Teammate" until then.
+            <li
+              aria-current="page"
+              className="flex min-w-0 items-center truncate font-medium text-foreground"
+            >
+              {/* Named as soon as there is a name, and "Agent" until then.
                   A crumb that appeared only once the read landed would move
                   the page's controls across the row as it settled. */}
-              {agent ? (agent.name?.trim() || agent.role) : "Teammate"}
+              {agent ? (agent.name?.trim() || agent.role) : "Agent"}
             </li>
           </ol>
         </nav>
@@ -741,9 +712,9 @@ export function AgentDetailView({
         {/*
           The page's accessible name in the four states `Identity` does not
           mount for (codex review, #1785). `Identity`'s `h1` is this page's
-          only heading and it renders only once the teammate has loaded, so a
+          only heading and it renders only once the agent has loaded, so a
           direct `#/team/<id>` visit that was still loading — or that landed on
-          a removed teammate, an older host, or a failed read — was a page a
+          a removed agent, an older host, or a failed read — was a page a
           screen reader could not announce at all.
 
           `hidden`, because the breadcrumb above already says where you are and
@@ -752,7 +723,7 @@ export function AgentDetailView({
           The name is gated on `load === "ready"` and not merely on `agent`
           being set (coderabbit review). `boot()` moves `load` to `"loading"`
           on an `agentId` change but keeps the previous `agent` until the new
-          request settles, so keying off `agent` alone announced the teammate
+          request settles, so keying off `agent` alone announced the agent
           you just navigated *away from* as the name of the page you navigated
           *to* — a wrong name, which is worse than a generic one. The crumb has
           the same shape and can afford it: it is visible text next to the
@@ -760,28 +731,28 @@ export function AgentDetailView({
           reader announces on arrival.
         */}
         {load !== "ready" || !agent ? (
-          <PageHeader title="Teammate" hidden />
+          <PageHeader title="Agent" hidden />
         ) : null}
 
         {load === "loading" && <Skeleton className="h-64 rounded-xl" />}
 
         {load === "missing" && (
           <EmptyState
-            title="This teammate is no longer on the roster."
+            title="This agent is no longer on the roster."
             body="It may have been removed. Go back to the team to see who is here now."
           />
         )}
 
         {load === "unsupported" && (
           <EmptyState
-            title="This host can't open a teammate yet."
-            body="Opening a teammate needs a newer host. The roster still works."
+            title="This host can't open an agent yet."
+            body="Opening an agent needs a newer host. The roster still works."
           />
         )}
 
         {load === "error" && (
           <EmptyState
-            title="Couldn't load this teammate."
+            title="Couldn't load this agent."
             body="The company host didn't answer. Try again in a moment."
           />
         )}
@@ -800,40 +771,47 @@ export function AgentDetailView({
                   : undefined
               }
               avatarBusy={avatarSaving}
-              action={
-                !editing ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setEditing(true)}
-                    // Disabled with the reason, never absent — an operator
-                    // looking for the edit needs to find out *why* there isn't
-                    // one, not to conclude the console forgot to build it. What
-                    // makes a teammate uneditable is the host's own `editable`
-                    // list and nothing this file decides: a current host offers
-                    // at least name, role and instructions on every teammate,
-                    // manifest ones included, so an empty list now means a host
-                    // that does not support the edit rather than a blueprint row
-                    // this console must refuse.
-                    disabled={agent.editable.length === 0}
-                    title={
-                      agent.editable.length === 0
-                        ? "This teammate can't be edited from here."
-                        : undefined
-                    }
-                    data-testid="agent-edit"
-                  >
-                    <Pencil className="size-4" /> Edit
-                  </Button>
-                ) : undefined
-              }
             />
+            {/*
+              The page's tab strip. `Identity` is this page's header — it draws
+              the name, the face and the role — so the strip sits under it and
+              on its own hairline, which is the same reading as `PageHeader`'s
+              built-in `tabs` slot everywhere else. The margins are overridden
+              because that slot's own offsets are measured against
+              `PageHeader`'s `pb-3`, which there is none of here.
+            */}
+            <div className="border-b">
+              <PageTabs
+                tabs={AGENT_TABS}
+                value={tab}
+                onChange={setTab}
+                idBase="agent"
+                aria-label="Agent views"
+                className="mt-0 -mb-px"
+              />
+            </div>
+
+            <PageTabPanel idBase="agent" id="overview" value={tab} className="space-y-6">
             <FactLine agent={agent} workload={workload} />
+            {/* One control, not a tab (see `AGENT_TABS`'s own doc comment) —
+                whether this teammate receives mail at all. */}
+            <div className="flex items-center gap-2">
+              <Switch
+                id="agent-inbox-toggle"
+                data-testid="agent-inbox-toggle"
+                checked={agent.inboxEnabled ?? false}
+                disabled={pendingInboxAgentIds.has(agent.id)}
+                onCheckedChange={(on) => void toggleInbox(on)}
+              />
+              <Label htmlFor="agent-inbox-toggle" className="text-sm font-normal">
+                Inbox
+              </Label>
+            </div>
             <OpenTasks tasks={openTasks} />
 
-            {/* What this teammate has actually done (issue #1573), directly
+            {/* What this agent has actually done (issue #1573), directly
                 under what it is doing now. Everything below this point defines
-                the teammate — instructions, tools, inbox, budget — and the
+                the agent — instructions, tools, inbox, budget — and the
                 record of its work reads before its definition, not after four
                 cards of configuration. */}
             <AgentRuns
@@ -842,28 +820,65 @@ export function AgentDetailView({
               agentId={agent.id}
               agentName={agent.name?.trim() || agent.role}
             />
+            </PageTabPanel>
 
-            {/* The Edit action sits on the teammate's name row (issue #1434) —
-                one editing action, in the place a page's actions live, rather
-                than halfway down inside one of its cards. */}
+            {/* Edit sits in this card, beside the fields it opens (issue #1434
+                revisited). It was on the agent's name row — right while the
+                page was one column and the name row was the only place a
+                page-level action could go. With the definition split into tabs
+                a single header Edit would have been an action whose form
+                appears on one tab and nowhere else, offered identically from
+                all six. Each tab now carries its own way in. */}
+            <PageTabPanel idBase="agent" id="instructions" value={tab}>
             <Section
               title="Instructions"
-              subtitle="What this teammate was defined to do. It frames every turn they take."
+              // Names both halves, because the card holds both and the operator
+              // has to be able to tell them apart. It used to say only "What
+              // this teammate was defined to do. It frames every turn they
+              // take." over a body that was the *description* with no label on
+              // it — so a teammate with no persona showed one sentence under a
+              // heading naming the other field, and nothing on screen said the
+              // persona was empty. See the two labelled blocks below.
+              subtitle="What this agent owns, and the standing instructions that frame every turn they take."
               action={
-                // Reset is offered only when an override is actually masking the
-                // blueprint, and only to a viewer the host will let write
-                // instructions — otherwise it is a control that can only 409.
-                isEditable(agent, "instructions") && agent.instructionsOverridden ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => void resetInstructions()}
-                    disabled={saving}
-                    data-testid="agent-instructions-reset"
-                  >
-                    Reset to blueprint
-                  </Button>
-                ) : undefined
+                <div className="flex items-center gap-2">
+                  {/* Reset is offered only when an override is actually masking
+                      the blueprint, and only to a viewer the host will let
+                      write instructions — otherwise it is a control that can
+                      only 409. */}
+                  {isEditable(agent, "instructions") && agent.instructionsOverridden && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void resetInstructions()}
+                      disabled={saving}
+                      data-testid="agent-instructions-reset"
+                    >
+                      Reset to blueprint
+                    </Button>
+                  )}
+                  {!editing && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setEditing(true)}
+                      // Disabled with the reason, never absent — an operator
+                      // looking for the edit needs to find out *why* there
+                      // isn't one, not to conclude the console forgot to build
+                      // it. What makes a teammate uneditable is the host's own
+                      // `editable` list and nothing this file decides.
+                      disabled={agent.editable.length === 0}
+                      title={
+                        agent.editable.length === 0
+                          ? "This agent can't be edited from here."
+                          : undefined
+                      }
+                      data-testid="agent-edit"
+                    >
+                      <Pencil className="size-4" /> Edit
+                    </Button>
+                  )}
+                </div>
               }
             >
               {editing ? (
@@ -915,7 +930,7 @@ export function AgentDetailView({
                             cognition === "echo"
                               ? "No model is configured, so the copilot can't draft yet."
                               : !draft.role.trim()
-                                ? "Give this teammate a role first — the copilot drafts from it."
+                                ? "Give this agent a role first — the copilot drafts from it."
                                 : undefined
                           }
                         />
@@ -933,7 +948,7 @@ export function AgentDetailView({
                   )}
                   <div className="flex items-center justify-end gap-2">
                     {/* Why Save is dead, next to Save (issue #1776). A manifest
-                        teammate carries no name of its own, so this form opens
+                        agent carries no name of its own, so this form opens
                         with Name blank and the button already disabled — and
                         until this line the only way to find that out was to
                         guess. The fields themselves are marked too; this says
@@ -967,38 +982,66 @@ export function AgentDetailView({
                 </div>
               ) : (
                 <>
-                  <p
-                    className="whitespace-pre-wrap text-sm text-muted-foreground"
-                    data-testid="agent-description"
-                  >
-                    {agent.description?.trim() ||
-                      "No description was written for this teammate."}
-                  </p>
-                  {agent.instructions?.trim() && (
-                    <div className="space-y-1">
-                      <p className="text-xs font-medium">
-                        Persona instructions
-                        {agent.instructionsOverridden ? " · overriding the blueprint" : ""}
-                      </p>
+                  {/* Labelled, like the persona below it. Unlabelled, this
+                      paragraph was read as the standing instructions the card's
+                      heading names — and for an agent with no persona it was
+                      the only thing on the card, so the mistake was the default
+                      rather than an edge. */}
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium">What they do</p>
+                    <p
+                      className="whitespace-pre-wrap text-sm text-muted-foreground"
+                      data-testid="agent-description"
+                    >
+                      {agent.description?.trim() ||
+                        "No description was written for this agent."}
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium">
+                      Persona instructions
+                      {agent.instructions?.trim() && agent.instructionsOverridden
+                        ? " · overriding the blueprint"
+                        : ""}
+                    </p>
+                    {agent.instructions?.trim() ? (
                       <p
                         className="whitespace-pre-wrap text-sm text-muted-foreground"
                         data-testid="agent-instructions"
                       >
                         {agent.instructions.trim()}
                       </p>
-                    </div>
-                  )}
+                    ) : (
+                      // Said rather than left blank. An empty persona is a real
+                      // state with a consequence — this teammate runs on the
+                      // company's default wording — and the operator could
+                      // previously only find out by opening the edit form.
+                      <p
+                        className="text-sm text-muted-foreground"
+                        data-testid="agent-instructions-empty"
+                      >
+                        None yet, so this agent runs on the company&apos;s default
+                        wording. Edit to write some, or ask the copilot.
+                      </p>
+                    )}
+                  </div>
                   {agent.editable.length === 0 && (
                     <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
-                      This teammate can't be edited from here. Its daily budget can still be changed
-                      below.
+                      This agent can't be edited from here — its definition comes from the
+                      company's manifest.
                     </p>
                   )}
                 </>
               )}
             </Section>
 
+            </PageTabPanel>
+
+            <PageTabPanel idBase="agent" id="tools" value={tab}>
             <Tools agent={agent} saving={saving} onSave={(globs) => saveTools(globs)} />
+            </PageTabPanel>
+
+            <PageTabPanel idBase="agent" id="model" value={tab}>
             <HarnessAndModel
               agent={agent}
               harnesses={harnesses}
@@ -1055,19 +1098,8 @@ export function AgentDetailView({
               onCancel={() => setEditingHarness(false)}
               onSave={() => void saveHarnessAndModel()}
             />
-            <Inbox
-              agent={agent}
-              busy={inboxSaving}
-              onToggle={(next) => void toggleInbox(next)}
-            />
-            <Budget
-              agent={agent}
-              canEdit={isAdmin}
-              setByLabel={agent.budgetSetBy ? whoSet(agent.budgetSetBy) : undefined}
-              onEdit={() => setBudgetOpen(true)}
-              onRemoveCap={() => void applyBudget(null)}
-              onResetBudget={() => void resetBudget()}
-            />
+            </PageTabPanel>
+
           </>
         )}
       </div>
@@ -1082,14 +1114,7 @@ export function AgentDetailView({
           void saveAvatar(avatar);
         }}
       />
-      <BudgetDialog
-        agent={budgetOpen ? agent : null}
-        onOpenChange={setBudgetOpen}
-        onSave={(cap) => {
-          setBudgetOpen(false);
-          void applyBudget(cap);
-        }}
-      />
+
     </div>
   );
 }
@@ -1097,12 +1122,17 @@ export function AgentDetailView({
 /** Name, role, id, desks, and the two facts that classify an agent. */
 function Identity({
   agent,
-  action,
   onPickAvatar,
   avatarBusy,
 }: {
   agent: AgentDetailDto;
-  action?: ReactNode;
+  /*
+   * `action` used to be here — the page's one Edit button, on the name row.
+   * Editing is per-tab now (`AGENT_TABS`), so each card carries its own way in
+   * and this header has no action of its own. Removed rather than left
+   * optional-and-unpassed: an unused slot is a third state, neither drawn nor
+   * gone, that the next reader has to rule out.
+   */
   /** Opens the icon picker. Absent leaves the tile inert — a read-only header. */
   onPickAvatar?: () => void;
   /** An icon save is in flight — the tile must not start another one. */
@@ -1123,7 +1153,7 @@ function Identity({
   return (
     <div className="flex items-start justify-between gap-4">
       <div className="flex items-start gap-4 min-w-0">
-        {/* The header of the page a teammate *is* — the one screen that should
+        {/* The header of the page an agent *is* — the one screen that should
             never be the one showing letters (issue #1181). 56px. */}
         {/* The tile is the control. A face is a visual thing, so the way to
             change it is to click the one on screen rather than to hunt for a
@@ -1135,7 +1165,7 @@ function Identity({
             type="button"
             onClick={onPickAvatar}
             disabled={avatarBusy}
-            aria-label="Change this teammate's icon"
+            aria-label="Change this agent's icon"
             title="Change icon"
             className="rounded-xl ring-2 ring-transparent transition-colors hover:ring-primary focus-visible:ring-primary focus-visible:outline-none disabled:cursor-wait"
             data-testid="agent-avatar-pick"
@@ -1188,17 +1218,9 @@ function Identity({
                 </Badge>
               </a>
             ))}
-            {agent.inboxEnabled && (
-              <Badge variant="outline" className="gap-1">
-                <Mail className="size-3" /> Inbox
-              </Badge>
-            )}
           </div>
         </div>
       </div>
-      {action && (
-        <div className="flex shrink-0 flex-wrap justify-end gap-2">{action}</div>
-      )}
     </div>
   );
 }
@@ -1273,8 +1295,8 @@ function OpenTasks({ tasks }: { tasks: Task[] | null }) {
         {tasks.map((task) => (
           <a
             key={task.id}
-            href={`#/tasks/${encodeURIComponent(task.id)}`}
-            className="text-sm text-primary underline-offset-4 hover:underline"
+            href={consoleHref("tasks", task.id)}
+            className="text-sm text-primary transition-opacity hover:opacity-80"
             data-testid={`agent-open-task-${task.id}`}
           >
             {task.title}
@@ -1327,6 +1349,28 @@ function Tools({
   }, [agent.id, agent.tools.requested]);
 
   const draft = parseToolGlobs(field);
+  const draftSet = new Set(draft);
+  /**
+   * The ceiling as a list of switches — what this teammate is allowed to hold,
+   * one row each, which is the question an operator actually arrives with.
+   *
+   * It was a comma-separated glob field. That asked the operator to know the
+   * namespace vocabulary before they could change anything, and it let them
+   * type a grant the ceiling does not cover — stored happily, conferring
+   * nothing, which is the failure the card already had two warnings about.
+   * Switches can only express grants that exist.
+   *
+   * The raw field is still here, under Advanced: a wildcard (`docs.*`) is not
+   * one of these rows, and dropping it would take away scoping the toggles
+   * cannot spell.
+   */
+  const ceiling = grantCeiling(agent.tools);
+  // While the grant is standard the teammate inherits the whole ceiling, so
+  // every switch is on — the first one turned off is what converts an inherited
+  // grant into an explicit list.
+  const held = (glob: string) =>
+    summary.standardGrant ? true : draftSet.has(glob);
+  const [advanced, setAdvanced] = useState(false);
   const dirty = toolGlobsDiffer(requestedGlobs, draft);
   // Live, before the save rather than after it: the intersection is the thing
   // operators get wrong, and a glob the desk-and-company ceiling does not allow
@@ -1347,11 +1391,11 @@ function Tools({
       subtitle={
         summary.standardGrant
           ? deskCeilingActive
-            ? "This teammate lists no tools of its own, so it holds what its desk allows, narrowed by the company."
-            : "This teammate lists no tools of its own, so it holds everything the company allows."
+            ? "This agent lists no tools of its own, so it holds what its desk allows, narrowed by the company."
+            : "This agent lists no tools of its own, so it holds everything the company allows."
           : summary.deniedAll
-            ? "This teammate has been given an explicit empty grant, so it holds no tools at all."
-            : "What this teammate asked for, narrowed by what its desk and the company allow."
+            ? "This agent has been given an explicit empty grant, so it holds no tools at all."
+            : "What this agent asked for, narrowed by what its desk and the company allow."
       }
       action={
         canEdit && !editing ? (
@@ -1367,28 +1411,93 @@ function Tools({
       }
     >
       {editing && (
-        <div className="grid gap-2" data-testid="agent-tools-editor">
-          <Label htmlFor="agent-tools-field">Tool grants</Label>
-          <Input
-            id="agent-tools-field"
-            value={field}
-            onChange={(event) => setField(event.target.value)}
-            placeholder="workspace.read, docs.*, files.*"
-            className="font-mono text-xs"
-            data-testid="agent-tools-field"
-          />
+        <div className="grid gap-3" data-testid="agent-tools-editor">
+          {/* One row per grant the ceiling actually offers. Switching one off
+              narrows this agent; there is no row for a tool the company
+              does not allow, because granting it here would confer nothing. */}
+          {ceiling.length > 0 ? (
+            <div className="divide-y rounded-lg border" data-testid="agent-tools-toggles">
+              {ceiling.map((glob) => (
+                <div key={glob} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <Label
+                    htmlFor={`agent-tool-${glob}`}
+                    className="min-w-0 truncate font-mono text-xs font-normal"
+                  >
+                    {glob}
+                  </Label>
+                  <Switch
+                    id={`agent-tool-${glob}`}
+                    checked={held(glob)}
+                    data-testid={`agent-tool-toggle-${glob}`}
+                    onCheckedChange={(on) => {
+                      // An inherited grant holds the whole ceiling, so the
+                      // first switch turned off has to write the rest of it
+                      // out explicitly — otherwise the save would read as
+                      // "narrow to nothing but this one".
+                      const base = summary.standardGrant ? ceiling : draft;
+                      const next = on
+                        ? [...new Set([...base, glob])]
+                        : base.filter((g) => g !== glob);
+                      setField(next.join(", "));
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground" data-testid="agent-tools-no-ceiling">
+              {deskCeilingActive
+                ? "This agent's desk allows no tools, so there is nothing to grant here."
+                : "The company allows no tools, so there is nothing to grant here."}
+            </p>
+          )}
+
           <p className="text-xs text-muted-foreground">
-            One glob per grant, separated by commas or spaces. Each is narrowed by the
-            company tool list below
-            {deskCeilingActive ? " and by this teammate's desk ceiling" : ""}, so this
+            Every grant is narrowed by the company tool list
+            {deskCeilingActive ? " and by this agent's desk ceiling" : ""}, so this
             can only ever take capability away — never add to it.
           </p>
+
+          {/* The switches cannot spell a wildcard, and a company that grants
+              `docs.*` scopes agents with patterns rather than with the
+              literal rows above. The field stays, one disclosure away. */}
+          <div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 h-7 px-2 text-xs text-muted-foreground"
+              onClick={() => setAdvanced((on) => !on)}
+              data-testid="agent-tools-advanced"
+            >
+              {advanced ? "Hide" : "Edit"} globs
+            </Button>
+            {advanced && (
+              <div className="mt-2 grid gap-2">
+                <Label htmlFor="agent-tools-field" className="text-xs">
+                  Tool grants
+                </Label>
+                <Input
+                  id="agent-tools-field"
+                  value={field}
+                  onChange={(event) => setField(event.target.value)}
+                  placeholder="workspace.read, docs.*, files.*"
+                  className="font-mono text-xs"
+                  data-testid="agent-tools-field"
+                />
+                <p className="text-xs text-muted-foreground">
+                  One glob per grant, separated by commas or spaces. A pattern here that
+                  matches none of the rows above still applies — the rows are the literal
+                  grants, not the whole vocabulary.
+                </p>
+              </div>
+            )}
+          </div>
           {draft.length === 0 && (
             // Since #1804 the inversion runs the other way: an empty list is a
             // deliberate deny-all, NOT the standard grant. An operator who
             // wants the standard grant back must use "Reset to standard" below.
             <p className="text-xs text-status-blocked-text" data-testid="agent-tools-empty-warning">
-              Saving an empty list is a deny-all — this teammate would hold no tools at all. To
+              Saving an empty list is a deny-all — this agent would hold no tools at all. To
               give it the standard company grant instead, use “Reset to standard grant”.
             </p>
           )}
@@ -1412,7 +1521,7 @@ function Tools({
             </Button>
             {/* Reset to the standard grant (`null`) — a distinct action from
                 saving an empty list (`[]`, a deny-all) since #1804. Only shown
-                when the teammate is not already on the standard grant. */}
+                when the agent is not already on the standard grant. */}
             {!summary.standardGrant && (
               <Button
                 variant="ghost"
@@ -1458,10 +1567,10 @@ function Tools({
               nothing; a narrowed agent asked for tools none of which are
               covered. */}
           {summary.standardGrant
-            ? "This teammate has no tools, because the company allows none."
+            ? "This agent has no tools, because the company allows none."
             : summary.deniedAll
-              ? "This teammate has no tools: it was given an explicit empty (deny-all) grant."
-              : "This teammate has no tools. Nothing it asked for is covered by the company tool list."}
+              ? "This agent has no tools: it was given an explicit empty (deny-all) grant."
+              : "This agent has no tools. Nothing it asked for is covered by the company tool list."}
         </p>
       ) : (
         <div className="flex flex-wrap gap-2" data-testid="agent-tools">
@@ -1615,7 +1724,7 @@ function HarnessAndModel({
   return (
     <Section
       title="Harness & model"
-      subtitle="Which coding engine this teammate runs on, and — on an ACP harness (an operator's own coding CLI) — which model to pin it to."
+      subtitle="Which coding engine this agent runs on, and — on an ACP harness (an operator's own coding CLI) — which model to pin it to."
       action={
         editable && !editing ? (
           <Button variant="ghost" size="sm" onClick={onEdit} data-testid="agent-harness-edit">
@@ -1679,7 +1788,7 @@ function HarnessAndModel({
                     {/* A value the harness no longer advertises is still
                         offered, so opening the editor cannot silently drop a
                         pin somebody set deliberately. The list moves when the
-                        CLI updates; the teammate's setting should not. */}
+                        CLI updates; the agent's setting should not. */}
                     {unlistedModel && (
                       <SelectItem value={unlistedModel}>
                         {unlistedModel}
@@ -1749,160 +1858,8 @@ function HarnessAndModel({
   );
 }
 
-/**
- * Whether mail addressed to this teammate lands anywhere (issue #1190).
- *
- * A per-teammate setting, on the teammate's own page — not a switch in a grid
- * of cards, which is what it was. The subtitle says what turning it on actually
- * does, because "Inbox" alone does not: an inbox is an address the outside
- * world can reach, which is a different kind of decision from the rest of this
- * screen and worth one sentence.
- */
-function Inbox({
-  agent,
-  busy,
-  onToggle,
-}: {
-  agent: AgentDetailDto;
-  /** A write is in flight — the switch is held rather than allowed to race. */
-  busy: boolean;
-  onToggle: (next: boolean) => void;
-}) {
-  return (
-    <Section
-      title="Inbox"
-      subtitle="Give this teammate an address of its own, so mail routed to it arrives here rather than nowhere."
-    >
-      <label className="flex cursor-pointer items-center justify-between gap-3">
-        <span className="flex items-center gap-2 text-sm">
-          <Mail className="size-4 text-muted-foreground" />
-          {agent.inboxEnabled ? "This teammate has an inbox." : "This teammate has no inbox."}
-        </span>
-        <Switch
-          checked={agent.inboxEnabled}
-          disabled={busy}
-          onCheckedChange={onToggle}
-          aria-label="Give this teammate an inbox"
-          data-testid="agent-inbox-toggle"
-        />
-      </label>
-    </Section>
-  );
-}
 
-/**
- * Turns a failed budget write into something worth reading.
- *
- * The 403 is the one an operator will actually hit, and it needs to say *why* —
- * "only an admin can change a spend limit" is the answer, not "request failed".
- */
-function budgetError(error: unknown, fallback: string): string {
-  if (error instanceof ApiError) {
-    if (error.status === 403) return "Only an admin can change a teammate's daily cap.";
-    if (error.status === 404) return "This host doesn't support console budgets yet.";
-    return error.message;
-  }
-  return error instanceof Error ? error.message : fallback;
-}
 
-/**
- * The teammate's daily spend cap, editable (issue #1206).
- *
- * Moved here from the roster card's `⋯` menu, for the same reason Inbox moved
- * in #1190: a card in a grid of thirteen is for recognising a teammate, not
- * configuring one. The card still shows the cap and today's spend — this is
- * where an operator now sets, changes, removes or resets it, beside Inbox.
- *
- * Renders the cap and attribution to everyone (the roster card does too), but
- * only offers the writing controls to an admin — same courtesy-not-enforcement
- * gate `TeamView.tsx` used, so a member sees the same facts without a control
- * that would only 403.
- */
-function Budget({
-  agent,
-  canEdit,
-  setByLabel,
-  onEdit,
-  onRemoveCap,
-  onResetBudget,
-}: {
-  agent: AgentDetailDto;
-  /** Whether to offer the writing controls at all (admins only). */
-  canEdit: boolean;
-  /** Who set the current override, already resolved to something readable. */
-  setByLabel?: string;
-  onEdit: () => void;
-  onRemoveCap: () => void;
-  onResetBudget: () => void;
-}) {
-  const cap = agent.budgetUsdDaily;
-  const capped = cap !== undefined;
-  // An override exists (someone set this deliberately), as opposed to the cap
-  // simply coming from the company's own definition.
-  const overridden = agent.budgetSetBy !== undefined;
-  return (
-    <Section
-      title="Budget"
-      subtitle="The most this teammate may spend per day. It takes effect on their next task — no restart needed."
-      action={
-        canEdit ? (
-          <Button variant="outline" size="sm" onClick={onEdit} data-testid="team-budget-edit">
-            <Wallet className="size-4" />
-            {capped ? "Change…" : "Set…"}
-          </Button>
-        ) : undefined
-      }
-    >
-      <div className="space-y-1 text-sm" data-testid="agent-budget">
-        {capped ? (
-          <>
-            <p className="text-muted-foreground">
-              {usd(cap)}/day · {usd(agent.spentTodayUsd ?? 0)} spent today
-            </p>
-            <p className="text-xs text-muted-foreground" data-testid="agent-budget-scope">
-              Spent today counts everything this teammate has spent since 00:00
-              UTC — chat turns and metered searches included, not only the
-              attempts listed above. This is the total the cap is enforced
-              against.
-            </p>
-          </>
-        ) : (
-          <p className="text-muted-foreground">No daily cap — this teammate spends freely.</p>
-        )}
-        {setByLabel && agent.budgetSetAtMillis !== undefined && (
-          <p className="text-xs text-muted-foreground" data-testid="agent-budget-attribution">
-            {capped ? "Set by" : "Uncapped by"} {setByLabel} ·{" "}
-            {new Date(agent.budgetSetAtMillis).toLocaleDateString()}
-          </p>
-        )}
-      </div>
-      {canEdit && (capped || overridden) && (
-        <div className="flex flex-wrap gap-2">
-          {capped && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onRemoveCap}
-              data-testid="team-budget-remove"
-            >
-              Remove cap
-            </Button>
-          )}
-          {overridden && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onResetBudget}
-              data-testid="team-budget-reset"
-            >
-              Reset to company default
-            </Button>
-          )}
-        </div>
-      )}
-    </Section>
-  );
-}
 
 /**
  * Pick a teammate's icon.
@@ -1928,7 +1885,7 @@ function AvatarDialog({
   onOpenChange: (open: boolean) => void;
   onPick: (avatar: string | undefined) => void;
 }) {
-  const name = agent?.name?.trim() || agent?.role || "this teammate";
+  const name = agent?.name?.trim() || agent?.role || "this agent";
   return (
     <Dialog open={agent !== null} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -1956,76 +1913,6 @@ function AvatarDialog({
   );
 }
 
-/**
- * Enter a daily cap for one teammate.
- *
- * Empty input is **not** submittable: "no cap" is the explicit "Remove cap"
- * action, not a blank field, so an operator clearing the box and saving can
- * never silently uncap a teammate. `0` is allowed and means exactly what it
- * says — this teammate may not spend.
- */
-function BudgetDialog({
-  agent,
-  onOpenChange,
-  onSave,
-}: {
-  agent: AgentDetailDto | null;
-  onOpenChange: (open: boolean) => void;
-  onSave: (cap: number) => void;
-}) {
-  const [value, setValue] = useState("");
-
-  useEffect(() => {
-    setValue(agent?.budgetUsdDaily !== undefined ? String(agent.budgetUsdDaily) : "");
-  }, [agent]);
-
-  const parsed = Number(value);
-  const valid = value.trim() !== "" && Number.isFinite(parsed) && parsed >= 0;
-  const name = agent?.name?.trim() || agent?.role || "this teammate";
-
-  return (
-    <Dialog open={agent !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Daily budget</DialogTitle>
-          <DialogDescription>
-            The most {name} may spend per day. It takes effect on their next task — no restart
-            needed.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="grid gap-2">
-          <Label htmlFor="agent-budget">US dollars per day</Label>
-          <Input
-            id="agent-budget"
-            type="number"
-            min={0}
-            step="0.01"
-            inputMode="decimal"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="e.g. 5.00"
-            data-testid="team-budget-input"
-          />
-          <p className="text-xs text-muted-foreground">
-            $0 stops them spending entirely. To let them spend freely, use “Remove cap”.
-          </p>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => valid && onSave(parsed)}
-            disabled={!valid}
-            data-testid="team-budget-save"
-          >
-            Save
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 function Section({
   title,

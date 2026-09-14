@@ -59,7 +59,7 @@ describe("mcpAddedMessage", () => {
     // Still a success: the server IS stored, and survives the rebuild that adds
     // the feature. Saying otherwise would report a working add as a failure.
     expect(message).toMatch(/stored/i);
-    expect(message).not.toMatch(/teammates pick it up/i);
+    expect(message).not.toMatch(/agents pick it up/i);
   });
 
   it("promises next-turn pickup when the bridge is present", () => {

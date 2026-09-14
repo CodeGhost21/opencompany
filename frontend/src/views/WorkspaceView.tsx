@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -1133,6 +1133,9 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
   async function open(id: string) {
     await flush();
     setOpenId(id);
+    // Below `md` the two panes share one column, so opening a note has to hand
+    // it over; above `md` both are shown regardless and this is inert.
+    setShowExplorer(false);
     setMode("read");
     setDraft(null);
     setSaveState("idle");
@@ -1526,7 +1529,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         title="Workspace"
         count={headerNoteCount(noteCount, treeKnown)}
         /*
-          Not "every note this company's teammates can read and write", which
+          Not "every note this company's agents can read and write", which
           the tree contradicts in two places: `secrets/` is the one folder the
           agents cannot list, read, search or write (`SECRETS_REASON`, #1465),
           and `derived/` is written by a ledger and re-derived over any edit
@@ -1558,9 +1561,12 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         id="workspace-explorer"
         className={cn(
           "min-w-0 shrink-0 flex-col overflow-hidden bg-card/40 md:flex",
+          // Full width while it owns the column; the resizable width only
+          // applies once the note pane is beside it.
+          "w-full md:w-(--workspace-list-width)",
           showExplorer ? "flex" : "hidden",
         )}
-        style={{ width: listWidth }}
+        style={{ "--workspace-list-width": `${listWidth}px` } as CSSProperties}
       >
         <div className="flex items-center gap-1 border-b px-2 py-2">
           <span className="flex-1 px-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
@@ -1600,7 +1606,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               two mines in it (issue #1378). */}
           <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 self-center bg-border" />
           {/* Issue #700. A company provisioned before the tree went lazy carries
-              one empty folder per teammate, and nothing else will ever remove
+              one empty folder per agent, and nothing else will ever remove
               them. Deliberately a button rather than something boot does: the
               operator's click is the opt-in, and the dialog names every folder
               before any of them goes. */}
@@ -1753,7 +1759,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
           "relative w-1.5 shrink-0 touch-none cursor-col-resize bg-border outline-none transition-colors select-none motion-reduce:transition-none",
           "hover:bg-primary/50 focus-visible:bg-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
           resizingList && "bg-primary/70",
-          showExplorer ? "hidden md:block" : "hidden",
+          "hidden md:block",
         )}
         onPointerDown={(e) => {
           if (e.button !== 0) return;
@@ -2224,7 +2230,7 @@ function Breadcrumb({
             <button
               type="button"
               onClick={() => onOpenFolder(crumb.id)}
-              className="truncate rounded-sm hover:text-foreground hover:underline"
+              className="truncate rounded-sm hover:text-foreground"
             >
               {crumb.name}
             </button>
@@ -2577,7 +2583,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
               opening each note. Only the agent case — badging the operator's
               own notes back at them says nothing.
 
-              The pill reads the teammate's NAME, through the same
+              The pill reads the agent's NAME, through the same
               `rosterDisplayName` the row label one line up already goes through
               (issue #1723). It used to print the raw roster handle —
               `seo_specialist` beside a row already labelled "SEO Specialist" —
@@ -2589,7 +2595,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
             <Badge
               variant="outline"
               className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
-              title={`Created by teammate ${agentBadge.id}`}
+              title={`Created by agent ${agentBadge.id}`}
               data-testid="workspace-tree-agent-badge"
             >
               {agentBadge.name}
@@ -2834,7 +2840,7 @@ function NoteMarkdown({
                   className={cn(
                     "rounded px-0.5 font-medium no-underline",
                     exists
-                      ? "text-primary hover:underline"
+                      ? "text-primary transition-opacity hover:opacity-80"
                       : "text-muted-foreground underline decoration-dashed underline-offset-2",
                   )}
                 >
@@ -2983,7 +2989,7 @@ function EmptyNote({
             <div className="max-w-md space-y-2">
               <p className="font-medium">Your company&rsquo;s shared notes</p>
               <p className="text-sm text-muted-foreground">
-                Everyone here reads this tree — your teammates and the
+                Everyone here reads this tree — your agents and the
                 company&rsquo;s agents alike. What you write is what they work
                 from on their next turn, and the notes they write show up here
                 beside yours.
@@ -3560,7 +3566,7 @@ function SweepDialog({
                 {folder.display}
               </span>
               {/* An id the roster cannot resolve is the clearest case of all
-                  for sweeping: that teammate is no longer on the roster. Said
+                  for sweeping: that agent is no longer on the roster. Said
                   plainly rather than left as a bare ULID the operator is asked
                   to recognise. */}
               {!folder.resolved && (

@@ -7,14 +7,14 @@ REPO_ROOT=$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd)
 
 cat <<'EOF'
 Friendly names:
-  marketing     agentic_marketing_agency
-  software      agentic_software_company
-  fund          agentic_venture_capital
-  studio        agentic_venture_studio
+  marketing     marketing_agency
+  software      software_company
+  fund          venture_capital
+  studio        venture_studio
   accelerator   startup_accelerator
-  law           agentic_law_firm
-  accounting    agentic_accounting_firm
-  support       agentic_customer_support
+  law           law_firm
+  accounting    accounting_firm
+  support       customer_support
   signals       signals_opportunity_studio
 
 Company directory names:

@@ -21,27 +21,27 @@ const client = (payload: unknown) =>
 
 describe("originLabel", () => {
   it("names the agent that authored a node", () => {
-    expect(originLabel({ kind: "agent", id: "ceo" })).toBe("Teammate · ceo");
+    expect(originLabel({ kind: "agent", id: "ceo" })).toBe("Agent · ceo");
   });
 
   it("distinguishes a seeded node from one somebody wrote", () => {
     expect(originLabel({ kind: "seed" })).toBe("Seeded");
   });
 
-  it("names the teammate when it is given a roster to resolve against (issue #1723)", () => {
+  it("names the agent when it is given a roster to resolve against (issue #1723)", () => {
     // The raw handle is engine plumbing — `seo_specialist` where the operator
     // knows "SEO Specialist" — and this label sits beside names the rest of
     // the workspace has already resolved. Routed through the one shared
     // `rosterDisplayName` rather than a second lookup of its own.
     const names = rosterNameMap([{ id: "seo_specialist", name: "SEO Specialist" }]);
     expect(originLabel({ kind: "agent", id: "seo_specialist" }, names)).toBe(
-      "Teammate · SEO Specialist",
+      "Agent · SEO Specialist",
     );
     // An id the roster does not carry falls back to the id, never to a blank
     // label — and a caller with no roster to hand gets exactly the string it
     // got before the parameter existed.
-    expect(originLabel({ kind: "agent", id: "ghost" }, names)).toBe("Teammate · ghost");
-    expect(originLabel({ kind: "agent", id: "ceo" })).toBe("Teammate · ceo");
+    expect(originLabel({ kind: "agent", id: "ghost" }, names)).toBe("Agent · ghost");
+    expect(originLabel({ kind: "agent", id: "ceo" })).toBe("Agent · ceo");
   });
 
   it("says nothing for a plain operator note", () => {

@@ -1,0 +1,30 @@
+{
+  "$comment": "This company's whole work environment is five role-scoped MCP servers from the `opencompany-tau2` repo, each serving one slice of the tau2-bench retail domain over streamable HTTP and all five sharing ONE state file under an exclusive flock. They ship DISABLED with placeholder https endpoints, because a bundle in this repo must not point an agent at a host nobody has provisioned. For a LOCAL run, leave them disabled here and register the loopback endpoints at runtime \u2014 `PUT /mcp/servers/{name}` is the only layer that accepts an http:// endpoint. `scripts/tau2-sim.py --domain retail` does exactly that.",
+  "mcpServers": {
+    "tau2-retail-triage": {
+      "url": "https://tau2-retail-triage.invalid/mcp",
+      "description": "Read-only front desk: find a user from name and zip, read their orders, read product and stock detail. Nine tools, none of which mutate.",
+      "enabled": false
+    },
+    "tau2-retail-exchanges": {
+      "url": "https://tau2-retail-exchanges.invalid/mcp",
+      "description": "Delivered orders, remedy = exchange: swap an item for another variant of the same product. One mutating tool; holds no refund tool.",
+      "enabled": false
+    },
+    "tau2-retail-refunds": {
+      "url": "https://tau2-retail-refunds.invalid/mcp",
+      "description": "Delivered orders, remedy = refund: take items back. One mutating tool; holds no exchange tool.",
+      "enabled": false
+    },
+    "tau2-retail-cancellations": {
+      "url": "https://tau2-retail-cancellations.invalid/mcp",
+      "description": "Pending orders, remedy = cancel the whole order. One mutating tool; holds no modify tool.",
+      "enabled": false
+    },
+    "tau2-retail-amendments": {
+      "url": "https://tau2-retail-amendments.invalid/mcp",
+      "description": "Pending orders, remedy = amend in place (items, address, payment). Three mutating tools; holds no cancel tool.",
+      "enabled": false
+    }
+  }
+}

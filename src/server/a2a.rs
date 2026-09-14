@@ -17,14 +17,17 @@
 //! order: resolve a **discoverable** company, verify the SIWX `Authorization`
 //! (skew + single-use replay protection via the host-global
 //! [`NonceCache`](crate::economy::NonceCache)) before anything reaches cognition,
-//! answer a `402` challenge for a priced skill lacking a valid
-//! [`X402Authorization`](crate::economy::X402Authorization), sanitize the
+//! answer a `402` challenge for a priced skill lacking a valid, unspent
+//! [`X402Authorization`](crate::economy::X402Authorization), refuse outright a
+//! skill id the Agent Card never advertised (a different thing from one it
+//! advertises for nothing), sanitize the
 //! counterparty payload (a minimal promptguard pass), and only then append an
 //! [`A2aTaskReceived`](crate::ports::types::CompanyEvent::A2aTaskReceived) event
 //! and run one cycle. A paying customer runs under the same approval gates as any
 //! other stimulus — there is no fence bypass.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::HeaderMap;
@@ -46,6 +49,15 @@ use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::ports::types::{AgentCard, CardPayment, CompanyEvent, LedgerEntry};
 use crate::server::error::ApiError;
+
+/// How long an inbound A2A task may hold this connection — and the worker
+/// running its company cycle — open before the caller is told to retry.
+///
+/// `tasks/send` is fully synchronous: the HTTP response IS the cycle result,
+/// so a cycle that never returns (a stuck tool call, a hung provider) would
+/// otherwise pin this connection, and the task behind it, forever. A paying
+/// counterparty gets no other signal that anything went wrong.
+const A2A_CYCLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Builds the tiny.place A2A route fragment, merged into the main router.
 pub fn router() -> Router<AppState> {
@@ -251,25 +263,31 @@ async fn a2a_task(
         Err(err) => return err.into_response(),
     };
 
-    // 4. If the requested skill is priced above zero, require a valid x402
-    // authorization. A `0.00` (or unparsable) price is served for free.
-    if let Some(pay) = card.payment_requirements.iter().find(|p| {
-        p.skill_id == skill
-            && p.price
-                .trim()
-                .parse::<f64>()
-                .map(|v| v > 0.0)
-                .unwrap_or(false)
-    }) {
-        match extract_payment(&rpc.params) {
+    // 4. Charge for the requested skill. See `classify_skill` for why an
+    // unadvertised id is not the same answer as a free one.
+    match classify_skill(&card, &skill) {
+        SkillCharge::Unknown => {
+            return ApiError(OpenCompanyError::NotFound(format!(
+                "@{handle} does not offer skill `{}`",
+                sanitize_text(&skill)
+            )))
+            .into_response();
+        }
+        SkillCharge::Free => {}
+        SkillCharge::Priced(pay) => match extract_payment(&rpc.params) {
             None => return payment_required(&state, &runtime, pay).await,
             Some(auth) => {
-                if x402::verify(&auth).is_err() {
-                    return ApiError(OpenCompanyError::InvalidRequest(
-                        "x402 payment authorization did not verify".into(),
-                    ))
-                    .into_response();
-                }
+                // Checked against the claimed (not yet verified) fields,
+                // before `x402::verify` spends the nonce below: on a
+                // multi-company host, a correctly-signed authorization
+                // submitted against the wrong company's handle — or one
+                // that underpays — would otherwise burn its nonce on this
+                // re-challenge and could never be resubmitted, even against
+                // the right company or with the right amount. A forged
+                // recipient or amount is still caught by `verify`'s
+                // signature check right after, since those fields are part
+                // of what it signs.
+                //
                 // Bind the payment to THIS company: the payer must have signed a
                 // `recipient` equal to our own agent id. Without this a
                 // counterparty could self-sign an authorization paying anyone
@@ -281,11 +299,21 @@ async fn a2a_task(
                 if auth.recipient != our_id {
                     return payment_required(&state, &runtime, pay).await;
                 }
-                let paid = auth.amount.trim().parse::<f64>().unwrap_or(0.0);
-                let price = pay.price.trim().parse::<f64>().unwrap_or(f64::INFINITY);
-                if paid < price {
-                    // Underpaid: re-challenge for the correct amount.
+                let paid = auth.amount.trim().parse::<f64>().ok();
+                let price = pay.price.trim().parse::<f64>().ok();
+                let sufficient = matches!(
+                    (paid, price),
+                    (Some(paid), Some(price))
+                        if paid.is_finite() && price.is_finite() && paid >= price
+                );
+                if auth.asset != pay.asset || auth.network != pay.network || !sufficient {
+                    // Underpaid, unparsable/non-finite, or paid in the wrong
+                    // asset/network: re-challenge for the correct terms.
                     return payment_required(&state, &runtime, pay).await;
+                }
+                let paid = paid.expect("sufficient implies paid is Some and finite");
+                if let Err(err) = x402::verify(&auth, state.x402_nonce(), now_secs()) {
+                    return ApiError(err).into_response();
                 }
                 // Journal the inbound receipt before doing the work.
                 let entry = LedgerEntry {
@@ -298,7 +326,7 @@ async fn a2a_task(
                     return ApiError(err).into_response();
                 }
             }
-        }
+        },
     }
 
     // 5. Promptguard: sanitize the counterparty payload before it becomes an
@@ -306,16 +334,20 @@ async fn a2a_task(
     // model-based guard.
     let task = sanitize_value(rpc.params.clone());
 
-    // 6. Append the event and run one cycle (run_cycle persists the event).
-    let report = match runtime
-        .run_cycle(vec![CompanyEvent::A2aTaskReceived {
+    // 6. Append the event and run one cycle (run_cycle persists the event),
+    // bounded so a stuck cycle cannot hold this connection open forever.
+    let report = match tokio::time::timeout(
+        A2A_CYCLE_TIMEOUT,
+        runtime.run_cycle(vec![CompanyEvent::A2aTaskReceived {
             from: from.clone(),
             task,
-        }])
-        .await
+        }]),
+    )
+    .await
     {
-        Ok(report) => report,
-        Err(err) => return ApiError(err).into_response(),
+        Ok(Ok(report)) => report,
+        Ok(Err(err)) => return ApiError(err).into_response(),
+        Err(_) => return cycle_timeout(),
     };
 
     let result = json!({
@@ -336,6 +368,75 @@ fn unauthorized(err: &OpenCompanyError) -> Response {
         Json(json!({ "error": err.to_string(), "code": err.code() })),
     )
         .into_response()
+}
+
+/// Renders a cycle that outran [`A2A_CYCLE_TIMEOUT`] as a `504`.
+fn cycle_timeout() -> Response {
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(json!({
+            "error": "the company did not finish this task in time",
+            "code": "timeout",
+        })),
+    )
+        .into_response()
+}
+
+/// What a company's Agent Card says about a requested skill id.
+enum SkillCharge<'a> {
+    /// Advertised above zero: the task needs a valid, unspent authorization.
+    Priced(&'a CardPayment),
+    /// Advertised at `0.00`, or at a price this build cannot parse. Served.
+    Free,
+    /// Not advertised at all, by a company that charges for its work. Refused.
+    Unknown,
+}
+
+/// Classifies `skill` against the card's advertised prices.
+///
+/// The three answers are genuinely different and collapsing any two of them
+/// gives work away. `payment_requirements` is a one-to-one projection of the
+/// manifest's `[place].skills`, so an id missing from it is an id the company
+/// never offered — not an id it offers for nothing. Reading "no price found" as
+/// "free" let any unadvertised string buy the whole `tasks/send` path on a
+/// company that prices every skill it does advertise.
+///
+/// An unparsable price stays free deliberately: a company that has misdeclared
+/// its own price has not thereby declared a task unavailable, and the manifest
+/// validator already names the mistake.
+///
+/// A card advertising nothing above zero charges for nothing, so every id on it
+/// is free — including one it does not list. Refusing there would take A2A away
+/// from companies that never opted into pricing.
+///
+/// Manifest validation rejects a duplicate skill id outright, so
+/// `payment_requirements` should never carry two entries for the same
+/// `skill`. If one somehow reaches this card anyway (an older store predating
+/// that check), a priced entry always outranks a free or unparsable one for
+/// the same id — the reverse would let a duplicate free entry waive a price
+/// the company does charge for that skill.
+fn classify_skill<'a>(card: &'a AgentCard, skill: &str) -> SkillCharge<'a> {
+    let matching = || {
+        card.payment_requirements
+            .iter()
+            .filter(|pay| pay.skill_id == skill)
+    };
+
+    match matching().find(|pay| priced_above_zero(pay)) {
+        Some(pay) => SkillCharge::Priced(pay),
+        None if matching().next().is_some() => SkillCharge::Free,
+        None if card.payment_requirements.iter().any(priced_above_zero) => SkillCharge::Unknown,
+        None => SkillCharge::Free,
+    }
+}
+
+/// Whether this requirement names a price the company actually charges.
+fn priced_above_zero(pay: &CardPayment) -> bool {
+    pay.price
+        .trim()
+        .parse::<f64>()
+        .map(|price| price > 0.0)
+        .unwrap_or(false)
 }
 
 /// Builds the `402` challenge naming the price and the company's own address.
@@ -390,6 +491,7 @@ mod test {
     use super::*;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -399,8 +501,10 @@ mod test {
     use crate::economy::signer::LocalSigner;
     use crate::economy::x402::X402Challenge;
     use crate::economy::{MockTinyplaceClient, TinyplaceEconomy};
-    use crate::ports::types::{CompanyId, EventSeq};
-    use crate::ports::{AgentEconomy, CompanyStore};
+    use crate::ports::types::{
+        CompanyId, CompressedTrace, CycleRequest, CycleResult, EventSeq, TokenUsage,
+    };
+    use crate::ports::{AgentEconomy, Brain, CompanyStore, CycleHost};
     use crate::runtime::RuntimeBuilder;
     use crate::store::FsCompanyStore;
 
@@ -448,6 +552,108 @@ mod test {
         (state, client_signer)
     }
 
+    /// Same as [`seeded_state`], but the company cycle is driven by `brain`
+    /// instead of the default hosted one — for tests that need to control how
+    /// long (or how) a cycle runs.
+    async fn seeded_state_with_brain(
+        home: &std::path::Path,
+        brain: Arc<dyn Brain>,
+    ) -> (AppState, Arc<LocalSigner>) {
+        let manifest: CompanyManifest = toml::from_str(DISCOVERABLE_TOML).unwrap();
+        let id = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> = Arc::new(FsCompanyStore::new(home.to_path_buf()));
+        let signer = Arc::new(LocalSigner::generate());
+        let mock = Arc::new(MockTinyplaceClient::new());
+        let economy: Arc<dyn AgentEconomy> = Arc::new(
+            TinyplaceEconomy::new(mock, signer.clone(), store.clone(), id.clone(), None)
+                .going_public(true),
+        );
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id)
+            .with_economy(economy)
+            .with_brain(brain)
+            .build()
+            .await
+            .unwrap();
+
+        let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+        state
+            .registry()
+            .insert(runtime.id().clone(), Arc::new(runtime));
+
+        let client_signer = Arc::new(LocalSigner::generate());
+        (state, client_signer)
+    }
+
+    /// A brain that never returns, so a test can prove the cycle it drives is
+    /// bounded by something other than the brain's own good behavior.
+    struct HangingBrain;
+
+    #[async_trait]
+    impl Brain for HangingBrain {
+        async fn run_cycle(
+            &self,
+            _req: CycleRequest,
+            _host: &dyn CycleHost,
+        ) -> crate::Result<CycleResult> {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            unreachable!("the cycle timeout must fire long before this wakes")
+        }
+    }
+
+    /// A brain that answers a cycle with nothing, cheaply — for tests that
+    /// only care about the transport, not what cognition produces.
+    struct SilentBrain;
+
+    #[async_trait]
+    impl Brain for SilentBrain {
+        async fn run_cycle(
+            &self,
+            req: CycleRequest,
+            _host: &dyn CycleHost,
+        ) -> crate::Result<CycleResult> {
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(req.cycle_id, "silent test brain")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// Builds an `AppState` with two distinct discoverable companies, each
+    /// answering only its own handle — for tests of the prosumer (single-
+    /// company) fallback's boundary.
+    async fn two_company_state(home: &std::path::Path) -> AppState {
+        let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+        for handle in ["acme", "globex"] {
+            let toml_src = format!(
+                r#"
+                [company]
+                name = "{handle}"
+                output = "audits"
+                handle = "{handle}"
+
+                [place]
+                discoverable = true
+                skills = [
+                    {{ id = "seo.free", price_usd = "0.00" }},
+                ]
+                "#
+            );
+            let manifest: CompanyManifest = toml::from_str(&toml_src).unwrap();
+            let id = CompanyId::new(handle);
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .with_brain(Arc::new(SilentBrain))
+                .build()
+                .await
+                .unwrap();
+            state.registry().insert(id, Arc::new(runtime));
+        }
+        state
+    }
+
     /// Signs a POST body for `/a2a/{handle}` and returns the SIWX header value.
     fn siwx_header(signer: &LocalSigner, handle: &str, body: &[u8], ts: i64) -> String {
         let hash = sha256_hex(body);
@@ -461,6 +667,24 @@ mod test {
             },
         );
         siwx::header_value(&header)
+    }
+
+    /// Builds a SIWX-signed `seo.audit` request carrying `auth` as its payment.
+    /// `site` varies the body so each request has its own SIWX signature.
+    fn paid_request(client: &LocalSigner, auth: &X402Authorization, site: &str) -> Request<Body> {
+        let rpc = JsonRpcRequest::new(
+            "tasks/send",
+            json!({ "skill": "seo.audit", "input": { "site": site }, "payment": auth }),
+        );
+        let body = serde_json::to_vec(&rpc).unwrap();
+        let header = siwx_header(client, "acme", &body, now_secs());
+        Request::builder()
+            .method("POST")
+            .uri("/a2a/acme")
+            .header(AUTHORIZATION, header)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
     }
 
     fn task_body(skill: &str) -> Vec<u8> {
@@ -623,11 +847,105 @@ mod test {
         assert_eq!(inflow.amount_usd, 25.0);
     }
 
+    /// The same signed authorization, presented on two different tasks. Each
+    /// request carries its own SIWX signature, so the transport replay cache
+    /// admits both; only the payment layer can refuse the second.
+    #[tokio::test]
+    async fn replayed_x402_authorization_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let our_id = signer_for(dir.path(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        let app = router().with_state(state);
+
+        let challenge = X402Challenge {
+            amount: "25.00".into(),
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+
+        let first = paid_request(&client, &auth, "first.example");
+        let response = app.clone().oneshot(first).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "first purchase is served"
+        );
+
+        let second = paid_request(&client, &auth, "second.example");
+        let response = app.oneshot(second).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the same authorization must not buy a second task"
+        );
+    }
+
+    /// Spending one nonce must not blind the company to the next payment.
+    #[tokio::test]
+    async fn a_freshly_minted_authorization_is_admitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let our_id = signer_for(dir.path(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        let app = router().with_state(state);
+
+        let challenge = X402Challenge {
+            amount: "25.00".into(),
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+
+        for site in ["first.example", "second.example"] {
+            let auth = x402::authorize(&client, &challenge, now_secs());
+            let request = paid_request(&client, &auth, site);
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{site} pays its own way");
+        }
+    }
+
+    /// A skill id the card never advertises must not slip past the pricing gate
+    /// on a company that prices its work.
+    #[tokio::test]
+    async fn unknown_skill_id_is_refused_on_a_pricing_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state);
+
+        let body = task_body("seo.ghost");
+        let header = siwx_header(&client, "acme", &body, now_secs());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "an unpriced, unadvertised skill must not run for free"
+        );
+    }
+
     #[tokio::test]
     async fn paid_skill_with_wrong_recipient_is_rechallenged() {
         let dir = tempfile::tempdir().unwrap();
         let (state, client) = seeded_state(dir.path()).await;
-        let app = router().with_state(state);
+        let app = router().with_state(state.clone());
 
         // A well-formed, correctly-signed authorization that pays SOMEONE ELSE
         // (a self-dealing payer) must not buy priced work from this company.
@@ -660,6 +978,174 @@ mod test {
 
         // Re-challenged with a 402, not served for free.
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        // And the rejection must not have spent the nonce: on a multi-company
+        // host, submitting a valid authorization against the wrong company's
+        // handle would otherwise burn it here and reject the payer's retry
+        // against the right company as a replay, even though it was never
+        // accepted anywhere.
+        assert!(
+            state
+                .x402_nonce()
+                .check_and_insert(&auth.nonce, now_secs(), auth.timestamp)
+                .expect("nonce cache must still answer")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_underpaid_authorization_does_not_spend_its_nonce() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state.clone());
+
+        let our_id = signer_for(state.home(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        let challenge = X402Challenge {
+            amount: "1.00".into(), // below seo.audit's price
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+        let rpc = JsonRpcRequest::new(
+            "tasks/send",
+            json!({ "skill": "seo.audit", "input": {}, "payment": auth }),
+        );
+        let body = serde_json::to_vec(&rpc).unwrap();
+        let header = siwx_header(&client, "acme", &body, now_secs());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(
+            state
+                .x402_nonce()
+                .check_and_insert(&auth.nonce, now_secs(), auth.timestamp)
+                .expect("nonce cache must still answer"),
+            "an underpaid authorization must not burn its nonce — the payer \
+             cannot fix the amount without re-signing, but nothing here \
+             should have consumed it either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_correctly_priced_authorization_in_the_wrong_asset_is_rechallenged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state.clone());
+
+        let our_id = signer_for(state.home(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        // The payer signs a fully-priced authorization, but in an asset the
+        // card never priced this skill in.
+        let challenge = X402Challenge {
+            amount: "25.00".into(),
+            recipient: our_id,
+            asset: "NOTUSDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+        let rpc = JsonRpcRequest::new(
+            "tasks/send",
+            json!({ "skill": "seo.audit", "input": {}, "payment": auth }),
+        );
+        let body = serde_json::to_vec(&rpc).unwrap();
+        let header = siwx_header(&client, "acme", &body, now_secs());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "a signed payment in the wrong asset must not buy work priced in a different one"
+        );
+        assert!(
+            state
+                .x402_nonce()
+                .check_and_insert(&auth.nonce, now_secs(), auth.timestamp)
+                .expect("nonce cache must still answer"),
+            "the rejected authorization must not have spent its nonce"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_finite_amount_is_rechallenged_not_treated_as_paid() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state.clone());
+
+        let our_id = signer_for(state.home(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        // `"NaN".parse::<f64>()` succeeds and every comparison against NaN is
+        // false, so a naive `paid < price` underpayment check treats this as
+        // sufficient. It must not be.
+        let challenge = X402Challenge {
+            amount: "NaN".into(),
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+        let rpc = JsonRpcRequest::new(
+            "tasks/send",
+            json!({ "skill": "seo.audit", "input": {}, "payment": auth }),
+        );
+        let body = serde_json::to_vec(&rpc).unwrap();
+        let header = siwx_header(&client, "acme", &body, now_secs());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "a non-finite claimed amount must never be treated as sufficient payment"
+        );
+        assert!(
+            state
+                .x402_nonce()
+                .check_and_insert(&auth.nonce, now_secs(), auth.timestamp)
+                .expect("nonce cache must still answer"),
+            "the rejected authorization must not have spent its nonce"
+        );
     }
 
     #[tokio::test]
@@ -686,6 +1172,137 @@ mod test {
         // The identical signature is rejected on replay.
         let second = app.oneshot(build()).await.unwrap();
         assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn card_pricing(skills: &[(&str, &str)]) -> AgentCard {
+        AgentCard {
+            payment_requirements: skills
+                .iter()
+                .map(|(id, price)| CardPayment {
+                    skill_id: (*id).to_string(),
+                    price: (*price).to_string(),
+                    asset: "USDC".into(),
+                    network: "solana".into(),
+                })
+                .collect(),
+            ..AgentCard::default()
+        }
+    }
+
+    #[test]
+    fn a_priced_skill_is_charged_for() {
+        let card = card_pricing(&[("seo.audit", "25.00")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.audit"),
+            SkillCharge::Priced(_)
+        ));
+    }
+
+    #[test]
+    fn a_zero_price_is_deliberately_free() {
+        let card = card_pricing(&[("seo.audit", "25.00"), ("seo.free", "0.00")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.free"),
+            SkillCharge::Free
+        ));
+    }
+
+    #[test]
+    fn an_unparsable_price_is_still_free() {
+        let card = card_pricing(&[("seo.audit", "25.00"), ("seo.odd", "gratis")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.odd"),
+            SkillCharge::Free
+        ));
+    }
+
+    #[test]
+    fn an_unadvertised_skill_is_unknown_not_free() {
+        let card = card_pricing(&[("seo.audit", "25.00"), ("seo.free", "0.00")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.ghost"),
+            SkillCharge::Unknown
+        ));
+    }
+
+    #[test]
+    fn a_card_that_prices_nothing_charges_for_nothing() {
+        // A company that never opted into pricing keeps serving every id,
+        // including one it does not list — refusing here would take A2A away
+        // from it.
+        let card = card_pricing(&[("seo.free", "0.00")]);
+        assert!(matches!(
+            classify_skill(&card, "seo.ghost"),
+            SkillCharge::Free
+        ));
+        assert!(matches!(
+            classify_skill(&AgentCard::default(), "seo.ghost"),
+            SkillCharge::Free
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_id_with_a_priced_entry_is_still_charged() {
+        // Manifest validation now rejects this shape outright, but the lookup
+        // itself must stay safe by construction: given both a free and a
+        // priced entry under the same id, in either order, the priced one
+        // must win. Letting the free entry win would waive a price the
+        // company does charge for that skill.
+        let free_first = card_pricing(&[("seo.audit", "0.00"), ("seo.audit", "25.00")]);
+        assert!(matches!(
+            classify_skill(&free_first, "seo.audit"),
+            SkillCharge::Priced(_)
+        ));
+
+        let priced_first = card_pricing(&[("seo.audit", "25.00"), ("seo.audit", "0.00")]);
+        assert!(matches!(
+            classify_skill(&priced_first, "seo.audit"),
+            SkillCharge::Priced(_)
+        ));
+    }
+
+    /// The spent-nonce set is the only thing that makes an authorization
+    /// single-use, so a set that cannot answer must stop the sale.
+    #[tokio::test]
+    async fn an_unusable_spent_nonce_set_refuses_a_paid_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let runtime = state.registry().sole().unwrap();
+        let our_id = signer_for(dir.path(), &CompanyId::new("acme"))
+            .await
+            .unwrap()
+            .agent_id();
+        state.x402_nonce().poison_for_tests();
+        let app = router().with_state(state);
+
+        let challenge = X402Challenge {
+            amount: "25.00".into(),
+            recipient: our_id,
+            asset: "USDC".into(),
+            network: "solana".into(),
+        };
+        let auth = x402::authorize(&client, &challenge, now_secs());
+        let response = app
+            .oneshot(paid_request(&client, &auth, "x.com"))
+            .await
+            .unwrap();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "an unreadable spent-nonce set must refuse the payment"
+        );
+        let stored = runtime
+            .events
+            .read_from(runtime.id(), EventSeq::new(0), 10)
+            .await
+            .unwrap();
+        assert!(
+            !stored
+                .iter()
+                .any(|e| matches!(&e.event, CompanyEvent::A2aTaskReceived { .. })),
+            "no task may reach cognition when the payment was refused"
+        );
     }
 
     #[tokio::test]
@@ -780,5 +1397,138 @@ mod test {
             .unwrap();
         let md = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(md.contains("`seo.audit` — 25.00 USDC (solana)"));
+    }
+
+    /// PLAT-067 / PLAT-066-067: `tasks/send` is fully synchronous, so a cycle
+    /// that never returns must not be able to hold the connection (and the
+    /// task behind it) open forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_task_that_never_finishes_is_bounded_by_a_cycle_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state_with_brain(dir.path(), Arc::new(HangingBrain)).await;
+        let app = router().with_state(state);
+
+        let body = task_body("seo.free");
+        let header = siwx_header(&client, "acme", &body, now_secs());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "a company cycle that never returns must not hold the connection open forever"
+        );
+    }
+
+    /// PLAT-067: one `tasks/send` POST must append exactly one
+    /// `A2aTaskReceived` event — not a batch, not a loop that could run the
+    /// counterparty's task more than once.
+    #[tokio::test]
+    async fn exactly_one_cycle_runs_per_inbound_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let runtime = state.registry().sole().unwrap();
+        let app = router().with_state(state);
+
+        let body = task_body("seo.free");
+        let header = siwx_header(&client, "acme", &body, now_secs());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stored = runtime
+            .events
+            .read_from(runtime.id(), EventSeq::new(0), 10)
+            .await
+            .unwrap();
+        let received = stored
+            .iter()
+            .filter(|e| matches!(&e.event, CompanyEvent::A2aTaskReceived { .. }))
+            .count();
+        assert_eq!(
+            received, 1,
+            "one POST to tasks/send must append exactly one A2aTaskReceived event: {stored:?}"
+        );
+    }
+
+    /// PLAT-066: the prosumer fallback is scoped to a genuinely sole company.
+    /// With two companies registered, an unmatched handle must 404 rather than
+    /// silently answering as either of them.
+    #[tokio::test]
+    async fn the_prosumer_fallback_does_not_fire_when_more_than_one_company_is_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = two_company_state(dir.path()).await;
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/nonexistent-handle/skill.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "with two companies registered, an unmatched handle must not resolve to either"
+        );
+    }
+
+    /// PLAT-066-067: this IS the SIWX design — a self-issued identity, not an
+    /// allow-listed one. Two independently generated keypairs, neither ever
+    /// provisioned or seen before, must each transact on their very first
+    /// request.
+    #[tokio::test]
+    async fn two_independent_strangers_each_transact_without_prior_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _seed_client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state);
+
+        for _ in 0..2 {
+            let stranger = LocalSigner::generate();
+            let body = task_body("seo.free");
+            let header = siwx_header(&stranger, "acme", &body, now_secs());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/a2a/acme")
+                        .header(AUTHORIZATION, header)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "a freshly generated, never-before-seen keypair must transact on its first request"
+            );
+        }
     }
 }

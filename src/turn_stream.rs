@@ -613,6 +613,36 @@ mod tests {
         publish(&company, frame("tool_call", 0)); // must not panic
     }
 
+    /// A subscriber that lags past [`CAPACITY`] must skip the gap and keep
+    /// reading — never block, and never end the stream. `subscribe`'s `loop`
+    /// treats `RecvError::Lagged` as a reason to keep polling; only `Closed`
+    /// ends the stream, and `REGISTRY` holds a sender for the process
+    /// lifetime, so that never fires here.
+    #[tokio::test]
+    async fn a_lagging_subscriber_skips_dropped_frames_instead_of_ending() {
+        let company = CompanyId::new("turn-stream-overflow");
+        let mut stream = subscribe(&company);
+
+        // Publish well past the ring's capacity with nobody draining it, so
+        // the receiver's cursor falls behind the oldest frame still buffered.
+        let overflow = CAPACITY as u64 + 50;
+        for seq in 0..overflow {
+            publish(&company, frame("tool_call", seq));
+        }
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("a lagging subscriber must not block forever")
+            .expect("the stream must not end on a lag");
+        let got = turn(got);
+        assert!(
+            got.seq >= overflow - CAPACITY as u64,
+            "a lagging read must resume at the oldest frame still in the ring, not replay one \
+             that was already dropped: got seq {}",
+            got.seq
+        );
+    }
+
     /// The wire shape carries a `type` discriminant (so the console switches on
     /// it alongside the durable projections), camelCases its keys, and omits
     /// empty optionals.

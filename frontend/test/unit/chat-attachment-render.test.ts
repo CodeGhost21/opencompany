@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AttachmentDto } from "@/api/types";
-import { MessageAttachments } from "@/views/chat/MessageAttachments";
+import { MessageAttachments } from "@/views/room/MessageAttachments";
 
 /**
  * Issue #1682: how an attachment renders in the transcript. v1 is a download

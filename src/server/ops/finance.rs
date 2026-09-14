@@ -704,6 +704,7 @@ mod tests {
         .expect("manifest");
         crate::store::FsCompanyStore::new(home.to_path_buf())
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
                 ledger: Vec::new(),

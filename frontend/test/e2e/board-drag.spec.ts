@@ -25,10 +25,10 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
  * drag-and-drop does not scroll a nested scroll container, so a column parked
  * off-screen could not be reached by the gesture at all.
  *
- * # Why this one drives `#/ledgers/tasks`
+ * # Why this one drives `#/company/work/tasks`
  *
  * Because that is where the board is. `LedgerBoard` renders every ledger's
- * columns under `#/ledgers/<slug>`, and the task board is one of them — the
+ * columns under `#/company/work/<slug>`, and the task board is one of them — the
  * `tasks` ledger — since issue #1140 retired the standalone Tasks page that had
  * been showing the same records through the same component.
  *
@@ -59,7 +59,7 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
 const API = "/api/v1/company";
 
 /** The board's address now that the standalone screen is gone. */
-const BOARD = "/#/ledgers/tasks";
+const BOARD = "/#/company/work/tasks";
 
 /**
  * Board order (issue #301), so a column can be addressed by position.
@@ -236,9 +236,23 @@ test("a card drags from Working to Done, and the board scrolls to get there", as
   request,
 }) => {
   const title = `e2e in-review to done ${Date.now()}`;
+  // Wide enough that `openBoard`'s `expandAll` finds NO rails and therefore
+  // pins nothing, which is the premise everything below rests on: a column that
+  // was pinned open while the window was wide will not collapse when it
+  // narrows, and the collapse is what this test then waits for.
+  //
+  // 1280 used to be wide enough for that. It is not since #2130: Work is a page
+  // under Company, and a section's sub-navigation is a 240px rail down the left
+  // of the content area now — so at 1280 the board has ~240px less than it did
+  // and folds a phase into a rail before this test has started. `expandAll`
+  // then pins all three open and nothing can collapse again.
+  //
+  // 1600 restores the old headroom rather than guessing at a new threshold:
+  // 1280 was comfortable before the rail, and 1600 is comfortable behind it.
+  await page.setViewportSize({ width: 1600, height: 720 });
   const { id, card } = await seedInReview(page, request, title);
 
-  // Three phases of ~260px no longer overflow the default 1280px window, so
+  // Three phases of ~260px do not overflow the window at the width above, so
   // the board cannot scroll and the park below lands on zero. Narrow the
   // window so the board genuinely overflows: the sidebar stays expanded above
   // `md` (768px), and the park needs ~260px of overflow to land mid-range.

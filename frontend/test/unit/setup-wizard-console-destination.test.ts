@@ -113,6 +113,25 @@ async function click(testId: string) {
   });
 }
 
+/**
+ * Answers the model step with "No model".
+ *
+ * The escape used to be a link under the step (`setup-skip-model`); it is the
+ * provider picker's last option now, and the picker is a base-ui `Select`
+ * whose popup portals onto `document.body` and does not exist until the
+ * trigger opens it.
+ */
+async function skipModel() {
+  await click("setup-provider-select");
+  const none = document.body.querySelector('[data-testid="setup-provider-none"]') as
+    | HTMLElement
+    | null;
+  expect(none, "no No-model option").toBeTruthy();
+  await act(async () => {
+    none!.click();
+  });
+}
+
 const next = async () =>
   act(async () => {
     const match = Array.from(container.querySelectorAll("button")).find((b) =>
@@ -148,7 +167,7 @@ const settle = async () =>
  * preselects `none` and the address step is absent.
  */
 async function finishNoSignIn() {
-  await click("setup-skip-model");
+  await skipModel();
   await next(); // -> business
   await fill("setup-field-industry", "E-commerce — homeware");
   await next(); // -> sign-in (none preselected)
@@ -160,7 +179,7 @@ async function finishNoSignIn() {
 
 /** An email-sign-in host that cannot send mail: the "anyway" escape. */
 async function finishUnmailable() {
-  await click("setup-skip-model");
+  await skipModel();
   await next(); // -> business
   await fill("setup-field-industry", "E-commerce — homeware");
   await next(); // -> sign-in

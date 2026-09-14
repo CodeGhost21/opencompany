@@ -236,7 +236,7 @@ export function ExternalHarnesses({ client, company }: Props) {
       <CardHeader>
         <CardTitle className="text-base">External harnesses</CardTitle>
         <CardDescription>
-          The coding engines a teammate here can run on. A teammate is put on one from its
+          The coding engines an agent here can run on. An agent is put on one from its
           own page, under Harness &amp; model.
         </CardDescription>
         <CardAction>

@@ -1,7 +1,7 @@
 # The console's four sections
 
 The sidebar is four rows — **Room**, **Company**, **Connections**, **Flows** —
-with the contents of the one you are in listed beneath them. This file is the
+with the Room rail pinned beneath them on every one of them. This file is the
 record of that decision. It is Rule 8 of
 [`ledgers-console-ia.md`](ledgers-console-ia.md) written out, because that file
 is at its 500-line ceiling and this is the largest IA change it has seen.
@@ -30,54 +30,84 @@ question an operator is answering:
 Everything else is chrome (Settings, Feedback, Discord in the footer; Overview
 and Approvals in the window's title row) or is filed under one of the four.
 
-## The sub-navigation is in the SIDEBAR
+## The sub-navigation is in the CONTENT AREA — and this reverses a decision
 
-Finance, Settings and — until this change — Connections each drew a `w-60` rail
-inside the content area. That is the wrong place once more than one section has
-sub-pages, for two reasons that are not about layout fashion:
+This file first recorded the opposite, and the reversal is issue #2130. Both
+arguments are kept, because a decision reversed without its reasons on the page
+gets reversed back.
 
-- It puts the same kind of list in two different places depending on which
-  section you are in — the sidebar for the sections without sub-pages, a rail
-  for the ones with — so there is no rule to learn.
-- It charges the content pane 240px on every page under it, on a screen that
-  already has a sidebar to its left.
+**What it said.** Finance, Settings and Connections each drew a `w-60` rail
+inside the content area, and that was the wrong place once more than one section
+had sub-pages, for two reasons that are not about layout fashion: it puts the
+same kind of list in two different places depending on which section you are in
+— the sidebar for the sections without sub-pages, a rail for the ones with — so
+there is no rule to learn; and it charges the content pane 240px on every page
+under it, on a screen that already has a sidebar to its left. PR #1977 built a
+Connections content rail and removed it on exactly that argument.
 
-`components/sidebar-navigation.tsx` owns the pattern, and all four sections use
-it. `views/connections/ConnectionsSection.tsx` kept its dispatch and lost its
-rail in the same change that introduced the pattern, so the console never had
-two answers at once.
+**What outweighs it.** Putting a section's pages in the sidebar's middle region
+meant spending that region on them — and what it was spending was the **channel
+list**, which only appeared while you were in Room. The channel list is the one
+list an operator returns to continuously, from wherever they are. Losing it on
+every trip to Company, Connections or Flows is not a width, it is a round trip:
+go to Room, find the channel, come back. That costs more than 240px does.
 
-### Not an accordion
+So the trade is inverted. The sidebar's middle region is the Room rail,
+permanently, on every section. Company's five pages and Connections' two are the
+first column of their content area, drawn by `components/section-rail.tsx` from
+the same `NAV_SECTIONS` table the four rows come from.
+
+**The "two places" half of the old argument is answered, not ignored.** There is
+exactly one rule now — a section's sub-navigation is the first column of its
+content — and exactly one rail on screen at a time:
+
+- **Finance folds in.** Its three pages are nested rows on Company's rail,
+  visible while Finance is the open row. A rail of its own would be the second
+  240px column beside Company's, which is the 768–1023px band of issue #1383
+  reproduced at *every* width. `views/finance/FinanceSection.tsx` is
+  dispatch-only as a result — the shape `ConnectionsSection` already had.
+- **Settings keeps its own** because it is not one of the four at all. It is a
+  footer utility, and its rail *is* this pattern; the shared component copies
+  its geometry (`w-60` from `lg`, chips below) rather than the other way round.
+- **Room and Flows draw none.** Room's sub-navigation is the pinned channel
+  list. Flows has none to move: the canvas's Workflows/Runs toggle is a control
+  on the page's title row whose state is client-side rather than an address, so
+  promoting it would be inventing sub-pages rather than relocating any.
+
+### Not an accordion, and no longer a swap either
 
 The four rows are always visible, always contiguous, always in the same place.
-Selecting a section swaps the block **below** them; it does not expand a row in
-place and does not displace a row's siblings. Exactly one section's contents are
-on screen at a time.
+Selecting a section does not expand a row in place and does not displace a row's
+siblings — and since #2130 it does not swap the block below them either. That
+block is the channel list on every route, which makes the whole column fixed
+furniture: the same four rows and the same list, wherever you are.
 
 ```text
-┌─────────────────┐
-│ ■ Room          │  the four, fixed — they do not
-│   Company       │  move when you switch section
-│   Connections   │
-│   Flows         │
-│                 │  space, not a rule
-│ CHANNELS      + │  the active section's contents,
-│  # engineering  │  and only its contents. This is
-│  # general      │  the block that scrolls.
-│ DIRECT MSGS   ✎ │
-│  Neil · Alex    │
-├─────────────────┤
-│ ⚙ Settings      │  pinned, unchanged
-│ ⚑ Feedback      │
-│ ✦ Discord       │
-└─────────────────┘
+┌─────────────────┐┌────────────┬──────────────────┐
+│ ■ Room          ││ COMPANY    │                  │
+│   Company       ││  Agents    │  the page        │
+│   Connections   ││  Work      │                  │
+│   Flows         ││  Workspace │                  │
+│                 ││  Brain     │                  │
+│ CHANNELS      + ││  Finance   │                  │
+│  # engineering  ││   Overview │  the section's   │
+│  # general      ││   Invoicing│  rail — nested   │
+│ DIRECT MSGS   ✎ ││   Wallet   │  rows only while │
+│  Neil · Alex    ││            │  Finance is open │
+├─────────────────┤│            │                  │
+│ ⚙ Settings      ││            │                  │
+│ ⚑ Feedback      ││            │                  │
+│ ✦ Discord       ││            │                  │
+└─────────────────┘└────────────┴──────────────────┘
+  fixed on every      one rail, never two
+  route now
 ```
 
 The accordion — each row expanding under itself — was the first shape this took
 and was rejected twice over. The rows move, so "Flows is the fourth thing" only
-holds while nothing above it is open. And the one section whose contents are
-unbounded, Room, pushes every row after it off the bottom at an ordinary twenty
-channels: the wall, recreated inside one row.
+holds while nothing above it is open. And the one region whose contents are
+unbounded, the channel list, pushes every row after it off the bottom at an
+ordinary twenty channels: the wall, recreated inside one row.
 
 A fixed block also has no per-row open/closed state to keep. Which section is
 showing is which section you are in, and the route already carries that.
@@ -89,12 +119,12 @@ whatever a removed element's margins happened to be.
 
 ### On the collapsed rail
 
-The four icons stay. A section whose contents are a fixed list hides them —
-those rows are 3rem of nothing without their labels, and the parent icon still
-leads to them. **Room is the exception**: `ChannelRail` has a compact variant
-built for exactly that width, and dropping it would make collapsing the sidebar
-silently lose the channel list — the regression issue #1018 filed about the
-approvals badge, in a new place.
+The four icons stay, and so does the channel list: `ChannelRail` has a compact
+variant built for exactly that width, and dropping it would make collapsing the
+sidebar silently lose the channel list — the regression issue #1018 filed about
+the approvals badge, in a new place. Nothing else is in this region to hide any
+more. The fixed lists of child rows that *were* hidden here at 3rem are
+content-rail rows now, where they keep their labels at every width.
 
 ## Room is the chat column, moved whole
 
@@ -111,7 +141,34 @@ node, not the component tree. Lifting the model would have meant an effect
 writing it up to the shell and a re-render of the whole console every time an
 unread count changed.
 
-Two consequences worth stating:
+### Pinning the rail keeps `ChatView` mounted, and that is the price
+
+The rail is painted on every section now, so the view that renders it has to
+outlive the route that used to own it. The shell mounts `ChatView` on every
+route and hands it `routeOpen`; off Room it renders the rail, its two dialogs,
+and nothing else.
+
+The same two options were reweighed and the answer did not change. Lifting the
+model into the shell would now be *worse* than it was: the console would
+re-render on every unread tick from every section rather than only from Room.
+
+What the portal costs, stated plainly: ~2,400 lines of chat model stay mounted
+while an operator is on Company or Flows. The **data** was already resident —
+the shell owns the transcripts, the mention feed and the unread map precisely
+*because* `ChatView` used to unmount — so what is newly kept is the view's own
+state and its desks/roster reads, not the traffic. `ChatView` takes one roster
+read at shell mount that it did not take before, which
+`onboarding-gate-setup-controller-mount.test.ts` accounts for by name. In
+exchange the channel list is never a round trip away and a return to Room
+refetches nothing.
+
+One correctness consequence has to be said with it: **a mounted transcript is no
+longer evidence of a visible one.** `chatPaneVisible` is `routeOpen && !covering`
+— a mention must not be marked read because the operator happens to be on
+Company, for the same reason it must not be marked read behind the phone's
+covering sheet.
+
+Two further consequences worth stating:
 
 - **The 768–1023px two-rail band is gone by construction.** The rail was a
   second column competing with the app sidebar for the viewport, which is what
@@ -200,6 +257,9 @@ that one.
 - Rule 2's reasoning about a row per declared list is the argument this file
   generalises. Nothing in it is superseded.
 - Rule 6 is unchanged and is now exercised by eight views rather than five.
-- Rule 7's Connections section survives; only its rail moved into the sidebar.
-- `finance-console.md` still describes Finance's sub-pages correctly. Its
-  content rail is the last one left and is the obvious next thing to convert.
+- Rule 7's Connections section survives. Its rail moved into the sidebar and
+  came back to the content area as the shared one — through both moves the
+  section itself stayed dispatch-only, which is the property that mattered.
+- `finance-console.md` still describes Finance's sub-pages correctly. They are
+  nested rows on Company's rail rather than a rail of their own; the pages,
+  their addresses and their order are unchanged.

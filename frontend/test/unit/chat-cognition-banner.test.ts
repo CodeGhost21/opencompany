@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { CapabilityStatusDto, CognitionState } from "@/api/types";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { ChatView } from "@/views/ChatView";
+import { RoomView } from "@/views/RoomView";
 
 /**
  * Issues #1734 / #1735 — chat says so, before the first echo, when this company
@@ -33,7 +33,7 @@ let root: Root;
  * A client that answers the capability read, and answers everything else with
  * an empty list.
  *
- * A `Proxy` rather than an enumerated stub on purpose. `ChatView` boots eight
+ * A `Proxy` rather than an enumerated stub on purpose. `RoomView` boots eight
  * unrelated reads — roster, viewer, people, desks, mentionables, history,
  * read-state, presence — and naming each one here would make this test a
  * standing record of that list, failing on the next read anyone adds for a
@@ -80,7 +80,7 @@ async function render(cognition: CognitionState | undefined | "reject"): Promise
     root.render(
       createElement(ConnectionScopeProvider, {
         scope: { connection: "c1", company: "acme" },
-        children: createElement(ChatView, {
+        children: createElement(RoomView, {
           client,
           company: "acme",
           sub: "main",
@@ -144,15 +144,15 @@ describe("the chat cognition banner", () => {
     const notice = banner();
     expect(notice).not.toBeNull();
     // What is wrong, in the operator's terms rather than the runtime's.
-    expect(notice!.textContent).toContain("Teammates can't think yet.");
+    expect(notice!.textContent).toContain("Agents can't think yet.");
     // Why the replies below are not what they look like.
     expect(notice!.textContent).toContain("offline echo brain");
     // And the remedy, as a link that actually goes there — the whole point of
     // the issue is that this is one settings page away and nothing said so.
     const link = notice!.querySelector("a");
     expect(link).not.toBeNull();
-    expect(link!.getAttribute("href")).toBe("#/settings/inference");
-    expect(link!.textContent).toContain("Settings → Inference");
+    expect(link!.getAttribute("href")).toBe("#/connections/inference");
+    expect(link!.textContent).toContain("Connections → Inference");
   });
 
   it("names the host, not a setting, when no harness is available", async () => {
@@ -211,7 +211,7 @@ describe("the chat cognition banner", () => {
     expect(notice!.textContent).not.toContain("has no model configured");
     // The link goes to the card that owns the restart — but the copy stops
     // short of promising a button, which is `canRebuildInPlace`'s to report.
-    expect(notice!.querySelector("a")!.getAttribute("href")).toBe("#/settings/inference");
+    expect(notice!.querySelector("a")!.getAttribute("href")).toBe("#/connections/inference");
   });
 
   /**
@@ -248,7 +248,7 @@ describe("the chat cognition banner", () => {
       root.render(
         createElement(ConnectionScopeProvider, {
           scope: { connection: "c1", company: "acme" },
-          children: createElement(ChatView, {
+          children: createElement(RoomView, {
             client,
             company: "acme",
             sub: "main",
@@ -315,7 +315,7 @@ describe("the chat cognition banner", () => {
    * The answer can go stale under a console doing nothing at all: another admin,
    * or this operator in a second window, configures inference and rebuilds the
    * runtime while this chat sits open (codex, PR #1740). The operator's own trip
-   * to Settings already re-reads — the shell mounts and unmounts `ChatView` per
+   * to Settings already re-reads — the shell mounts and unmounts `RoomView` per
    * route — but nothing covered the cross-session case, and a standing banner
    * insisting that a company which now thinks perfectly well cannot is the same
    * class of wrong claim this surface exists to remove.
@@ -343,7 +343,7 @@ describe("the chat cognition banner", () => {
       root.render(
         createElement(ConnectionScopeProvider, {
           scope: { connection: "c1", company: "acme" },
-          children: createElement(ChatView, {
+          children: createElement(RoomView, {
             client,
             company: "acme",
             sub: "main",
@@ -381,7 +381,7 @@ describe("the chat cognition banner", () => {
    * A company switch must not show the previous company's verdict, not even for
    * the frame before the new read lands (CodeRabbit review of PR #1740).
    *
-   * `ChatView` stays mounted when `company` changes, and its capability read is
+   * `RoomView` stays mounted when `company` changes, and its capability read is
    * a passive effect — which runs *after* React has committed the DOM and the
    * browser has painted. Clearing the state inside that effect is therefore too
    * late by construction: the operator sees company A's "teammates can't think"
@@ -421,7 +421,7 @@ describe("the chat cognition banner", () => {
         createElement(ConnectionScopeProvider, {
           scope: { connection: "c1", company },
           children: createElement(Fragment, null, [
-            createElement(ChatView, {
+            createElement(RoomView, {
               key: "chat",
               client,
               company,
@@ -505,7 +505,7 @@ describe("the cognition banner's copy claims no direction", () => {
 
       const text = banner()!.textContent!;
       expect(text).toContain("offline echo brain");
-      expect(text).toContain("rather than the teammate they appear under");
+      expect(text).toContain("rather than the agent they appear under");
     });
   }
 });

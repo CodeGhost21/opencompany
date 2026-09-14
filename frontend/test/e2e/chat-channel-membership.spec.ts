@@ -113,7 +113,7 @@ async function mockApi(page: Page, mode: () => DesksMode) {
 }
 
 /** The header's member toggle — its label ends in "members". */
-const membersToggle = (page: Page) => page.getByRole("button", { name: /teammates$/i });
+const membersToggle = (page: Page) => page.getByRole("button", { name: /agents$/i });
 
 /** The member pane; the channel rail is the other `complementary` on screen. */
 const pane = (page: Page) => page.getByRole("complementary").last();
@@ -121,7 +121,7 @@ const pane = (page: Page) => page.getByRole("complementary").last();
 /**
  * Open the pane if it is shut.
  *
- * Not a plain click: the pane's open state lives in `ChatView`, and switching
+ * Not a plain click: the pane's open state lives in `RoomView`, and switching
  * channels is a hash-only navigation that does not remount it — so a second
  * click would close what the first opened.
  */
@@ -194,7 +194,7 @@ test("#369 a host with no desks surface still shows the whole roster", async ({ 
   // behaviour on purpose — one plain roster, no "in this channel" claim.
   await expect(membersToggle(page)).toHaveText(/17/);
   await openPane(page);
-  await expect(pane(page)).toContainText("17 teammates");
+  await expect(pane(page)).toContainText("17 agents");
   await expect(pane(page).getByRole("heading", { name: "In this channel" })).toHaveCount(0);
   await expect(pane(page).locator("ul").first().locator("li")).toHaveCount(17);
 });
@@ -222,9 +222,12 @@ test("#370 a deep link never flashes a channel the company doesn't have", async 
     (window as unknown as { __placeholders: string[] }).__placeholders = [];
     const tick = () => {
       const seen = (window as unknown as { __placeholders: string[] }).__placeholders;
-      const p = document
-        .querySelector("textarea[placeholder], input[placeholder]")
-        ?.getAttribute("placeholder");
+      // The composer is the only `textarea[placeholder]` on the page; scoped
+      // to that element type deliberately, since the sidebar's disabled
+      // search `input` also carries a `placeholder` ("Search") and — sitting
+      // earlier in the DOM now that it lives in the title row — would
+      // otherwise win a bare `querySelector` before the composer ever paints.
+      const p = document.querySelector("textarea[placeholder]")?.getAttribute("placeholder");
       if (p && seen[seen.length - 1] !== p) seen.push(p);
       requestAnimationFrame(tick);
     };

@@ -97,6 +97,7 @@ async fn state_with(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -139,7 +140,7 @@ async fn state_with(
 /// The repo's shared skill library (`<crate root>/skills`), the same directory
 /// the serve path derives `skills_root` from.
 fn repo_skills_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills")
 }
 
 /// Like [`state_with_company`], but with the repo's shared skill library wired
@@ -3433,6 +3434,7 @@ async fn state_with_manifest_and_defaults(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -3482,6 +3484,7 @@ async fn state_with_manifest_and_overlays(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -3772,12 +3775,20 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     // Issue #931: every row carries the display label the rest of the console
     // uses — a manifest agent's role, an overlay teammate's name — so the minted
     // overlay id is never what a reader sees.
+    // The four baseline teammates every company inherits ask for `mcp:*`, so a
+    // company granting it reaches them too. Listed rather than filtered out:
+    // this asserts the whole reachable set, and hiding the half that is not
+    // this manifest's own would leave the baseline free to drift unseen.
     assert_eq!(
         reach("notion"),
         vec![
             pair("019fa75dbc9b-000000000001", "Helper"),
             pair("ceo", "Chief"),
             pair("eng", "Engineer"),
+            pair("operations", "Operations"),
+            pair("page_builder", "Page Builder"),
+            pair("researcher", "Researcher"),
+            pair("writer", "Writer"),
         ]
     );
     // linear: only the wildcard holders — ceo scoped itself out of it.
@@ -3786,6 +3797,10 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
         vec![
             pair("019fa75dbc9b-000000000001", "Helper"),
             pair("eng", "Engineer"),
+            pair("operations", "Operations"),
+            pair("page_builder", "Page Builder"),
+            pair("researcher", "Researcher"),
+            pair("writer", "Writer"),
         ],
         "ceo narrowed to mcp:notion, so it cannot reach linear"
     );
@@ -3861,10 +3876,21 @@ async fn mcp_reachability_is_empty_for_a_disabled_server() {
             .collect()
     };
 
-    // Enabled: the one agent's grant covers it.
+    // Enabled: the one agent's grant covers it, and so does the baseline's —
+    // this company grants `mcp:*`, which the inherited teammates ask for. The
+    // disabled assertion below is the one this test is about.
     let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(reach(&list[0]), vec!["ceo".to_string()]);
+    assert_eq!(
+        reach(&list[0]),
+        vec![
+            "ceo".to_string(),
+            "operations".to_string(),
+            "page_builder".to_string(),
+            "researcher".to_string(),
+            "writer".to_string(),
+        ]
+    );
 
     // Disabling it empties reachability in the mutating response itself.
     let (status, updated) = send(
@@ -4048,6 +4074,7 @@ async fn state_with_source_dir(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -8027,7 +8054,7 @@ async fn applying_a_proposal_with_an_unwired_channel_is_refused_and_keeps_the_ca
         problem["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("is not a workflow delivery channel"),
+            .contains("is not an automation delivery channel"),
         "{body}"
     );
 
@@ -10538,14 +10565,17 @@ impl crate::ports::workspace::WorkspaceStore for RecordingReads {
         self.inner.read_capped(company, id, max_bytes).await
     }
 
-    async fn write(
+    async fn write_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         content: &str,
         author: crate::ports::workspace::WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> crate::Result<crate::ports::workspace::WorkspaceNode> {
-        self.inner.write(company, id, content, author).await
+        self.inner
+            .write_with_revision(company, id, content, author, expected_updated_at)
+            .await
     }
 
     async fn create(

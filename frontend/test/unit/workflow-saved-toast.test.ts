@@ -11,7 +11,7 @@ import { workflowSavedToast } from "@/lib/workflow-saved-toast";
  * render.
  */
 describe("workflowSavedToast", () => {
-  it("flags a save that disarmed an armed workflow", () => {
+  it("flags a save that disarmed an armed automation", () => {
     // The schedule-edit path: armed (true) → host returns disarmed (false).
     expect(workflowSavedToast(true, false)).toBe("disarmed");
   });
@@ -21,16 +21,16 @@ describe("workflowSavedToast", () => {
     expect(workflowSavedToast(undefined, false)).toBe("disarmed");
   });
 
-  it("stays a plain save when the workflow is still armed", () => {
+  it("stays a plain save when the automation is still armed", () => {
     expect(workflowSavedToast(true, true)).toBe("saved");
   });
 
-  it("does not re-flag a re-save of an already-paused workflow", () => {
+  it("does not re-flag a re-save of an already-paused automation", () => {
     // false → false changed nothing the operator must act on.
     expect(workflowSavedToast(false, false)).toBe("saved");
   });
 
-  it("is a plain save when an edit re-armed a paused workflow", () => {
+  it("is a plain save when an edit re-armed a paused automation", () => {
     expect(workflowSavedToast(false, true)).toBe("saved");
   });
 });
