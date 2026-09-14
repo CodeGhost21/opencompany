@@ -527,6 +527,7 @@ impl MessageView {
             reactions: Vec::new(),
             mentions: Vec::new(),
             attachments: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 }
@@ -2275,6 +2276,7 @@ mod test {
             reactions: Vec::new(),
             mentions: Vec::new(),
             attachments: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 

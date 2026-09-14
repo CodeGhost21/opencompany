@@ -10205,6 +10205,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "General".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "one turn, from one session".to_string(),

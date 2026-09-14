@@ -555,6 +555,7 @@ mod test {
                 text: text.to_string(),
                 steps: Vec::new(),
                 task_id: None,
+                outputs: Vec::new(),
                 parent: None,
                 mentions: Vec::new(),
                 mention_depth: 0,

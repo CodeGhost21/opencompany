@@ -391,6 +391,9 @@ impl SpeechContext {
             text,
             steps: Vec::new(),
             task_id: None,
+            // A spoken reply produces no files: the workspace-output collector
+            // runs on the turn, not on this belt.
+            outputs: Vec::new(),
             parent: None,
             // Drawn as chips and read by nobody's dispatcher — see the module
             // docs. Left empty here rather than resolved: this belt does not
@@ -2080,6 +2083,7 @@ members = ["engineer"]
             text: text.to_string(),
             steps: Vec::new(),
             task_id: None,
+            outputs: Vec::new(),
             parent: None,
             mentions: Vec::new(),
             mention_depth: 0,
@@ -2101,6 +2105,7 @@ members = ["engineer"]
                     text: "not brand's business".to_string(),
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     parent: None,
                     mentions: Vec::new(),
                     mention_depth: 0,
@@ -2195,6 +2200,7 @@ members = ["engineer"]
                         text: "filler".to_string(),
                         steps: Vec::new(),
                         task_id: None,
+                        outputs: Vec::new(),
                         parent: None,
                         mentions: Vec::new(),
                         mention_depth: 0,
