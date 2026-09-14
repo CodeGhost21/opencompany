@@ -326,9 +326,14 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
       expect(copy, "the managed route is offered — name its credential").toContain(
         "TinyHumans account key",
       );
-      expect(copy).toContain("Composio token of your own");
+      // "API key", not "token": the route of your own is BYOK, and its
+      // credential is a Composio API key. A "Composio token" is the managed
+      // route's override — a different credential in a different slot — so
+      // naming it here sent the founder after the wrong one.
+      expect(copy).toContain("Composio API key of your own");
+      expect(copy).not.toContain("Composio token of your own");
       expect(copy.indexOf("TinyHumans account key")).toBeLessThan(
-        copy.indexOf("Composio token of your own"),
+        copy.indexOf("Composio API key of your own"),
       );
     }
   });

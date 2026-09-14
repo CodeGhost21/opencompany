@@ -306,7 +306,7 @@ export function IntegrationStep({
                 both are named: the account key is the one-click half. */}
             {COMPOSIO_MANAGED_HIDDEN
               ? "a Composio API key of your own."
-              : "a TinyHumans account key, or a Composio token of your own."}
+              : "a TinyHumans account key, or a Composio API key of your own."}
           </p>
           <p className="flex items-start gap-2 rounded-lg border bg-muted/40 px-3 py-2">
             <KeyRound aria-hidden className="mt-0.5 size-4 shrink-0" />
