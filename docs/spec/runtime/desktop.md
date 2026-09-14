@@ -60,7 +60,7 @@ opencompany-core = { path = "../opencompany-core", default-features = false, fea
 ```
 
 and the shipped set, passed on the `tauri` command line as
-`DESKTOP_RELEASE_FEATURES` in `.github/workflows/release-desktop-macos.yml`:
+`DESKTOP_RELEASE_FEATURES` in `.github/workflows/build-desktop.yml`:
 
 ```text
 opencompany-core/acp,opencompany-core/composio

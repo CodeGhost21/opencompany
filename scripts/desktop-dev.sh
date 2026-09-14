@@ -154,7 +154,7 @@ fi
 # comment cannot be picked up instead. A miss is fatal rather than a silent
 # fall-back to no features: that would restore the very divergence this exists
 # to close, and do it quietly.
-RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/release-desktop-macos.yml"
+RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/build-desktop.yml"
 # An explicitly-set `DESKTOP_FEATURES` wins, even when empty — that is someone
 # deliberately asking for the leaner build. Only an UNSET one is read from the
 # workflow, and a read that finds nothing is fatal: falling back to no features

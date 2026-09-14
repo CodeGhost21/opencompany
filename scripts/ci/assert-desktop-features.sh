@@ -7,7 +7,7 @@
 # ships. `acp` and `composio` are passed on the `tauri` command line — both are
 # `= ["openhuman"]` in the root manifest, pure `cfg` switches adding no package,
 # so a release can turn them on and still build `--locked`; the argument is on
-# the `DESKTOP_RELEASE_FEATURES` env block in `release-desktop-macos.yml`.
+# the `DESKTOP_RELEASE_FEATURES` env block in `build-desktop.yml`.
 #
 # The cost of that is three copies of one string, and until #1738 there were
 # only two: the dev script ran `tauri dev` bare. So a developer's desktop was
@@ -24,12 +24,12 @@
 # user.
 #
 # To change the shipped set: edit `DESKTOP_RELEASE_FEATURES` in
-# `release-desktop-macos.yml`, run this script, and fix whatever it names.
+# `build-desktop.yml`, run this script, and fix whatever it names.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-RELEASE_WORKFLOW=.github/workflows/release-desktop-macos.yml
+RELEASE_WORKFLOW=.github/workflows/build-desktop.yml
 CI_WORKFLOW=.github/workflows/ci.yml
 DEV_SCRIPT=scripts/desktop-dev.sh
 CONSOLE_MANIFEST=frontend/package.json
@@ -167,14 +167,14 @@ done <<< "$ci_lines"
 dev_code="$(grep -vE '^[[:space:]]*#' "$DEV_SCRIPT")"
 dev_names_workflow=0
 dev_extracts_key=0
-printf '%s' "$dev_code" | grep -q 'release-desktop-macos.yml' && dev_names_workflow=1
+printf '%s' "$dev_code" | grep -q 'build-desktop.yml' && dev_names_workflow=1
 # The extraction itself: executable code that pulls the key out of something.
 printf '%s' "$dev_code" | grep -qE '(sed|awk|grep|rg)[^|]*DESKTOP_RELEASE_FEATURES' && dev_extracts_key=1
 if [ "$dev_names_workflow" -eq 1 ] && [ "$dev_extracts_key" -eq 1 ]; then
   echo "  ok  $DEV_SCRIPT derives the features from $RELEASE_WORKFLOW"
 else
   echo "  BAD $DEV_SCRIPT no longer extracts DESKTOP_RELEASE_FEATURES from the release workflow in code" >&2
-  [ "$dev_names_workflow" -eq 1 ] || echo "        (no executable line names release-desktop-macos.yml)" >&2
+  [ "$dev_names_workflow" -eq 1 ] || echo "        (no executable line names build-desktop.yml)" >&2
   [ "$dev_extracts_key" -eq 1 ] || echo "        (no executable line extracts DESKTOP_RELEASE_FEATURES)" >&2
   status=1
 fi
