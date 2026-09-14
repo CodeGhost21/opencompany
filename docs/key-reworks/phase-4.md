@@ -68,11 +68,13 @@ Items 5, 6, 11, 12; Q6–Q10.
 
 ## Not handled (and why)
 
-- Removing the fallback chains (item 10) and `TINYHUMANS_TOKEN_FILE` (item 18):
-  hosted tenants have no stored key — see [not-handled.md](not-handled.md).
-  Until item 10 lands, a company with no default still resolves Managed through
-  `tinyhumans/key`; the banner matters for companies whose default or an agent
-  pair names `tinyhumans`.
+- Removing the fallback chains (item 10): hosted tenants have no stored key —
+  see [not-handled.md](not-handled.md). Until item 10 lands, a company with no
+  default still resolves Managed through `tinyhumans/key`; the banner matters
+  for companies whose default or an agent pair names `tinyhumans`.
+- `TINYHUMANS_TOKEN_FILE` (item 18) is **not** handled here — it is removed in
+  slice 6a, after 5b, alongside three other environment variables. Do not touch
+  it in 4a. See [phase-6a-remove-env-vars.md](phase-6a-remove-env-vars.md).
 - A new sign-in button for the key-grant flow — #2304's operator request
   removed it; Q10 keeps only the backend.
 - Copying into `composio/byok/key` or changing `composio/mode` — never.

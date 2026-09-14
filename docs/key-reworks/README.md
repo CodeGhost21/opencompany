@@ -66,10 +66,13 @@ Each row is one commit (or a short run of commits) on branch
 | 4c | [phase-4c-reuse-banner.md](phase-4c-reuse-banner.md) | 12; Q8 |
 | 5a | [phase-5a-routes-carry.md](phase-5a-routes-carry.md) | 2; Q14; F7 |
 | 5b | [phase-5b-routing-removal.md](phase-5b-routing-removal.md) | 2, 13a |
+| 6a | [phase-6a-remove-env-vars.md](phase-6a-remove-env-vars.md) | 18 (now handled); D-env-cleanup |
 
 Phase overviews (what, where, use cases, handled / not handled, rollback):
 [phase-1.md](phase-1.md) · [phase-2.md](phase-2.md) · [phase-3.md](phase-3.md) ·
-[phase-4.md](phase-4.md) · [phase-5.md](phase-5.md).
+[phase-4.md](phase-4.md) · [phase-5.md](phase-5.md). Slice 6a has no separate
+overview file; [phase-6a-remove-env-vars.md](phase-6a-remove-env-vars.md) is
+both.
 
 Reference: [current-state.md](current-state.md) + [part 2](current-state-part2.md)
 (every key today) · [target-state.md](target-state.md) +
@@ -81,7 +84,10 @@ key; a decision below turns out impossible or dangerous in code; a carry-over
 would clear or overwrite a stored value; slice 2d is ready to deploy but the
 manager has not confirmed it injects `OPENCOMPANY_INFERENCE_MODEL` and the proxy
 `OPENCOMPANY_INFERENCE_URL` for hosted tenants (the merge itself is not blocked;
-the deploy is).
+the deploy is); slice 6a is ready to deploy but the manager has not confirmed
+every hosted tenant has a `provider/tinyhumans/key` (or another provider's key)
+set — after 6a there is no env-var fallback left for managed inference,
+embeddings or search (merge is not blocked; the deploy is).
 
 ## Decisions (taken; do not re-open)
 
@@ -109,6 +115,7 @@ the changes"). The Q-numbers are the questions in the Keys Rework Rundown.
 | Q13 | Internal passes (title, triage, planning, …) use the default model. A separate background model is **not** built. |
 | Q14 | Routes are copied into an empty default only when all four tier rows are present and identical; otherwise a banner. |
 | Q16 | `OPENHUMAN_*` names stay (embedded runtime contract). Only verified dead code is removed. |
+| D-env-cleanup | The operator decided (2026-09-15) to remove exactly four environment variables — `OPENCOMPANY_INFERENCE_KEY`, `OPENCOMPANY_INFERENCE_URL`, `OPENCOMPANY_COMPOSIO_BACKEND_URL`, `TINYHUMANS_TOKEN_FILE` — in slice 6a, accepting the hosted-tenant risk that item 10 had deferred item 18 on. `TINYHUMANS_API_KEY`, `TINYHUMANS_API_URL` and every `OPENHUMAN_*` name are **not** in scope and stay exactly as they are. |
 | F3 | Tier code is quarantined, not deleted, only where the legacy path still maps a tier hint to a configured real id (2d names each place). |
 | F6 | A pair or default naming a missing or disabled provider fails closed, with no fallback. |
 | F7 | Route carry-over requires all four tier rows present and equal. |

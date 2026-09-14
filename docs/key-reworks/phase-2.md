@@ -105,10 +105,13 @@ Items 1, 4, 13b, 14, 15 and item 16's "no tiers"; Q1, Q2, Q3, Q13.
 ## Not handled (and why)
 
 - Agent pairs — phase 3. Account-key flow — phase 4. Routing removal — phase 5.
-- The managed fallback chain, `inference/managed/enabled`,
-  `TINYHUMANS_TOKEN_FILE` — [not-handled.md](not-handled.md).
+- The managed fallback chain, `inference/managed/enabled` —
+  [not-handled.md](not-handled.md).
 - Rewriting an injected `/openai/v1` `OPENCOMPANY_INFERENCE_URL` in this repo —
-  D-proxy: the manager injects the proxy URL.
+  D-proxy: the manager injects the proxy URL. (`OPENCOMPANY_INFERENCE_URL`
+  itself is removed later, in slice 6a — [phase-6a-remove-env-vars.md](phase-6a-remove-env-vars.md).
+  This slice (2a) still reads it as today.)
+- `TINYHUMANS_TOKEN_FILE` (item 18) is removed in slice 6a, not here.
 
 ## Data carry-over
 

@@ -1,7 +1,8 @@
 # Target state: every key after phase 5b (part 1 of 2)
 
 This describes every key **after** all slices have landed, in this order: 1a,
-1b, 1c, 2a, 2b, 2c, 2d, 3a, 3b, 4a, 4b, 4c, 5a, 5b.
+1b, 1c, 2a, 2b, 2c, 2d, 3a, 3b, 4a, 4b, 4c, 5a, 5b, 6a. Unless a row says
+otherwise, "after the rework" means after 6a, the last slice.
 
 - **Slice numbering** follows the 2026-09-14 renumbering:
   - **2a** puts TinyHumans on the proxy (`phase-2a-tinyhumans-on-proxy.md`);
@@ -362,11 +363,18 @@ The second line is the stored cleared pair.
 
 ## 7. Environment variables
 
-| Variable | After the rework |
-|---|---|
-| `OPENCOMPANY_INFERENCE_MODEL` | **The fallback model** for a company with no full default and no agent pair (2d): the legacy path sends it, or a configured real id, else fails closed with "choose a model". It is ignored whenever a chosen model exists (2b). **Hosted tenants need the manager to inject it** until each company sets a default; that is a manager change outside this repo. E2E fixture hosts set it. |
-| `OPENCOMPANY_INFERENCE_URL` | Still outranks `PLATFORM_BASE_URL`. After 2a it must name the proxy path (`https://api.tinyhumans.ai/agent-integrations/openrouter`, or staging's equivalent), or be unset. |
-| `OPENCOMPANY_INFERENCE_KEY`, `TINYHUMANS_API_KEY`, `TINYHUMANS_TOKEN_FILE` | Unchanged. They remain the instance-identity step of both managed chains; items 10 and 18 are not handled. |
-| `OPENCOMPANY_COMPOSIO_BACKEND_URL`, `TINYHUMANS_API_URL` | Unchanged. |
+Columns below distinguish the **interim** state (after 2a/2d, before 6a — the
+window in which a partial deploy of this branch could sit) from the **final**
+state (after 6a, the last slice).
+
+| Variable | Interim (after 2a/2d, before 6a) | Final (after 6a) |
+|---|---|---|
+| `OPENCOMPANY_INFERENCE_MODEL` | **Not removed by 6a.** The fallback model for a company with no full default and no agent pair (2d): the legacy path sends it, or a configured real id, else fails closed with "choose a model". Ignored whenever a chosen model exists (2b). Hosted tenants need the manager to inject it until each company sets a default. E2E fixture hosts set it. | Unchanged from interim. |
+| `OPENCOMPANY_INFERENCE_URL` | Still outranks `PLATFORM_BASE_URL`. After 2a it must name the proxy path (`https://api.tinyhumans.ai/agent-integrations/openrouter`, or staging's equivalent), or be unset. | **Removed.** Nothing reads it. The base URL is always the constant (the proxy, after 2a's gated commit 5). A manager that used to inject a custom URL loses that lever — see [phase-6a-remove-env-vars.md](phase-6a-remove-env-vars.md). |
+| `OPENCOMPANY_INFERENCE_KEY` | Checked first, ahead of the instance-identity token source. | **Removed.** `hosted_endpoint_from_env`'s credential is `TinyhumansTokenSource::from_env` only. |
+| `TINYHUMANS_TOKEN_FILE` | Instance-identity tier 1 (projected file), ahead of `TINYHUMANS_API_KEY`. | **Removed.** `TinyhumansTokenSource` has one tier left: `TINYHUMANS_API_KEY`. |
+| `TINYHUMANS_API_KEY` | Instance-identity tier 2 (static), unchanged since before the rework. | **Unchanged, and now the only instance-level TinyHumans credential.** Still the last-resort step of both managed chains (item 10 is not handled); still the config-file `tinyhumans_api_key` path. |
+| `OPENCOMPANY_COMPOSIO_BACKEND_URL` | Explicit Composio backend override, ahead of `TINYHUMANS_API_URL`. | **Removed.** Composio's backend URL is `TINYHUMANS_API_URL`, else the `DEFAULT_BACKEND_URL` constant. |
+| `TINYHUMANS_API_URL` | Unchanged. | Unchanged, and now the only URL override for the Composio backend. |
 
 Continued in [target-state-part2.md](target-state-part2.md).

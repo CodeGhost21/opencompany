@@ -290,7 +290,7 @@ None in 4a. `ApiKeyView.tsx:229-231` already toasts `result.note`, so the new no
 
 ## 9. Must not touch
 
-`company_key::resolve` and every fallback (item 10); `inference/managed/enabled`; `TINYHUMANS_TOKEN_FILE` and `hosted_endpoint_from_env`; `composio/mode`, `composio/byok/key`; `inference/config` (never written again by this path); route paths and authority (`/credential` stays `Admin, Credential`); `start_link`, `get_billing`; `DEFAULT_TIER_MODELS` (never used to pick a model); `inference/routes`.
+`company_key::resolve` and every fallback (item 10); `inference/managed/enabled`; `TINYHUMANS_TOKEN_FILE`, `OPENCOMPANY_INFERENCE_KEY` and `hosted_endpoint_from_env` (item 18 is 6a's job, after this slice, not this one's); `composio/mode`, `composio/byok/key`; `inference/config` (never written again by this path); route paths and authority (`/credential` stays `Admin, Credential`); `start_link`, `get_billing`; `DEFAULT_TIER_MODELS` (never used to pick a model); `inference/routes`.
 
 ## 10. Done when
 

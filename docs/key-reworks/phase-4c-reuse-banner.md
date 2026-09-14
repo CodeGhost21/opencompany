@@ -270,8 +270,8 @@ session scratch directory.
 **provider** keeps 2b/2c's rule for every slug — no TinyHumans special case);
 `ComposioStatusDto` (no new slot boolean, #886); `composio/mode`,
 `composio/byok/key`; `company_key::resolve`; `inference/managed/enabled`;
-`TINYHUMANS_TOKEN_FILE`; the Account page. Never send `tinyhumans/key` to the
-browser to prefill anything.
+`TINYHUMANS_TOKEN_FILE` (6a's job, after this slice, not this one's); the
+Account page. Never send `tinyhumans/key` to the browser to prefill anything.
 
 ## 9. Done when
 

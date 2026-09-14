@@ -34,13 +34,14 @@ Code references are on `upstream/main @ fcfb3e1bc` (2026-09-14).
 | After 2d a hosted company with no default and no injected model fails every turn | D-legacy: `OPENCOMPANY_INFERENCE_MODEL` is the no-default model; manager-side deploy gate ([not-handled.md](not-handled.md)); clear error, never echo, never a tier name | 2d test: env default + `OPENCOMPANY_INFERENCE_MODEL=acme/test-model` sends that id; env default without it fails with the "choose a model" sentence |
 | An injected `/openai/v1` URL is silently rewritten | D-proxy: used as given | 2a test: an env default URL is sent to exactly as injected |
 | Hosted Composio stops working | 1a keeps managed resolution falling through to `company_key::resolve`; item 10 not handled | 1a blank-new-and-legacy fall-through test; the unchanged harness Composio chain tests |
-| `TINYHUMANS_TOKEN_FILE` read removed | Not handled | Review: `git diff upstream/main -- src/company/credentials.rs` is empty |
+| `TINYHUMANS_TOKEN_FILE`, `OPENCOMPANY_INFERENCE_KEY` reads removed; a hosted tenant with no `provider/tinyhumans/key` loses managed inference/embeddings/search | 6a (operator-accepted risk, 2026-09-15); the fallback chains themselves (item 10) stay not handled | 6a done-when list; the risk is written out in the PR description and in `phase-6a-remove-env-vars.md` §"the hosted-tenant risk, stated plainly" |
 
 ## 2. E2E hosts
 
 | Risk | Handled by | Proof |
 |---|---|---|
 | Fixture hosts (`frontend/playwright.config.ts:214-226`, `OPENCOMPANY_INFERENCE_URL=http://…/v1`) stop answering once tiers are not sent | 2d adds `OPENCOMPANY_INFERENCE_MODEL` to both fixture hosts with an id the mock accepts | Both Console E2E lanes green by head SHA on the 2d commit |
+| The same fixture hosts (and the Composio fixture at `:242`) stop being reachable at all once 6a deletes the `OPENCOMPANY_INFERENCE_URL` / `_KEY` / `OPENCOMPANY_COMPOSIO_BACKEND_URL` reads | 6a switches every fixture host from an env-injected URL to a stored provider row (LLM) and a stored `TINYHUMANS_API_URL`-reachable mock (Composio) — see `phase-6a-remove-env-vars.md` §"E2E hosts" | Both Console E2E lanes, and the Composio e2e specs, green by head SHA on the 6a commit |
 | `OPENCOMPANY_INFERENCE_MODEL` beats a chosen model | `chosen_model` wins in `request_plan` | 2b `a_full_default_sends_its_model_whatever_the_tier` (with `model_override = "stub-model"`) |
 | E2E specs that call `PUT …/composio/token` break | 1a keeps route paths and bodies | The three Composio e2e specs pass unchanged |
 

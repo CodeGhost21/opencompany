@@ -24,6 +24,13 @@ managed chain is `composio/token` → `company_key::resolve`
 (`src/company/company_key.rs:123`: `tinyhumans/key`, then the instance
 identity) → nothing.
 
+**After slice 6a**, the instance-identity step of both chains shrinks: it
+reads only `TINYHUMANS_API_KEY` (`OPENCOMPANY_INFERENCE_KEY` and
+`TINYHUMANS_TOKEN_FILE` are no longer read anywhere). The chain still has a
+step, it is just one variable shorter — item 10 itself (dropping this step,
+and the `tinyhumans/key` step before it) remains not handled for the reasons
+below.
+
 **Why not here.**
 - **Hosted tenants store no key.** A hosted pod's only credential is the
   projected token file the kubelet rewrites in place with a 600-second expiry
@@ -37,9 +44,11 @@ identity) → nothing.
 - **Only a grant-minted or attested key carries Composio's `connections`
   scope.** A key a person mints does not, so "paste a key" is not a hosted
   replacement for Composio.
-- **Docker development and both Console E2E lanes ride the env default**
-  (`frontend/playwright.config.ts:220-226` sets `OPENCOMPANY_INFERENCE_URL` and
-  `OPENCOMPANY_INFERENCE_KEY` on the fixture hosts).
+- **Docker development and both Console E2E lanes rode the env default**
+  (`frontend/playwright.config.ts:220-226` set `OPENCOMPANY_INFERENCE_URL` and
+  `OPENCOMPANY_INFERENCE_KEY` on the fixture hosts) until slice 6a moved them
+  to a stored provider row instead — see
+  [phase-6a-remove-env-vars.md](phase-6a-remove-env-vars.md) §"E2E hosts".
 
 **What would unblock it.** A manager-side change (Q4 option B): at provision
 time the manager (or backend) mints a per-tenant key that carries `inference`
@@ -56,26 +65,25 @@ path exists and is used first. The fallbacks stay behind it, unchanged.
 
 ---
 
-## Item 18 — remove `TINYHUMANS_TOKEN_FILE`
+## Item 18 — remove `TINYHUMANS_TOKEN_FILE` — now handled (slice 6a)
 
 **Asked.** Stop reading `TINYHUMANS_TOKEN_FILE` and wire everything that used
 it to the normal per-provider key.
 
-**Today.** `TOKEN_FILE_ENV` (`src/company/credentials.rs:66`) names the
-projected token file. `TinyhumansTokenSource` reads it before
-`TINYHUMANS_API_KEY` (`API_KEY_ENV`, `:70`), re-reading on rotation. It is also
-read by `src/app/config.rs:935`, `src/app/doctor.rs` and
-`credential_available` (`src/app/types.rs:226-233`).
+**Originally deferred here** alongside item 10 (same blocker: a hosted tenant
+holds no stored key, so deleting the read would remove the brain and Composio
+from every hosted company at once, and the value cannot be "wired" into a
+stored key because it rotates every few minutes).
 
-**Why not here.** It is the same blocker as item 10, and a harder one: this
-variable **is** the hosted tenant's credential. Deleting the read before
-hosted tenants hold a stored key removes the brain and Composio from every
-hosted company at once. "Wiring" it into a stored key is impossible because
-the value rotates every few minutes.
-
-**What would unblock it.** The manager-side per-tenant key above, deployed and
-observed, then item 10, then this read's removal — in that order, in a PR that
-also changes the manager's injected environment.
+**2026-09-15: the operator decided to remove it anyway**, together with
+`OPENCOMPANY_INFERENCE_KEY`, `OPENCOMPANY_INFERENCE_URL` and
+`OPENCOMPANY_COMPOSIO_BACKEND_URL`, accepting the hosted-tenant risk rather than
+waiting on item 10's manager-side per-tenant key. `TINYHUMANS_API_KEY` is
+**not** one of the four and stays as the sole remaining instance-level
+TinyHumans credential. See [phase-6a-remove-env-vars.md](phase-6a-remove-env-vars.md)
+for every read site, what replaces each, what breaks, and the risk written out
+in full. Item 10 itself (dropping the fallback *chains*, as opposed to these
+four specific variable reads) is still not handled — see below.
 
 ---
 
@@ -189,6 +197,17 @@ operator's chosen behaviour; the outage is avoidable only on the manager side.
 **What would unblock removing the env model.** Every hosted company holding a
 full default (for example written at provisioning, alongside item 10's per-tenant
 key).
+
+**After slice 6a** (the last slice, landing after 5b), `OPENCOMPANY_INFERENCE_URL`
+is no longer read anywhere in this repo — see
+[phase-6a-remove-env-vars.md](phase-6a-remove-env-vars.md). Everything above
+describes the interim window from 2a through 5b, while the variable is still
+read. Once 6a lands, the manager's job changes: it no longer injects a URL at
+all (the constants alone decide the base, and after 2a's gated commit 5 they
+already name the proxy); it still needs to give each hosted tenant a
+`provider/tinyhumans/key` (or another provider's key) for managed inference to
+work at all, because 6a also removes the instance-identity URL override that
+used to carry a per-tenant `OPENCOMPANY_INFERENCE_KEY`.
 
 ---
 

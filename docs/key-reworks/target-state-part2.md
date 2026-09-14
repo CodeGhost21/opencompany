@@ -5,6 +5,8 @@ This continues [target-state.md](target-state.md).
 - The code reference is `upstream/main @ fcfb3e1bc` (2026-09-14).
 - Slice numbers follow the 2026-09-14 renumbering: 2a is TinyHumans on the
   proxy, 2b the default's shape, 2c model required, 2d no tier on the wire.
+  6a (added 2026-09-15) removes four environment variables; it is the last
+  slice.
 - Every example value is fake.
 
 ---
@@ -225,8 +227,15 @@ but `routes_carry` reads it.
 
 - The `SecretStore` port: no list, delete or rename is added.
 - `OPENHUMAN_WORKSPACE` and the other `OPENHUMAN_*` contract names (Q16).
-- `TINYHUMANS_TOKEN_FILE` and the managed chains' instance-identity step
-  (items 10 and 18 are not handled).
+- The managed chains' fallback steps themselves — `tinyhumans/key`,
+  `inference/key`, `company_key::resolve` — and `TINYHUMANS_API_KEY` (item 10
+  is not handled; `TINYHUMANS_API_KEY` is not one of the four variables 6a
+  removes and stays as the chains' last step).
+- `TINYHUMANS_TOKEN_FILE`, `OPENCOMPANY_INFERENCE_KEY`,
+  `OPENCOMPANY_INFERENCE_URL` and `OPENCOMPANY_COMPOSIO_BACKEND_URL` in every
+  slice **except** 6a, which is the only slice that touches them. Removing any
+  of the four earlier stops phases 2a–5b's own fixture hosts and manager
+  guidance from being read.
 
 ## 6. Done when
 
