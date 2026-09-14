@@ -528,6 +528,7 @@ kind = "built_in"
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
             overlay_agents: vec![OverlayAgent {
+                provider: None,
                 id: "writer".into(),
                 name: "Writer".into(),
                 role: "Content Writer".into(),

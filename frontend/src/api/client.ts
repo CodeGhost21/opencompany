@@ -1717,7 +1717,7 @@ function parseJson(text: string): unknown {
  * prose. The strictness is the point: this predicate is the only thing standing
  * between a foreign response body and `ApiError.message`.
  */
-function errorEnvelope(text: string): ApiErrorBody | undefined {
+export function errorEnvelope(text: string): ApiErrorBody | undefined {
   const parsed = parseJson(text);
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const { error, code, problems, usedBy } = parsed as Record<string, unknown>;
@@ -1741,7 +1741,7 @@ function errorEnvelope(text: string): ApiErrorBody | undefined {
  * malformed one should degrade to "say nothing" rather than to a thrown error
  * in the middle of reading a refusal.
  */
-function parseUsedBy(value: unknown): UsedBy | undefined {
+export function parseUsedBy(value: unknown): UsedBy | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const { default: isDefault, agents, surfaces } = value as Record<string, unknown>;
   const out: UsedBy = {};

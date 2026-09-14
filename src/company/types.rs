@@ -674,14 +674,26 @@ pub struct Agent {
     ///
     /// Not a credential, for the same reason [`AcpHarness::model`] is not
     /// one — the ACP agent already holds its own. Meaningful only when this
-    /// agent resolves to an `acp` harness with `transport = "local"`;
-    /// validation rejects it on a `built_in`-harness agent rather than
-    /// silently ignoring it, matching the harness-level field's own
-    /// doctrine. Two agents sharing one `local` acp harness process still
-    /// share the subprocess — the override steers that agent's own ACP
-    /// *session* (`session/set_config_option`), not the process env.
+    /// agent resolves to an `acp` harness with `transport = "local"`; on a
+    /// `built_in` harness it is instead the model half of this agent's own
+    /// `{provider, model}` pair — see [`provider`](Self::provider).
     #[serde(default)]
     pub model: Option<String>,
+    /// The provider half of this agent's own `{provider, model}` pair (keys
+    /// rework slice 3a, issue #2306): a slug in the company's
+    /// `inference/providers` list, e.g. `anthropic`.
+    ///
+    /// Only on a `built_in` harness, and only together with
+    /// [`model`](Self::model). Both set: this agent's own turns use that
+    /// provider and model, ahead of the harness `[harness.inference]` and
+    /// the company default. Neither set: the agent follows the default. One
+    /// without the other, or `provider` on an `acp` harness, is refused by
+    /// `CompanyManifest::validate`. Never checked against the provider list
+    /// at load — that list is console data a manifest cannot see — so a
+    /// slug that is not there fails the agent's first turn (F6), with no
+    /// fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Tool grant globs, intersected with `[tools].allow`.
     ///
     /// Three distinct states, made representable by issue #1804 (epic #1817,

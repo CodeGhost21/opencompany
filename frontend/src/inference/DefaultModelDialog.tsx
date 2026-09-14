@@ -10,7 +10,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { checkModelId, defaultModelPrefill, modelIdErrorCopy } from "./connect";
+import {
+  checkModelId,
+  defaultModelPrefill,
+  modelIdErrorCopy,
+  replacesDifferentDefault as computeReplacesDifferentDefault,
+} from "./connect";
 import { ModelField } from "./ModelField";
 import type { DefaultChoice, Provider } from "./types";
 
@@ -29,6 +34,7 @@ export function DefaultModelDialog({
   client,
   company,
   provider,
+  providers,
   defaultChoice,
   busy,
   error,
@@ -39,6 +45,8 @@ export function DefaultModelDialog({
   company: string | null;
   /** The row being set as default, or `null` when the dialog is closed. */
   provider: Provider | null;
+  /** Every provider this company has, so the confirm step can name the old pair by its label rather than its slug (X7). */
+  providers: readonly Pick<Provider, "slug" | "label">[];
   /** The company's current stored default, so a replace can be confirmed against it. */
   defaultChoice: DefaultChoice | null | undefined;
   busy: boolean;
@@ -57,14 +65,10 @@ export function DefaultModelDialog({
 
   if (!provider) return null;
 
-  // A **full** default naming a different pair than what is about to be
-  // saved. Replacing the company's `Unset` state, its bare-slug state, or this
-  // exact pair again all save directly — there is nothing for a confirm to
-  // usefully name in those cases.
-  const replacesDifferentDefault =
-    defaultChoice != null &&
-    defaultChoice.model != null &&
-    (defaultChoice.provider !== provider.slug || defaultChoice.model !== model.trim());
+  const wasLabel = defaultChoice
+    ? (providers.find((p) => p.slug === defaultChoice.provider)?.label ?? defaultChoice.provider)
+    : "";
+  const replacesDifferentDefault = computeReplacesDifferentDefault(defaultChoice, provider.slug, model);
 
   const proceed = () => {
     if (!ready) return;
@@ -101,7 +105,7 @@ export function DefaultModelDialog({
           <div className="grid gap-2 text-sm" data-testid="inference-default-model-confirm">
             <p>
               <span className="text-muted-foreground">Was: </span>
-              {defaultChoice?.provider} · {defaultChoice?.model}
+              {wasLabel} · {defaultChoice?.model ?? "no model"}
             </p>
             <p>
               <span className="text-muted-foreground">Now: </span>

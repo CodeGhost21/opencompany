@@ -130,7 +130,17 @@ export function useInference(
    * contract) rather than a generic toast being the only trace of it.
    */
   const write = useCallback(
-    async (slug: string | null, run: () => Promise<ProviderMutation>) => {
+    async (
+      slug: string | null,
+      run: () => Promise<ProviderMutation>,
+      /**
+       * Round-2 review, P2-1: some callers already show a failure inline in
+       * the dialog that is still open (the default-model step, for one) —
+       * `silentError` skips this hook's own toast for exactly those, so the
+       * same refusal is not said twice in two different places at once.
+       */
+      opts?: { silentError?: boolean },
+    ) => {
       setBusySlug(slug);
       try {
         const result = await run();
@@ -143,7 +153,7 @@ export function useInference(
         // for confirmation, and the caller (a confirm dialog) shows its own
         // message and `usedBy` rather than a duplicate toast.
         const inUse = err instanceof ApiError && err.status === 409 && err.code === "in_use";
-        if (!inUse) {
+        if (!inUse && !opts?.silentError) {
           toast.error(err instanceof ApiError ? err.message : "That change could not be saved.");
         }
         throw err;
@@ -165,7 +175,9 @@ export function useInference(
     remove: (slug, confirmInUse) => write(slug, () => deleteProvider(client, company, slug, confirmInUse)),
     setEnabled: (slug, enabled, confirmInUse) =>
       write(slug, () => setProviderEnabled(client, company, slug, enabled, confirmInUse)),
-    makeDefault: (slug, model) => write(slug, () => setDefaultProvider(client, company, slug, model)),
+    // silentError: the dialog already shows its own failure inline (P2-1).
+    makeDefault: (slug, model) =>
+      write(slug, () => setDefaultProvider(client, company, slug, model), { silentError: true }),
     saveManagedKey: (key) => write(null, () => setManagedKey(client, company, key)),
     setManagedOn: (enabled) => write(null, () => setManagedEnabled(client, company, enabled)),
     probeDraftEndpoint: (draft) => probeDraft(client, company, draft),

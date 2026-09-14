@@ -49,6 +49,49 @@ function describeAgents(agents: readonly { id: string; name: string }[]): string
   return `${agents.length} ${agents.length === 1 ? "agent" : "agents"}: ${names}`;
 }
 
+/** Display names for `UsedBy.surfaces` — never the raw wire id (X7). */
+const SURFACE_LABELS: Record<"llm" | "composio" | "search", string> = {
+  llm: "LLM",
+  composio: "Composio",
+  search: "Search",
+};
+
+/** "a, b and c" — the join every combined `usedBy` sentence below shares. */
+function joinParts(parts: readonly string[]): string {
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+}
+
+/** Whether `usedBy` names anything at all — the same check a confirm needs to decide whether to send `confirmInUse`. */
+export function hasUsedBy(usedBy: UsedBy | undefined | null): boolean {
+  return Boolean(usedBy?.default || usedBy?.agents?.length || usedBy?.surfaces?.length);
+}
+
+/**
+ * One sentence naming everything a row's `usedBy` says still depends on it —
+ * "Used by the company default and 2 agents: Researcher, Web search." — built
+ * once so every confirm dialog says the same thing instead of composing its
+ * own wording per field (round-2 review, P1-5). `null` when nothing is set.
+ *
+ * `ownSurface` excludes this row's own surface from the "other surfaces"
+ * naming — an LLM provider's `usedBy.surfaces` lists the *other* things its
+ * credential also backs, never itself.
+ */
+export function usedBySentence(
+  usedBy: UsedBy | undefined | null,
+  ownSurface: "llm" | "composio" | "search" = "llm",
+): string | null {
+  const parts: string[] = [];
+  if (usedBy?.default) parts.push("the company default");
+  if (usedBy?.agents?.length) parts.push(describeAgents(usedBy.agents));
+  const otherSurfaces = (usedBy?.surfaces ?? []).filter((s) => s !== ownSurface);
+  if (otherSurfaces.length) parts.push(otherSurfaces.map((s) => SURFACE_LABELS[s]).join(" and "));
+  if (!parts.length) return null;
+  return `Used by ${joinParts(parts)}.`;
+}
+
 /**
  * The sentences a confirmation says, in the order they matter.
  *
@@ -70,7 +113,7 @@ export function removalWarnings(intent: ProviderIntent, label: string, impact: R
     intent === "key"
       ? [`${label} stays on this page, keeping its endpoint. It just has no credential, so it cannot answer until you add one.`]
       : [`This deletes ${label} and clears its stored key in the same operation. Adding it again means entering the credential again.`];
-  appendUsedByLines(lines, label, impact, intent);
+  appendUsedByLines(lines, impact, intent);
   if (impact.lastEnabled && intent === "provider") {
     lines.push("It is the only provider switched on. Nothing will be able to think until another is added or switched back on.");
   }
@@ -88,7 +131,7 @@ function disableWarnings(label: string, impact: RemovalImpact): string[] {
   const lines: string[] = [
     `${label} keeps its endpoint and its key. Switching it back on restores both — nothing is deleted.`,
   ];
-  appendUsedByLines(lines, label, impact, "disable");
+  appendUsedByLines(lines, impact, "disable");
   if (impact.lastEnabled) {
     lines.push("It is the only provider switched on. Nothing will be able to think while it is off.");
   }
@@ -100,30 +143,27 @@ function enableWarnings(label: string): string[] {
   return [`This switches ${label} back on. It becomes reachable for the company default and any agent pinned to it.`];
 }
 
-/** Appends the `usedBy`-derived lines shared by every destructive intent. */
-function appendUsedByLines(
-  lines: string[],
-  label: string,
-  impact: RemovalImpact,
-  intent: ProviderIntent,
-): void {
+/**
+ * Appends the `usedBy`-derived lines shared by every destructive intent.
+ *
+ * The naming sentence — "Used by the company default and 2 agents: ..." —
+ * comes first (round-2 review, P1-5), with the X14 consequence lines after
+ * it: none of the four intents ever clears the default or an agent's pin, so
+ * these say what actually happens rather than a "moves to" claim that is true
+ * for none of them.
+ */
+function appendUsedByLines(lines: string[], impact: RemovalImpact, intent: ProviderIntent): void {
+  const sentence = usedBySentence(impact.usedBy);
+  if (sentence) lines.push(sentence);
   const verb = intent === "disable" ? "Switching it off" : intent === "key" ? "Clearing its key" : "Removing it";
   if (impact.usedBy?.default) {
-    lines.push(
-      // Decision X14: none of the four intents clears the default, ever. It
-      // just stops resolving, and the company sees a banner until an admin
-      // picks a new one — said here so the confirmation cannot promise a
-      // fallback that does not happen.
-      `It is this company's default. ${verb} does not change the default — turns will fail until you choose a new one.`,
-    );
+    // Decision X14: none of the four intents clears the default, ever. It
+    // just stops resolving, and the company sees a banner until an admin
+    // picks a new one — said here so the confirmation cannot promise a
+    // fallback that does not happen.
+    lines.push(`${verb} does not change the default — turns will fail until you choose a new one.`);
   }
   if (impact.usedBy?.agents?.length) {
-    lines.push(`Pinned by ${describeAgents(impact.usedBy.agents)}. Their turns will fail until you give them a different pair or clear their pin.`);
-  }
-  if (impact.usedBy?.surfaces?.length) {
-    const others = impact.usedBy.surfaces.filter((s) => s !== "llm");
-    if (others.length) {
-      lines.push(`${label}'s credential is also used by ${others.join(" and ")}.`);
-    }
+    lines.push("Their turns will fail until you give them a different pair or clear their pin.");
   }
 }

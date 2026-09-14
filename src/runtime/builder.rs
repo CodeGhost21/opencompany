@@ -4688,6 +4688,7 @@ mod test {
         .expect("new manifest");
         let overlay_agents = vec![
             OverlayAgent {
+                provider: None,
                 id: "clerk".to_string(),
                 name: "Clerk".to_string(),
                 role: "Data Entry".to_string(),
@@ -4698,6 +4699,7 @@ mod test {
                 harness: None,
             },
             OverlayAgent {
+                provider: None,
                 id: "finance_help".to_string(),
                 name: "Finance Help".to_string(),
                 role: "Assistant".to_string(),
@@ -4799,6 +4801,7 @@ mod test {
         )
         .expect("new manifest");
         let overlay_agents = vec![OverlayAgent {
+            provider: None,
             id: "clerk".to_string(),
             name: "Clerk".to_string(),
             role: "Data Entry".to_string(),

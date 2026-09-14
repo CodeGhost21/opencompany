@@ -253,6 +253,7 @@ fn the_federation_serves_an_overlay_edited_label_not_the_stale_manifest_one() {
     record
         .overlay_agent_edits
         .push(crate::ports::types::AgentOverride {
+            provider: None,
             agent_id: "sre".to_owned(),
             name: Some("Senior SRE".to_owned()),
             role: None,

@@ -268,6 +268,7 @@ async fn company_agent(
     let deps = deps(model_url, dir);
     let company = CompanyId::new("acme");
     let manifest_agent = ManifestAgent {
+        provider: None,
         global: false,
         id: "ceo".to_string(),
         role: "Chief Executive".to_string(),

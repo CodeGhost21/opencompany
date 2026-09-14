@@ -2281,6 +2281,7 @@ members = ["designer"]
         let mut record = acme();
         // A teammate on nobody's desk: on the roster, off `#engineering`.
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "designer".to_string(),
             name: "Dana".to_string(),
             role: "Designer".to_string(),
@@ -2316,6 +2317,7 @@ members = ["designer"]
         );
 
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "designer".to_string(),
             name: "Dana".to_string(),
             role: "Designer".to_string(),

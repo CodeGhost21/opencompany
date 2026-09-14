@@ -17,6 +17,7 @@ import {
   modelIdErrorCopy,
   modelRequiredCopy,
   providerState,
+  replacesDifferentDefault,
   rowNeedsModel,
 } from "@/inference/connect";
 import type { DefaultChoice, Provider } from "@/inference/types";
@@ -179,6 +180,31 @@ describe("defaultModelPrefill", () => {
 
   it("is blank when neither has one", () => {
     expect(defaultModelPrefill(provider({ slug: "acme", model: null }), null)).toBe("");
+  });
+});
+
+describe("replacesDifferentDefault (round-2 review, P2-1)", () => {
+  it("is false with no stored default at all", () => {
+    expect(replacesDifferentDefault(null, "acme", "acme/one")).toBe(false);
+    expect(replacesDifferentDefault(undefined, "acme", "acme/one")).toBe(false);
+  });
+
+  it("is true for a bare-slug default naming a DIFFERENT provider — the gap the old check missed", () => {
+    expect(replacesDifferentDefault({ provider: "beta", model: null }, "acme", "acme/one")).toBe(true);
+  });
+
+  it("is false for completing THIS row's own bare-slug default", () => {
+    expect(replacesDifferentDefault({ provider: "acme", model: null }, "acme", "acme/one")).toBe(false);
+  });
+
+  it("is true for a full default naming a different provider or a different model", () => {
+    expect(replacesDifferentDefault({ provider: "beta", model: "beta/x" }, "acme", "acme/one")).toBe(true);
+    expect(replacesDifferentDefault({ provider: "acme", model: "acme/old" }, "acme", "acme/one")).toBe(true);
+  });
+
+  it("is false for re-saving the exact pair already stored", () => {
+    expect(replacesDifferentDefault({ provider: "acme", model: "acme/one" }, "acme", "acme/one")).toBe(false);
+    expect(replacesDifferentDefault({ provider: "acme", model: "acme/one" }, "acme", "  acme/one  ")).toBe(false);
   });
 });
 
