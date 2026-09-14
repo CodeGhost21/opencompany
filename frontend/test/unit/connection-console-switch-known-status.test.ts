@@ -169,19 +169,12 @@ afterEach(() => {
  * `onCompanyCreated` below the trigger would keep this green while the shipped
  * path renders nothing to reach it. The handler is untouched; turning the flag
  * off restores the trigger and this case.
+ *
+ * The replacement for *that* case — asserting the trigger's absence while the
+ * product does not offer creation — cannot live in this file: this file mocks
+ * `COMPANY_SWITCHING_HIDDEN` to `false` at module scope (see the top-of-file
+ * comment) so the create/reset flow tests below can reach the dialog at all,
+ * which makes "the product does not offer it" unrepresentable here. It now
+ * lives in `connection-console-no-company.test.ts`, which imports the real,
+ * unmocked `product-scope` module.
  */
-
-describe("the no-company screen while the product offers no company creation", () => {
-  it("shows no way to create one", async () => {
-    // What replaces the retired case above: the trigger it drove is the thing
-    // under test now, and its absence is asserted where the case used to press
-    // it. A platform-scoped client is used deliberately — the caller *could*
-    // create a company, and it is product scope that withholds the control.
-    const { client } = stubClient(company("co-fresh1", "Fresh Co"));
-
-    await show(client);
-    await settle();
-
-    expect(container.querySelector('[data-testid="no-company-new"]')).toBeNull();
-  });
-});
