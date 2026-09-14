@@ -418,26 +418,26 @@ export function normalizeEndpoint(raw: string): string | null {
  */
 export function endpointHasCredentials(raw: string): boolean {
   const trimmed = raw.trim();
-  // Query and fragment are never the authority in any reading of the value.
+  // Query and fragment are never an authority.
   const cut = trimmed.search(/[?#]/);
   const head = cut === -1 ? trimmed : trimmed.slice(0, cut);
-  // One unambiguous reading — a single valid scheme and `://`, or no scheme,
-  // with no other `:/` — and the `@` has to be in the authority, as on the host.
-  const split = head.indexOf("://");
-  const unambiguous =
-    split === -1
-      ? !head.includes(":/")
-      : /^[A-Za-z][A-Za-z0-9+.-]*$/.test(head.slice(0, split)) &&
-        !head.slice(split + 3).includes(":/");
-  if (unambiguous) {
-    const rest = split === -1 ? head : head.slice(split + 3);
-    const end = rest.indexOf("/");
-    return (end === -1 ? rest : rest.slice(0, end)).includes("@");
+  // Every place an HTTP client could read an authority, as on the host: the
+  // start, after every `://`, and after every `http:`/`https:` in any case,
+  // skipping any run of `/` or `\` (a special scheme reads both as slashes).
+  // Only an `@` inside that authority counts, so a gateway path that proxies to
+  // another URL is still an endpoint.
+  const starts = [0];
+  for (let i = head.indexOf("://"); i !== -1; i = head.indexOf("://", i + 1)) {
+    starts.push(i + 1);
   }
-  // Malformed (`http:/alice:pw@host`, `http://HTTP://alice:pw@host`): every `@`
-  // before the query counts, mirroring the host's conservative reading.
-  const lead = /^https?:\/*/i.exec(head);
-  return head.slice(lead ? lead[0].length : 0).includes("@");
+  for (const match of head.matchAll(/https?:/gi)) {
+    starts.push((match.index ?? 0) + match[0].length);
+  }
+  return starts.some((start) => {
+    const authority = head.slice(start).replace(/^[/\\]+/, "");
+    const end = authority.search(/[/\\]/);
+    return (end === -1 ? authority : authority.slice(0, end)).includes("@");
+  });
 }
 
 /**

@@ -339,14 +339,25 @@ describe("endpointHasCredentials", () => {
     expect(normalizeEndpoint("http://HTTP://alice:hunter2@127.0.0.1:8597/v1")).toBeNull();
   });
 
-  it("reads a malformed endpoint conservatively", () => {
-    // Codex review on #2281: no `://` at all, so the first `/` used to end the
-    // "authority" before the `@`.
-    expect(endpointHasCredentials("http:/alice:hunter2@127.0.0.1:8597/v1")).toBe(true);
-    expect(endpointHasCredentials("http://http:/alice:hunter2@127.0.0.1:8597/v1")).toBe(true);
-    expect(endpointHasCredentials("alice:/hunter2@127.0.0.1:8597/v1")).toBe(true);
-    expect(endpointHasCredentials("http://alice:one@outer/http://bob:two@inner/v1")).toBe(true);
-    expect(normalizeEndpoint("http:/alice:hunter2@127.0.0.1:8597/v1")).toBeNull();
+  it("finds a credential in every authority an HTTP client could read", () => {
+    // Mirrors the host's
+    // `a_credential_is_found_in_every_authority_an_http_client_could_read`
+    // (Codex and CodeRabbit review on #2281).
+    for (const bad of [
+      "http:/alice:hunter2@127.0.0.1:8597/v1",
+      "http:///alice:hunter2@127.0.0.1:8597/v1",
+      "http:\\\\alice:hunter2@127.0.0.1:8597/v1",
+      "HTTP:alice:hunter2@127.0.0.1:8597/v1",
+      "http://http:/alice:hunter2@127.0.0.1:8597/v1",
+      "http://alice:one@outer/http://bob:two@inner/v1",
+    ]) {
+      expect(endpointHasCredentials(bad)).toBe(true);
+      expect(normalizeEndpoint(bad)).toBeNull();
+    }
+    // A path is still a path: a gateway proxying to another URL is storable.
+    const gateway = "https://gateway.example/proxy/http://upstream/@me";
+    expect(endpointHasCredentials(gateway)).toBe(false);
+    expect(normalizeEndpoint(gateway)).toBe(gateway);
     for (const good of ["http://[::1]:11434/v1", "https://api.acme.example:8443/v1/@me"]) {
       expect(endpointHasCredentials(good)).toBe(false);
     }
