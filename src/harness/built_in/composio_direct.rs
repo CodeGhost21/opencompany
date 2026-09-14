@@ -7,7 +7,7 @@
 //! no configuration.
 //!
 //! This module is the other route. A company that has its own Composio account
-//! stores its API key ([`API_KEY_KEY`](crate::company::composio::API_KEY_KEY))
+//! stores its API key ([`BYOK_KEY_KEY`](crate::company::composio::BYOK_KEY_KEY))
 //! and every Composio call is then made against `backend.composio.dev` with
 //! that key in `x-api-key` — no proxy, no platform identity, no platform bill.
 //! It mirrors OpenHuman's own `backend` / `direct` split (see

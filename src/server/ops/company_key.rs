@@ -188,7 +188,7 @@ struct SetKey {
 /// else this instance's platform identity, else nothing.
 ///
 /// That is deliberately **not** the same answer `GET …/composio` gives. The
-/// Composio route prepends its BYO `composio/token` tier, so a company holding
+/// Composio route prepends its BYO `composio/tinyhumans/key` tier, so a company holding
 /// both reads `company` here and `static` there — and both are correct, because
 /// they answer different questions: this route reports whose identity the
 /// company *has*, the Composio one reports what a Composio call *presents*.

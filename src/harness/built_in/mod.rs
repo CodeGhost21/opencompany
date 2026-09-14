@@ -535,7 +535,7 @@ pub struct HarnessDeps {
     /// fingerprint) so a console token set/rotate takes effect next turn with no
     /// restart. Only wired when a company **explicitly** grants `composio` **and**
     /// a credential can be obtained: the company's own token under
-    /// [`composio::TOKEN_KEY`](crate::harness::composio::TOKEN_KEY) if it has one,
+    /// [`composio::TINYHUMANS_KEY_KEY`](crate::harness::composio::TINYHUMANS_KEY_KEY) if it has one,
     /// else this instance's platform identity. With neither, no tools are wired —
     /// never a borrowed identity.
     pub composio: Option<composio::TenantComposio>,

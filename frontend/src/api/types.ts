@@ -1882,7 +1882,8 @@ export interface CapabilityStatusDto {
   composioInBuild?: boolean;
   /**
    * Whether a per-tenant Composio **BYO override** token is stored under
-   * `composio/token` — never the token itself.
+   * `composio/tinyhumans/key` (or its legacy address `composio/token`) —
+   * never the token itself.
    *
    * Narrow on purpose, and **not** "can this company reach Composio" (issue
    * #886). The BYO slot is the first of three credential tiers; on a hosted

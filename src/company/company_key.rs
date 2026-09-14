@@ -32,7 +32,7 @@
 //! the rotation guarantee true by construction: there is no second resolution to
 //! drift, so a key set in the console cannot reach one surface and miss another.
 //! A surface may prepend its own escape-hatch tier ahead of this (Composio keeps
-//! its BYO `composio/token` — see
+//! its BYO `composio/tinyhumans/key` — see
 //! [`harness::composio`](crate::harness::composio)), but nothing may resolve a
 //! *company* identity any other way.
 //!

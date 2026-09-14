@@ -53,9 +53,10 @@
 //!
 //! Either way the token is **write-only** over the API: set through the `token`
 //! field, stored in the secret store under
-//! [`TOKEN_KEY`](crate::company::composio::TOKEN_KEY), and **never** echoed. The
-//! read shape carries only `credentialSource` plus non-secret routing (backend
-//! URL, toolkit allowlist) — never a token, and never a file path. A set / rotate
+//! [`TINYHUMANS_KEY_KEY`](crate::company::composio::TINYHUMANS_KEY_KEY), and
+//! **never** echoed. The read shape carries only `credentialSource` plus
+//! non-secret routing (backend URL, toolkit allowlist) — never a token, and
+//! never a file path. A set / rotate
 //! / clear takes effect on the agents' **next turn** with no restart (the harness
 //! re-resolves the credential each turn and rebuilds the roster when the
 //! *identity* behind it changes).
@@ -329,7 +330,8 @@ struct ComposioStatusDto {
     /// saying out loud — **never a boolean about a secret slot**. A
     /// `tokenConfigured`-shaped field was on this DTO once and was removed by
     /// issue #886: it answered "did somebody paste something into
-    /// `composio/token`", which is one tier of the chain, and it read `false`
+    /// `composio/tinyhumans/key` (then `composio/token`)", which is one tier of
+    /// the chain, and it read `false`
     /// for companies whose agents were calling `GITHUB_*` tools successfully in
     /// the same session. Do not reintroduce one under any name. The question it
     /// looked like it answered is answered here, by the tier that actually
@@ -947,7 +949,7 @@ async fn test_api_key(company: AdminScopedCompany) -> Result<Json<ApiKeyTestDto>
 /// sentence. The BYOK-with-no-key case is already a state
 /// [`resolve_access`] warns about on the agent path.
 async fn stored_api_key(runtime: &CompanyRuntime) -> Result<Option<String>, ApiError> {
-    use crate::company::composio::{API_KEY_KEY, load_mode};
+    use crate::company::composio::{load_byok_key, load_mode};
 
     if !load_mode(runtime.id(), runtime.secrets().as_ref())
         .await
@@ -956,13 +958,11 @@ async fn stored_api_key(runtime: &CompanyRuntime) -> Result<Option<String>, ApiE
     {
         return Ok(None);
     }
-    let stored = runtime
-        .secrets()
-        .get(runtime.id(), API_KEY_KEY)
+    let stored = load_byok_key(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
     Ok(stored
-        .map(|crate::ports::types::SecretValue(key)| key.trim().to_string())
+        .map(|key| key.trim().to_string())
         .filter(|key| !key.is_empty()))
 }
 
@@ -2115,7 +2115,8 @@ mod tests {
         assert_eq!(dto["credentialSource"], "none");
         assert_eq!(dto["managedCredentialSource"], "none");
 
-        // A pasted `composio/token` is the managed chain's first tier.
+        // A pasted `composio/tinyhumans/key` (formerly `composio/token`) is the
+        // managed chain's first tier.
         store_token(runtime.id(), secrets.as_ref(), "byo-managed-bearer")
             .await
             .unwrap();
@@ -2486,7 +2487,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_check_changes_absolutely_nothing() {
         const BYOK_KEY: &str = "ak_not_a_real_key_0123456789";
-        use crate::company::composio::{API_KEY_KEY, MODE_KEY};
+        use crate::company::composio::{BYOK_KEY_KEY, LEGACY_API_KEY_KEY, MODE_KEY};
 
         let home_dir = home();
         let state = state_with_manifest_id(home_dir.path(), "testkeeps", GRANTED).await;
@@ -2502,7 +2503,9 @@ mod tests {
         assert_eq!(code, StatusCode::OK, "{raw}");
 
         let runtime = runtime_of(&state, "testkeeps");
-        async fn slots(runtime: &super::CompanyRuntime) -> (Option<String>, Option<String>) {
+        async fn slots(
+            runtime: &super::CompanyRuntime,
+        ) -> (Option<String>, Option<String>, Option<String>) {
             let read = |key: &'static str| async move {
                 runtime
                     .secrets()
@@ -2511,7 +2514,11 @@ mod tests {
                     .unwrap()
                     .map(|crate::ports::types::SecretValue(v)| v)
             };
-            (read(MODE_KEY).await, read(API_KEY_KEY).await)
+            (
+                read(MODE_KEY).await,
+                read(BYOK_KEY_KEY).await,
+                read(LEGACY_API_KEY_KEY).await,
+            )
         }
         let before = slots(&runtime).await;
 
@@ -2588,6 +2595,158 @@ mod tests {
         assert!(body.get("probeClass").is_none(), "{body}");
         assert!(body.get("message").is_none(), "{body}");
         assert!(!raw.contains(BYOK_KEY), "the check leaked the key: {raw}");
+    }
+
+    // ── Storage addresses and the legacy fallback (#2306) ──────────────
+
+    /// A token `PUT` writes both addresses, and a legacy-only value still reads
+    /// as configured before that first write.
+    #[tokio::test]
+    async fn a_token_put_mirrors_to_the_legacy_slot() {
+        use crate::company::composio::{LEGACY_TOKEN_KEY, TINYHUMANS_KEY_KEY};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "legacytoken", GRANTED).await;
+        let runtime = runtime_of(&state, "legacytoken");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                LEGACY_TOKEN_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let (_, dto, raw) = send_for(
+            &state,
+            "legacytoken",
+            "GET",
+            "/api/v1/company/composio",
+            None,
+        )
+        .await;
+        assert_eq!(dto["credentialSource"], "static", "{raw}");
+
+        let (code, _, raw) = send_for(
+            &state,
+            "legacytoken",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "th-not-a-real-key-2" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        assert_eq!(
+            read_slot(&runtime, TINYHUMANS_KEY_KEY).await.as_deref(),
+            Some("th-not-a-real-key-2")
+        );
+        assert_eq!(
+            read_slot(&runtime, LEGACY_TOKEN_KEY).await.as_deref(),
+            Some("th-not-a-real-key-2")
+        );
+        assert!(
+            !raw.contains("th-not-a-real-key"),
+            "the PUT leaked the token: {raw}"
+        );
+
+        let (code, _, raw) = send_for(
+            &state,
+            "legacytoken",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(
+            read_slot(&runtime, TINYHUMANS_KEY_KEY).await.as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            read_slot(&runtime, LEGACY_TOKEN_KEY).await.as_deref(),
+            Some("")
+        );
+    }
+
+    /// Raw slot contents for a company's runtime, blank-or-absent collapsed to
+    /// `None` only when truly absent (a stored `""` reads back as `Some("")`).
+    async fn read_slot(runtime: &super::CompanyRuntime, key: &'static str) -> Option<String> {
+        runtime
+            .secrets()
+            .get(runtime.id(), key)
+            .await
+            .unwrap()
+            .map(|crate::ports::types::SecretValue(v)| v)
+    }
+
+    /// A legacy-only BYOK key still passes the check route, and a subsequent
+    /// `PUT` mirrors the rotated value to both addresses.
+    #[tokio::test]
+    async fn the_api_key_test_route_reads_a_legacy_byok_key() {
+        use crate::company::composio::{BYOK_KEY_KEY, LEGACY_API_KEY_KEY, MODE_KEY};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "legacybyok", GRANTED).await;
+        let runtime = runtime_of(&state, "legacybyok");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                MODE_KEY,
+                crate::ports::types::SecretValue(crate::company::composio::BYOK_MODE.to_string()),
+            )
+            .await
+            .unwrap();
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                LEGACY_API_KEY_KEY,
+                crate::ports::types::SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        super::probe_override::set("legacybyok", Ok(()));
+
+        let (code, body, raw) = send_for(
+            &state,
+            "legacybyok",
+            "POST",
+            "/api/v1/company/composio/api-key/test",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(body["ok"], true, "{body}");
+
+        let (code, _, raw) = send_for(
+            &state,
+            "legacybyok",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak-not-a-real-key-2" })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        assert_eq!(
+            read_slot(&runtime, BYOK_KEY_KEY).await.as_deref(),
+            Some("ak-not-a-real-key-2")
+        );
+        assert_eq!(
+            read_slot(&runtime, LEGACY_API_KEY_KEY).await.as_deref(),
+            Some("ak-not-a-real-key-2")
+        );
+        assert_eq!(
+            read_slot(&runtime, MODE_KEY).await.as_deref(),
+            Some(crate::company::composio::BYOK_MODE)
+        );
+        assert!(
+            !raw.contains("ak-not-a-real-key"),
+            "the PUT leaked the key: {raw}"
+        );
     }
 
     /// Spending the company's Composio credential against a third party is a

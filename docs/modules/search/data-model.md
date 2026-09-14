@@ -74,17 +74,23 @@ only `searxng` has a writable one.
 
 ```
    SearchProvider records                SecretStore (per CompanyId)
-   ┌────────────────────┐                ┌──────────────────────────────────┐
-   │ slug               │                │ search/providers        index    │
-   │ enabled            │ ──names──▶     │ search/provider/<slug>/key       │
-   │ endpoint           │                │ search/provider/<slug>/endpoint  │
-   │                    │                │ search/default          one slug │
-   │   NO KEY FIELD     │                │ ──────────────────────────────── │
-   └────────────────────┘                │ search/provider   entry zero     │
-                                         │ search/api_key    entry zero     │
-                                         │ search/endpoint   entry zero     │
-                                         └──────────────────────────────────┘
+   ┌────────────────────┐                ┌───────────────────────────────────────────┐
+   │ slug               │                │ search/providers  index (+endpoint)       │
+   │ enabled            │ ──names──▶     │ search/provider/<slug>/key                │
+   │ endpoint           │                │ search/provider/<slug>/endpoint  fallback │
+   │                    │                │ search/default          one slug          │
+   │   NO KEY FIELD     │                │ ───────────────────────────────────────── │
+   └────────────────────┘                │ search/provider   entry zero              │
+                                         │ search/api_key    entry zero              │
+                                         │ search/endpoint   entry zero              │
+                                         └───────────────────────────────────────────┘
 ```
+
+Since #2306 the address is stored in the index row
+(`[{"slug":"searxng","enabled":true,"endpoint":"https://search.example"}]`).
+Reads take the row, else `search/provider/<slug>/endpoint`, else
+`search/endpoint` for entry zero. Writes go to the row and, for one release,
+also to the per-slug key.
 
 The credential rules are the inference ones verbatim, because they are right and
 because three of the four are already satisfied by the code being replaced:
