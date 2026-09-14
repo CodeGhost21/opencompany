@@ -272,9 +272,17 @@ async fn deleting_entry_zero_clears_the_flat_keys_too() {
     }
 }
 
+/// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+/// this test used to be named `disabling_the_marked_provider_clears_the_marker`
+/// and asserted the opposite. Disabling the marked provider now leaves
+/// `search/default` exactly as it was — a confirmed disable is one decision,
+/// not a second undocumented one to also retarget the default. Resolution
+/// still degrades gracefully: `resolve::active` (see its own tests) falls
+/// through a marked-but-disabled slug to the first usable candidate, or to
+/// managed. What changes is only that the **stored marker** is no longer
+/// silently rewritten.
 #[tokio::test]
-async fn disabling_the_marked_provider_clears_the_marker() {
-    // Rather than moving it to something the operator never chose.
+async fn disabling_the_marked_provider_never_clears_the_marker() {
     let secrets = MemSecrets::default();
     put_provider(
         &company(),
@@ -298,7 +306,14 @@ async fn disabling_the_marked_provider_clears_the_marker() {
         .await
         .unwrap();
 
-    assert_eq!(load_default_slug(&company(), &secrets).await.unwrap(), None);
+    assert_eq!(
+        load_default_slug(&company(), &secrets)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("brave"),
+        "a disable must not rewrite search/default"
+    );
     assert!(
         !list_providers(&company(), &secrets).await.unwrap()[0].enabled,
         "disabled is not deleted — the credential and the record stay"
@@ -314,8 +329,14 @@ async fn disabling_the_marked_provider_clears_the_marker() {
     );
 }
 
+/// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+/// this test used to be named `deleting_the_marked_provider_clears_the_marker`
+/// and asserted the opposite. There is no carve-out for delete versus
+/// disable — a marker naming a deleted slug is exactly the state X14 asks
+/// for, on the same footing as one naming a disabled slug (see the sibling
+/// test above).
 #[tokio::test]
-async fn deleting_the_marked_provider_clears_the_marker() {
+async fn deleting_the_marked_provider_never_clears_the_marker() {
     let secrets = MemSecrets::default();
     put_provider(
         &company(),
@@ -336,7 +357,21 @@ async fn deleting_the_marked_provider_clears_the_marker() {
         .await
         .unwrap();
 
-    assert_eq!(load_default_slug(&company(), &secrets).await.unwrap(), None);
+    assert_eq!(
+        load_default_slug(&company(), &secrets)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("brave"),
+        "a delete must not rewrite search/default, even though no row now answers to it"
+    );
+    assert!(
+        list_providers(&company(), &secrets)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the row itself is still gone"
+    );
 }
 
 #[tokio::test]
@@ -1405,11 +1440,21 @@ async fn a_default_is_not_marked_on_a_provider_that_is_not_connected() {
     );
 }
 
+/// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+/// this test used to be named
+/// `marking_a_default_while_it_is_removed_never_leaves_a_dangling_marker` and
+/// asserted that no ordering may leave `brave` marked with no `brave` row —
+/// which was true only because `delete_provider` used to clear the marker
+/// itself. It no longer does (see the two tests above), so "marked with no
+/// row" is now a legitimate outcome of the mark-then-remove ordering, not a
+/// bug to guard against. What must still hold under either ordering is that
+/// the store itself stays consistent: no resurrected row, no panic, and a
+/// marker that is *either* unset (remove-then-mark: `set_default_if_connected`
+/// finds nothing connected and refuses) *or* still naming `brave` (mark-then-
+/// remove: the mark lands, then the remove leaves it alone) — never anything
+/// else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn marking_a_default_while_it_is_removed_never_leaves_a_dangling_marker() {
-    // Either the mark lands first and the removal clears it, or the removal
-    // lands first and the mark is refused. Neither order may leave `brave` in
-    // the marker with no `brave` row.
+async fn marking_and_removing_the_same_provider_concurrently_leaves_a_consistent_store() {
     for _ in 0..20 {
         let secrets = std::sync::Arc::new(SlowSecrets::default());
         put_provider(
@@ -1443,15 +1488,16 @@ async fn marking_a_default_while_it_is_removed_never_leaves_a_dangling_marker() 
             list_providers(&company(), secrets.as_ref())
                 .await
                 .unwrap()
-                .is_empty()
+                .is_empty(),
+            "the row is gone either way"
         );
-        assert_eq!(
-            load_default_slug(&company(), secrets.as_ref())
-                .await
-                .unwrap()
-                .filter(|slug| !slug.is_empty()),
-            None,
-            "the removed slug must not be left marked"
+        let marker = load_default_slug(&company(), secrets.as_ref())
+            .await
+            .unwrap()
+            .filter(|slug| !slug.is_empty());
+        assert!(
+            marker.is_none() || marker.as_deref() == Some("brave"),
+            "the marker must be exactly unset or still naming brave, got {marker:?}"
         );
     }
 }
@@ -1505,11 +1551,21 @@ async fn selecting_a_provider_without_an_address_keeps_the_one_stored_now() {
     );
 }
 
+/// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+/// this test used to be named
+/// `a_legacy_selection_racing_a_removal_never_leaves_a_dangling_marker` and
+/// asserted that `brave` must never end up marked with no `brave` row — true
+/// only because `delete_provider` used to clear the marker whenever it
+/// matched the slug being removed. It no longer does, so a select landing
+/// first (creating the row and marking it) followed by a delete (removing the
+/// row, leaving the marker alone per X14) legitimately produces exactly that
+/// state now — it is the same outcome `deleting_the_marked_provider_never_
+/// clears_the_marker` above pins deliberately for the non-concurrent case.
+/// What must still hold is that the credential is never left stored with no
+/// row to list it (a `delete_provider_locked` invariant this change does not
+/// touch) and that the store itself never corrupts under the race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_legacy_selection_racing_a_removal_never_leaves_a_dangling_marker() {
-    // Either order is allowed to win. What is not allowed is the removal
-    // landing between the row write and the marker write, leaving `brave`
-    // marked with no `brave` row.
+async fn a_legacy_selection_racing_a_removal_leaves_a_consistent_store() {
     for _ in 0..20 {
         let secrets = std::sync::Arc::new(SlowSecrets::default());
         put_provider(
@@ -1551,14 +1607,10 @@ async fn a_legacy_selection_racing_a_removal_never_leaves_a_dangling_marker() {
             .unwrap()
             .iter()
             .any(|provider| provider.slug == "brave");
-        let marked = load_default_slug(&company(), secrets.as_ref())
-            .await
-            .unwrap()
-            .is_some_and(|slug| slug == "brave");
-        assert!(
-            !marked || connected,
-            "brave is marked as the default with no brave row"
-        );
+        // Under X14 a marker naming a slug with no row is a legitimate
+        // outcome of the select-then-delete ordering — see the doc comment
+        // above. The property worth holding is only that the credential is
+        // never orphaned, checked below.
         let key = provider_key_configured(&company(), secrets.as_ref(), "brave")
             .await
             .unwrap();

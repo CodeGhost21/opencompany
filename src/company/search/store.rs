@@ -125,6 +125,13 @@ pub fn provider_key_key(slug: &str) -> String {
 /// The per-slug instance-address slot. Read as a fallback when an index row
 /// carries no `endpoint`, and still written alongside the row for one release
 /// so a rolled-back binary finds the address (#2306). Not a secret.
+///
+/// DEPRECATED(keys-rework #2306): the pre-index per-slug endpoint fallback
+/// address; replaced by [`IndexEntry`]'s `endpoint` field (the index row
+/// carries the address directly now); removable when a later release stops
+/// the one-release mirror write in [`put_provider_locked`]. Not
+/// `#[deprecated]`: the read fallback and the mirror write are both live and
+/// required until then, and `clippy -D warnings` would fail on that usage.
 pub fn provider_endpoint_key(slug: &str) -> String {
     format!("search/provider/{slug}/endpoint")
 }
@@ -445,6 +452,14 @@ async fn put_provider_locked(
         // what this binary reads first; this copy is what a binary rolled back to
         // before #2306 reads, since it ignores `IndexEntry.endpoint`. Remove this
         // write only in a release after the one that ships the index field.
+        //
+        // DEPRECATED(keys-rework #2306): this write is the compatibility
+        // mirror to the pre-index per-slug address ([`provider_endpoint_key`]);
+        // replaced by the index row's own `endpoint` field, written via
+        // `save_index` below; removable when a later release stops the
+        // one-release mirror. Not `#[deprecated]`: this write is live and
+        // required on every save until then, and `clippy -D warnings` would
+        // fail on that usage.
         write(
             company,
             secrets,
@@ -480,11 +495,23 @@ async fn put_provider_locked(
     save_index(company, secrets, &providers).await
 }
 
-/// Turns one provider on or off, keeping the default marker honest.
+/// Turns one provider on or off.
 ///
-/// Disabling the marked provider **clears the marker** rather than moving it to
-/// something the operator never chose. Resolution then falls through to the
-/// first enabled provider, which is what it did before anything was marked.
+/// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15,
+/// `docs/key-reworks/README.md`, extended to search by
+/// `docs/key-reworks/in-use-guards.md` §4): disabling the marked provider used
+/// to **clear the marker** here, on the theory that moving to the first
+/// enabled provider was "the same answer" with less claim to intent than
+/// leaving a marker pointing at something switched off. Silently retargeting
+/// the default is itself an undocumented second decision the operator did not
+/// make when they only asked to disable a row — so the marker is now left
+/// exactly as it was. [`crate::company::search::resolve::active`] already
+/// falls through a marked-but-disabled slug to the first usable candidate
+/// (and has since before this change — see its own doc comment), so nothing
+/// about *resolution* changes here; only the **stored** marker stops being
+/// rewritten out from under the operator. The HTTP layer
+/// (`server/ops/search.rs`) is what now asks for confirmation before a
+/// disable that would leave the default pointing at something switched off.
 pub async fn set_enabled(
     company: &CompanyId,
     secrets: &dyn SecretStore,
@@ -497,12 +524,7 @@ pub async fn set_enabled(
         return Ok(());
     };
     target.enabled = enabled;
-    save_index(company, secrets, &providers).await?;
-
-    if !enabled && load_default_slug(company, secrets).await?.as_deref() == Some(slug) {
-        clear_default_slug(company, secrets).await?;
-    }
-    Ok(())
+    save_index(company, secrets, &providers).await
 }
 
 /// Removes a provider, clearing its credential in the same operation.
@@ -603,9 +625,20 @@ async fn delete_provider_locked(
     // Only once nothing of it is left stored.
     save_index(company, secrets, &remaining).await?;
 
-    if load_default_slug(company, secrets).await?.as_deref() == Some(slug) {
-        clear_default_slug(company, secrets).await?;
-    }
+    // Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15,
+    // `docs/key-reworks/README.md`, extended to search by
+    // `docs/key-reworks/in-use-guards.md` §4): `search/default` is left
+    // exactly as it was marked, even though it may now name a slug with no
+    // row at all. There is no carve-out for delete versus disable — a marker
+    // naming a deleted slug is exactly the state X14 asks for, on the same
+    // footing as one naming a disabled slug (see the identical note in
+    // `set_enabled` above). An operator who confirmed this removal made one
+    // decision — delete the provider — and this function silently also
+    // retargeting the default used to be a second, undocumented one.
+    // `resolve::active` already falls through a marker naming nothing back to
+    // the first usable candidate, so nothing about resolution depends on the
+    // marker being cleared; the HTTP layer's in-use guard is what now asks
+    // for confirmation before a removal that would do this at all.
     Ok(())
 }
 
