@@ -55,32 +55,29 @@ Re-dispatching the promotion afterwards merges — it never resets — so fixes 
    the desktop shell's `Cargo.toml` and lock, `tauri.conf.json`,
    `frontend/package.json` and its lock), refuses a tree whose files already
    disagree, commits, tags `vX.Y.Z`, pushes, merges `release` back into `main`.
-2. **`verify`** — `cargo build --locked --all-targets && cargo test --locked`
-   at the tag. The lock is the committed one; a silent re-resolution would
-   otherwise ship.
-3. **`create-release`** — `scripts/release/generate-release-notes.mjs` writes
+2. **`create-release`** — `scripts/release/generate-release-notes.mjs` writes
    the notes (OpenAI-polished when `OPENAI_API_KEY` is set, deterministic
    otherwise — the job log says which) and creates the Release **as a draft**.
-4. **`build-desktop`** (`build-desktop.yml`) — both architectures, Developer-ID
+3. **`build-desktop`** (`build-desktop.yml`) — both architectures, Developer-ID
    signed and notarized, plus the updater's `.app.tar.gz` + `.sig` built from
    the stapled bundle. Everything attaches to the draft.
-5. **`build-docker`** — the tenant image built with the same feature set
+4. **`build-docker`** — the tenant image built with the same feature set
    `deploy-staging.yml` ships and then discarded. `ci.yml` never runs the
    Dockerfile; this is the only proof the tag containerises.
-6. **`updater-manifest`** — `latest.json` assembled from both architectures'
+5. **`updater-manifest`** — `latest.json` assembled from both architectures'
    assets, uploaded to the draft. See [desktop-updates.md](desktop-updates.md).
-7. **`publish-release`** — every required asset is checked to be on the draft,
+6. **`publish-release`** — every required asset is checked to be on the draft,
    then it is flipped public and marked latest. This repository has immutable
    releases: the asset list freezes at that moment, which is why nothing is
    published until it is complete.
-8. **`cleanup-failed-release`** — if anything after the tag failed, the draft
+7. **`cleanup-failed-release`** — if anything after the tag failed, the draft
    and the tag are deleted, so the next dispatch bumps cleanly and no
    half-built version is reachable. The bump commit stays; that is harmless.
 
-`create_release: false` is a rehearsal: bump, verify, build — no tag, no
+`create_release: false` is a rehearsal: bump and build — no tag, no
 Release, DMGs as Actions artifacts. The version still moves.
 
-A staging cut is steps 1, 4 (without the updater archive) and 5, tagged
+A staging cut is steps 1, 3 (without the updater archive) and 4, tagged
 `vX.Y.Z-staging`, with no Release at all — see
 [desktop-updates.md](desktop-updates.md#a-staging-cut-ships-no-update-anybody-can-reach)
 for why that is the right shape for the auto-updater.
@@ -105,6 +102,11 @@ forgotten because it is not a separate thing.
 point that can be fixed without taking everything that landed since. Fixes
 land on `release` as PRs and reach `main` through the back-merge, so neither
 branch loses them.
+
+**No separate build-and-test job.** Everything on `release` came through a PR
+that ran `ci.yml`, the promotion dispatches `ci.yml` on the snapshot, and the
+desktop and Docker jobs compile the tag `--locked` anyway. A third compile of
+the same tree cost ~30 minutes per cut and never found anything new.
 
 **Pushes by the workflow do not trigger CI.** The bump commit and the
 promotion merge are pushed with `GITHUB_TOKEN`, which GitHub deliberately
