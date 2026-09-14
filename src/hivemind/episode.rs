@@ -982,6 +982,15 @@ impl<'a> EpisodeDriver<'a> {
         // caller passing an odd `HiveDesk`.
         let general = tinyhivemind_core::chat::GENERAL_DESK.to_string();
         let general_label = format!("#{general} ({general})");
+        // A bare direct-line target is only safe when it cannot also name a
+        // declared desk. `addresses_desk` accepts either spelling, so querying
+        // the bare id for an unrelated desk with the same id/name leaks that
+        // desk's rows into this agent's prompt. DMs written after the collision
+        // guard use the prefixed spelling below.
+        let bare_direct_line_is_safe = self
+            .context_desks
+            .iter()
+            .all(|desk| desk.id != agent_id && desk.name != agent_id);
         let targets: Vec<(String, String, String)> = self
             .context_desks
             .iter()
@@ -999,7 +1008,7 @@ impl<'a> EpisodeDriver<'a> {
                 (self.desk.id != general)
                     .then(|| (general.clone(), general.clone(), general_label)),
             )
-            .chain(std::iter::once((
+            .chain(bare_direct_line_is_safe.then(|| (
                 agent_id.to_string(),
                 agent_id.to_string(),
                 direct_line_label.clone(),
