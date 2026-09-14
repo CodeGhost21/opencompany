@@ -53,10 +53,9 @@ const PAGES = [
     // ONE section, not two. `CompanyCredentialCard` was the other and no longer
     // renders here: it asked for the company's TinyHumans key in its own
     // language directly above rows that report that same key, so the page put
-    // one credential on screen twice. It still heads at `h2` on the API Key
-    // page, which is the only place it renders now. That page is not in this
-    // map, so nothing here pins it any more — which is correct: this list is
-    // per-page outlines, and it is no longer part of this page's.
+    // one credential on screen twice. The Account page stopped rendering it
+    // too (#2279), so it has no caller left, and nothing here pins it — which
+    // is correct: this list is per-page outlines, and it is part of none.
     view: "connections/ComposioView",
     sections: ["connections/ComposioSection"],
   },
