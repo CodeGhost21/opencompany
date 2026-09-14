@@ -632,14 +632,30 @@ export function defaultModelPrefill(
 // for the states the console detects client-side, from a status read, before
 // any request naming them is even sent.
 
-/** Whether `slug` names a provider this company no longer has, or has switched off. */
+/**
+ * The console path every sentence below points to (decision D-copy / X9,
+ * mirrored from the host's own `src/company/inference/copy.rs`, which is the
+ * shared sentence table this file's copy must never drift from): the LLM
+ * page, under the "API Keys" group of Connections
+ * (`frontend/src/views/connection-pages.ts`: group `keys` is labelled "API
+ * Keys"; the `inference` page in it is labelled "LLM" — verified against that
+ * file, not guessed).
+ */
+export const SETTINGS_PATH = "Connections → API Keys → LLM";
+
+/**
+ * Whether `slug` names a provider this company can actually turn to: gone,
+ * switched off, present-and-enabled but keyless, or fine. Mirrors the host's
+ * `copy::ProviderGone` plus the separate `provider_has_no_key` case.
+ */
 export function providerState(
   slug: string,
-  providers: readonly Pick<Provider, "slug" | "enabled">[],
-): "ok" | "removed" | "disabled" {
+  providers: readonly Pick<Provider, "slug" | "enabled" | "keyConfigured">[],
+): "ok" | "removed" | "disabled" | "noKey" {
   const row = providers.find((p) => p.slug === slug);
   if (!row) return "removed";
-  return row.enabled ? "ok" : "disabled";
+  if (!row.enabled) return "disabled";
+  return row.keyConfigured ? "ok" : "noKey";
 }
 
 /** X9: "Choose a model for {Provider} before saving." */
@@ -653,18 +669,24 @@ export function modelRequiredCopy(providerLabel: string): string {
  * is unset, or a bare slug with no model to be "broken" about (that is
  * {@link defaultNeedsModel}'s banner instead).
  *
- * Decision X14 (2026-09-15): disabling or deleting the default's provider
- * never clears the stored default, so this state is reachable and durable —
- * the same sentence renders here and in the agent editor's fallback line for
- * every agent whose own pair is unset.
+ * Decision X14 (2026-09-15, confirmed over an earlier draft that carved out
+ * an exception for deletes — see `docs/key-reworks/in-use-guards.md` §4):
+ * disabling, deleting, or clearing the key of the default's provider never
+ * clears the stored default, so this state is reachable and durable.
+ *
+ * Mirrors the host's `copy::default_broken`, which — like this — only covers
+ * `removed` and `turned off`. A keyless-but-enabled default has no sentence
+ * of its own on the host; its turns fail with `provider_has_no_key`, naming
+ * whichever agent's turn hit it, which is not a fact this static banner can
+ * show without one.
  */
 export function defaultBrokenCopy(
   choice: DefaultChoice | null | undefined,
-  providers: readonly Pick<Provider, "slug" | "label" | "enabled">[],
+  providers: readonly Pick<Provider, "slug" | "label" | "enabled" | "keyConfigured">[],
 ): string | null {
   if (!choice || choice.model == null) return null;
   const state = providerState(choice.provider, providers);
-  if (state === "ok") return null;
+  if (state === "ok" || state === "noKey") return null;
   const label = providers.find((p) => p.slug === choice.provider)?.label ?? choice.provider;
-  return `The company default uses ${label}, which is ${state === "removed" ? "removed" : "turned off"}. Choose a new default in API Keys → LLM.`;
+  return `The company default uses ${label}, which is ${state === "removed" ? "removed" : "turned off"}. Choose a new default in ${SETTINGS_PATH}.`;
 }

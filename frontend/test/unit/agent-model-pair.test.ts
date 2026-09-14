@@ -108,7 +108,7 @@ describe("resolveAgentDefault — what an unpinned agent's fallback line says (d
     const resolution = resolveAgentDefault(null, healthy, "Writer");
     expect(resolution.kind).toBe("none");
     expect(resolution.kind === "none" && resolution.message).toBe(
-      "No model is chosen. Choose a provider and model for Writer, or set the company default in API Keys → LLM.",
+      "No model is chosen. Choose a provider and model for Writer, or set the company default in Connections → API Keys → LLM.",
     );
   });
 
@@ -121,7 +121,7 @@ describe("resolveAgentDefault — what an unpinned agent's fallback line says (d
     const removed = resolveAgentDefault({ provider: "ghost", model: "x" }, healthy, "Writer");
     expect(removed).toEqual({
       kind: "broken",
-      message: "The company default uses ghost, which is removed. Choose a new default in API Keys → LLM.",
+      message: "The company default uses ghost, which is removed. Choose a new default in Connections → API Keys → LLM.",
     });
 
     const disabled = resolveAgentDefault(
@@ -154,6 +154,13 @@ describe("agentPairBrokenCopy — a pinned pair naming a gone or disabled provid
   it("names a switched-off provider", () => {
     const off = [provider({ slug: "anthropic", label: "Anthropic", enabled: false })];
     expect(agentPairBrokenCopy(agent({ provider: "anthropic", model: "x" }), off)).toContain("turned off");
+  });
+
+  it("names a present, enabled, keyless provider — mirrors the host's provider_has_no_key", () => {
+    const keyless = [provider({ slug: "anthropic", label: "Anthropic", enabled: true, keyConfigured: false })];
+    expect(agentPairBrokenCopy(agent({ provider: "anthropic", model: "x" }), keyless)).toBe(
+      "Researcher uses Anthropic, which has no key. Add one in Connections → API Keys → LLM, or choose another provider and model for Researcher.",
+    );
   });
 
   it("falls back to 'This teammate' for a manifest agent with no name", () => {

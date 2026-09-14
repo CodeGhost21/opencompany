@@ -3,7 +3,7 @@
 // and the three derivations that are easy to get quietly wrong.
 
 import type { AgentDetailDto, AgentToolsDto, EditAgentInput, HarnessDto } from "@/api/types";
-import { defaultBrokenCopy, providerState } from "@/inference/connect";
+import { SETTINGS_PATH, defaultBrokenCopy, providerState } from "@/inference/connect";
 import type { DefaultChoice, Provider } from "@/inference/types";
 
 /** The fields that describe an agent, in the order both forms show them. */
@@ -297,7 +297,7 @@ export type AgentDefaultResolution =
  */
 export function resolveAgentDefault(
   choice: DefaultChoice | null | undefined,
-  providers: readonly Pick<Provider, "slug" | "label" | "enabled">[],
+  providers: readonly Pick<Provider, "slug" | "label" | "enabled" | "keyConfigured">[],
   agentName: string,
 ): AgentDefaultResolution {
   const broken = defaultBrokenCopy(choice, providers);
@@ -307,24 +307,30 @@ export function resolveAgentDefault(
   }
   return {
     kind: "none",
-    message: `No model is chosen. Choose a provider and model for ${agentName}, or set the company default in API Keys → LLM.`,
+    message: `No model is chosen. Choose a provider and model for ${agentName}, or set the company default in ${SETTINGS_PATH}.`,
   };
 }
 
 /**
- * X9: an agent's own pair naming a provider this company no longer has, or
- * has switched off, or `null` when the pair is fine (or unset — that is
- * {@link resolveAgentDefault}'s business).
+ * X9: an agent's own pair naming a provider this company no longer has, has
+ * switched off, or (present and enabled, but) holds no key, or `null` when
+ * the pair is fine — or unset, which is {@link resolveAgentDefault}'s
+ * business. Mirrors the host's `copy::pair_broken` (removed/turned off) and
+ * `copy::provider_has_no_key` (present, enabled, keyless) — the same three
+ * facts a turn attempt would fail closed on, said here before any turn runs.
  */
 export function agentPairBrokenCopy(
   agent: Pick<AgentDetailDto, "name" | "provider" | "model">,
-  providers: readonly Pick<Provider, "slug" | "label" | "enabled">[],
+  providers: readonly Pick<Provider, "slug" | "label" | "enabled" | "keyConfigured">[],
 ): string | null {
   if (!agent.provider || !agent.model) return null;
   const state = providerState(agent.provider, providers);
   if (state === "ok") return null;
   const label = providers.find((p) => p.slug === agent.provider)?.label ?? agent.provider;
   const name = agent.name ?? "This teammate";
+  if (state === "noKey") {
+    return `${name} uses ${label}, which has no key. Add one in ${SETTINGS_PATH}, or choose another provider and model for ${name}.`;
+  }
   return `${name} uses ${label}, which is ${state === "removed" ? "removed" : "turned off"}. Choose another provider and model for ${name}, or clear its model to use the company default.`;
 }
 
