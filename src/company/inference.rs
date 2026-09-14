@@ -1471,6 +1471,7 @@ async fn decl_for_indexed(
     let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
     Ok(InferenceDecl {
         provider: normalize_provider(&provider.kind).to_string(),
+        selected_provider: selected_kind(&provider.kind).to_string(),
         base_url: provider.base_url.clone(),
         models: provider.models.clone(),
         source: InferenceSource::Runtime,
@@ -1802,6 +1803,7 @@ async fn managed_decl(
     let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
     Ok(InferenceDecl {
         provider: normalize_provider(LEGACY_MANAGED).to_string(),
+        selected_provider: LEGACY_MANAGED.to_string(),
         base_url,
         models: BTreeMap::new(),
         source: InferenceSource::Runtime,
