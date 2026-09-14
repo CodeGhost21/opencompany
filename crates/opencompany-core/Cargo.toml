@@ -4,16 +4,14 @@
 # resolves unchanged. `-p opencompany-core` and `opencompany-core/<feature>` name
 # the package; `opencompany::` names the crate. Deliberate.
 #
-# The sources still live at the repository root — `src/`, `tests/`, `benches/`,
-# `examples/` and `build.rs` — and every target below points at them with a
-# `../../` path. That is a transitional shape: many open pull requests touch
-# `src/`, and moving it would conflict with all of them at once. Moving the tree
-# under this directory is a follow-up; nothing else about the crate changes
-# when it happens. Until then `autobins`/`autotests`/`autobenches` are off
-# because Cargo only auto-discovers targets beneath the manifest, and
-# `scripts/ci/assert-integration-targets-run.sh` fails on any `tests/*.rs`
-# without a `[[test]]` entry here — the same silent-zero hazard issue #475
-# closed for the old layout.
+# The sources live beneath this manifest — `src/`, `tests/`, `benches/`,
+# `examples/` and `build.rs` — so `CARGO_MANIFEST_DIR` is their parent, and the
+# repository root (`companies/`, `globals/`, `skills/`, `frontend/`, `vendor/`,
+# the workspace `Cargo.lock`) is `../..` from it. Auto-discovery stays off all
+# the same: `scripts/ci/assert-integration-targets-run.sh` reads the `[[test]]`
+# entries here to decide which integration targets must run something, and a
+# `tests/*.rs` with no entry fails it. That is the silent-zero hazard issue
+# #475 closed, kept explicit rather than left to what Cargo happens to find.
 #
 # `[patch]` tables live in the workspace root `Cargo.toml`, where Cargo honours
 # them; they are ignored in a member manifest.
@@ -31,8 +29,8 @@ categories = ["web-programming", "asynchronous"]
 # Each example is a standalone workspace member crate, not a bare-file example
 # target of the host crate.
 autoexamples = false
-# The targets are not beneath this manifest (see the header), so nothing is
-# auto-discovered; every target is declared explicitly below.
+# Every target is declared explicitly below (see the header); nothing relies
+# on discovery.
 autobins = false
 autotests = false
 autobenches = false
