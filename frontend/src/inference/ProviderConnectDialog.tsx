@@ -13,9 +13,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   MANAGED_OPTION_SLUG,
-  MAX_PROVIDER_NAME_CHARS,
   checkProviderName,
   checkSlug,
+  clampToProviderNameLimit,
   credentialAsk,
   customProviderReady,
   endpointHasCredentials,
@@ -222,10 +222,11 @@ export function ProviderConnectDialog({
                 value={label}
                 placeholder="My Provider"
                 autoComplete="off"
-                // The host holds this rule; the attribute only stops a paste
-                // becoming a 400 the operator has to read to understand.
-                maxLength={MAX_PROVIDER_NAME_CHARS}
-                onChange={(e) => setLabel(e.target.value)}
+                // The host holds this rule; clamping here only stops a paste
+                // becoming a 400 the operator has to read to understand. Counted
+                // in code points, as the host counts — never `maxLength`, which
+                // counts UTF-16 units and refuses names the host accepts.
+                onChange={(e) => setLabel(clampToProviderNameLimit(e.target.value))}
               />
               {/* The slug is what a routing entry will say, so the operator
                   sees it before they commit to it rather than meeting it later

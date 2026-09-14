@@ -456,3 +456,19 @@ export function checkProviderName(label: string): SlugError | null {
   if ([...trimmed].length > MAX_PROVIDER_NAME_CHARS) return "too-long";
   return null;
 }
+
+/**
+ * Cuts a typed provider name to {@link MAX_PROVIDER_NAME_CHARS} Unicode code
+ * points — the unit the host counts with `chars()`.
+ *
+ * Not the native `maxLength` attribute, which counts UTF-16 code units: most
+ * emoji are one character to the host and two to the DOM, so a name the host
+ * accepts could not be typed or pasted (Codex review on #2281). The same gap
+ * was closed for the company name by `clampToCompanyNameLimit`.
+ */
+export function clampToProviderNameLimit(label: string): string {
+  const chars = Array.from(label);
+  return chars.length > MAX_PROVIDER_NAME_CHARS
+    ? chars.slice(0, MAX_PROVIDER_NAME_CHARS).join("")
+    : label;
+}

@@ -13,6 +13,7 @@ import {
   addOptions,
   checkProviderName,
   checkSlug,
+  clampToProviderNameLimit,
   endpointHasCredentials,
   credentialAsk,
   customProviderReady,
@@ -155,6 +156,24 @@ describe("the slug, which is derived and never typed", () => {
     expect(customProviderReady([], { label: pastLimit, baseUrl: "https://a.example/v1" })).toBe(
       false,
     );
+  });
+
+  it("clamps a typed name in code points, the unit the host counts", () => {
+    // Codex review on #2281: the field's native `maxLength` counted UTF-16 code
+    // units, so a name of astral characters the host's `chars()` bound accepts
+    // could not be typed or pasted. U+1F600 is one code point, two code units.
+    const astral = "\u{1F600}".repeat(MAX_PROVIDER_NAME_CHARS);
+    expect(astral.length).toBe(MAX_PROVIDER_NAME_CHARS * 2);
+    expect(clampToProviderNameLimit(astral)).toBe(astral);
+    expect(checkProviderName(astral)).toBeNull();
+
+    const over = "\u{1F600}".repeat(MAX_PROVIDER_NAME_CHARS + 3);
+    const clamped = clampToProviderNameLimit(over);
+    expect(Array.from(clamped)).toHaveLength(MAX_PROVIDER_NAME_CHARS);
+    // Never a lone surrogate: cut between code points, not between code units.
+    expect(clamped).toBe(astral);
+
+    expect(clampToProviderNameLimit("Acme")).toBe("Acme");
   });
 });
 
