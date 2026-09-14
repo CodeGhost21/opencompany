@@ -243,7 +243,15 @@ with no way to configure Composio at all.
 So the console offers **add anyway**, which sends `skipVerify: true`. Two rules:
 
 - It is offered **only after a probe failure**, never up front. A key nobody has
-  tried does not need an escape hatch.
+  tried does not need an escape hatch. Concretely, that means only after the
+  host's own `400 invalid_request` — the one refusal `set_api_key` returns for a
+  destructive probe class — and not after any other rejection. A network
+  failure, a `409`, a `422`, or a `500` is not a verdict on the key; and a `500`
+  can arrive **after** the key was already stored (the route writes it, then
+  journals and rebuilds status), where offering to add it again invites a
+  duplicate write. A `400` that did not come from the host's envelope does not
+  count either. `offersSkipVerify` in `frontend/src/composio/classify.ts` is the
+  single place this is decided.
 - It is **cleared on every retry**, so an attempt that fails for an unrelated
   reason — a store write error, a permissions refusal — does not still offer to
   skip verification.

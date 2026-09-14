@@ -160,31 +160,61 @@ export type ComposioSubmitOutcome =
       kind: "rejected";
       /** The host's HTTP status, where there was one. */
       status?: number;
+      /**
+       * The envelope's `code`, where there was one. Kept because the status
+       * alone cannot say *why* a write was refused: a probe refusal and a body
+       * that failed to parse are both 400, and only one is something skipping
+       * the check can fix.
+       */
+      code?: string;
+      /**
+       * Whether `status` and `code` came from the host's own envelope, rather
+       * than being synthesised from a status line by something in between. A
+       * proxy's 400 is not the host's verdict on this key.
+       */
+      fromHost?: boolean;
       message: string;
     };
 
 /**
- * Whether "add anyway" should be offered after this attempt.
+ * Whether to offer "add anyway" — a retry with the probe skipped.
  *
- * Gated on **what actually happened**, never on a bare "it failed". Two kinds
- * of failure must not unlock it:
+ * **Only after the probe itself refused the key**, which the host reports as a
+ * `400` with code `invalid_request` in its own envelope (`set_api_key` returns
+ * `InvalidRequest` for exactly that and nothing else it can refuse on). That is
+ * the one refusal `skipVerify` can do anything about, and it is the rule
+ * `docs/modules/composio/connect-flow.md` states: offered only after a probe
+ * failure.
  *
- * - An **advisory**. The key was stored; there is nothing left to add, and a
- *   button offering to add it again would invite a second write of a credential
- *   that already landed.
- * - A **permission** refusal (401/403). The viewer may not write this
- *   credential at all, and skipping the check turns one refusal into two.
+ * It used to be offered after every rejection except 401/403, which turned the
+ * rule inside out. What that let through, and why each is wrong:
  *
- * What is left is a write the host refused on the strength of its own check —
- * including an `auth` class, because a Composio account behind a proxy that
- * rewrites 401s is exactly the operator who cannot otherwise get past a check
- * that is wrong about them. Callers clear the offer on every retry, so an
- * attempt that fails for an unrelated reason does not still offer to skip a
- * check.
+ * - **A network failure** (no status, or the client's `0`/`network_error`). The
+ *   request may never have arrived, or may have arrived and landed; skipping a
+ *   check answers neither question.
+ * - **A 500 after the store.** `set_api_key` writes the key, then journals and
+ *   rebuilds the status — both fallible. A failure there means the credential
+ *   is already stored, and a button inviting a second write of it is the exact
+ *   duplicate this function exists to avoid.
+ * - **A 409** (`not_in_build`, `not_configured`), a 503 while quiescing, a 413.
+ *   None of them is a verdict on the key.
+ * - **A 400 that is not the host's.** A proxy can answer 400; `fromHost` is what
+ *   separates "the host considered this key and refused" from "something in
+ *   between gave up".
+ *
+ * An advisory never unlocks it either: the key was stored, and there is nothing
+ * left to add. The `auth` class still does, because it arrives as that same
+ * `400 invalid_request` — a Composio account behind a proxy that rewrites 401s
+ * is exactly the operator who cannot otherwise get past a check that is wrong
+ * about them.
  */
 export function offersSkipVerify(
   outcome: ComposioSubmitOutcome | null,
 ): boolean {
   if (outcome?.kind !== "rejected") return false;
-  return outcome.status !== 401 && outcome.status !== 403;
+  return (
+    outcome.fromHost === true &&
+    outcome.status === 400 &&
+    outcome.code === "invalid_request"
+  );
 }

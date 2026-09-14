@@ -140,18 +140,63 @@ describe("offersSkipVerify", () => {
     expect(offersSkipVerify({ kind: "advisory", message: "x" })).toBe(false);
   });
 
-  it("offers it after a refusal the host reached on its own check", () => {
-    // Including an `auth` class: a Composio account behind a proxy that
-    // rewrites 401s is exactly the operator who cannot otherwise get past a
-    // check that is wrong about them.
+  it("offers it after the probe itself refused the key", () => {
+    // `set_api_key` answers a destructive probe class with `InvalidRequest`,
+    // which the host envelope reports as `400 invalid_request`. That is the one
+    // refusal skipping the check can do anything about — including an `auth`
+    // class, because a Composio account behind a proxy that rewrites 401s is
+    // exactly the operator who cannot otherwise get past a check that is wrong
+    // about them.
     expect(
-      offersSkipVerify({ kind: "rejected", status: 400, message: "x" }),
+      offersSkipVerify({
+        kind: "rejected",
+        status: 400,
+        code: "invalid_request",
+        fromHost: true,
+        message: "x",
+      }),
     ).toBe(true);
-    expect(
-      offersSkipVerify({ kind: "rejected", status: 422, message: "x" }),
-    ).toBe(true);
-    // A transport failure with no status: still worth a retry without the probe.
-    expect(offersSkipVerify({ kind: "rejected", message: "x" })).toBe(true);
+  });
+
+  it("does not offer it for a failure the probe did not cause", () => {
+    // Each of these used to unlock the button, because the rule was "anything
+    // but 401/403". None of them is a verdict on the key.
+    const cases: [string, Parameters<typeof offersSkipVerify>[0]][] = [
+      // The request may never have arrived — or may have arrived and landed.
+      ["no status at all", { kind: "rejected", message: "x" }],
+      [
+        "the client's network failure",
+        { kind: "rejected", status: 0, code: "network_error", message: "x" },
+      ],
+      // `set_api_key` stores, THEN journals and rebuilds status. A failure there
+      // means the key is already stored; offering a second write of it is the
+      // duplicate this function exists to prevent.
+      [
+        "a 500 after the store",
+        { kind: "rejected", status: 500, code: "internal", fromHost: true, message: "x" },
+      ],
+      [
+        "not in this build",
+        { kind: "rejected", status: 409, code: "not_in_build", fromHost: true, message: "x" },
+      ],
+      [
+        "a semantically invalid payload",
+        { kind: "rejected", status: 422, fromHost: true, message: "x" },
+      ],
+      // Right status, wrong reason: a body that failed to parse is also a 400.
+      [
+        "a 400 for something other than the probe",
+        { kind: "rejected", status: 400, code: "manifest_invalid", fromHost: true, message: "x" },
+      ],
+      // Right status and code, but not the host's verdict — a proxy said it.
+      [
+        "a 400 invalid_request that did not come from the host",
+        { kind: "rejected", status: 400, code: "invalid_request", fromHost: false, message: "x" },
+      ],
+    ];
+    for (const [label, outcome] of cases) {
+      expect(offersSkipVerify(outcome), label).toBe(false);
+    }
   });
 
   it("never offers it after a permission refusal", () => {

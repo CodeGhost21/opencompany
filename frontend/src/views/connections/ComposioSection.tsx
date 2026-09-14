@@ -283,6 +283,10 @@ export function ComposioSection({
     setOutcome({
       kind: "rejected",
       status: err instanceof ApiError ? err.status : undefined,
+      // Carried so `offersSkipVerify` can tell the probe's own refusal apart
+      // from every other 400-or-worse — see it for the cases that matter.
+      code: err instanceof ApiError ? err.code : undefined,
+      fromHost: err instanceof ApiError ? err.fromHost : false,
       message: err instanceof ApiError ? err.message : fallback,
     });
   }
