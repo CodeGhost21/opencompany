@@ -75,23 +75,17 @@ export function accountSubline(load: AccountLoad, status: CompanyCredentialStatu
     return "The host could not say — this is not the same as having no key";
   }
   switch (status.source) {
-    case "company":
-      return "Acting as this company's own TinyHumans account";
     case "attested":
     case "static":
+      // The one tier worth a line: the row is connected, but not with a key of
+      // this company's own, which is why Remove is not offered on it.
       return "Acting as the account of whoever runs this server";
-    case "none":
-      // Deliberately narrow. "Agents cannot think" is what this page used to
-      // say here, and it is **false** on a company whose LLM page holds a key
-      // of its own: that one outranks this credential in the managed chain, and
-      // a provider of its own never consults it — so such a company thinks
-      // perfectly well with no TinyHumans account at all. What is always true
-      // is the absence itself.
-      return "No TinyHumans account for this company";
     default:
-      // An older or newer host naming a tier this build does not know. Saying
-      // what the row *is* beats claiming a state nobody established.
-      return "The account this company acts and spends through";
+      // The company's own key needs no line — the card's "Connected" heading
+      // already says it — and "none" never reaches a row: the page shows the
+      // Connect button alone (operator request, 2026-09-14). Empty renders no
+      // sub-line at all.
+      return "";
   }
 }
 
@@ -107,27 +101,25 @@ export function canRemoveKey(status: CompanyCredentialStatus | null): boolean {
   return status?.source === "company";
 }
 
-/** Which of the page's two ways to connect the header card shows. */
+/** What the page's header offers. */
 export interface HeaderActions {
   /** "Connect to TinyHumans" — the dialog that takes an API key. */
   key: boolean;
-  /** "Sign in with TinyHumans" — the key grant, where the host has a hub. */
-  grant: boolean;
 }
 
 /**
- * The page's two options, each shown or not.
+ * Whether the page offers its one action, "Connect to TinyHumans".
  *
- * Two, and only two: paste an API key, or sign in and have one minted. The key
- * dialog works on every host; the grant only where one has a hub wired
- * (`hubLink`), so a self-hosted instance shows the first alone.
+ * One, not two: the "Sign in with TinyHumans" grant option was removed from
+ * this page at the operator's request (2026-09-14). The key dialog works on
+ * every host.
  *
- * Neither is offered once this company has a key of its own. The connected row
+ * Not offered once this company has a key of its own. The connected row
  * carries Replace and Remove, and a Connect button above a row that already
  * says "connected" is a second path to the same write, asked for by nobody.
  *
- * This decides what is **shown**. `ConnectTinyHumansButton` stays mounted
- * whatever it says, because it also redeems a returning grant.
+ * This decides what is **shown**. A returning grant is still redeemed by
+ * `useRedeemKeyGrant`, which `ApiKeyView` calls whatever this says.
  */
 export function headerActions(
   status: CompanyCredentialStatus | null,
@@ -140,9 +132,9 @@ export function headerActions(
   // credential the console has just admitted it cannot see, and the value it
   // replaces cannot be read back from anywhere.
   if (!canManage || status === null || canRemoveKey(status)) {
-    return { key: false, grant: false };
+    return { key: false };
   }
-  return { key: true, grant: status.hubLink === true };
+  return { key: true };
 }
 
 /**

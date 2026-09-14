@@ -132,7 +132,7 @@ describe("ApiKeyView billing failures stay distinguishable from no key", () => {
     // No balance row at all — nothing to be "unavailable" about.
     expect(container.querySelector('[data-testid="account-balance"]')).toBeNull();
     expect(container.querySelector('[data-testid="account-empty"]')).not.toBeNull();
-    expect(container.textContent ?? "").toContain("No account connected yet.");
+    expect(container.textContent ?? "").toContain("Not connected.");
   });
 });
 
@@ -165,8 +165,7 @@ describe("ApiKeyView describes a fallback platform identity honestly", () => {
     await mount(client);
 
     expect(container.querySelector('[data-testid="account-empty"]')).not.toBeNull();
-    expect(container.textContent ?? "").toContain("No account connected yet.");
-    expect(container.textContent ?? "").toContain("Apps cannot be connected");
+    expect(container.textContent ?? "").toContain("Not connected.");
   });
 });
 
@@ -193,44 +192,30 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
     }
   });
 
-  // The exception is named rather than denied — an operator who has set a
-  // provider key on the LLM page must be able to see that it still applies.
-  it("names the LLM-page provider key as the thing that still works", async () => {
-    const client = clientFor({
-      credential: async () => credential({ configured: false, source: "none" }),
-      billing: async () => ({ configured: false }),
-    });
-
-    await mount(client);
-
-    expect(container.textContent ?? "").toContain(
-      "a provider key set on the LLM page still works",
-    );
-  });
-
-  // The billing consequence belongs to the control it is true of. `PUT
-  // …/credential` — what the paste dialog submits — writes `tinyhumans/key`
-  // and stops; only `finish_link` also writes `inference/key` and declares the
-  // managed provider. So the header card, which carries the Connect button,
-  // states the move, and the dialog must not: telling someone that pasting a
-  // key moved their model spend is the same defect pointing the other way.
-  it("puts the billing move on the connect path, not on the paste field", async () => {
+  // Operator request, 2026-09-14: the not-connected page is the Connect button
+  // alone, and the dialog is a heading, the field, the link and its controls.
+  // Every explainer that used to stand around them is asserted gone.
+  it("shows an admin only the Connect button when nothing is connected", async () => {
     await mount(
       adminClient(async () => credential({ configured: false, source: "none", hubLink: true })),
     );
 
-    // The header card says it, beside the button it is true of.
-    expect(container.textContent ?? "").toContain(
+    expect(container.querySelector('[data-testid="account-add-key"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="account-empty"]')).toBeNull();
+    const page = container.textContent ?? "";
+    for (const gone of [
+      "The TinyHumans account this company acts and spends through",
+      "One key for the apps your agents act through",
       "Connecting points both at this company's account",
-    );
-    // …and qualifies it, because the managed chain has rungs above this key.
-    expect(container.textContent ?? "").toContain("which keeps precedence");
+      "No account connected yet",
+      "No TinyHumans account for this company",
+      "Apps cannot be connected",
+    ]) {
+      expect(page, gone).not.toContain(gone);
+    }
   });
 
-  // The other half, and it has to open the dialog to be worth anything: an
-  // assertion against the closed page could not fail however the dialog were
-  // worded.
-  it("says in the API-key dialog that a key sets the account only", async () => {
+  it("keeps the API-key dialog to its heading, field and link", async () => {
     await mount(
       adminClient(async () => credential({ configured: false, source: "none", hubLink: false })),
     );
@@ -238,12 +223,12 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
     await press('[data-testid="account-add-key"]');
 
     const dialog = document.body.textContent ?? "";
-    // `PUT …/credential` writes `tinyhumans/key` and stops; only `finish_link`
-    // also declares the `managed` provider.
-    expect(dialog).toContain("It does not choose a model provider");
-    // Since #2266 a managed turn resolves through this very key.
-    expect(dialog).toContain("its TinyHumans models resolve through");
-    expect(dialog).not.toContain("moves every agent turn");
+    expect(dialog).toContain("Add your API key");
+    expect(dialog).toContain("Don't have an API key?");
+    expect(dialog).not.toContain("connects apps as");
+    expect(dialog).not.toContain("It does not choose a model provider");
+    const input = document.querySelector('[data-testid="account-key-input"]') as HTMLInputElement;
+    expect(input.getAttribute("placeholder")).toBeNull();
   });
 });
 
@@ -258,8 +243,10 @@ async function typeInto(selector: string, value: string) {
   });
 }
 
-describe("ApiKeyView offers two ways to connect", () => {
-  it("shows Connect to TinyHumans and Sign in with TinyHumans where the host has a hub", async () => {
+describe("ApiKeyView offers one way to connect", () => {
+  // The sign-in option was removed at the operator's request (2026-09-14):
+  // even on a host with a hub, the page offers Connect to TinyHumans alone.
+  it("shows Connect to TinyHumans and no sign-in option where the host has a hub", async () => {
     await mount(
       adminClient(async () => credential({ configured: false, source: "none", hubLink: true })),
     );
@@ -267,12 +254,11 @@ describe("ApiKeyView offers two ways to connect", () => {
     expect(container.querySelector('[data-testid="account-add-key"]')?.textContent).toContain(
       "Connect to TinyHumans",
     );
-    expect(container.querySelector('[data-testid="connect-tinyhumans"]')?.textContent).toContain(
-      "Sign in with TinyHumans",
-    );
+    expect(container.querySelector('[data-testid="connect-tinyhumans"]')).toBeNull();
+    expect(container.textContent ?? "").not.toContain("Sign in with TinyHumans");
   });
 
-  it("shows the API-key option alone where there is no hub", async () => {
+  it("shows the same single option where there is no hub", async () => {
     await mount(
       adminClient(async () => credential({ configured: false, source: "none", hubLink: false })),
     );
@@ -327,7 +313,7 @@ describe("ApiKeyView's Connect to TinyHumans dialog", () => {
     expect(document.body.textContent ?? "").toContain("Don't have an API key?");
 
     const link = document.querySelector('[data-testid="account-key-get-link"]') as HTMLAnchorElement;
-    expect(link.textContent).toContain("Get your API key");
+    expect(link.textContent).toContain("Get an API key");
     // The same page the setup wizard's Managed field sends an operator to.
     expect(link.getAttribute("href")).toBe("https://tinyhumans.ai/dashboard?tab=api-keys");
     expect(link.getAttribute("target")).toBe("_blank");
@@ -484,15 +470,16 @@ describe("ApiKeyView redeems a returning grant whatever else failed", () => {
   // The grant comes back as a top-level navigation: `App` takes the code off
   // the URL before the first render, strips the address bar because it is a
   // live single-use credential, and hands it to a module-local box that a
-  // reload empties. The effect inside `ConnectTinyHumansButton` is the only
-  // thing that spends it.
+  // reload empties. `useRedeemKeyGrant`, which `ApiKeyView` calls
+  // unconditionally, is the only thing on this page that spends it.
   //
-  // So that component's *mount* must not be gated on the credential read. It
-  // was, briefly: the header offers one action and the connect action is
-  // chosen from `status`, which is null while the read is in flight and stays
-  // null when it fails — and a company whose secret store hiccuped on exactly
-  // that page load would have lost the key it had just minted, with nothing on
-  // screen to try again with. Only what is *shown* may depend on the read.
+  // So that call must not be gated on the credential read. It was, briefly:
+  // the header's action is chosen from `status`, which is null while the read
+  // is in flight and stays null when it fails — and a company whose secret
+  // store hiccuped on exactly that page load would have lost the key it had
+  // just minted, with nothing on screen to try again with. The sign-in button
+  // is gone from this page (2026-09-14); the redemption must not have gone
+  // with it. Only what is *shown* may depend on the read.
   it("finishes the link even when the credential read fails", async () => {
     const finished: unknown[] = [];
     captureKeyLink({ state: "st", code: "cd" }, false);

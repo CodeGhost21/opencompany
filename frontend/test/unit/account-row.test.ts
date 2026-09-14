@@ -51,10 +51,10 @@ describe("accountShape keeps an unreadable store apart from an empty one", () =>
 });
 
 describe("accountSubline says which tier actually answers", () => {
-  it("names the company's own account", () => {
-    expect(accountSubline("ready", status({ source: "company" }))).toContain(
-      "this company's own TinyHumans account",
-    );
+  // The card's "Connected" heading already says it; the operator asked for no
+  // extra line (2026-09-14).
+  it("draws no line for the company's own key", () => {
+    expect(accountSubline("ready", status({ source: "company" }))).toBe("");
   });
 
   // The hosted case. `configured` is false here and a row built on it would
@@ -84,14 +84,10 @@ describe("accountSubline says which tier actually answers", () => {
     expect(accountSubline("error", null).toLowerCase()).not.toContain("billed");
   });
 
-  // Narrow on purpose. "Agents cannot think" is what this line said first, and
-  // it is **false** on a company whose LLM page holds a provider key of its
-  // own — `inference/key` resolves without this credential. The sub-line states
-  // the absence; the empty state carries the consequence with its exception
-  // named.
-  it("states the absence without claiming the company has stopped", () => {
+  // No row is drawn for "none" — the Connect button alone is that state.
+  it("draws no line when nothing resolves", () => {
     const line = accountSubline("ready", status({ configured: false, source: "none" }));
-    expect(line).toBe("No TinyHumans account for this company");
+    expect(line).toBe("");
   });
 
   it("never claims agents cannot think, in any state", () => {
@@ -109,11 +105,9 @@ describe("accountSubline says which tier actually answers", () => {
     expect(line).not.toContain("No TinyHumans account");
   });
 
-  it("falls back to what the row is when a host names an unknown tier", () => {
+  it("claims no state for a tier this build does not know", () => {
     const unknown = status({ source: "something-new" as CompanyCredentialStatus["source"] });
-    expect(accountSubline("ready", unknown)).toBe(
-      "The account this company acts and spends through",
-    );
+    expect(accountSubline("ready", unknown)).toBe("");
   });
 });
 
@@ -133,29 +127,26 @@ describe("canRemoveKey offers Remove only where it would remove something", () =
   });
 });
 
-describe("headerActions offers the page's two ways to connect", () => {
-  const none = { key: false, grant: false };
+describe("headerActions offers the page's one way to connect", () => {
+  const none = { key: false };
 
   it("offers nothing to a member", () => {
     expect(headerActions(status({ source: "none", hubLink: true }), false)).toEqual(none);
     expect(headerActions(status({ source: "none", hubLink: false }), false)).toEqual(none);
   });
 
-  it("offers both the API key and the sign-in where the host has a hub", () => {
+  // One option whatever the host: the sign-in grant was removed from the page
+  // (operator request, 2026-09-14), so `hubLink` no longer changes the offer.
+  it("offers Connect to TinyHumans alone, with or without a hub", () => {
     expect(headerActions(status({ configured: false, source: "none", hubLink: true }), true)).toEqual(
-      { key: true, grant: true },
+      { key: true },
     );
-  });
-
-  // The sign-in cannot complete without a hub, so a self-hosted instance gets
-  // the API-key option alone rather than a button that renders nothing.
-  it("offers the API key alone where there is no hub", () => {
     expect(headerActions(status({ configured: false, source: "none", hubLink: false }), true)).toEqual(
-      { key: true, grant: false },
+      { key: true },
     );
     expect(
       headerActions(status({ configured: false, source: "static", hubLink: undefined }), true),
-    ).toEqual({ key: true, grant: false });
+    ).toEqual({ key: true });
   });
 
   // Connected: the row carries Replace and Remove, and a Connect button above
@@ -171,8 +162,8 @@ describe("headerActions offers the page's two ways to connect", () => {
   // be read back from anywhere, which is what makes this worse than an ordinary
   // control-that-cannot-act.
   it("offers nothing at all while the credential state is unknown", () => {
-    expect(headerActions(null, true)).toEqual({ key: false, grant: false });
-    expect(headerActions(null, false)).toEqual({ key: false, grant: false });
+    expect(headerActions(null, true)).toEqual({ key: false });
+    expect(headerActions(null, false)).toEqual({ key: false });
   });
 });
 

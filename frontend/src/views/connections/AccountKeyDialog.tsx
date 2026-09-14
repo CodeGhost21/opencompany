@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -43,8 +42,11 @@ interface Props {
  * `PUT …/credential`, which stores `tinyhumans/key` and stops. That is the
  * company's TinyHumans identity, and since #2266 the slot a managed turn
  * resolves through. It does **not** declare the managed provider — only the
- * grant (`finish_link`) does — so the copy says it sets the account, not that
- * it chooses a model.
+ * grant (`finish_link`) does.
+ *
+ * Deliberately minimal (operator request, 2026-09-14): a heading, the field,
+ * the "Get an API key" link, Save and Cancel, and an error only when a save
+ * fails. No explanatory paragraph.
  *
  * Write-only, like every credential the console handles: the value is never
  * returned, so the field opens empty every time and "set" is reported by a
@@ -66,10 +68,6 @@ export function AccountKeyDialog({ open, onOpenChange, replacing, busy, error, o
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{replacing ? "Replace your API key" : "Connect to TinyHumans"}</DialogTitle>
-          <DialogDescription>
-            Sets the TinyHumans account this company connects apps as, and that its TinyHumans
-            models resolve through. It does not choose a model provider.
-          </DialogDescription>
         </DialogHeader>
 
         <form
@@ -86,7 +84,6 @@ export function AccountKeyDialog({ open, onOpenChange, replacing, busy, error, o
               type="password"
               autoComplete="off"
               spellCheck={false}
-              placeholder="Paste your TinyHumans API key"
               aria-describedby={error ? "account-key-error" : undefined}
               value={key}
               onChange={(event) => setKey(event.target.value)}
@@ -101,7 +98,7 @@ export function AccountKeyDialog({ open, onOpenChange, replacing, busy, error, o
                 data-testid="account-key-get-link"
                 className="inline-flex items-center gap-1 font-medium text-foreground underline underline-offset-4"
               >
-                Get your API key
+                Get an API key
                 <ExternalLink className="size-3" />
               </a>
             </p>
