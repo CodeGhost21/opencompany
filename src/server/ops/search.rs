@@ -964,47 +964,29 @@ async fn put_search(
     }
 
     let info = catalogue_entry(&provider)?;
-    let connected = store::list_providers(runtime.id(), runtime.secrets().as_ref())
-        .await?
-        .into_iter()
-        .find(|existing| existing.slug == provider);
 
+    // Every supplied field is validated before anything is written.
     let endpoint = supplied(body.endpoint.as_deref());
     if let Some(endpoint) = endpoint.as_deref()
         && info.needs_endpoint()
     {
         validate_endpoint(endpoint).await?;
     }
+    let key = supplied(body.api_key.as_deref());
 
-    store::put_provider(
+    // Then one critical section in the store: row, credential, default marker.
+    // As separate unlocked steps, a concurrent Change address was overwritten
+    // with the address this handler had read, and a concurrent removal could
+    // leave the deleted slug marked as the default. An omitted address is left
+    // exactly as stored — nothing is carried over from a snapshot.
+    store::select_provider(
         runtime.id(),
         runtime.secrets().as_ref(),
-        SearchProvider {
-            slug: provider.clone(),
-            // Naming a provider on this route is selecting it, and a selected
-            // provider that is switched off resolves to something else — which
-            // would make the route answer 200 and change nothing, the same
-            // failure as the managed branch above. It is also what makes the
-            // round trip work: managed, then back to this provider.
-            enabled: true,
-            endpoint: endpoint.or_else(|| connected.and_then(|p| p.endpoint)),
-        },
+        &provider,
+        endpoint.filter(|_| info.needs_endpoint()),
+        key.as_deref(),
     )
     .await?;
-    if let Some(key) = supplied(body.api_key.as_deref()) {
-        // Connected-only, for the same reason as the modern routes: the row was
-        // written a line ago and released its lock, and a removal landing in
-        // between would otherwise leave this key stored with no row to list it.
-        if !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), &provider, &key)
-            .await?
-        {
-            return Err(invalid(format!(
-                "{} was disconnected while it was being saved — try again",
-                info.label
-            )));
-        }
-    }
-    store::set_default_slug(runtime.id(), runtime.secrets().as_ref(), &provider).await?;
 
     Ok(Json(status_of(runtime).await?))
 }
@@ -1015,6 +997,16 @@ async fn apply_to(
     slug: &str,
     body: &SearchConfigBody,
 ) -> Result<Json<SearchStatus>, ApiError> {
+    // Validate every supplied field BEFORE mutating anything. The key used to be
+    // written first, so a request with a new key and an invalid address
+    // answered 400 with the credential already replaced — and a client that
+    // reasonably treats a failed patch as unapplied would be searching with a
+    // key it believes it never set.
+    let endpoint = supplied(body.endpoint.as_deref());
+    if let Some(endpoint) = endpoint.as_deref() {
+        validate_endpoint(endpoint).await?;
+    }
+
     if let Some(key) = supplied(body.api_key.as_deref())
         && !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), slug, &key)
             .await?
@@ -1023,8 +1015,7 @@ async fn apply_to(
         // would otherwise leave this key stored with no row to list it.
         return Err(invalid("that provider was disconnected — try again"));
     }
-    if let Some(endpoint) = supplied(body.endpoint.as_deref()) {
-        validate_endpoint(&endpoint).await?;
+    if let Some(endpoint) = endpoint {
         // The same connected-only update the modern re-address route uses. This
         // read the row's `enabled` flag and then called `put_provider`, which
         // RECREATES a row — so a removal landing in between was undone, and a
@@ -1746,6 +1737,51 @@ mod tests {
             status,
             StatusCode::OK,
             "a self-hosted instance still takes an address"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_patch_that_fails_validation_changes_nothing() {
+        // The provider-less `PUT …/search` wrote the key before validating the
+        // address. A request carrying a new key and an invalid address answered
+        // 400 with the credential already replaced — so a client that treated
+        // the failed patch as unapplied was searching with a key it believed it
+        // never set.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        // Connected and selected, with no key yet — so any key write is visible.
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "exa"})),
+        )
+        .await;
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"apiKey": "exa-not-a-real-key", "endpoint": "not a url"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (_, after) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        let exa = after["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .find(|row| row["slug"] == "exa")
+            .expect("exa row")
+            .clone();
+        assert_eq!(
+            exa["keyConfigured"], false,
+            "a rejected patch must not have stored its key: {after}"
         );
     }
 

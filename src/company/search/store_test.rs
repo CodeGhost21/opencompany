@@ -1025,3 +1025,173 @@ async fn marking_a_default_while_it_is_removed_never_leaves_a_dangling_marker() 
         );
     }
 }
+
+#[tokio::test]
+async fn selecting_a_provider_without_an_address_keeps_the_one_stored_now() {
+    // The legacy save read the row and wrote back the address it had read. A
+    // Change address landing in between was overwritten with the old value.
+    // Nothing is carried from a snapshot any more: an omitted address is simply
+    // not written.
+    let secrets = MemSecrets::default();
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "searxng".to_string(),
+            enabled: true,
+            endpoint: Some("http://old.acme.internal".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    // The concurrent re-address, landed.
+    assert!(
+        update_endpoint_if_present(
+            &company(),
+            &secrets,
+            "searxng",
+            Some("http://new.acme.internal".to_string()),
+        )
+        .await
+        .unwrap()
+    );
+
+    select_provider(&company(), &secrets, "searxng", None, None)
+        .await
+        .unwrap();
+
+    let providers = list_providers(&company(), &secrets).await.unwrap();
+    assert_eq!(
+        providers[0].endpoint.as_deref(),
+        Some("http://new.acme.internal"),
+        "the newer address must survive: {providers:?}"
+    );
+    assert_eq!(
+        load_default_slug(&company(), &secrets)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("searxng")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_legacy_selection_racing_a_removal_never_leaves_a_dangling_marker() {
+    // Either order is allowed to win. What is not allowed is the removal
+    // landing between the row write and the marker write, leaving `brave`
+    // marked with no `brave` row.
+    for _ in 0..20 {
+        let secrets = std::sync::Arc::new(SlowSecrets::default());
+        put_provider(
+            &company(),
+            secrets.as_ref(),
+            SearchProvider {
+                slug: "brave".to_string(),
+                enabled: true,
+                endpoint: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let selecting = {
+            let secrets = secrets.clone();
+            tokio::spawn(async move {
+                select_provider(
+                    &company(),
+                    secrets.as_ref(),
+                    "brave",
+                    None,
+                    Some("brave-not-a-real-key"),
+                )
+                .await
+            })
+        };
+        let removing = {
+            let secrets = secrets.clone();
+            tokio::spawn(
+                async move { delete_provider(&company(), secrets.as_ref(), "brave").await },
+            )
+        };
+        selecting.await.expect("task").expect("select");
+        removing.await.expect("task").expect("remove");
+
+        let connected = list_providers(&company(), secrets.as_ref())
+            .await
+            .unwrap()
+            .iter()
+            .any(|provider| provider.slug == "brave");
+        let marked = load_default_slug(&company(), secrets.as_ref())
+            .await
+            .unwrap()
+            .is_some_and(|slug| slug == "brave");
+        assert!(
+            !marked || connected,
+            "brave is marked as the default with no brave row"
+        );
+        let key = provider_key_configured(&company(), secrets.as_ref(), "brave")
+            .await
+            .unwrap();
+        assert!(!key || connected, "brave's key is stored with no brave row");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_legacy_address_clear_is_still_retried_as_entry_zero() {
+    // Clearing `search/provider` before `search/endpoint` meant a failed
+    // address clear left the flat value stored while the retry no longer knew
+    // the row was entry zero — so it never cleared it.
+    let secrets = FailingSecrets::default();
+    seed_failing(
+        &secrets,
+        &[
+            (PROVIDER_SECRET, "searxng"),
+            (ENDPOINT_SECRET, "http://search.acme.internal"),
+        ],
+    )
+    .await;
+
+    *secrets.fail_on.lock().unwrap() = Some(ENDPOINT_SECRET.to_string());
+    assert!(
+        delete_provider(&company(), &secrets, "searxng")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        list_providers(&company(), &secrets)
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.slug.as_str())
+            .collect::<Vec<_>>(),
+        vec!["searxng"],
+        "the legacy row must still be recognisable"
+    );
+
+    *secrets.fail_on.lock().unwrap() = None;
+    delete_provider(&company(), &secrets, "searxng")
+        .await
+        .unwrap();
+    assert!(
+        list_providers(&company(), &secrets)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for key in [PROVIDER_SECRET, ENDPOINT_SECRET] {
+        assert_eq!(
+            secrets.inner.map.lock().unwrap().get(key).cloned(),
+            Some(String::new()),
+            "{key} must be cleared on the retry"
+        );
+    }
+}
+
+async fn seed_failing(secrets: &FailingSecrets, pairs: &[(&str, &str)]) {
+    for (key, value) in pairs {
+        secrets
+            .set(&company(), key, SecretValue((*value).to_string()))
+            .await
+            .expect("seed");
+    }
+}

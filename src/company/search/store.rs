@@ -539,7 +539,11 @@ async fn delete_provider_locked(
     // Entry zero lives at the flat keys, so removing it has to clear those too —
     // which is exactly what `DELETE …/search/key` has always done.
     if is_entry_zero {
-        for key in [API_KEY_SECRET, PROVIDER_SECRET, ENDPOINT_SECRET] {
+        // `PROVIDER_SECRET` LAST. It is what makes this slug entry zero, and
+        // the retry depends on still recognising it: clear it before a flat
+        // value whose clear then fails, and the retry sees an ordinary row,
+        // skips the flat keys, and leaves that value stored for good.
+        for key in [API_KEY_SECRET, ENDPOINT_SECRET, PROVIDER_SECRET] {
             if let Err(err) = write(company, secrets, key, "").await {
                 tracing::error!(
                     company = %company,
@@ -620,6 +624,53 @@ pub async fn load_default_slug(
     secrets: &dyn SecretStore,
 ) -> Result<Option<String>> {
     read(company, secrets, DEFAULT_PROVIDER_KEY).await
+}
+
+/// The legacy "select this provider" save, as one critical section.
+///
+/// `PUT …/search` naming a provider used to do this in four unlocked steps: read
+/// the row, write it back with the address it had read, store the key, mark it
+/// default. Two things slipped through the gaps:
+///
+/// - A Change address landing after the read had its new address overwritten
+///   with the one the read captured, so both requests answered 200 and agents
+///   kept searching the old instance.
+/// - A removal landing before the marker write left a deleted slug marked as
+///   the default — the dangling-marker state `set_default_if_connected` exists
+///   to prevent on the modern route.
+///
+/// Held under the index lock end to end, neither can interleave. An omitted
+/// `endpoint` is left exactly as stored rather than rewritten from a snapshot:
+/// the index carries no address, and [`put_provider_locked`] writes one only
+/// when given one.
+///
+/// Creating the row when it does not exist is deliberate — naming a provider
+/// on this route has always connected it — and the credential is written after
+/// the row, inside the same lock, so it can never land without one.
+pub async fn select_provider(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    endpoint: Option<String>,
+    key: Option<&str>,
+) -> Result<()> {
+    let _guard = index_guard(company).await;
+    put_provider_locked(
+        company,
+        secrets,
+        SearchProvider {
+            slug: slug.to_string(),
+            // Selecting a provider means using it; a selected row that is
+            // switched off resolves to something else.
+            enabled: true,
+            endpoint,
+        },
+    )
+    .await?;
+    if let Some(key) = key {
+        store_provider_key(company, secrets, slug, key).await?;
+    }
+    set_default_slug(company, secrets, slug).await
 }
 
 /// Marks a provider as the default **only if it is connected**, atomically.
