@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   agentPairBrokenCopy,
   companyDefaultLabel,
+  pairEdits,
   pairLabel,
+  pairMissingModel,
   providerEdit,
   resolveAgentDefault,
 } from "@/lib/agent";
@@ -58,6 +60,56 @@ describe("providerEdit — the sibling of modelEdit/harnessEdit", () => {
 
   it("sends null to clear back to the company default", () => {
     expect(providerEdit("anthropic", "")).toBeNull();
+  });
+});
+
+describe("pairEdits — one PATCH body for both halves (round-2 review, P2-6)", () => {
+  it("is null when neither half changed", () => {
+    expect(pairEdits(agent({ provider: undefined, model: undefined }), "", "")).toBeNull();
+    expect(pairEdits(agent({ provider: "anthropic", model: "test-model-large" }), "anthropic", "test-model-large")).toBeNull();
+  });
+
+  it("sends provider and model together when a new pair is chosen", () => {
+    expect(pairEdits(agent({ provider: undefined, model: undefined }), "anthropic", "test-model-large")).toEqual({
+      provider: "anthropic",
+      model: "test-model-large",
+    });
+  });
+
+  it("sends null for BOTH halves when the pin is cleared back to the company default", () => {
+    expect(pairEdits(agent({ provider: "anthropic", model: "test-model-large" }), "", "")).toEqual({
+      provider: null,
+      model: null,
+    });
+  });
+
+  it("sends both halves again when only the model changes on an already-pinned provider", () => {
+    expect(
+      pairEdits(agent({ provider: "anthropic", model: "test-model-large" }), "anthropic", "test-model-small"),
+    ).toEqual({ provider: "anthropic", model: "test-model-small" });
+  });
+
+  it("sends both halves when switching to a different provider, seeding its own model", () => {
+    expect(
+      pairEdits(agent({ provider: "anthropic", model: "test-model-large" }), "openrouter", "acme/test-model"),
+    ).toEqual({ provider: "openrouter", model: "acme/test-model" });
+  });
+});
+
+describe("pairMissingModel — the Save button's own gate (round-2 review, P2-6)", () => {
+  it("blocks a chosen provider with no valid model", () => {
+    expect(pairMissingModel("anthropic", "")).toBe(true);
+    expect(pairMissingModel("anthropic", "  ")).toBe(true);
+    expect(pairMissingModel("anthropic", "reasoning-v1")).toBe(true); // a tier name, never a model
+  });
+
+  it("is ready with a chosen provider and a real model id", () => {
+    expect(pairMissingModel("anthropic", "test-model-large")).toBe(false);
+  });
+
+  it("is always ready for the company default — there is no model field to fill in", () => {
+    expect(pairMissingModel("", "")).toBe(false);
+    expect(pairMissingModel("", "anything")).toBe(false);
   });
 });
 

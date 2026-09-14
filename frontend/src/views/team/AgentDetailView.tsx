@@ -61,9 +61,10 @@ import {
   harnessOptionLabel,
   isEditable,
   modelEdit,
+  pairEdits,
   pairLabel,
+  pairMissingModel,
   parseToolGlobs,
-  providerEdit,
   resolveAgentDefault,
   resolvedHarnessKind,
   summarizeGrants,
@@ -676,11 +677,10 @@ export function AgentDetailView({
       if (model !== undefined) edits.model = model;
       if (agent.provider) edits.provider = null;
     } else {
-      const provider = providerEdit(agent.provider, providerDraft);
-      const model = modelEdit(agent.model, providerDraft === "" ? "" : modelDraft);
-      if (provider !== undefined || model !== undefined) {
-        edits.provider = providerDraft === "" ? null : providerDraft;
-        edits.model = providerDraft === "" ? null : modelDraft.trim();
+      const pair = pairEdits(agent, providerDraft, modelDraft);
+      if (pair) {
+        edits.provider = pair.provider;
+        edits.model = pair.model;
       }
     }
 
@@ -2104,10 +2104,7 @@ function HarnessAndModel({
             </Button>
             <Button
               onClick={onSave}
-              disabled={
-                saving ||
-                (draftKind !== "acp" && providerDraft !== "" && checkModelId(modelDraft) !== null)
-              }
+              disabled={saving || (draftKind !== "acp" && pairMissingModel(providerDraft, modelDraft))}
               data-testid="agent-harness-save"
             >
               Save

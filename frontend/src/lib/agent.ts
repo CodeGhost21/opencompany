@@ -3,7 +3,7 @@
 // and the three derivations that are easy to get quietly wrong.
 
 import type { AgentDetailDto, AgentToolsDto, EditAgentInput, HarnessDto } from "@/api/types";
-import { SETTINGS_PATH, defaultBrokenCopy, providerState } from "@/inference/connect";
+import { SETTINGS_PATH, checkModelId, defaultBrokenCopy, providerState } from "@/inference/connect";
 import type { DefaultChoice, Provider } from "@/inference/types";
 
 /** The fields that describe an agent, in the order both forms show them. */
@@ -256,6 +256,38 @@ export function providerEdit(current: string | undefined, draft: string): string
   const before = current ?? "";
   if (draft === before) return undefined;
   return draft === "" ? null : draft;
+}
+
+/**
+ * The `PATCH` body for a built-in pair, or `null` when neither half changed —
+ * `saveHarnessAndModel`'s own pair-building logic, extracted so it can be
+ * tested directly (round-2 review, P2-6). `provider` and `model` are always
+ * sent **together** when either changed, so the host validates the pair it
+ * is about to store rather than one half against the other; clearing the
+ * provider sends `null` for both, back to the company default.
+ */
+export function pairEdits(
+  agent: Pick<AgentDetailDto, "provider" | "model">,
+  providerDraft: string,
+  modelDraft: string,
+): { provider: string | null; model: string | null } | null {
+  const provider = providerEdit(agent.provider, providerDraft);
+  const model = modelEdit(agent.model, providerDraft === "" ? "" : modelDraft);
+  if (provider === undefined && model === undefined) return null;
+  return {
+    provider: providerDraft === "" ? null : providerDraft,
+    model: providerDraft === "" ? null : modelDraft.trim(),
+  };
+}
+
+/**
+ * Whether a built-in pair draft names a provider with no valid model chosen
+ * yet — the Save button's own gate, extracted for a direct test (round-2
+ * review, P2-6). Company default (`providerDraft === ""`) is always ready:
+ * there is no model field to fill in against it.
+ */
+export function pairMissingModel(providerDraft: string, modelDraft: string): boolean {
+  return providerDraft !== "" && checkModelId(modelDraft) !== null;
 }
 
 /** "Company default · <provider label> · <model>", or the not-chosen form. */
