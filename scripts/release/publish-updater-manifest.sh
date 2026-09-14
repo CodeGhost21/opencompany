@@ -14,7 +14,7 @@
 # ## It runs before the release is published, and that is load-bearing
 #
 # This repository has immutable releases enabled: publishing freezes the asset
-# list, and nothing can be added afterwards. `release-desktop-macos.yml`
+# list, and nothing can be added afterwards. `build-desktop.yml`
 # therefore uploads every DMG and update archive to a DRAFT and publishes it
 # last — so this script has to write latest.json into the draft, in the window
 # between the builds finishing and the draft going public. A release published
@@ -88,7 +88,7 @@ read_signature() {
 }
 
 # The platform keys the updater looks itself up under. macOS only, because
-# `release-desktop-macos.yml` is the only desktop release path there is — a
+# `build-desktop.yml` is the only desktop release path there is — a
 # Windows or Linux client would find no entry for its target and report no
 # update, which is the honest answer while no such build is published.
 # See docs/spec/runtime/desktop-updates.md.
