@@ -187,7 +187,15 @@ export function ProviderConnectDialog({
     onSubmit({
       kind: optionSlug ?? "custom",
       label: custom ? label.trim() : undefined,
-      baseUrl: ask.needsEndpoint ? (normalizeEndpoint(baseUrl) ?? baseUrl.trim()) : undefined,
+      // **An unchanged endpoint in edit mode is not sent.** The row's
+      // `baseUrl` is the host's *redacted* form, which can mask a path segment
+      // that only looks like a credential; posting it back would store that
+      // mask over a working endpoint on a rename (Codex review on #2281). The
+      // host keeps the stored endpoint when none is sent.
+      baseUrl:
+        !ask.needsEndpoint || (editing != null && baseUrl.trim() === editing.baseUrl.trim())
+          ? undefined
+          : (normalizeEndpoint(baseUrl) ?? baseUrl.trim()),
       // **An untouched field in edit mode is not an instruction.** The host
       // reads `Some("")` as "clear the credential", which is right for the
       // Remove key action and catastrophic here: renaming a provider would

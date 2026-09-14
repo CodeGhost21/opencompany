@@ -387,6 +387,19 @@ describe("endpointHasCredentials", () => {
     expect(endpointHasCredentials("https://http://alice@api.acme.example/v1")).toBe(true);
   });
 
+  it("sees through the tabs and line breaks a URL parser removes", () => {
+    // Codex review on #2281, mirroring the host's
+    // `tabs_and_line_breaks_do_not_hide_a_credential`.
+    for (const bad of [
+      "http:\t//alice:hunter2@127.0.0.1:8597/v1",
+      "http://ali\nce:hunter2@127.0.0.1:8597/v1",
+      "http://http:\t//alice:hunter2@127.0.0.1:8597/v1",
+    ]) {
+      expect(endpointHasCredentials(bad)).toBe(true);
+      expect(normalizeEndpoint(bad)).toBeNull();
+    }
+  });
+
   it("still ignores an @ outside every authority", () => {
     expect(endpointHasCredentials("HTTPS://api.acme.example/v1/@me")).toBe(false);
     expect(endpointHasCredentials("https://api.acme.example/v1?to=a@b")).toBe(false);

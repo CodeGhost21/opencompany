@@ -417,7 +417,9 @@ export function normalizeEndpoint(raw: string): string | null {
  * (`https://host/v1/@me`), and that is not a credential.
  */
 export function endpointHasCredentials(raw: string): boolean {
-  const trimmed = raw.trim();
+  // As a URL parser reads it: ASCII tab, LF and CR are removed wherever they
+  // appear, so `http:\t//alice:pw@host` is credentialed (Codex review on #2281).
+  const trimmed = raw.trim().replace(/[\t\n\r]/g, "");
   // Query and fragment are never an authority.
   const cut = trimmed.search(/[?#]/);
   const head = cut === -1 ? trimmed : trimmed.slice(0, cut);
