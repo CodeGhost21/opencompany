@@ -2809,7 +2809,7 @@ mod tests {
         let rendered = format!("{}\n", rows.join("\n"));
 
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/snapshots/tool-standing.txt");
+            .join("tests/snapshots/tool-standing.txt");
         if std::env::var_os("BLESS_TOOL_STANDING").is_some() {
             std::fs::write(&path, &rendered).expect("write the grantability snapshot");
             return;

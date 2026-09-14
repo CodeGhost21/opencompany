@@ -31,10 +31,10 @@ include!("src/build_stamp.rs");
 
 fn main() {
     // `CARGO_MANIFEST_DIR` is `crates/opencompany-core`, the member manifest
-    // that names this script — but everything this script reads (the bundles,
-    // the globals, the skills, `src/`, `.git`, `.gitmodules`, the workspace
-    // `Cargo.lock`) lives at the repository root two levels up, where the
-    // host's sources still are. Canonicalised so the paths cargo records for
+    // that names this script and the parent of `src/`. Everything else this
+    // script reads (the bundles, the globals, the skills, `.git`,
+    // `.gitmodules`, the workspace `Cargo.lock`) lives at the repository root
+    // two levels up. Canonicalised so the paths cargo records for
     // `rerun-if-changed` carry no `..` segments.
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest_dir
@@ -48,7 +48,7 @@ fn main() {
     // a reason to restamp.
     watch_if_present(&manifest_dir.join("Cargo.toml"));
 
-    stamp_build_commit(&root);
+    stamp_build_commit(&root, &manifest_dir);
     embed_globals(&root);
 
     // Re-run when a bundle changes. Watching `companies/` alone is not enough:
@@ -105,7 +105,7 @@ fn main() {
 /// **It must never fail a build.** Every source below is allowed to be absent,
 /// and the worst outcome is the honest string `"unknown"` — which is why
 /// [`resolve_build_commit`] takes options rather than unwrapping.
-fn stamp_build_commit(root: &Path) {
+fn stamp_build_commit(root: &Path, manifest_dir: &Path) {
     // Both environment sources are watched, not just read: an injected value
     // that changes must restamp, and cargo caches build-script output against
     // exactly the variables a script declares an interest in.
@@ -128,7 +128,7 @@ fn stamp_build_commit(root: &Path) {
     // Editing `docs/` or `frontend/` deliberately does not restamp: neither
     // changes this binary, so a stamp that stays clean across such an edit is
     // still telling the truth about the code that was compiled.
-    watch_if_present(&root.join("src"));
+    watch_if_present(&manifest_dir.join("src"));
     watch_if_present(&root.join("Cargo.toml"));
     watch_if_present(&root.join("Cargo.lock"));
     watch_submodule_heads(root);

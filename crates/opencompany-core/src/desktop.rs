@@ -33,7 +33,7 @@ macro_rules! preset {
         DesktopPreset {
             id: $id,
             name: $name,
-            manifest: include_str!(concat!("../companies/", $id, "/company.toml")),
+            manifest: include_str!(concat!("../../../companies/", $id, "/company.toml")),
         }
     };
 }
