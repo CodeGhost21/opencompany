@@ -177,6 +177,7 @@ pub mod title;
 pub mod tool_dispatcher;
 pub mod toolbelt;
 pub mod triage;
+pub mod turn_outputs;
 /// Issue #661 (M7): `read_workflow` / `update_workflow` / `delete_workflow` —
 /// the agent's way to fix or retire a workflow instead of only ever creating
 /// another one beside it. Kept out of `orchestrator.rs` (already the largest
@@ -13546,6 +13547,7 @@ description = "Builds the product."
                     text: text.to_string(),
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     parent: None,
                     mentions: Vec::new(),
                     mention_depth: 0,

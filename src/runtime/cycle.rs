@@ -451,6 +451,7 @@ fn small_talk_result(record: &CompanyRecord, events: &[CompanyEvent]) -> Option<
         channel_responses: vec![OutboundMessage {
             message_id: None,
             task_id: None,
+            outputs: Vec::new(),
             channel: OPERATOR_CHANNEL.to_string(),
             agent: Some(responder),
             text: talk.reply().to_string(),
@@ -2307,6 +2308,7 @@ approval.]"
             cycle_id: generate_id(),
             responses: vec![OutboundMessage {
                 task_id: None,
+                outputs: Vec::new(),
                 channel: OPERATOR_CHANNEL.to_string(),
                 agent: None,
                 text: "This approval was already resolved.".to_string(),
@@ -2337,6 +2339,7 @@ approval.]"
             cycle_id: generate_id(),
             responses: vec![OutboundMessage {
                 task_id: None,
+                outputs: Vec::new(),
                 channel: OPERATOR_CHANNEL.to_string(),
                 agent: None,
                 text: "This approval had passed its deadline, so it was declined automatically. \
@@ -2685,6 +2688,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                     .send(OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: channel.to_string(),
                         agent: None,
                         text: text.to_string(),
@@ -5149,6 +5153,7 @@ members = ["writer"]
                     responses.push(OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: format!("handled: {text}"),
@@ -5229,6 +5234,7 @@ members = ["writer"]
                 channel_responses: vec![OutboundMessage {
                     message_id: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     channel: "operator".into(),
                     agent: Some("ceo".into()),
                     text: "a full turn ran".into(),
@@ -5265,6 +5271,7 @@ members = ["writer"]
                     responses.push(OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: format!("that needs your approval: {text}"),
@@ -5296,6 +5303,7 @@ members = ["writer"]
                     OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: "orchestrator".into(),
@@ -5306,6 +5314,7 @@ members = ["writer"]
                     OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         // Addressed by *agent id*: no adapter answers to this.
                         channel: "maya".into(),
                         agent: None,
@@ -5414,6 +5423,7 @@ members = ["writer"]
                 channel_responses: vec![OutboundMessage {
                     message_id: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     channel: "operator".into(),
                     agent: None,
                     text: "settled".into(),
@@ -8052,6 +8062,7 @@ members = ["writer"]
                 channel_responses: vec![OutboundMessage {
                     message_id: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     channel: "operator".into(),
                     agent: None,
                     text: "thought about it".into(),
@@ -10129,6 +10140,7 @@ members = ["writer"]
                 text: "done".into(),
                 steps: Vec::new(),
                 task_id: None,
+                outputs: Vec::new(),
             },
             // Issue #327: appended by the workspace store after the write it
             // describes. An agent that answers a message and touches the tree
@@ -13078,6 +13090,7 @@ timeout)",
                 text: "an answer".to_string(),
                 steps: Vec::new(),
                 task_id: None,
+                outputs: Vec::new(),
                 parent: Some(EventSeq::new(parent)),
                 mentions: Vec::new(),
                 mention_depth: 0,

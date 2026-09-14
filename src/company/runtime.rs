@@ -532,6 +532,7 @@ fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> Comp
             .to_string(),
         steps: Vec::new(),
         task_id: None,
+        outputs: Vec::new(),
         // A runtime notice addressed to whoever is reading it. It names no
         // teammate and no person, so there is nothing to chip and nobody to
         // ping.
@@ -4737,6 +4738,7 @@ impl CompanyRuntime {
                             .unwrap_or_else(|| response.channel.clone()),
                         text: response.text.clone(),
                         steps: response.steps.clone(),
+                        outputs: response.outputs.clone(),
                         // Dropped, deliberately — unlike `publish_continuation`
                         // and `journal_chat_replies`, which carry it through.
                         // `response.task_id` here always names the very card
@@ -5251,6 +5253,7 @@ impl CompanyRuntime {
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
+                        outputs: response.outputs.clone(),
                         mentions: reply_mentions.clone(),
                         // Zero, and stays zero: no reply's mentions reach
                         // dispatch, so no reply is ever a mention hop.
@@ -5343,6 +5346,7 @@ impl CompanyRuntime {
             responses: vec![crate::ports::types::OutboundMessage {
                 message_id: None,
                 task_id: None,
+                outputs: Vec::new(),
                 channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
                 agent: None,
                 text: format!(
@@ -5911,6 +5915,7 @@ impl CompanyRuntime {
                         .send(crate::ports::types::OutboundMessage {
                             message_id: None,
                             task_id: None,
+                            outputs: Vec::new(),
                             channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
                             agent: None,
                             text: text.clone(),
@@ -6018,6 +6023,7 @@ impl CompanyRuntime {
                         // notice above, which this generalizes.
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
                         agent: None,
                         text: text.to_string(),
@@ -7037,6 +7043,7 @@ impl CompanyRuntime {
                     text: prompt.to_string(),
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                 },
@@ -7091,6 +7098,7 @@ impl CompanyRuntime {
                     text,
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                     // Desk-visible, the ordinary case: the whole point of the
@@ -8301,6 +8309,7 @@ mod tests {
             text: "re-issued".to_string(),
             steps: Vec::new(),
             task_id: None,
+            outputs: Vec::new(),
         };
         let origin = |task: Option<TaskLink>, run_id: Option<&str>| ApprovalOrigin {
             at_millis: 1,
@@ -9357,6 +9366,7 @@ mod tests {
                         channel_responses.push(OutboundMessage {
                             message_id: None,
                             task_id: Some("t-1".to_string()),
+                            outputs: Vec::new(),
                             channel: "ceo".to_string(),
                             agent: None,
                             text: "\"Ship it\" is ready for review (ceo ran it).".to_string(),
@@ -9663,6 +9673,7 @@ mod tests {
                 OutboundMessage {
                     message_id: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     channel: "operator".to_string(),
                     agent: Some("ceo".to_string()),
                     text: "already handled elsewhere".to_string(),
@@ -9677,6 +9688,7 @@ mod tests {
                 OutboundMessage {
                     message_id: None,
                     task_id: Some("t-2".to_string()),
+                    outputs: Vec::new(),
                     channel: "ceo".to_string(),
                     agent: None,
                     text: "General-chat relay".to_string(),
@@ -9690,6 +9702,7 @@ mod tests {
                 OutboundMessage {
                     message_id: None,
                     task_id: Some("t-1".to_string()),
+                    outputs: Vec::new(),
                     channel: "ceo".to_string(),
                     agent: None,
                     text: "\"Ship it\" is ready for review.".to_string(),
@@ -9814,6 +9827,7 @@ mod tests {
         let relay = |task: Option<&str>| crate::ports::types::OutboundMessage {
             message_id: None,
             task_id: task.map(str::to_string),
+            outputs: Vec::new(),
             channel: "ceo".to_string(),
             agent: None,
             text: "the delegate finished it".to_string(),
@@ -12188,6 +12202,7 @@ mod tests {
                 text: "Here is the draft.".to_string(),
                 steps: Vec::new(),
                 task_id: None,
+                outputs: Vec::new(),
                 parent: None,
                 mentions: Vec::new(),
                 mention_depth: 0,
@@ -12208,6 +12223,7 @@ mod tests {
                 text: "@sam matches two people here, so it pinged nobody.".to_string(),
                 steps: Vec::new(),
                 task_id: None,
+                outputs: Vec::new(),
                 parent: None,
                 mentions: Vec::new(),
                 mention_depth: 0,
@@ -12402,6 +12418,7 @@ mod tests {
                     text: "Here is the draft.".to_string(),
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     parent: None,
                     mentions: Vec::new(),
                     mention_depth: 0,
@@ -15966,6 +15983,7 @@ to = "draft"
                     channel_responses: vec![OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: Some("ceo".into()),
                         text: "a full turn ran".into(),

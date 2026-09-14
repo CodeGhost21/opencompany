@@ -1630,6 +1630,7 @@ fn project_event_for_viewer(
             agent_id,
             text,
             steps,
+            outputs,
             task_id,
             parent,
             mentions,
@@ -1655,6 +1656,9 @@ fn project_event_for_viewer(
             // when empty so a tool-less reply's wire form is unchanged.
             if !steps.is_empty() {
                 o["steps"] = json!(steps);
+            }
+            if !outputs.is_empty() {
+                o["outputs"] = json!(outputs);
             }
             // Correlation key for a dispatch-produced reply (#185); omitted for
             // an ordinary chat reply so the legacy wire shape is unchanged.
@@ -2835,6 +2839,7 @@ async fn run_chat(
                     .to_string(),
                 steps: Vec::new(),
                 task_id: None,
+                outputs: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
             };
@@ -3970,6 +3975,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                     text: turn_failure_notice(&err.0.to_string()),
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                 };
@@ -4142,6 +4148,7 @@ mod readable_responses_test {
             steps: Vec::new(),
             reply_to: None,
             task_id: None,
+            outputs: Vec::new(),
             message_id: None,
             mentions: Vec::new(),
         }
@@ -4320,6 +4327,9 @@ pub(crate) async fn journal_chat_replies(
                     // Persist the per-bubble timeline so a history reload
                     // rehydrates the tool calls, not just the text.
                     steps: response.steps.clone(),
+                    // Persist the structured addresses, never the redacted
+                    // display strings in the step timeline.
+                    outputs: response.outputs.clone(),
                 },
             )
             .await;
@@ -4593,6 +4603,9 @@ struct ChatHistoryMessageDto {
     /// existed — so the legacy shape is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
+    /// Workspace objects produced by this reply's turn. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    outputs: Vec<crate::ports::types::ChatOutput>,
     /// The message this one replies to (issue #364), so a thread survives a
     /// reload instead of collapsing into the channel. Omitted on a message
     /// posted straight into the channel — which is every message journaled
@@ -4758,6 +4771,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
             by_person: view.by_person,
             steps: view.steps,
             task_id: view.task_id,
+            outputs: view.outputs,
             parent_id: view.parent_id,
             reactions: view
                 .reactions
@@ -10114,6 +10128,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "General".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "reply under General".to_string(),
@@ -10132,6 +10147,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "main".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "reply under main".to_string(),
@@ -10285,6 +10301,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "main".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "done".to_string(),
@@ -10327,6 +10344,145 @@ mode = "full"
         );
         assert_eq!(reply["steps"][0]["status"], "ok");
         assert_eq!(reply["steps"][0]["elapsedMs"], 9);
+    }
+
+    /// A reply's produced-file buttons are durable transcript data, and the
+    /// projection must stop returning either kind once its target is gone.
+    #[tokio::test]
+    async fn chat_history_route_rehydrates_outputs_and_drops_deleted_targets() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let company = runtime.id().clone();
+
+        runtime
+            .workspace()
+            .create(
+                &company,
+                &attachment_note_node("node-1", "launch-note.md"),
+                Some("Launch notes"),
+            )
+            .await
+            .unwrap();
+        runtime
+            .workspace()
+            .create(
+                &company,
+                &attachment_note_node("node-2", "surviving-note.md"),
+                Some("Keep this note"),
+            )
+            .await
+            .unwrap();
+        runtime
+            .artifacts()
+            .upsert(
+                &company,
+                &crate::ports::artifacts::ArtifactRecord::new(
+                    "artifact-1",
+                    "task-1",
+                    "Launch brief",
+                    crate::ports::artifacts::ArtifactKind::Markdown,
+                    "# Launch",
+                    "ceo",
+                    1,
+                ),
+            )
+            .await
+            .unwrap();
+        runtime
+            .events()
+            .append(
+                &company,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    outputs: vec![
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::WorkspaceNode,
+                            target_id: "node-1".to_string(),
+                            title: "launch-note.md".to_string(),
+                            task_id: None,
+                            version: None,
+                        },
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::WorkspaceNode,
+                            target_id: "node-2".to_string(),
+                            title: "surviving-note.md".to_string(),
+                            task_id: None,
+                            version: None,
+                        },
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::Artifact,
+                            target_id: "artifact-1".to_string(),
+                            title: "Launch brief".to_string(),
+                            task_id: Some("task-1".to_string()),
+                            version: Some(1),
+                        },
+                    ],
+                    chat_id: "main".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "I wrote both files.".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let history = |app: axum::Router| async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/company/chat/history")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let app = router(state);
+        let first = history(app.clone()).await;
+        let reply = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["text"] == "I wrote both files.")
+            .unwrap();
+        assert_eq!(reply["outputs"].as_array().unwrap().len(), 3);
+        assert_eq!(reply["outputs"][0]["targetId"], "node-1");
+        assert_eq!(reply["outputs"][1]["targetId"], "node-2");
+        assert_eq!(reply["outputs"][2]["kind"], "artifact");
+        assert_eq!(reply["outputs"][2]["taskId"], "task-1");
+        assert_eq!(reply["outputs"][2]["version"], 1);
+
+        runtime
+            .workspace()
+            .delete(&company, "node-1")
+            .await
+            .unwrap();
+        runtime
+            .artifacts()
+            .delete(&company, "artifact-1")
+            .await
+            .unwrap();
+
+        let reloaded = history(app).await;
+        let reply = reloaded
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["text"] == "I wrote both files.")
+            .unwrap();
+        let outputs = reply["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 1, "only live targets may rehydrate: {reply}");
+        assert_eq!(outputs[0]["targetId"], "node-2");
     }
 
     /// Issue #246: a reply that opened a board card must still say so after a
@@ -10386,6 +10542,7 @@ mode = "full"
                         mention_depth: 0,
                         parent: None,
                         task_id,
+                        outputs: Vec::new(),
                         chat_id: "main".to_string(),
                         agent_id: "ceo".to_string(),
                         text: text.to_string(),
@@ -10482,6 +10639,7 @@ mode = "full"
                             mention_depth: 0,
                             parent: None,
                             task_id: None,
+                            outputs: Vec::new(),
                             chat_id: "workflow-copilot:weekly_report".to_string(),
                             agent_id: "ceo".to_string(),
                             text: text.to_string(),
@@ -10534,6 +10692,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "General".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "kept".to_string(),
@@ -11115,6 +11274,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "operator".into(),
                     agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
                     text: "no admin has a mailbox".into(),
@@ -13191,6 +13351,7 @@ mode = "full"
                     channel_responses.push(crate::ports::types::OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: SLOW_TURN_REPLY.into(),
@@ -13372,6 +13533,7 @@ mode = "full"
                     channel_responses.push(crate::ports::types::OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: format!("answered: {text}"),
@@ -14155,6 +14317,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "shipped it".into(),
@@ -14203,6 +14366,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "@Ada @everyone".into(),
@@ -14233,6 +14397,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "operator".into(),
             agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
             text: "no admin has a mailbox".into(),
@@ -14282,6 +14447,7 @@ mode = "full"
             mention_depth: 0,
             parent: Some(EventSeq::new(4)),
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "in the thread".into(),
@@ -14462,6 +14628,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "hi".into(),
@@ -14487,6 +14654,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: Some("t-1".into()),
+            outputs: Vec::new(),
             chat_id: "t-1".into(),
             agent_id: "ceo".into(),
             text: "on it".into(),
@@ -16020,6 +16188,7 @@ mode = "full"
                         responses.push(crate::ports::types::OutboundMessage {
                             message_id: None,
                             task_id: None,
+                            outputs: Vec::new(),
                             channel: grant.agent.clone(),
                             agent: None,
                             text,
@@ -16663,6 +16832,7 @@ mode = "full"
                     channel_responses.push(crate::ports::types::OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: "cc @everyone on this".into(),
@@ -17208,6 +17378,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "operator".into(),
             agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
             text: "no admin has a mailbox".into(),
@@ -17226,6 +17397,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "ordinary reply".into(),
@@ -17538,6 +17710,7 @@ mode = "full"
                     text: "Here is the draft.".to_string(),
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     parent: None,
                     mentions: Vec::new(),
                     mention_depth: 0,
