@@ -329,3 +329,18 @@ describe("providerMenu", () => {
     expect(ids()).toContain("remove");
   });
 });
+
+describe("endpointHasCredentials", () => {
+  it("finds a credential behind a second scheme", () => {
+    // Mirrors the host's `a_second_scheme_does_not_hide_the_credential_behind_it`
+    // (Codex review on #2281): the first authority here is `HTTP:`, with no `@`.
+    expect(endpointHasCredentials("http://HTTP://alice:hunter2@127.0.0.1:8597/v1")).toBe(true);
+    expect(endpointHasCredentials("HTTP://alice:hunter2@127.0.0.1:8597/v1")).toBe(true);
+    expect(normalizeEndpoint("http://HTTP://alice:hunter2@127.0.0.1:8597/v1")).toBeNull();
+  });
+
+  it("still ignores an @ outside every authority", () => {
+    expect(endpointHasCredentials("HTTPS://api.acme.example/v1/@me")).toBe(false);
+    expect(endpointHasCredentials("https://api.acme.example/v1?to=a@b")).toBe(false);
+  });
+});

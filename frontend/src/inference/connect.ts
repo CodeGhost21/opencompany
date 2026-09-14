@@ -418,12 +418,20 @@ export function normalizeEndpoint(raw: string): string | null {
  */
 export function endpointHasCredentials(raw: string): boolean {
   const trimmed = raw.trim();
-  const split = trimmed.indexOf("://");
-  const start = split === -1 ? 0 : split + 3;
-  const rest = trimmed.slice(start);
-  const end = rest.search(/[/?#]/);
-  const authority = end === -1 ? rest : rest.slice(0, end);
-  return authority.includes("@");
+  // Every `://` starts a candidate authority, not only the first — as on the
+  // host. A doubled scheme (`http://HTTP://alice:pw@host/v1`) otherwise hides
+  // the credential behind an `HTTP:` authority that has no `@`.
+  const starts: number[] = [];
+  for (let i = trimmed.indexOf("://"); i !== -1; i = trimmed.indexOf("://", i + 3)) {
+    starts.push(i + 3);
+  }
+  if (starts.length === 0) starts.push(0);
+  return starts.some((start) => {
+    const rest = trimmed.slice(start);
+    const end = rest.search(/[/?#]/);
+    const authority = end === -1 ? rest : rest.slice(0, end);
+    return authority.includes("@");
+  });
 }
 
 /**
