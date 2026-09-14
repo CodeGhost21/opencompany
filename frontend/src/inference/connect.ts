@@ -559,10 +559,14 @@ export function modelAskFromProbe(
 ): ModelAsk {
   if (url === null) return { models: [], freeTextOnly: false };
   if (!probe || !probe.ok) {
+    // The host's own sentence already ends with a period (or is a fragment
+    // with none) — never assume either, or a doubled or missing full stop
+    // shows up exactly where an operator is reading for the reason.
+    const reason = (probe?.message ?? "no answer").trim().replace(/\.+$/, "");
     return {
       models: [],
       freeTextOnly: false,
-      error: `Could not read this provider's models: ${probe?.message ?? "no answer"}. Type a model id.`,
+      error: `Could not read this provider's models: ${reason}. Type a model id.`,
     };
   }
   return { models: probe.models ?? [], freeTextOnly: isAzureEndpoint(url) };
