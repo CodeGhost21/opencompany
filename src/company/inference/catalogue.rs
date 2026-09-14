@@ -606,6 +606,14 @@ pub fn endpoint_has_credentials(endpoint: &str) -> bool {
     endpoint_userinfo_range(endpoint.trim()).is_some()
 }
 
+/// What an operator is told when an endpoint they typed carries a credential.
+///
+/// One sentence for every place an endpoint is typed — the provider list and
+/// the first-run setup probe — so the two cannot drift into different advice.
+pub const ENDPOINT_CREDENTIAL_REFUSAL: &str = "That endpoint carries a username or password \
+    in the URL. Remove them and put the credential in the API key field — an endpoint is stored \
+    as written and is readable by everyone who can see this company's settings.";
+
 /// The same endpoint with any embedded credential replaced by
 /// [`REDACTED_USERINFO`].
 ///

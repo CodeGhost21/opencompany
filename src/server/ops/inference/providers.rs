@@ -821,10 +821,7 @@ fn advisory_subject(provider: &store::Provider) -> String {
 /// the field that is write-only.
 fn endpoint_refusal(typed: &str) -> String {
     if catalogue::endpoint_has_credentials(typed) {
-        return "That endpoint carries a username or password in the URL. Remove them and put \
-                the credential in the API key field — an endpoint is stored as written and is \
-                readable by everyone who can see this company's settings."
-            .to_string();
+        return catalogue::ENDPOINT_CREDENTIAL_REFUSAL.to_string();
     }
     "That endpoint must be an http or https address.".to_string()
 }
