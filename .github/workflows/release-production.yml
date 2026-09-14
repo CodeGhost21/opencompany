@@ -1,5 +1,5 @@
 # Cut a PRODUCTION release from the `release` branch: bump the version, tag
-# `v<version>`, verify the tree, build and notarize both macOS DMGs plus the
+# `v<version>`, build and notarize both macOS DMGs plus the
 # auto-updater's artifacts, write the release notes, and publish the GitHub
 # Release — all from one dispatch.
 #
@@ -20,15 +20,18 @@
 #   prepare-build   bump every version file (scripts/release/bump-version.mjs),
 #                   commit `chore(release): v<version> [skip ci]` to release,
 #                   tag it, merge release back into main.
-#   verify          `cargo build --locked --all-targets && cargo test --locked`
-#                   at the tag. The tree that becomes the release artifact,
-#                   built with the committed lock — issue #251's reason.
 #   create-release  generate the notes and create the Release AS A DRAFT.
 #   build-desktop   both DMGs, signed + notarized, plus the updater archives,
 #                   attached to the draft (build-desktop.yml).
 #   build-docker    the tenant image, built and discarded — ci.yml never runs
 #                   the Dockerfile, so this is the only proof the tag
 #                   containerises.
+#
+# There is deliberately NO separate build-and-test job. Everything on `release`
+# arrived through a PR that ran `ci.yml`, and the promotion dispatches `ci.yml`
+# on the snapshot; the desktop and Docker builds below compile the tag with
+# `--locked` anyway. A third compile of the same tree added ~30 minutes to
+# every cut and found nothing the other two would not.
 #   updater-manifest `latest.json` assembled from both architectures' assets.
 #   publish-release check every required asset is on the draft, then flip it
 #                   public. Immutable releases freeze the asset list at that
@@ -43,7 +46,7 @@
 # a release that had been frozen 40 minutes earlier. A draft is mutable; the
 # release becomes public already carrying everything.
 #
-# `create_release: false` runs the bump, the verification and the builds but
+# `create_release: false` runs the bump and the builds but
 # tags nothing and creates no Release — the DMGs land as Actions artifacts. It
 # is a rehearsal; the version still moves.
 #
@@ -65,7 +68,7 @@ on:
         type: choice
         options: [patch, minor, major]
       create_release:
-        description: Tag and publish the GitHub Release. Off = bump, verify and build only (a rehearsal).
+        description: Tag and publish the GitHub Release. Off = bump and build only (a rehearsal).
         required: false
         type: boolean
         default: true
@@ -203,33 +206,6 @@ jobs:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           bash scripts/release/merge-release-into-main.sh "chore(release): merge release v${VERSION} back into main"
-
-  verify:
-    name: Verify (build + test, --locked)
-    needs: [prepare-build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.prepare-build.outputs.build_ref }}
-          persist-credentials: false
-          submodules: true
-      - name: Init vendored openhuman crate submodules
-        run: scripts/ci/init-vendored-submodules.sh
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: "1.98.0"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: release-verify
-      # `--locked` for the same reason issue #251 requires it throughout
-      # `ci.yml`: this is the tree that becomes a release artifact, so a silent
-      # re-resolution of the dependency graph would ship.
-      - name: Build and test
-        run: |
-          cargo build --locked --all-targets
-          cargo test --locked
 
   create-release:
     name: Draft release with notes
@@ -409,7 +385,7 @@ jobs:
 
   publish-release:
     name: Publish release
-    needs: [prepare-build, verify, create-release, build-desktop, build-docker, updater-manifest]
+    needs: [prepare-build, create-release, build-desktop, build-docker, updater-manifest]
     if: inputs.create_release
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -466,13 +442,12 @@ jobs:
     name: Remove draft and tag if a step failed
     # Including `publish-release`: a failed asset check or a failed
     # `gh release edit` is exactly the half-built state this job exists for.
-    needs: [prepare-build, verify, create-release, build-desktop, build-docker, updater-manifest, publish-release]
+    needs: [prepare-build, create-release, build-desktop, build-docker, updater-manifest, publish-release]
     if: >-
       always()
       && inputs.create_release
       && needs.prepare-build.result == 'success'
-      && (needs.verify.result == 'failure' || needs.verify.result == 'cancelled'
-          || needs.create-release.result == 'failure' || needs.create-release.result == 'cancelled'
+      && (needs.create-release.result == 'failure' || needs.create-release.result == 'cancelled'
           || needs.build-desktop.result == 'failure' || needs.build-desktop.result == 'cancelled'
           || needs.build-docker.result == 'failure' || needs.build-docker.result == 'cancelled'
           || needs.updater-manifest.result == 'failure' || needs.updater-manifest.result == 'cancelled'
