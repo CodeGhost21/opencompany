@@ -8,6 +8,8 @@
 // field to one of these: **no shape in this file carries a key.** The wire
 // carries `keyConfigured: boolean` and nothing else.
 
+import type { UsedBy } from "@/api/types";
+
 /** Which of the two questions a provider answers. */
 export type ProviderCategory = "account" | "self-hosted";
 
@@ -61,6 +63,18 @@ export interface SearchProvider {
    * answer either way.
    */
   isDefault: boolean;
+  /**
+   * Who still depends on this row (keys rework, issue #2306;
+   * `docs/key-reworks/in-use-guards.md` §1/§6): `default: true` iff the
+   * **bare stored** `search/default` marker names this slug — not the
+   * resolved `isDefault` above, which can differ from the marker when the
+   * marked provider is disabled or incomplete (D-never-clear-default / X14:
+   * the marker is never silently moved off a provider the operator chose).
+   * Search has no agent pairs and is never itself a `surfaces` target for
+   * another guard, so `agents` and `surfaces` are never populated here.
+   * Absent when nothing depends on this row.
+   */
+  usedBy?: UsedBy;
 }
 
 /** What a connect or test attempt came back with. */
@@ -74,13 +88,18 @@ export interface ConnectOutcome {
 }
 
 /**
- * A destructive action waiting on a confirmation.
+ * A destructive action or on/off toggle waiting on a confirmation.
  *
- * All three are irreversible in the only sense that matters on this page: a key
- * is write-only and is never shown back, so an operator who clears the wrong one
- * has nothing on screen to retype.
+ * `remove`, `remove-key` and `disconnect-all` are irreversible in the sense
+ * that matters on this page: a key is write-only and is never shown back, so
+ * an operator who clears the wrong one has nothing on screen to retype.
+ * `toggle` is not irreversible — flipping it back undoes it — but the
+ * operator's mid-project ask (`docs/key-reworks/in-use-guards.md`) put every
+ * on/off toggle behind a confirmation too, unconditionally, not only when
+ * something depends on it.
  */
 export type ConfirmTarget =
   | { kind: "remove"; slug: string; label: string }
   | { kind: "remove-key"; slug: string; label: string }
-  | { kind: "disconnect-all"; label: string };
+  | { kind: "disconnect-all"; label: string }
+  | { kind: "toggle"; slug: string; label: string; enabling: boolean };

@@ -320,6 +320,54 @@ describe("destructive confirmations", () => {
   });
 });
 
+describe("the toggle confirmation (operator's mid-project ask: every on/off toggle asks first)", () => {
+  it("asks to disable, naming what happens right away", () => {
+    const copy = confirmCopy({
+      kind: "toggle",
+      slug: "exa",
+      label: "Exa",
+      enabling: false,
+    });
+    expect(copy.title).toBe("Disable Exa?");
+    expect(copy.action).toBe("Disable");
+    expect(copy.body).toContain("stop searching through it right away");
+  });
+
+  it("asks to enable, with different wording from disabling", () => {
+    const copy = confirmCopy({
+      kind: "toggle",
+      slug: "exa",
+      label: "Exa",
+      enabling: true,
+    });
+    expect(copy.title).toBe("Enable Exa?");
+    expect(copy.action).toBe("Enable");
+    expect(copy.body).not.toContain("stop searching");
+  });
+});
+
+describe("a host-provided in-use notice (docs/key-reworks/in-use-guards.md §2)", () => {
+  it("replaces the generic body but keeps the title and action label", () => {
+    const target = {
+      kind: "toggle" as const,
+      slug: "exa",
+      label: "Exa",
+      enabling: false,
+    };
+    const generic = confirmCopy(target);
+    const withNotice = confirmCopy(target, "Exa is the search default.");
+    expect(withNotice.title).toBe(generic.title);
+    expect(withNotice.action).toBe(generic.action);
+    expect(withNotice.body).toBe("Exa is the search default.");
+    expect(withNotice.body).not.toBe(generic.body);
+  });
+
+  it("falls back to the generic body when there is no notice yet", () => {
+    const target = { kind: "remove" as const, slug: "exa", label: "Exa" };
+    expect(confirmCopy(target, null).body).toBe(confirmCopy(target).body);
+  });
+});
+
 describe("a class this console has never heard of", () => {
   // `ProbeClass` is a compile-time union and the value is a string off the
   // wire, so a host one version ahead can send a seventh class. Without a

@@ -45,6 +45,7 @@ import {
   describeTest,
   type TestState,
 } from "@/search-providers/classify";
+import { confirmInUseFor, guardedOutcome } from "@/search-providers/in-use";
 import type {
   ConfirmTarget,
   ProbeClass,
@@ -107,6 +108,14 @@ export function SearchView({ client, company }: Props) {
   const [adding, setAdding] = useState(false);
   const [intent, setIntent] = useState<ConnectIntent | null>(null);
   const [confirm, setConfirm] = useState<ConfirmTarget | null>(null);
+  // The host's own `in_use` sentence from a first, unconfirmed attempt on the
+  // current `confirm` target (`docs/key-reworks/in-use-guards.md` §2/§3):
+  // `null` until a guarded attempt is refused, at which point the dialog
+  // re-renders showing this instead of its generic question, and the next
+  // attempt sends `confirmInUse: true` (`@/search-providers/in-use`). Reset
+  // whenever the dialog closes, so a later confirm target opens generic
+  // again rather than showing a stale reason from an unrelated row.
+  const [confirmNotice, setConfirmNotice] = useState<string | null>(null);
   const [tests, setTests] = useState<Record<string, TestState>>({});
   // What the last check learnt about each provider, keyed by slug. Sourced from
   // things that already happen — the connect probe and the manual Test — rather
@@ -224,6 +233,57 @@ export function SearchView({ client, company }: Props) {
       }
     },
     [forgetHealth],
+  );
+
+  /**
+   * Runs the confirm dialog's pending action, which the host may refuse with
+   * `409 in_use` on a first, uninformed attempt
+   * (`docs/key-reworks/in-use-guards.md` §2). One implementation shared by
+   * every kind `AlertDialog` in this file can confirm — the toggle, remove,
+   * remove-key and disconnect-all targets — so the "reopen with the host's
+   * reason, then resend confirmed" state machine cannot drift between them;
+   * the decisions themselves live in `@/search-providers/in-use`, which is
+   * what is actually under test. `disconnect-all` is never refused by the
+   * host today (it carries no guard of its own — see `docs/key-reworks/
+   * in-use-guards.md` §1's table, which files search's guard under single-row
+   * removal/disable and the default, not the bulk clear), but routing it
+   * through the same function costs nothing and keeps one code path rather
+   * than two.
+   *
+   * `work` always receives `confirmInUse` — `true` exactly when this attempt
+   * follows a prior refusal on the SAME open dialog (`confirmInUseFor`).
+   */
+  const runGuarded = useCallback(
+    async (
+      slug: string,
+      done: string,
+      work: (confirmInUse: boolean) => Promise<SearchStatus>,
+      /** Whether success makes this row's last probe result meaningless. */
+      changesConfiguration: boolean,
+    ) => {
+      setBusySlug(slug);
+      const alreadyConfirmed = confirmInUseFor(confirmNotice);
+      try {
+        const next = await work(alreadyConfirmed);
+        setStatus(next);
+        if (changesConfiguration) forgetHealth(slug === "__all__" ? undefined : slug);
+        toast.success(done);
+        setConfirm(null);
+        setConfirmNotice(null);
+      } catch (err) {
+        const outcome = guardedOutcome(err, alreadyConfirmed);
+        if (outcome.action === "reopen") {
+          setConfirmNotice(outcome.message);
+          return;
+        }
+        setConfirm(null);
+        setConfirmNotice(null);
+        toast.error(reason(err));
+      } finally {
+        setBusySlug(null);
+      }
+    },
+    [confirmNotice, forgetHealth],
   );
 
   /** Records a finished test on the row, and clears it after ten seconds. */
@@ -431,6 +491,18 @@ export function SearchView({ client, company }: Props) {
           />
         )}
 
+        {/* Keys rework (#2306), decision D-never-clear-default (X14): a
+            disable or delete no longer clears `search/default`, so a marker
+            naming a removed or switched-off provider can now sit
+            indefinitely — this says so, instead of the page silently
+            answering through whatever the fallback happens to resolve to. */}
+        {status.defaultNotice && (
+          <Alert variant="warning" data-testid="search-default-notice">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>{status.defaultNotice}</AlertDescription>
+          </Alert>
+        )}
+
         <Card>
           <CardContent className="flex flex-wrap items-center justify-between gap-4">
             <div className="grid min-w-0 leading-tight">
@@ -467,17 +539,17 @@ export function SearchView({ client, company }: Props) {
               health={(slug) => health[slug]}
               testState={(slug) => tests[slug] ?? { kind: "idle" }}
               onAdd={() => setAdding(true)}
+              // Every on/off toggle asks first, unconditionally — the
+              // operator's mid-project ask, not only where something depends
+              // on the row (`docs/key-reworks/in-use-guards.md`). The Switch
+              // itself does not move until the dialog is confirmed.
               onToggle={(provider, enabled) =>
-                void run(
-                  provider.slug,
-                  enabled
-                    ? `${provider.label} enabled.`
-                    : `${provider.label} disabled.`,
-                  () =>
-                    updateSearchProvider(client, company, provider.slug, {
-                      enabled,
-                    }),
-                )
+                setConfirm({
+                  kind: "toggle",
+                  slug: provider.slug,
+                  label: provider.label,
+                  enabling: enabled,
+                })
               }
               onTest={(provider) => void onTest(provider)}
               onReplaceKey={(provider) =>
@@ -544,55 +616,103 @@ export function SearchView({ client, company }: Props) {
         )}
       </div>
 
-      {/* Every destructive action passes through here. None of the three can be
-          undone from this page: a key is write-only and is never shown back, so
-          an operator who clears the wrong one has nothing on screen to retype. */}
+      {/* Every destructive action and on/off toggle passes through here. `remove`,
+          `remove-key` and `disconnect-all` are irreversible in the sense that
+          matters on this page: a key is write-only and is never shown back, so
+          an operator who clears the wrong one has nothing on screen to retype.
+          Any of the four may come back `409 in_use` on a first, unconfirmed
+          attempt (`docs/key-reworks/in-use-guards.md` §2) — `runGuarded` keeps
+          the dialog open and swaps in the host's own reason via `confirmNotice`
+          rather than closing on a generic error, so a second, now-informed click
+          can resend confirmed. */}
       <AlertDialog
         open={confirm !== null}
-        onOpenChange={(open) => !open && setConfirm(null)}
+        onOpenChange={(open) => {
+          if (open || busySlug !== null) return;
+          setConfirm(null);
+          setConfirmNotice(null);
+        }}
       >
         <AlertDialogContent data-testid="search-confirm">
           <AlertDialogHeader>
-            <AlertDialogTitle>{confirmCopy(confirm).title}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {confirmCopy(confirm, confirmNotice).title}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {confirmCopy(confirm).body}
+              {confirmCopy(confirm, confirmNotice).body}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={busySlug !== null}>
+              Cancel
+            </AlertDialogCancel>
             <AlertDialogAction
+              disabled={busySlug !== null}
               data-testid="search-confirm-action"
-              onClick={() => {
+              onClick={(event) => {
                 const pending = confirm;
-                setConfirm(null);
                 if (!pending) return;
-                // All three change the configuration, so all three drop what
-                // a probe last said about it.
+                // Kept open on a stale-UI 409 so it can reopen with the
+                // host's own reason — `runGuarded` closes it itself on
+                // success or on an unrelated failure.
+                event.preventBaseUIHandler();
+                // All four change the configuration (or nothing, for a
+                // cancelled toggle that never wrote anything), so all drop
+                // what a probe last said about the row.
                 if (pending.kind === "disconnect-all") {
-                  void run(
+                  void runGuarded(
                     "__all__",
                     "Disconnected. Searches go through the included account.",
                     () => clearSearch(client, company),
                     true,
                   );
                 } else if (pending.kind === "remove") {
-                  void run(
+                  void runGuarded(
                     pending.slug,
                     `${pending.label} removed.`,
-                    () => removeSearchProvider(client, company, pending.slug),
+                    (confirmInUse) =>
+                      removeSearchProvider(
+                        client,
+                        company,
+                        pending.slug,
+                        confirmInUse,
+                      ),
+                    true,
+                  );
+                } else if (pending.kind === "remove-key") {
+                  void runGuarded(
+                    pending.slug,
+                    `${pending.label} key removed.`,
+                    (confirmInUse) =>
+                      replaceSearchProviderKey(
+                        client,
+                        company,
+                        pending.slug,
+                        "",
+                        confirmInUse,
+                      ),
                     true,
                   );
                 } else {
-                  void run(
+                  void runGuarded(
                     pending.slug,
-                    `${pending.label} key removed.`,
-                    () => replaceSearchProviderKey(client, company, pending.slug, ""),
-                    true,
+                    pending.enabling
+                      ? `${pending.label} enabled.`
+                      : `${pending.label} disabled.`,
+                    (confirmInUse) =>
+                      updateSearchProvider(
+                        client,
+                        company,
+                        pending.slug,
+                        { enabled: pending.enabling },
+                        confirmInUse,
+                      ),
+                    false,
                   );
                 }
               }}
             >
-              {confirmCopy(confirm).action}
+              {confirmCopy(confirm, confirmNotice).action}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

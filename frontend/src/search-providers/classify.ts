@@ -183,38 +183,64 @@ export function describeTest(probeClass: ProbeClass, provider: string): string {
 }
 
 /**
- * What a destructive confirmation asks.
+ * What a destructive or toggle confirmation asks.
  *
- * A function rather than three ternaries inside the dialog, so the wording is
+ * A function rather than ternaries inside the dialog, so the wording is
  * unit-testable and so the component stays layout. It tolerates `null` because
  * the dialog stays mounted through its own close animation, and reading copy off
  * a target that has already been cleared would otherwise blank the text mid-fade.
+ *
+ * `notice` is the host's own `in_use` message from a first, unconfirmed attempt
+ * (`docs/key-reworks/in-use-guards.md` §2: "A 409 response from a stale UI
+ * re-opens the dialog with the server's message... rather than a generic error
+ * toast"). When present it REPLACES the generic body — the host's sentence names
+ * exactly what depends on the row, which the client cannot know without asking —
+ * and the title and action label are unchanged, so the dialog still reads as the
+ * same question, now with the real stakes attached.
  */
-export function confirmCopy(target: ConfirmTarget | null): {
+export function confirmCopy(
+  target: ConfirmTarget | null,
+  notice?: string | null,
+): {
   title: string;
   body: string;
   action: string;
 } {
-  switch (target?.kind) {
-    case "remove":
-      return {
-        title: `Remove ${target.label}?`,
-        body: `Its stored key is cleared with it. Re-connecting later means pasting a new key — this one is never shown back, so it cannot be recovered from this page.`,
-        action: "Remove",
-      };
-    case "remove-key":
-      return {
-        title: `Remove the ${target.label} key?`,
-        body: `${target.label} stays in the list but stops answering searches, and teammates fall back to the included account. The key is never shown back, so it cannot be recovered from this page.`,
-        action: "Remove key",
-      };
-    case "disconnect-all":
-      return {
-        title: "Disconnect every provider?",
-        body: "Every connected provider is removed and every stored key is cleared. Teammates fall back to the included account, which is metered and capped.",
-        action: "Disconnect all",
-      };
-    default:
-      return { title: "", body: "", action: "Confirm" };
-  }
+  const base = ((): { title: string; body: string; action: string } => {
+    switch (target?.kind) {
+      case "remove":
+        return {
+          title: `Remove ${target.label}?`,
+          body: `Its stored key is cleared with it. Re-connecting later means pasting a new key — this one is never shown back, so it cannot be recovered from this page.`,
+          action: "Remove",
+        };
+      case "remove-key":
+        return {
+          title: `Remove the ${target.label} key?`,
+          body: `${target.label} stays in the list but stops answering searches, and teammates fall back to the included account. The key is never shown back, so it cannot be recovered from this page.`,
+          action: "Remove key",
+        };
+      case "disconnect-all":
+        return {
+          title: "Disconnect every provider?",
+          body: "Every connected provider is removed and every stored key is cleared. Teammates fall back to the included account, which is metered and capped.",
+          action: "Disconnect all",
+        };
+      case "toggle":
+        return target.enabling
+          ? {
+              title: `Enable ${target.label}?`,
+              body: `Teammates can search through it again once it is the default provider, or once nothing else answers.`,
+              action: "Enable",
+            }
+          : {
+              title: `Disable ${target.label}?`,
+              body: `Teammates stop searching through it right away if it is the one currently in use. Its stored credential is kept.`,
+              action: "Disable",
+            };
+      default:
+        return { title: "", body: "", action: "Confirm" };
+    }
+  })();
+  return notice ? { ...base, body: notice } : base;
 }
