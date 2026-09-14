@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
  * would advertise stale — possibly cross-company — targets until the next
  * reload (PR #1669 review: "discard stale mention-directory reloads").
  *
- * A jsdom render of `ChatView` cannot exercise this race — it needs the whole
+ * A jsdom render of `RoomView` cannot exercise this race — it needs the whole
  * client and every hook, and the failure is timing-shaped. So this guards the
  * wiring contract the fix rests on, the same source-contract idiom as
  * `chat-rail-focus.test.ts`: the mount fetch and `reloadDirectory` share one
@@ -23,7 +23,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("mention-directory reloads discard stale completions", () => {
-  const chatView = read("views/ChatView.tsx");
+  const chatView = read("views/RoomView.tsx");
 
   it("shares one epoch token between the mount fetch and reloadDirectory", () => {
     // The token lives next to the directory it guards, not inside either

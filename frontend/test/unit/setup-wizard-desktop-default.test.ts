@@ -107,6 +107,25 @@ async function click(testId: string) {
   });
 }
 
+/**
+ * Answers the model step with "No model".
+ *
+ * The escape used to be a link under the step (`setup-skip-model`); it is the
+ * provider picker's last option now, and the picker is a base-ui `Select`
+ * whose popup portals onto `document.body` and does not exist until the
+ * trigger opens it.
+ */
+async function skipModel() {
+  await click("setup-provider-select");
+  const none = document.body.querySelector('[data-testid="setup-provider-none"]') as
+    | HTMLElement
+    | null;
+  expect(none, "no No-model option").toBeTruthy();
+  await act(async () => {
+    none!.click();
+  });
+}
+
 function labelled(...wanted: string[]): HTMLButtonElement {
   const match = Array.from(container.querySelectorAll("button")).find((b) =>
     wanted.includes(b.textContent?.trim() ?? ""),
@@ -143,7 +162,7 @@ async function fill(testId: string, value: string) {
 
 /** model (skipped) -> business (answered) -> sign-in. */
 async function goToSignIn() {
-  await click("setup-skip-model");
+  await skipModel();
   await next();
   await fill("setup-field-industry", "E-commerce — homeware");
   await next();

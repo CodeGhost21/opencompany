@@ -71,8 +71,8 @@ const SHRINK_NOTICE_RATIO = 0.75;
  * that did not exist yet.
  */
 const FIRST_PLACEHOLDER: Record<DraftableField, string> = {
-  description: "What does this teammate own? e.g. “paid social and the ad budget, not the newsletter”",
-  instructions: "How should this teammate work? e.g. “never launch without sign-off; report ROAS weekly”",
+  description: "What does this agent own? e.g. “paid social and the ad budget, not the newsletter”",
+  instructions: "How should this agent work? e.g. “never launch without sign-off; report ROAS weekly”",
 };
 
 const REPLY_PLACEHOLDER: Record<DraftableField, string> = {
@@ -238,7 +238,7 @@ export function FieldCopilot({
       >
         {turns.length === 0 && !busy && (
           <p className="text-2xs text-muted-foreground" data-testid={`agent-copilot-empty-${field}`}>
-            Say what this teammate should own, and it will draft it. Then tell it what to change.
+            Say what this agent should own, and it will draft it. Then tell it what to change.
           </p>
         )}
         {turns.map((turn, i) => {

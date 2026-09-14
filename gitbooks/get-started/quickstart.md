@@ -31,13 +31,13 @@ git submodule update --init --recursive
 Pick any template and validate its definition in plain language:
 
 ```sh
-cargo run --bin opencompany -- check companies/agentic_marketing_agency
+cargo run --bin opencompany -- check companies/marketing_agency
 ```
 
 ## 4. Launch it
 
 ```sh
-cargo run --bin opencompany -- serve --company companies/agentic_marketing_agency
+cargo run --bin opencompany -- serve --company companies/marketing_agency
 ```
 
 The host comes up on `127.0.0.1:8080`. Point `--company` at any other folder

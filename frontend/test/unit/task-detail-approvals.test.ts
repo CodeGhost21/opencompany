@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { TaskApproval } from "@/api/tasks";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import { AwaitingApprovalRow } from "@/views/TaskDetailView";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 
 /**
  * The task detail's blocked section decides, and says what it cannot decide

@@ -57,12 +57,12 @@ describe("steer verbs are derived from the run", () => {
  * so that projection is precisely where it was being dropped.
  */
 describe("the Room carries the in-flight control", () => {
-  const chatView = read("views/ChatView.tsx");
+  const chatView = read("views/RoomView.tsx");
   const appShell = read("components/app-shell.tsx");
   const tasksApi = read("api/tasks.ts");
 
-  it("ChatView renders the in-flight bar", () => {
-    expect(chatView).toContain('import { InflightRunBar } from "./chat/InflightRunBar";');
+  it("RoomView renders the in-flight bar", () => {
+    expect(chatView).toContain('import { InflightRunBar } from "./room/InflightRunBar";');
     expect(chatView).toContain("<InflightRunBar");
   });
 

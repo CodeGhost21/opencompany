@@ -1,7 +1,7 @@
 // The desktop window's own chrome: what replaces the native title bar once the
 // window stops drawing one.
 //
-// `src-tauri/tauri.conf.json` runs the main window with `titleBarStyle:
+// `crates/opencompany-app/tauri.conf.json` runs the main window with `titleBarStyle:
 // "Overlay"` and `hiddenTitle: true`, which is macOS's transparent title bar:
 // the bar itself is gone, the traffic lights float over the web content, and
 // the window keeps its rounded corners and its resize edges. Two things stop
@@ -38,20 +38,22 @@ export const WINDOW_CHROME_HEIGHT = 28;
 /**
  * Height of the console's own title row, in px.
  *
- * Not a taste value — it is derived from where macOS draws the traffic lights,
- * because the row centres its contents on the lights' centre line and the
- * lights are the one item in it this code cannot move.
+ * **A layout choice now, and it did not used to be.** While the shell drew its
+ * own chrome this number was derived: the traffic lights floated *inside* this
+ * row, the row centres its contents with `align-items: center`, and the lights
+ * were the one item in it this code could not move — so the height had to be
+ * exactly twice their centre line (`2 * (trafficLightPosition.y + 6)`) or they
+ * sat off it. Change one, change the other.
  *
- * `trafficLightPosition.y` in `tauri.conf.json` is 16 and the buttons are the
- * standard 12px, so they occupy y ∈ [16, 28] and their centre line is at 22.
- * A row of height H laid out with `align-items: center` centres its contents
- * at H/2, so H = 44 is the height — and the only height — at which the
- * switcher, the profile control and the lights share one centre line.
+ * The window is natively decorated again, so the lights are in the OS title bar
+ * above this row and that constraint is gone. 52 is kept because it is a good
+ * height for what the row actually carries — comfortably clear of the 36px
+ * switcher trigger, which the 28px sidebar strip this row replaced was not —
+ * and no longer because any pixel of it is owed to the OS.
  *
- * The two therefore move together: change `trafficLightPosition.y` to Y and
- * this must become `2 * (Y + 6)`, or the lights sit off the row's centre. It is
- * also comfortably taller than the 36px switcher trigger it carries, which
- * 28px — the height of the sidebar strip this row replaced — was not.
+ * The derivation is recorded rather than deleted because restoring
+ * `titleBarStyle: "Overlay"` restores the constraint with it: this must go back
+ * to `2 * (trafficLightPosition.y + 6)` in the same change.
  */
 export const WINDOW_TITLE_BAR_HEIGHT = 52;
 
@@ -67,16 +69,29 @@ export const WINDOW_TITLE_BAR_HEIGHT = 52;
 export const WINDOW_CONTROLS_WIDTH = 72;
 
 /**
- * Whether this build is drawing its own window chrome.
+ * Whether the shell hides the native title bar and draws its own.
  *
- * Deliberately a runtime check rather than a build-time one: the same bundle is
- * served by `opencompany serve` to a browser and loaded by the Tauri shell, so
- * there is no compile step that could tell them apart. `navigator.platform` is
- * deprecated but is what a webview still answers reliably for the OS; the Tauri
- * check is the load-bearing half, and a non-mac desktop simply keeps its native
- * title bar.
+ * **This must agree with `crates/opencompany-app/tauri.conf.json`.** The window runs with
+ * `decorations: true` and no `titleBarStyle`, so macOS draws an ordinary title
+ * bar and the traffic lights sit in it — there is nothing for the console to
+ * reserve space for or make draggable, and both {@link WindowDragBar} and
+ * {@link WindowControlsInset} render nothing.
+ *
+ * Read from a constant rather than inferred from the platform, which is the bug
+ * this replaces: the old check asked "is this a mac desktop?" and answered
+ * "then the title bar is an overlay", so the config and the layout agreed only
+ * by coincidence. Flipping `titleBarStyle` back in `tauri.conf.json` without
+ * touching this file would have left a 72px hole where the lights used to be,
+ * with nothing in the console to explain it.
+ *
+ * The platform half is kept because it is still a precondition: `Overlay` is a
+ * macOS style, so a Windows or Linux desktop keeps its native title bar however
+ * this constant is set.
  */
+const SHELL_DRAWS_ITS_OWN_TITLE_BAR = false;
+
 export function usesOverlayTitleBar(): boolean {
+  if (!SHELL_DRAWS_ITS_OWN_TITLE_BAR) return false;
   if (!isDesktopRuntime()) return false;
   if (typeof navigator === "undefined") return false;
   const platform =

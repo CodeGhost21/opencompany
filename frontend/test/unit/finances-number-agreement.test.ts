@@ -136,7 +136,11 @@ describe("Monthly budget card", () => {
     const origin = container.querySelector('[data-testid="monthly-budget-origin"]');
     expect(origin?.textContent).toContain("company manifest");
     expect(origin?.textContent).toContain("cannot be changed here");
-    expect(origin?.textContent).toContain("daily cap on each teammate's page");
+    // It used to end "To limit spending from the console, set a daily cap on
+    // each agent's page." Per-agent caps are gone from the console, so the
+    // sentence would have pointed at a control that no longer exists — a worse
+    // answer than saying only where the cap comes from.
+    expect(origin?.textContent).not.toContain("daily cap");
   });
 
   it("keeps saying so once a cap exists, since the console still cannot change it", async () => {

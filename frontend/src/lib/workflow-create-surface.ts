@@ -1,5 +1,5 @@
 import { ApiError } from "@/api/types";
-import { utf8ByteLength } from "@/views/chat/mentions";
+import { utf8ByteLength } from "@/views/room/mentions";
 
 /**
  * Which of the two New-workflow dialogs is on screen.
@@ -185,20 +185,20 @@ export interface DraftDecline {
  */
 const DECLINE_FAILURES: ReadonlyArray<readonly [string, string]> = [
   [
-    "drafting the workflow ran out of time",
+    "drafting the automation ran out of time",
     "The copilot ran out of time before it had a draft.",
   ],
   [
-    "drafting the workflow could not complete",
+    "drafting the automation could not complete",
     "The copilot hit an error and did not finish a draft.",
   ],
   [
-    "the workflow copilot reached its step budget",
+    "the automation copilot reached its step budget",
     "The copilot ran out of steps before it had a draft.",
   ],
   [
-    "the described workflow could not be drafted into one that would be accepted",
-    "The copilot could not turn that into a workflow it would accept.",
+    "the described automation could not be drafted into one that would be accepted",
+    "The copilot could not turn that into an automation it would accept.",
   ],
 ];
 
@@ -225,7 +225,7 @@ export function draftDecline(reason: string | null | undefined): DraftDecline {
   }
   return {
     kind: "judgment",
-    message: stated || "This is better done once than built into a workflow.",
+    message: stated || "This is better done once than built into an automation.",
     action: "Create it anyway",
   };
 }

@@ -72,7 +72,7 @@ Object.defineProperties(globalThis.HTMLElement.prototype, {
 const { WorkflowsView } = await import("@/views/WorkflowsView");
 
 const PROBE = "qa_probe_wf3";
-const NO_WORKFLOW = "This company has no workflow";
+const NO_WORKFLOW = "This company has no automation";
 
 /** Seven ordinary workflows — the list a link's target is NOT yet part of. */
 const STALE: WorkflowSummary[] = Array.from({ length: 7 }, (_, i) => ({
@@ -151,7 +151,7 @@ function toastedNoWorkflow(): boolean {
   );
 }
 
-describe("a deep link to a workflow authored elsewhere resolves", () => {
+describe("a deep link to an automation authored elsewhere resolves", () => {
   it(
     "re-reads the list and selects the id instead of toasting (decisive)",
     async () => {

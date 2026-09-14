@@ -50,7 +50,7 @@ describe("primaryLink", () => {
     expect(link.href).toBe("#/tasks/t-1?artifact=a-1&v=3");
   });
 
-  it("falls to the workflow when there is no artifact", () => {
+  it("falls to the automation when there is no artifact", () => {
     const link = primaryLink(
       task({ output: output({ workflows: [{ workflowId: "w-1", action: "ran", runId: "run-9" }] }) }),
     );
@@ -58,7 +58,7 @@ describe("primaryLink", () => {
     expect(link.href).toBe("#/workflows/w-1?run=run-9");
   });
 
-  it("opens the workflow with no run overlay when it was authored, not executed", () => {
+  it("opens the automation with no run overlay when it was authored, not executed", () => {
     const link = primaryLink(
       task({ output: output({ workflows: [{ workflowId: "w-1", action: "created" }] }) }),
     );
@@ -82,7 +82,7 @@ describe("primaryLink", () => {
 
   // --- issue #806: an output whose producer is a chat turn, not a run --------
 
-  it("opens the workflow a chat turn authored, with no run in the address", () => {
+  it("opens the automation a chat turn authored, with no run in the address", () => {
     // The case #806 exists for: the card is settled by an operator chat turn,
     // so there is no attempt — but there IS a deliverable, and the board's
     // contract is written in terms of links. The workflow href must carry no

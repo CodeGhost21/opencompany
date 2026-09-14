@@ -45,7 +45,7 @@
 //!
 //! See `docs/spec/runtime/hivemind-referral.md`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -54,7 +54,7 @@ use tinyhivemind_hive::{
     EnqueueOutcome, EnqueueRefusal,
     desk::{Desk, DeskSet, ResponderMode},
     dispatch::{DispatchConversation, DispatchKey},
-    mention::{Mention, MentionAuthor, resolve as resolve_mentions},
+    mention::{Mention, MentionAuthor, MentionTarget, resolve as resolve_mentions},
     referral::{
         NoReferralReason, Referral, ReferralFuture, ReferralInput, ReferralKind, ReferralOrigin,
         ReferralOutcome, ReferralPolicy, ReferralQueue, ReferralReach, dispatch_referral,
@@ -327,6 +327,26 @@ marker: this is not a deliberation turn, it is an answer to a colleague."
     )
 }
 
+/// The conversation two teammates hold with each other, by their ids.
+///
+/// **A crossing is a conversation between two people, not a message posted in
+/// somebody's office.** The library places a referred turn on the target's home
+/// desk, which is what "runs on their own desk" means there — but that puts a
+/// question about ANOTHER desk's case into a channel whose transcript is
+/// supposed to be the record of what that desk did, in front of colleagues who
+/// were never asked. The pair get their own conversation instead: the question
+/// goes there, the answer is written there, and neither desk carries somebody
+/// else's exchange.
+///
+/// Sorted, so `a` asking `b` and `b` asking `a` are the same thread rather than
+/// two half-conversations. Prefixed `dm:` so it can never collide with a desk
+/// id — a manifest desk id is a bare slug.
+#[must_use]
+pub fn pair_conversation(one: &str, two: &str) -> String {
+    let (first, second) = if one <= two { (one, two) } else { (two, one) };
+    format!("dm:{first}+{second}")
+}
+
 /// How the far desk's answer reads on the asking desk.
 ///
 /// Attributed in the text and authored by the room, never by the answerer: see
@@ -426,6 +446,25 @@ struct ReferralState {
     /// The answer the last forward produced, if it finished — read by the
     /// driver to decide whether a return hop is worth folding.
     last_answer: Option<(Referral, String)>,
+    /// The agents named DIRECTLY, by the line that named them.
+    ///
+    /// A crossing goes to the pair's own thread only when a person was asked
+    /// for by name. A `@#desk` mention resolves to whoever answers for that
+    /// desk, and that is a question put to the DESK — it belongs on the desk,
+    /// where the room can deliberate it, exactly as it did before pairs had
+    /// their own thread. The two are indistinguishable by the time the library
+    /// hands back a `Referral` — both carry the target's home desk in `to` —
+    /// so the distinction is recorded here, where the mention is still in hand.
+    /// Keyed by the trigger, not accumulated episode-wide: an earlier line
+    /// naming `@sre` must not make a LATER `@#platform` — which resolves to
+    /// that same person — look like it named them. Directness is a fact about
+    /// one line, and a room asks more than once.
+    named: HashMap<u64, HashSet<String>>,
+    /// The journal sequence of each forward marker this episode wrote, by the
+    /// desk it went to. A return names the forward it answers (`answers`), and
+    /// this is where that sequence comes from — the episode knows it, because
+    /// it wrote the marker itself a moment earlier.
+    forwards: HashMap<String, u64>,
 }
 
 impl<'a> EpisodeReferrals<'a> {
@@ -462,6 +501,28 @@ impl<'a> EpisodeReferrals<'a> {
     }
 
     /// What this episode's referrals amounted to.
+    /// Record which agents THIS line named by name, before its referral is
+    /// decided.
+    pub async fn note_named(&self, trigger: u64, mentions: &[Mention]) {
+        let mut state = self.state.lock().await;
+        let named = state.named.entry(trigger).or_default();
+        for mention in mentions {
+            if let MentionTarget::Agent { id } = &mention.target {
+                named.insert(id.clone());
+            }
+        }
+    }
+
+    /// Whether `target` was named by the line that raised `trigger`.
+    async fn named_by(&self, trigger: u64, target: &str) -> bool {
+        self.state
+            .lock()
+            .await
+            .named
+            .get(&trigger)
+            .is_some_and(|named| named.contains(target))
+    }
+
     pub async fn ledger(&self) -> ReferralLedger {
         self.state.lock().await.ledger.clone()
     }
@@ -523,13 +584,123 @@ impl<'a> EpisodeReferrals<'a> {
 
     /// Run one crossing (or local) question and journal its answer where the
     /// turn actually happened.
+    /// Journal the `ReferralEnqueued` marker for one crossing.
+    ///
+    /// The same row the chat path writes, so one projection reads both: the
+    /// console's chip and its crossing transcript key off this marker, and a
+    /// hand-off that does not write one is a hand-off nobody can audit.
+    ///
+    /// A return names the forward it answers, taken from what this episode
+    /// recorded when it wrote that forward — the pairing is a fact the writer
+    /// holds, never something a reader re-derives by scanning.
+    async fn mark(&self, referral: &Referral) {
+        let returning = matches!(referral.kind, ReferralKind::Return);
+        let answers = if returning {
+            self.state
+                .lock()
+                .await
+                .forwards
+                .get(&referral.from.desk_id)
+                .copied()
+        } else {
+            None
+        };
+        let event = CompanyEvent::ReferralEnqueued {
+            // Where this leg ran. A forward runs in the pair's own thread; a
+            // return is carried home to the asking conversation, which the desk
+            // fields already name.
+            conversation: match returning {
+                true => None,
+                false => self
+                    .named_by(referral.key.trigger_sequence, &referral.target_id)
+                    .await
+                    .then(|| pair_conversation(&referral.source_id, &referral.target_id)),
+            },
+            from_desk: referral.from.desk_id.clone(),
+            from_desk_name: self.desk_name(&referral.from.desk_id),
+            asker: referral.source_id.clone(),
+            asker_label: self.label(&referral.source_id),
+            trigger_sequence: referral.key.trigger_sequence,
+            returning,
+            answers,
+            to_desk: referral.to.desk_id.clone(),
+            target: referral.target_id.clone(),
+        };
+        match self.events.append(&self.company, event).await {
+            Ok(seq) if !returning => {
+                // Keyed by the desk being asked, which is the desk a return
+                // comes back FROM — the lookup above.
+                self.state
+                    .lock()
+                    .await
+                    .forwards
+                    .insert(referral.to.desk_id.clone(), seq.value());
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(
+                company = %self.company,
+                desk = %referral.from.desk_id,
+                "[hive] a crossing could not be marked on the journal ({err}); the turn still runs"
+            ),
+        }
+    }
+
     async fn forward(&self, referral: &Referral) -> EnqueueOutcome {
         let asker = self.label(&referral.source_id);
         let asker_desk = self.desk_name(&referral.from.desk_id);
         let prompt = referral_prompt(&asker, &asker_desk, &referral.content);
+        // Where this runs: the pair's own thread when a person was asked for by
+        // name, the target's desk when a desk was. Asking `@#order_ops` is a
+        // question put to that desk — turning it into a private chat with
+        // whoever leads it would skip the deliberation the desk exists for,
+        // which is the whole objection to `delegate_to_desk`.
+        let by_name = self
+            .named_by(referral.key.trigger_sequence, &referral.target_id)
+            .await;
+        let pair = if by_name {
+            DispatchConversation {
+                desk_id: pair_conversation(&referral.source_id, &referral.target_id),
+                thread_root: None,
+            }
+        } else {
+            referral.to.clone()
+        };
+        // The question, written into the pair's thread — and ONLY there.
+        //
+        // A pair thread is a conversation between two people and has to hold
+        // both sides, or it reads as a monologue. A desk crossing is not: the
+        // far desk is not told it was asked, it is asked, and its transcript
+        // records the turn its own member took. Writing the question there too
+        // would put a question that desk never received into its history.
+        //
+        // Whether it actually landed decides what may follow it. A pair thread
+        // is read positionally — the first thing said there IS the question —
+        // so an answer written into a thread whose question failed to append
+        // renders as that question: the reader is shown an answer and told it
+        // was the ask. Better to carry nothing than to carry it mislabelled.
+        let asked = if by_name {
+            match self
+                .journal(&pair, &referral.source_id, referral.content.clone())
+                .await
+            {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        pair = %pair.desk_id,
+                        error = %error,
+                        "[hive] a crossing's question could not be journaled; the turn still runs \
+                         and its answer still comes home, but the pair thread keeps neither side"
+                    );
+                    false
+                }
+            }
+        } else {
+            true
+        };
         let answer = match self
             .runner
-            .refer(&referral.to.desk_id, &referral.target_id, &prompt)
+            .refer(&pair.desk_id, &referral.target_id, &prompt)
             .await
         {
             Ok(answer) => answer,
@@ -560,18 +731,22 @@ impl<'a> EpisodeReferrals<'a> {
                 };
             }
         };
-        // Journaled on the desk the turn ran on, under the teammate that took
-        // it, because that is what happened: a real turn by a real member on
-        // its own desk, which its own desk should be able to read back.
-        if let Err(error) = self
-            .journal(&referral.to, &referral.target_id, answer.clone())
-            .await
+        // Journaled in the conversation the turn ran in — the pair's own thread,
+        // under the teammate that answered, directly beneath the question they
+        // were answering. Their desk does not carry it: the question was not
+        // put to that desk and its colleagues were never asked, so a transcript
+        // that is supposed to record what THAT desk did should not be holding
+        // somebody else's exchange.
+        if asked
+            && let Err(error) = self
+                .journal(&pair, &referral.target_id, answer.clone())
+                .await
         {
             tracing::warn!(
                 company = %self.company,
-                desk = %referral.to.desk_id,
+                pair = %pair.desk_id,
                 error = %error,
-                "[hive] a referred answer could not be journaled on the far desk"
+                "[hive] a referred answer could not be journaled in the pair's thread"
             );
         }
         let mut state = self.state.lock().await;
@@ -646,6 +821,22 @@ impl ReferralQueue for EpisodeReferrals<'_> {
                     state.asked = state.asked.saturating_add(1);
                 }
             }
+            // **The marker, before the turn it authorizes.**
+            //
+            // A crossing raised inside a room used to leave no trace on the
+            // journal at all: this adapter kept its idempotency in memory and
+            // dispatched straight to the runner, so the console had nothing to
+            // attach a chip or a transcript to and a room's question was
+            // invisible to the operator it was asked on behalf of. The chat
+            // path has always written one (`JournalReferralQueue`); writing it
+            // here too means every crossing is recorded the same way, whichever
+            // path raised it.
+            //
+            // Best-effort: a marker that cannot be appended is logged and the
+            // turn still runs, for the reason the rest of this module gives —
+            // a question that went unrecorded is a worse episode, not a broken
+            // one.
+            self.mark(&referral).await;
             Ok(match referral.kind {
                 ReferralKind::Forward => self.forward(&referral).await,
                 ReferralKind::Return => self.ret(&referral).await,
@@ -694,6 +885,9 @@ pub async fn consider(
         &roster,
         &desk_set,
     );
+    // Recorded before the decision, because the decision cannot tell a person
+    // from a desk afterwards — see `ReferralState::named`.
+    queue.note_named(seq.value(), &mentions).await;
     if mentions.is_empty() {
         return;
     }

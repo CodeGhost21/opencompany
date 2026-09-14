@@ -481,11 +481,11 @@ describe("nodeKindConfigProblem", () => {
     expect(nodeKindConfigProblem({ kind: "tool_call", config: { slug: "web_search" } })).toBeNull();
   });
 
-  it("refuses an agent naming no teammate, and accepts one that does", () => {
-    expect(nodeKindConfigProblem({ kind: "agent" })).toMatch(/teammate/);
+  it("refuses an agent naming no agent, and accepts one that does", () => {
+    expect(nodeKindConfigProblem({ kind: "agent" })).toMatch(/agent/);
     // The teammate is the top-level `agent` field, never inside config.
     expect(nodeKindConfigProblem({ kind: "agent", config: { agent: "analyst" } })).toMatch(
-      /teammate/,
+      /agent/,
     );
     expect(nodeKindConfigProblem({ kind: "agent", agent: "analyst" })).toBeNull();
   });

@@ -269,6 +269,31 @@ mod test {
         }
     }
 
+    /// A log whose `read_from` always fails, so `read_before`'s default
+    /// fallback propagates the error rather than ever returning a page.
+    struct FailingLog;
+
+    #[async_trait]
+    impl EventLog for FailingLog {
+        async fn append(&self, _id: &CompanyId, _e: CompanyEvent) -> crate::Result<EventSeq> {
+            unreachable!("read_thread only reads")
+        }
+        async fn read_from(
+            &self,
+            _id: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> crate::Result<Vec<StoredEvent>> {
+            Err(crate::error::OpenCompanyError::Store("boom".into()))
+        }
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
+            Box::pin(stream::empty())
+        }
+    }
+
     fn op(seq: u64, chat: &str, parent: Option<u64>, text: &str) -> StoredEvent {
         StoredEvent {
             seq: EventSeq::new(seq),
@@ -450,6 +475,36 @@ mod test {
             out.output()
                 .contains("and 6 earlier turn(s) in this thread, not shown"),
             "{out:?}"
+        );
+    }
+
+    /// The event log is a dependency, not the ground: when it errors,
+    /// `read_thread` must report the failure rather than let it become a
+    /// panic or a silent empty thread.
+    #[tokio::test]
+    async fn a_history_read_failure_is_reported_not_swallowed() {
+        let dir = tempfile::Builder::new()
+            .prefix("read-thread-fail-")
+            .tempdir()
+            .expect("tempdir");
+        let store: Arc<dyn crate::ports::store::CompanyStore> =
+            Arc::new(crate::store::FsCompanyStore::new(dir.path()));
+        let tool = ReadThreadTool::new(CompanyId::new("acme"), Arc::new(FailingLog), store);
+        let out = in_channel(Some("growth"), tool.execute(json!({ "root": 41 })))
+            .await
+            .expect("execute returns a ToolResult, not a Rust error");
+        assert!(
+            out.is_error,
+            "a log failure must surface as a refusal: {out:?}"
+        );
+        assert!(
+            out.output()
+                .contains("Could not read the channel's history"),
+            "{out:?}"
+        );
+        assert!(
+            out.output().contains("boom"),
+            "the underlying error is named, not hidden: {out:?}"
         );
     }
 

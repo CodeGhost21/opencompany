@@ -37,10 +37,10 @@ export type StillAwaiting = number | undefined;
 export function approvedLine(stillAwaiting: StillAwaiting, detail?: string): string {
   const suffix = detail ? `: ${detail}` : "";
   if (stillAwaiting === undefined) return `Approved — recorded${suffix}`;
-  if (stillAwaiting === 0) return `Approved — the teammate is picking it up now${suffix}`;
+  if (stillAwaiting === 0) return `Approved — the agent is picking it up now${suffix}`;
   return `Approved — waiting on ${stillAwaiting} more sign-off${
     stillAwaiting === 1 ? "" : "s"
-  } before the teammate continues${suffix}`;
+  } before the agent continues${suffix}`;
 }
 
 /**

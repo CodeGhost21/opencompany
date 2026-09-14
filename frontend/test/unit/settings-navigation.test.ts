@@ -15,14 +15,18 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("Settings navigation (issue #1468)", () => {
-  it("keeps the Integrations group, which the Connections move did not empty", () => {
-    // Apps and MCP Servers left this rail for `#/connections`. Inference,
-    // Hosting and Search stayed, deliberately: each is a credential form
-    // beside the one thing it unlocks, which is the argument the file makes
-    // twice. Pinned by id rather than by count so that "the group survived" and
-    // "it survived with the right three" are the same assertion.
-    const integrations = SETTINGS_PAGES.filter((page) => page.group === "integrations");
-    expect(integrations.map((page) => page.id)).toEqual(["inference", "hosting", "search"]);
+  it("has retired the Integrations group, which the Connections move emptied", () => {
+    // Apps and MCP Servers left this rail for `#/connections` first; Inference,
+    // Skills, Hosting and Search followed, which took the last row out of
+    // Integrations. Asserted as an absence on both tables — a group with no
+    // pages renders a heading over nothing, and a page in a group the rail does
+    // not list renders nowhere at all.
+    // Widened to `string` for the reason the retired-id assertions below are:
+    // once "integrations" is gone from both tables it is not in either union,
+    // so a narrow comparison is a type error rather than the assertion being
+    // made at all.
+    expect(SETTINGS_PAGES.map((page) => page.group as string)).not.toContain("integrations");
+    expect(SETTINGS_PAGE_GROUPS.map((group) => group.id as string)).not.toContain("integrations");
   });
 
   it("no longer carries the two pages that became the Connections section", () => {
@@ -37,8 +41,8 @@ describe("Settings navigation (issue #1468)", () => {
   it("groups every settings page exactly once", () => {
     expect(SETTINGS_PAGE_GROUPS.map((group) => group.label)).toEqual([
       "Identity & lifecycle",
-      "Integrations",
       "Capability",
+      "This console",
       "Spend",
     ]);
     expect(SETTINGS_PAGE_GROUPS.flatMap((group) => SETTINGS_PAGES.filter((page) => page.group === group.id)))

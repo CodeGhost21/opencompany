@@ -27,8 +27,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
 describe("chat has no second rail left to band with (issues #1383, four-row sidebar)", () => {
-  const chatView = read("views/ChatView.tsx");
-  const chatHeader = read("views/chat/ChatHeader.tsx");
+  const chatView = read("views/RoomView.tsx");
+  const chatHeader = read("views/room/ChatHeader.tsx");
 
   it("renders exactly one channel rail, and renders it through the sidebar's slot", () => {
     // #1383 was two rails plus content in one viewport. There are not two rails
@@ -139,7 +139,7 @@ describe("every content rail collapses to chips below lg (issue #1383)", () => {
 });
 
 describe("composer keeps Send in-flow in a narrow pane (issue #1383)", () => {
-  const composer = read("views/chat/MessageComposer.tsx");
+  const composer = read("views/room/MessageComposer.tsx");
 
   it("lets the action row wrap instead of overflowing", () => {
     expect(composer).toContain('className="flex flex-wrap items-center gap-0.5 px-2 pb-1.5"');
@@ -161,7 +161,7 @@ describe("composer keeps Send in-flow in a narrow pane (issue #1383)", () => {
 });
 
 describe("mention clearing is gated on the transcript being visible (codex P1)", () => {
-  const chatView = read("views/ChatView.tsx");
+  const chatView = read("views/RoomView.tsx");
 
   it("only reports a channel viewed while the chat pane is actually on screen", () => {
     // The view-report effect that clears mentions must not fire while the rail

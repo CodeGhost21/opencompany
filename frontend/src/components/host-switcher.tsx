@@ -39,7 +39,6 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { isDesktopRuntime } from "@/api/transport";
-import { TITLE_BAR_LADDER } from "@/components/window-title-bar";
 import { hostShortcutLabel, useHosts } from "@/connections/HostsContext";
 import type { CompanyStatus } from "@/api/types";
 import type { Connection, ConnectionStatus } from "@/connections/types";
@@ -305,6 +304,25 @@ export function HostSwitcher({
     </div>
   );
 
+  // The same signal as `dot`, re-homed for the title row.
+  //
+  // `dot` is pinned to the bottom-right of the glyph square and cuts a ring out
+  // of the ground behind it. The titlebar switcher has no glyph any more, so
+  // there is nothing to pin to — this is the plain mark, inline and ahead of
+  // the name, sitting on the trigger's own `bg-background` fill where a
+  // ring-shaped cut-out would be a hole in nothing.
+  //
+  // Same guard as `dot`, deliberately: a permanently green dot beside a
+  // single-host nameplate is furniture, and it earns its place only once there
+  // is a host you are not looking at or something is actually wrong.
+  const titlebarDot =
+    worst && (interactive || worst !== "live") ? (
+      <span
+        data-testid="host-switcher-status"
+        className={cn("size-2 shrink-0 rounded-full", STATUS_COPY[worst].dot)}
+      />
+    ) : null;
+
   const primary = companyName ?? active?.label ?? "No host";
   // The host on the second line, but only when it says something the first line
   // does not. Most hosts serve one company and are named after it, so repeating
@@ -349,13 +367,10 @@ export function HostSwitcher({
   // away. Nothing is lost but the pixels.
   const titlebarNameplate = (
     <>
-      {glyph}
+      {titlebarDot}
       <span
         data-testid="host-switcher-name"
-        className={cn(
-          "min-w-0 flex-1 items-baseline gap-1.5 text-left",
-          TITLE_BAR_LADDER.companyName,
-        )}
+        className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
       >
         <span className="truncate text-sm font-semibold">{primary}</span>
         {lifecycleTone ? (
@@ -594,15 +609,24 @@ export function HostSwitcher({
               // this is the only thing that still says which company the window
               // belongs to without opening the menu.
               title={switcherTooltip}
-              // No border, no shadow, no fill at rest. This trigger stands on
-              // the window chrome rather than in a card — it *is* the title row
-              // — so it announces itself on hover and on focus and otherwise
-              // reads as the window naming itself.
+              // A hairline and nothing else: the border says "this opens",
+              // and the control otherwise sits at the chrome's own value.
+              //
+              // It carried `bg-background` first, borrowed from the search
+              // field beside it. That field is a well you type into and wants
+              // to read as cut into the chrome; this one names the company you
+              // are already in, and a lighter fill made the quietest fact in
+              // the row its highest-contrast object. Same border, no fill —
+              // present when looked for, silent otherwise.
+              //
+              // Both replaced "no border, no shadow, no fill at rest", which
+              // was right while the control carried a filled glyph square: that
+              // block was the thing giving it an edge. There is no glyph now.
               //
               // `w-full` against the row's own `max-w-72` cap, not a width of
               // its own: the cap belongs to the layout that placed it, and a
               // second width here would be two answers to one question.
-              className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left transition hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-[popup-open]:bg-sidebar-accent"
+              className="flex h-9 w-full min-w-0 items-center gap-2 rounded-lg border border-chrome-border px-2.5 text-left transition hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none data-[popup-open]:bg-sidebar-accent"
             />
           }
           {...triggerData}

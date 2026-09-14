@@ -47,28 +47,40 @@ function render() {
 }
 
 describe("ContentSurface", () => {
-  it("frames the page as an inset, rounded card", () => {
+  it("frames the page as a card inset from three edges, flush to the leading one", () => {
     const surface = render();
     const classes = surface.className.split(/\s+/);
+    // The margins live on the FRAME, which is the card's parent: the orbiting
+    // halo is a sibling positioned against the same rectangle, and the card
+    // cannot host it — `overflow-hidden` is what keeps a page's scrolling
+    // inside the rounded corners and it clips a pseudo-element just as readily.
+    const frame = surface.parentElement!;
+    const frameClasses = frame.className.split(/\s+/);
 
-    // The inset is on all four sides, and it is ONE quantity — four numbers
-    // that happen to agree is what drifts. A three-sided inset flush to one
-    // edge is what the closed first attempt shipped, and it produced a sliver
-    // rather than a frame.
-    expect(classes).toContain(// Three sides at the frame inset, a thinner top: the window title row
-    // sits directly above this card now, and a full inset there stacked the
-    // row's own padding on the card's margin and read as a double gap.
-    "mx-(--frame-inset)");
-    // The top is deliberately thinner, and nothing else overrides a side.
+    // An even four-sided inset WAS the contract, when nothing sat above or
+    // beside this card. Two things do now, and each takes an edge off:
     //
-    // An even frame WAS the contract, when nothing sat above this card. The
-    // window title row does now, so a full inset there stacked the row's own
-    // bottom padding onto the card's margin and read as a gap twice the size of
-    // the other three. `mt` is the one exception; a stray `mr`/`ml` is still a
-    // special case creeping back and still fails here.
-    expect(classes.filter((c) => /^m[rl]-/.test(c))).toEqual([]);
-    expect(classes).toContain("mb-(--frame-inset)");
-    expect(classes.some((c) => c.startsWith("mt-"))).toBe(true);
+    //   - the LEADING edge is flush (`ml-0`). The sidebar's groups already
+    //     carry their own 12px gutter, so an inset here put 12px of card margin
+    //     against 12px of column padding — 24px between the last nav row and
+    //     the first pixel of the page, against 12px on the other sides.
+    //   - the TOP is thinner (`mt-0.5`). The window title row has its own
+    //     bottom padding, so a full inset there stacked the two and read as a
+    //     gap twice the size of the others.
+    //
+    // Stated as the exact set rather than "some margin exists", because the
+    // failure this guards is a stray `ml-` creeping back and reopening the
+    // double gutter — which looks like a design choice rather than a bug.
+    expect(frameClasses).toContain("mr-(--frame-inset)");
+    expect(frameClasses).toContain("mb-(--frame-inset)");
+    expect(frameClasses).toContain("ml-0");
+    expect(frameClasses).toContain("mt-0.5");
+    expect(frameClasses).not.toContain("mx-(--frame-inset)");
+
+    // The halo is a sibling of the card, inside the frame, and decorative.
+    const halo = frame.querySelector('[aria-hidden="true"].content-orbit');
+    expect(halo, "the frame draws no orbiting halo").not.toBeNull();
+
     expect(classes).toContain("rounded-2xl");
     // The edge carries the chrome hairline, and the sheet is opaque: it is the
     // only opaque surface in the shell, so anything a page draws stacks on it.

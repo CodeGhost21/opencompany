@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
-import { ThreadPanel } from "@/views/chat/ThreadPanel";
-import { buildTimeline, inlineReplyIds, type Channel } from "@/views/chat/model";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
+import { buildTimeline, inlineReplyIds, type Channel } from "@/views/room/model";
 
 /**
  * One capped turn, rendered once.

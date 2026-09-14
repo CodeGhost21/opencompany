@@ -540,6 +540,18 @@ fn continuation_failure_notice(thread: String, parent: Option<EventSeq>) -> Comp
     }
 }
 
+/// SPIKE (async hand-off): how many times one card may change hands before a
+/// person is asked.
+///
+/// A hand-off chain terminates by construction rather than by nobody writing
+/// one. `pub(crate)` so the harness tests can drive a chain the same number of
+/// times production does, instead of hard-coding a number that drifts.
+/// Both the cap's reader and the test that drives it are `openhuman`-only,
+/// so the constant carries the same gate rather than reading as dead code
+/// in a default build.
+#[cfg(feature = "openhuman")]
+pub(crate) const MAX_HAND_OFF_HOPS: usize = 3;
+
 impl CompanyRuntime {
     /// Assembles a runtime from its ports. Most callers use
     /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) instead.
@@ -566,6 +578,8 @@ impl CompanyRuntime {
         grants: GrantSet,
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
+        let run_supervisor_gate = approval_gate.clone();
+        let workflow_gates_gate = approval_gate.clone();
         Self {
             inert_board_reported: std::sync::atomic::AtomicBool::new(false),
             // Install-wide, not per-company, so it is set by the builder from
@@ -601,10 +615,11 @@ impl CompanyRuntime {
             #[cfg(feature = "openhuman")]
             workflow_checkpoints: None,
             steer: crate::company::steer::InflightRegistry::new(),
-            run_supervisor: crate::runtime::RunSupervisor::new(),
+            run_supervisor: crate::runtime::RunSupervisor::new()
+                .with_emergency_gate(run_supervisor_gate),
             grants,
             continuations: ContinuationQueue::default(),
-            workflow_gates: WorkflowGateQueue::default(),
+            workflow_gates: WorkflowGateQueue::default().with_emergency_gate(workflow_gates_gate),
             blocked_nodes: BlockedNodeQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
             per_agent: Arc::new(TokioMutex::new(HashMap::new())),
@@ -879,8 +894,13 @@ impl CompanyRuntime {
     /// (wired by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) to the one
     /// the harness deps hold, so the orchestrator's `run_workflow` tool registers
     /// into the map the cancel route reads).
+    ///
+    /// Re-gated on this runtime's emergency flag for
+    /// [`adopt_workflow_gates`](Self::adopt_workflow_gates)' reason: the
+    /// supervisor that reaches a runtime must refuse admission while the stop
+    /// is engaged whether or not the site that built it remembered to say so.
     pub fn set_run_supervisor(&mut self, supervisor: crate::runtime::RunSupervisor) {
-        self.run_supervisor = supervisor;
+        self.run_supervisor = supervisor.with_emergency_gate(self.approval_gate.clone());
     }
 
     /// This company's live set of cancellable workflow runs (issue #383).
@@ -960,6 +980,14 @@ impl CompanyRuntime {
     }
 
     /// This company's event log (append-only audit trail).
+    /// The gate a [`JournalReferralQueue`](crate::runtime::hivemind::JournalReferralQueue)
+    /// serialises its check-then-write under. One per company, so two referrals
+    /// decided at once cannot both find the marker absent.
+    #[cfg(feature = "hivemind")]
+    pub(crate) fn referral_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.task_writes.clone()
+    }
+
     pub fn events(&self) -> &Arc<dyn EventLog> {
         &self.events
     }
@@ -1263,6 +1291,99 @@ impl CompanyRuntime {
         let _ = task;
     }
 
+    /// SPIKE (tinyhivemind P15): run a referred child turn on the target desk.
+    ///
+    /// A referral arrives on the target's desk channel as a MESSAGE authored by
+    /// the agent that asked — which is what it is. That keeps one mechanism for
+    /// "a turn happens because something arrived on this conversation" instead
+    /// of a second, referral-only path, and it means the responder ladder picks
+    /// the target exactly as it would for any other addressed message.
+    ///
+    /// Detached, like every other turn this runtime starts: the enqueue
+    /// transaction has already committed its marker, and the caller must not
+    /// wait on a model.
+    #[cfg(feature = "hivemind")]
+    pub(crate) fn spawn_referred_turn(
+        self: Arc<Self>,
+        desk: String,
+        content: String,
+        asker: String,
+        // Where an answer goes home, on a crossing FORWARD. `None` on a return
+        // — an answer that has arrived does not need carrying further.
+        origin: Option<tinyhivemind_core::referral::ReferralOrigin>,
+        // The forward this child is answering, by the journal sequence of its
+        // marker — carried so the return can name it exactly. Two crossings
+        // between the same desks to the same agent write geometrically
+        // identical markers, so a return that searched for "the forward that
+        // looks like mine" would pair one question with the other's answer.
+        answers: Option<u64>,
+        // How deep in the chain this turn sits. Its own replies are offered to
+        // the referral pass at this depth, so a follow-up is one deeper than
+        // the answer it follows and `max_hops` finally counts something.
+        //
+        // This was a hardcoded `1`, which read as "a referred turn is depth 1"
+        // and is true only of the first one. Every later generation claimed
+        // depth 1 as well, so the counter reset on each hop: two desks could
+        // have passed a question back and forth forever without the policy ever
+        // reaching its limit. Nothing drove that loop at the time — the asker
+        // had no way to ask again — so it cost nothing until it would have cost
+        // everything.
+        hop: u32,
+    ) {
+        tokio::spawn(async move {
+            let desk_for_replies = desk.clone();
+            let event = CompanyEvent::OperatorMessage {
+                text: content,
+                // The asking AGENT, not the operator: a referral is a teammate
+                // asking, and recording it as an operator message would put
+                // words in a person's mouth.
+                by: Some(crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Agent,
+                    id: asker,
+                }),
+                chat: Some(desk),
+                parent: None,
+                // Never a card: a referral asks a question, it does not hand
+                // work over. Ownership moving is the hand-off path's job.
+                deliverable: Some(crate::ports::types::MessageIntent::Chat),
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+            };
+            // `run_cycle` journals its INPUT events and returns the replies —
+            // it does not write them down. The chat route journals its own
+            // (`journal_chat_replies`) and the dispatch cycle journals its own
+            // (`journal_dispatch_replies`); a third caller needs the same, or
+            // the referred agent answers into a transcript nobody can read.
+            match self.run_cycle(vec![event]).await {
+                Ok(mut report) => {
+                    let company = self.id.clone();
+                    crate::server::operator::journal_chat_replies(
+                        &self,
+                        &company,
+                        &desk_for_replies,
+                        None,
+                        &mut report,
+                    )
+                    .await;
+                    // The back edge. This turn's reply is the ANSWER to the
+                    // referral that caused it, so it is offered to the decision
+                    // carrying the origin it must return to, at its own depth.
+                    crate::server::operator::refer_committed_replies(
+                        &self,
+                        &company,
+                        &desk_for_replies,
+                        &report,
+                        origin,
+                        answers,
+                        hop,
+                    )
+                    .await;
+                }
+                Err(err) => tracing::warn!(error = %err, "[referral] the referred turn failed"),
+            }
+        });
+    }
+
     /// The body of a dispatch's detached cycle (issue #242), split out of the
     /// `tokio::spawn` so the quiesce path below is reachable from a test.
     ///
@@ -1270,48 +1391,156 @@ impl CompanyRuntime {
     /// backstop cannot see — see [`abandon_run`](Self::abandon_run).
     #[cfg(feature = "openhuman")]
     async fn run_dispatch_cycle(self: Arc<Self>, task_id: String, run_id: Option<String>) {
-        let report = match self
-            .run_cycle(vec![CompanyEvent::TaskDispatched {
-                task_id: task_id.clone(),
-                run_id: run_id.clone(),
-            }])
-            .await
-        {
-            Ok(report) => report,
-            Err(err) => {
-                // Issue #290 meets issue #242. `ensure_accepting` refuses
-                // *before* `CycleRunner` takes the serial lock, so a dispatch
-                // that lands in the window while this runtime is being
-                // replaced never reaches `begin_run` — and the backstop
-                // inside the cycle only settles rows that cycle started.
-                // Every other dispatch failure is already covered in there.
-                // Left alone, the row minted a moment ago would sit `Pending`
-                // for the rest of the process's life: a card reading as under
-                // way by an attempt that never began, which nothing
-                // re-drives, and which the rebuild deliberately does *not*
-                // run the boot reaper to clean up.
-                if let Some(id) = run_id.as_deref()
-                    && matches!(err, OpenCompanyError::Quiescing(_))
-                {
-                    self.abandon_run(id, &task_id).await;
+        let mut run_id = run_id;
+        let mut hops = 0usize;
+        let mut handed_back: Option<(String, String)> = None;
+        loop {
+            // Who owns the card going INTO this attempt. Read here and not after
+            // the cycle, because by then a hand-off has already overwritten it —
+            // which is exactly the value a rollback needs.
+            let owner_before = self
+                .ops
+                .tasks
+                .list(&self.id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|c| c.id == task_id)
+                .map(|c| c.assignee)
+                .unwrap_or_default();
+            let report = match self
+                .run_cycle(vec![CompanyEvent::TaskDispatched {
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                }])
+                .await
+            {
+                Ok(report) => report,
+                Err(err) => {
+                    // Issue #290 meets issue #242. `ensure_accepting` refuses
+                    // *before* `CycleRunner` takes the serial lock, so a dispatch
+                    // that lands in the window while this runtime is being
+                    // replaced never reaches `begin_run` — and the backstop
+                    // inside the cycle only settles rows that cycle started.
+                    // Every other dispatch failure is already covered in there.
+                    // Left alone, the row minted a moment ago would sit `Pending`
+                    // for the rest of the process's life: a card reading as under
+                    // way by an attempt that never began, which nothing
+                    // re-drives, and which the rebuild deliberately does *not*
+                    // run the boot reaper to clean up.
+                    if let Some(id) = run_id.as_deref()
+                        && matches!(err, OpenCompanyError::Quiescing(_))
+                    {
+                        self.abandon_run(id, &task_id).await;
+                    }
+                    tracing::warn!(
+                        company = %self.id,
+                        task = %task_id,
+                        error = %err,
+                        "task dispatch cycle failed"
+                    );
+                    return;
                 }
+            };
+            // Issue #1852 Part 1: `run_task`/`refuse_dispatch` already build the
+            // right relay via `relay_reply` — it rides home in this report's
+            // responses — but until now nothing wrote it down. Unlike the
+            // chat-POST path (`journal_chat_replies`) and the approval path
+            // (`publish_continuation`), this dispatch path had no journaling step
+            // at all, so the answer never reached the thread it was spawned from,
+            // live or on reload.
+            self.journal_dispatch_replies(&report).await;
+
+            // ── SPIKE (async hand-off): re-dispatch for the card's new owner ────
+            //
+            // A settled dispatch that leaves its card in `in_progress` is the
+            // hand-off shape and nothing else: every other ending lands the card in
+            // a terminal column (`in_review`, `todo`, `paused`), and
+            // `settled_landing_column(Delegated)` deliberately keeps it here
+            // because "a hand-off is not an ending".
+            //
+            // The dispatch EDGE cannot fire on its own for this: it triggers on
+            // `→ in_progress`, and the card never left. So the re-dispatch is
+            // driven from here, where a fresh attempt row is minted for the
+            // delegate — which is the whole point. One attempt per agent, the
+            // serial cycle lock released between hops, and cost attributable to
+            // whoever actually spent it.
+            //
+            // Bounded by the hand-offs already recorded on the card, so a chain
+            // terminates by construction rather than by nobody writing one.
+            // SPIKE: undo a hand-off whose delegate could not run.
+            //
+            // `refuse_dispatch` bounces the card to To-do with the reason, but it
+            // leaves `assignee` naming the delegate — the state that makes the card
+            // permanently unrunnable and the thread permanently misrouted. Rolling
+            // the owner back is what makes the hand-off transactional: it either
+            // moved the work or it did not.
+            if let Some((delegate, prior)) = handed_back.take()
+                && !prior.is_empty()
+                && let Ok(cards) = self.ops.tasks.list(&self.id).await
+                && let Some(mut card) = cards.into_iter().find(|c| c.id == task_id)
+                && card.column == crate::ports::tasks::COLUMN_TODO
+                && card.bounced.is_some()
+                && card.assignee == delegate
+            {
                 tracing::warn!(
                     company = %self.id,
                     task = %task_id,
-                    error = %err,
-                    "task dispatch cycle failed"
+                    from = %delegate,
+                    to = %prior,
+                    "[hand-off] the delegate could not run; returning the card to its previous owner"
                 );
-                return;
+                card.assignee = prior;
+                card.updated_at_millis = crate::ports::now_millis();
+                // The plain store port: this must not re-fire the dispatch edge.
+                let _ = self.ops.tasks.upsert(&self.id, &card).await;
             }
-        };
-        // Issue #1852 Part 1: `run_task`/`refuse_dispatch` already build the
-        // right relay via `relay_reply` — it rides home in this report's
-        // responses — but until now nothing wrote it down. Unlike the
-        // chat-POST path (`journal_chat_replies`) and the approval path
-        // (`publish_continuation`), this dispatch path had no journaling step
-        // at all, so the answer never reached the thread it was spawned from,
-        // live or on reload.
-        self.journal_dispatch_replies(&report).await;
+
+            let handed_on = self
+                .ops
+                .tasks
+                .list(&self.id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|card| card.id == task_id)
+                .filter(|card| card.column == crate::ports::tasks::COLUMN_IN_PROGRESS);
+            if let Some(card) = handed_on {
+                if hops >= MAX_HAND_OFF_HOPS {
+                    tracing::warn!(
+                        company = %self.id,
+                        task = %task_id,
+                        hops,
+                        "[hand-off] chain hit its cap; leaving the card for a person"
+                    );
+                    return;
+                }
+                hops += 1;
+                // Who owned it before this hop, so a hand-off that cannot run can
+                // be undone. Without this the card keeps an owner that never took
+                // the work: it bounces to To-do assigned to an agent this build
+                // cannot dispatch, every retry fails identically, and — since
+                // `assignee` is what the thread's overseer is read from — the
+                // conversation is redirected to them permanently.
+                handed_back = Some((card.assignee.clone(), owner_before.clone()));
+                tracing::info!(
+                    company = %self.id,
+                    task = %task_id,
+                    assignee = %card.assignee,
+                    hops,
+                    "[hand-off] re-dispatching for the card's new owner"
+                );
+                // A FRESH attempt row for the delegate — this is what makes cost
+                // attributable per agent instead of one figure spanning the chain.
+                // Looping rather than recursing keeps the whole chain on this one
+                // spawned task, and `run_cycle` takes and releases the per-company
+                // serial lock per iteration, so the company is not parked for the
+                // duration of the chain.
+                run_id = self.open_run(&card).await;
+                continue;
+            }
+            return;
+        }
     }
 
     /// Settles an attempt whose cycle was refused before it could start
@@ -1596,33 +1825,32 @@ impl CompanyRuntime {
         }
     }
 
-    /// Files the durable "a blocker was answered, picking it back up"
-    /// notification (issue #2008), the settle-side counterpart to
-    /// [`notify_blocker_parked`](Self::notify_blocker_parked).
-    ///
-    /// The park badged the operator that a person was blocked; nothing badged
-    /// them when the answer landed and the work resumed. Filed on the same DM
-    /// thread with the same thin `Approval` subject, so a console that folds
-    /// blocker badges by conversation clears the parked one and shows that the
-    /// stopped step is moving again. Best-effort — the resume already stands —
-    /// and a no-op for a blocker raised in no conversation, which has no thread
-    /// to badge.
+    /// Files the durable blocker-answer notification on the original DM thread.
+    /// Best-effort: the resolution already stands if this write fails.
     #[cfg(feature = "openhuman")]
     async fn notify_blocker_resumed(
         &self,
         id: &ApprovalId,
         thread: Option<&str>,
         resolution: &crate::ports::blockers::BlockerResolution,
+        step: Option<&crate::ports::blockers::BlockerStep>,
     ) {
-        use crate::ports::blockers::BlockerStep;
+        use crate::ports::blockers::{BlockerStep, BlockerVerdict};
         let Some(thread) = thread else {
             return;
         };
         let sender = thread.strip_prefix("dm:").unwrap_or(thread);
-        let step = match &resolution.step {
+        let step_id = match step {
             Some(BlockerStep::Task { task_id }) => task_id.clone(),
             Some(BlockerStep::Node { node_id, .. }) => node_id.clone(),
             None => "a question".to_string(),
+        };
+        let title = if resolution.verdict == BlockerVerdict::Skip
+            && matches!(step, Some(BlockerStep::Task { .. }))
+        {
+            format!("{sender}'s blocker on {step_id} was waived")
+        } else {
+            format!("{sender}'s blocker on {step_id} was answered — picking it back up")
         };
         let note = crate::ports::notifications::Notification {
             id: crate::ports::generate_id(),
@@ -1632,7 +1860,7 @@ impl CompanyRuntime {
                 id: id.as_ref().to_string(),
             },
             created_at: now_millis(),
-            title: format!("{sender}'s blocker on {step} was answered — picking it back up"),
+            title,
             audience: None,
             context: Some(thread.to_string()),
         };
@@ -1935,8 +2163,16 @@ impl CompanyRuntime {
     /// alongside it: the two describe one run's decisions from opposite sides,
     /// and a runtime holding a fresh copy of one and an inherited copy of the
     /// other would release a batch it cannot re-dispatch.
+    ///
+    /// The adopted queue is re-gated on this runtime's own emergency flag. A
+    /// queue arrives here from two places that both have reason not to carry
+    /// one — a boot builds a fresh queue to rehydrate parked gates into, and a
+    /// rebuild clones the outgoing runtime's — so requiring each construction
+    /// site to remember the gate makes the stop hold only where someone
+    /// remembered. Re-gating on adoption is the one place that cannot be
+    /// forgotten, because it is the only way a queue reaches a runtime.
     pub fn adopt_workflow_gates(&mut self, gates: WorkflowGateQueue) {
-        self.workflow_gates = gates;
+        self.workflow_gates = gates.with_emergency_gate(self.approval_gate.clone());
     }
 
     /// Installs the blocked-agent-node stash the builder prepared (issue #899,
@@ -1985,8 +2221,64 @@ impl CompanyRuntime {
     /// one of the cycle entry points below; this exists so the chat route can
     /// run the same check one step earlier.
     pub(crate) fn ensure_accepting(&self) -> Result<()> {
+        // The emergency stop is checked first because the two refusals mean
+        // opposite things to a caller: `Quiescing` is a `503` that says retry in
+        // a moment, and retrying is exactly wrong here.
+        self.ensure_not_emergency_stopped()?;
         if self.is_quiesced() {
             return Err(OpenCompanyError::Quiescing(self.id.as_ref().to_string()));
+        }
+        Ok(())
+    }
+
+    /// Refuses work while the emergency stop is engaged.
+    ///
+    /// The effect gate
+    /// ([`evaluate`](crate::ports::approvals::ApprovalGate::evaluate) /
+    /// [`park`](crate::ports::approvals::ApprovalGate::park)) refuses the
+    /// *effects* a turn asks for; this refuses the turn. Both are needed — a
+    /// company whose effects are denied but whose turns keep running still
+    /// executes tools and still bills inference, while reporting itself stopped.
+    ///
+    /// Enforced at the four doorways work enters through, each the sole
+    /// entrance of its family:
+    ///
+    /// * [`ensure_accepting`](Self::ensure_accepting) — every ingress asking for
+    ///   a cycle (chat, ACP, the scheduler, a rebuild, an approval resolution).
+    /// * [`spawn_follow_up`](Self::spawn_follow_up) — every resume a settled or
+    ///   expired verdict owes: a brain continuation, a released blocker, a
+    ///   workflow replay, a blocked node.
+    /// * [`reconcile_stranded_blocked_nodes`](Self::reconcile_stranded_blocked_nodes) —
+    ///   the boot-time resume, which reaches a dispatch through neither of the
+    ///   other two.
+    /// * [`run_planning_pass`](crate::harness::built_in::planning::run_planning_pass) —
+    ///   a task's own paid-model doorway. It never goes through `run_cycle`, and
+    ///   a card reaches `Planning` through a plain board write
+    ///   ([`upsert_task`](Self::upsert_task)), which leaves lifecycle `running`
+    ///   even while stopped, so none of the other three ever see it.
+    ///
+    /// # Semantics
+    ///
+    /// This halts the **admission** of work, not work already executing. A turn
+    /// running when the switch is pulled is not killed: it holds live model
+    /// context and half-written state, and the effect gate above already denies
+    /// the consequential actions it can still ask for, which is the containment
+    /// that matters. What it cannot do is start anything new.
+    ///
+    /// A parked approval is likewise frozen rather than resolved: while stopped
+    /// the queue takes no new parks, no verdicts and no extensions, so its cards
+    /// run down the deadline they already had to the default-deny the TTL
+    /// already promised.
+    ///
+    /// Nothing on the release path consults this — [`emergency_resume`](Self::emergency_resume)
+    /// and [`status`](Self::status) are reachable while stopped — because a
+    /// company that cannot resume is a worse failure than one that cannot stop.
+    pub(crate) fn ensure_not_emergency_stopped(&self) -> Result<()> {
+        if self.approval_gate.is_emergency() {
+            return Err(OpenCompanyError::EmergencyStop(format!(
+                "{} is stopped and will run no work until an operator releases it",
+                self.id.as_ref()
+            )));
         }
         Ok(())
     }
@@ -2546,6 +2838,12 @@ impl CompanyRuntime {
                 }
                 ResolveReceipt::Settled(event) => *event,
             };
+            // Below this line every branch dispatches real work — a blocker
+            // resume, a workflow replay, a brain continuation — so the emergency
+            // stop is enforced once here rather than on each of them. The two
+            // arms above return a synthetic report and start nothing, which is
+            // why they sit on the other side of it.
+            rt.ensure_not_emergency_stopped()?;
             // Issue #1863: a resolved blocker re-enters the stopped step rather
             // than redispatching a grant or running a brain continuation. The
             // answer was armed on the grant set's blocker side-channel by
@@ -2562,26 +2860,18 @@ impl CompanyRuntime {
         })
     }
 
-    /// Re-enters the step a resolved blocker stopped, carrying the operator's
-    /// answer (issue #1863) — the resume half `park_blocker` deliberately left
-    /// inert.
-    ///
-    /// The fork the whole tier turns on, reached from
-    /// [`spawn_follow_up`](Self::spawn_follow_up) once the verdict is durable.
-    /// A resuming verdict re-dispatches the stopped work carrying the answer; a
-    /// [`Cancel`](crate::ports::blockers::BlockerVerdict::Cancel) settles it and
-    /// starts nothing — the short-circuit that runs *before* any cycle. Which
-    /// step is re-entered is read off the blocker's own
-    /// [`BlockerStep`](crate::ports::blockers::BlockerStep): a board card is
-    /// moved back into In Progress so its dispatch edge fires; a workflow node
-    /// is handed the answer for its run; a bare agent question just carries the
-    /// answer back into the DM it was asked in.
+    /// Applies a durable blocker verdict to its task, workflow node, or DM.
+    /// Retry and amend re-dispatch task work; task skip and cancel settle it
+    /// without another run. Node verdicts retain their workflow semantics.
     ///
     /// The step rides on the resolution itself — the journal scrubs a parked
     /// effect's payload, so it is captured at resolve time — while the DM thread
-    /// is read off the approval's origin, which is not scrubbed. The answer is
-    /// retired from the re-arm queue once re-entered, so the next boot does not
-    /// resume it a second time.
+    /// is read off the approval's origin, which is not scrubbed. A blocker that
+    /// carried no step of its own falls back to the card its approval is linked
+    /// to, read from that same unscrubbed origin: see
+    /// [`blocker_step_from_task_link`](Self::blocker_step_from_task_link). The
+    /// answer is retired from the re-arm queue once re-entered, so the next boot
+    /// does not resume it a second time.
     #[cfg(feature = "openhuman")]
     async fn resume_blocker(
         self: &Arc<Self>,
@@ -2595,13 +2885,12 @@ impl CompanyRuntime {
         let origin_parent = conversation
             .as_ref()
             .and_then(|conversation| conversation.parent);
+        let step = match resolution.step.clone() {
+            Some(step) => Some(step),
+            None => self.blocker_step_from_task_link(approval_id).await?,
+        };
         let outcome = self
-            .drive_blocker_resume(
-                &resolution,
-                resolution.step.as_ref(),
-                thread.as_deref(),
-                origin_parent,
-            )
+            .drive_blocker_resume(&resolution, step.as_ref(), thread.as_deref(), origin_parent)
             .await;
         // Retire the armed answer whether or not the drive succeeded: a failed
         // resume is reported, not retried forever, and re-arming it would resume
@@ -2618,10 +2907,62 @@ impl CompanyRuntime {
         }
         outcome?;
         if resolution.resumes() {
-            self.notify_blocker_resumed(approval_id, thread.as_deref(), &resolution)
+            self.notify_blocker_resumed(approval_id, thread.as_deref(), &resolution, step.as_ref())
                 .await;
         }
         Ok(CycleRunner::new(self).already_resolved_report())
+    }
+
+    /// The card a blocker stopped, when its own payload never named one.
+    ///
+    /// An agent's question parks with no
+    /// [`BlockerStep`](crate::ports::blockers::BlockerStep): the tool holds
+    /// neither a card nor a node. Where a board card's dispatch cycle raised it,
+    /// the approval records that as its [`TaskLink`], the same key
+    /// [`unanswered_blocker`](Self::unanswered_blocker) returns an expired
+    /// blocker's card by — and for the same reason, that the journal has always
+    /// maintained the link while the payload's step is a field a producer can
+    /// omit.
+    ///
+    /// Read from the retained origins, never the pending set: the settle that
+    /// precedes a resume is what empties that set, so by here the approval is no
+    /// longer parked. An [`Unlinked`](TaskLink::Unlinked) record, a link written
+    /// before the journal kept one, and an id the journal never saw are one
+    /// answer — there is no card to re-enter, and the answer is carried back
+    /// into the conversation instead.
+    ///
+    /// A link is weaker evidence than a step, so it is only followed to a card
+    /// the board still holds and still has paused. A declared step names the
+    /// thing that stopped; a link only says a card was in hand when the
+    /// question was raised. Reading a link to a card that is gone — or to one
+    /// an operator has since moved on, which both card resumes leave alone
+    /// without a word — answers the operator with a report about a card, or
+    /// with nothing at all, where what was asked for was an answer to a
+    /// question.
+    ///
+    /// A board that cannot be read is not a board without the card: the error
+    /// propagates, leaving the answer armed for the next attempt rather than
+    /// retiring it against a resume that never re-entered anything.
+    ///
+    /// [`TaskLink`]: crate::runtime::journal::TaskLink
+    #[cfg(feature = "openhuman")]
+    async fn blocker_step_from_task_link(
+        &self,
+        id: &ApprovalId,
+    ) -> Result<Option<crate::ports::blockers::BlockerStep>> {
+        use crate::runtime::journal::TaskLink;
+
+        let Some(Some(TaskLink::Task { id: task_id })) = self.journal.approval_task(id) else {
+            return Ok(None);
+        };
+        let paused = self
+            .ops
+            .tasks
+            .list(&self.id)
+            .await?
+            .into_iter()
+            .any(|task| task.id == task_id && task.column == crate::ports::tasks::COLUMN_PAUSED);
+        Ok(paused.then_some(crate::ports::blockers::BlockerStep::Task { task_id }))
     }
 
     /// Routes a resolved blocker to the right resume by its
@@ -2634,27 +2975,35 @@ impl CompanyRuntime {
         thread: Option<&str>,
         origin_parent: Option<EventSeq>,
     ) -> Result<()> {
-        use crate::ports::blockers::BlockerStep;
+        use crate::ports::blockers::{BlockerStep, BlockerVerdict};
 
-        match step {
-            Some(BlockerStep::Task { task_id }) => {
-                if resolution.resumes() {
-                    self.resume_task_card(task_id, resolution, thread, origin_parent)
-                        .await
-                } else {
-                    self.cancel_task_card(task_id, thread).await
-                }
+        match (step, resolution.verdict) {
+            (Some(BlockerStep::Task { task_id }), BlockerVerdict::Skip) => {
+                self.skip_task_card(task_id, thread, origin_parent).await
             }
-            Some(BlockerStep::Node { run_id, node_id }) => {
-                self.resume_node_blocker(run_id, node_id, resolution, thread)
+            (Some(BlockerStep::Task { task_id }), BlockerVerdict::Cancel) => {
+                self.cancel_task_card(task_id, thread, origin_parent).await
+            }
+            (
+                Some(BlockerStep::Task { task_id }),
+                BlockerVerdict::Retry | BlockerVerdict::Amend,
+            ) => {
+                self.resume_task_card(task_id, resolution, thread, origin_parent)
                     .await
             }
-            // An agent question with no step behind it — there is nothing to
-            // re-dispatch, so carrying the answer back into its DM is the whole
-            // of the resume.
-            None => {
-                self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+            (Some(BlockerStep::Node { run_id, node_id }), _) => {
+                self.resume_node_blocker(run_id, node_id, resolution, thread, origin_parent)
                     .await
+            }
+            // A question with no card or node behind it — carrying the answer
+            // back into its DM is the whole of the resume.
+            (None, _) => {
+                self.post_blocker_resume_note(
+                    thread,
+                    origin_parent,
+                    &blocker_resume_note(resolution),
+                )
+                .await
             }
         }
     }
@@ -2712,6 +3061,7 @@ impl CompanyRuntime {
             return self
                 .post_blocker_resume_note(
                     thread,
+                    origin_parent,
                     "That card is no longer on the board, so there's nothing to pick back up.",
                 )
                 .await;
@@ -2735,8 +3085,52 @@ impl CompanyRuntime {
         card.updated_at_millis = now_millis();
         self.upsert_task(&card).await?;
         drop(_serialized);
-        self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+        self.post_blocker_resume_note(thread, origin_parent, &blocker_resume_note(resolution))
             .await
+    }
+
+    #[cfg(feature = "openhuman")]
+    async fn skip_task_card(
+        self: &Arc<Self>,
+        task_id: &str,
+        thread: Option<&str>,
+        origin_parent: Option<EventSeq>,
+    ) -> Result<()> {
+        let _serialized = self.task_writes.lock().await;
+        let Some(mut card) = self
+            .ops
+            .tasks
+            .list(&self.id)
+            .await?
+            .into_iter()
+            .find(|task| task.id == task_id)
+        else {
+            return Ok(());
+        };
+        if card.column != crate::ports::tasks::COLUMN_PAUSED {
+            return Ok(());
+        }
+        card.note = Some(crate::runtime::advance::append_result(
+            card.note.as_deref(),
+            "operator",
+            BLOCKER_WAIVED,
+        ));
+        if let Some(thread) = thread {
+            card.origin =
+                crate::ports::tasks::TaskOrigin::new(Some(thread.to_string()), origin_parent);
+        }
+        card.column = crate::ports::tasks::COLUMN_IN_REVIEW.to_string();
+        card.output = None;
+        card.bounced = None;
+        card.updated_at_millis = now_millis();
+        self.ops.tasks.upsert(&self.id, &card).await?;
+        drop(_serialized);
+        self.post_blocker_resume_note(
+            thread,
+            origin_parent,
+            "Okay — I've waived that blocker. The card is in review; nothing ran again.",
+        )
+        .await
     }
 
     /// Settles a blocked card the operator cancelled, moving it back to To-do
@@ -2747,7 +3141,12 @@ impl CompanyRuntime {
     /// bounce chip marks it as not-fresh for a board scan, exactly as the expiry
     /// mover marks a card nobody answered.
     #[cfg(feature = "openhuman")]
-    async fn cancel_task_card(self: &Arc<Self>, task_id: &str, thread: Option<&str>) -> Result<()> {
+    async fn cancel_task_card(
+        self: &Arc<Self>,
+        task_id: &str,
+        thread: Option<&str>,
+        origin_parent: Option<EventSeq>,
+    ) -> Result<()> {
         // Held for the same read-modify-write reason, and in the same order, as
         // [`resume_task_card`](Self::resume_task_card).
         let _serialized = self.task_writes.lock().await;
@@ -2776,6 +3175,7 @@ impl CompanyRuntime {
         drop(_serialized);
         self.post_blocker_resume_note(
             thread,
+            origin_parent,
             "Okay — I've cancelled that. It's back in To-do if you want to pick it up later.",
         )
         .await
@@ -2827,6 +3227,7 @@ impl CompanyRuntime {
         node_id: &str,
         resolution: &crate::ports::blockers::BlockerResolution,
         thread: Option<&str>,
+        origin_parent: Option<EventSeq>,
     ) -> Result<()> {
         let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, node_id);
         if !resolution.resumes() {
@@ -2846,7 +3247,11 @@ impl CompanyRuntime {
                 .await;
             self.retire_blocked_stash(&turn).await;
             return self
-                .post_blocker_resume_note(thread, "Okay — I've cancelled that workflow step.")
+                .post_blocker_resume_note(
+                    thread,
+                    origin_parent,
+                    "Okay — I've cancelled that workflow step.",
+                )
                 .await;
         }
         // A continuation already launched for this node — by the gated-call
@@ -2868,7 +3273,7 @@ impl CompanyRuntime {
             );
             self.retire_blocked_stash(&turn).await;
             return self
-                .post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+                .post_blocker_resume_note(thread, origin_parent, &blocker_resume_note(resolution))
                 .await;
         }
         // Read without taking: the spawn below can still fail, and retiring the
@@ -2878,6 +3283,7 @@ impl CompanyRuntime {
         let Some(stashed) = self.blocked_nodes.peek(&turn) else {
             self.post_blocker_resume_note(
                 thread,
+                origin_parent,
                 "I have your answer, but this host no longer holds that workflow run — re-run \
                  the workflow to pick it back up.",
             )
@@ -2912,6 +3318,7 @@ impl CompanyRuntime {
             // did not land.
             self.post_blocker_resume_note(
                 thread,
+                origin_parent,
                 &format!(
                     "I have your answer, but that workflow step could not be restarted right \
                      now: {error}"
@@ -2921,7 +3328,7 @@ impl CompanyRuntime {
             return Err(error);
         }
         self.retire_blocked_stash(&turn).await;
-        self.post_blocker_resume_note(thread, &blocker_resume_note(resolution))
+        self.post_blocker_resume_note(thread, origin_parent, &blocker_resume_note(resolution))
             .await
     }
 
@@ -2932,11 +3339,16 @@ impl CompanyRuntime {
     /// and reloads like any transcript line. A no-op when the blocker was raised
     /// in no conversation.
     #[cfg(feature = "openhuman")]
-    async fn post_blocker_resume_note(&self, thread: Option<&str>, text: &str) -> Result<()> {
+    async fn post_blocker_resume_note(
+        &self,
+        thread: Option<&str>,
+        parent: Option<EventSeq>,
+        text: &str,
+    ) -> Result<()> {
         let Some(thread) = thread else {
             return Ok(());
         };
-        self.post_blocker_prompt(thread, text).await
+        self.post_blocker_prompt(thread, parent, text).await
     }
 
     /// Durably banks a blocked-node approval the moment its verdict is known,
@@ -3751,6 +4163,18 @@ impl CompanyRuntime {
     /// function retire that case the same way the live path does, rather than
     /// only ever dispatching.
     pub(crate) async fn reconcile_stranded_blocked_nodes(&self) {
+        // A company that boots stopped resumes nothing. `RuntimeBuilder` seeds
+        // the switch from the event log before it calls this, so the replayed
+        // state is already in place; the stashes stay armed and this runs again
+        // on the boot after the release.
+        if self.ensure_not_emergency_stopped().is_err() {
+            tracing::info!(
+                company = %self.id,
+                "[approval] the emergency stop is engaged; leaving stranded blocked nodes \
+                 armed instead of resuming them at boot"
+            );
+            return;
+        }
         let still_parked: std::collections::HashSet<String> =
             self.journal.parked_turns().into_iter().collect();
         // Issue #1825: a turn already durably marked dispatched has already
@@ -3806,6 +4230,23 @@ impl CompanyRuntime {
                 // more next restart, which is a stale-record annoyance, not a
                 // repeat of the double-dispatch this branch exists to avoid.
                 self.retire_blocked_stash(&turn).await;
+                continue;
+            }
+            // Codex review finding on PR #2140 (`3952230580`): this whole
+            // function is one `await`-laden loop, so the single guard at the
+            // top only proves the stop was clear when the loop *started* —
+            // another owner can re-engage it while an earlier stash's own
+            // awaits (the journal reads above, `resume_blocked_agent_node`'s
+            // own writes) are still in flight. Rechecked immediately before
+            // the one call in this loop that actually starts real work, the
+            // same placement as `run_bracketed`'s post-lock recheck.
+            if self.ensure_not_emergency_stopped().is_err() {
+                tracing::info!(
+                    company = %self.id,
+                    %turn,
+                    "[approval] the emergency stop re-engaged mid-reconciliation; leaving this \
+                     stash armed instead of resuming it"
+                );
                 continue;
             }
             let placeholder = ApprovalId::new(format!("boot-reconcile:{turn}"));
@@ -4474,14 +4915,43 @@ impl CompanyRuntime {
     }
 
     /// Whether `parent` is the relay bubble `pill` actually produced: the
-    /// first `AgentReply` (`task_id: None`) posted to `desk` after `pill`,
-    /// with no other settle pill for `desk` interleaved.
+    /// first non-advisory `AgentReply` (`task_id: None`) posted to `desk`
+    /// after `pill`, with no other settle pill for `desk` interleaved.
     ///
     /// Without this check, any later ordinary chat turn in the same desk —
     /// also an `AgentReply` with `task_id: None` — would satisfy the "reply
     /// targets the relay bubble" test just by being the nearest one before
     /// whatever the operator replied to, silently turning a normal reply into
     /// review feedback on a card the operator never looked at.
+    ///
+    /// **Skips the runtime's own advisories** — the B-101 mention-ambiguity
+    /// note ([`Self::post_mention_ambiguity_note`]) also journals as an
+    /// `AgentReply` with `task_id: None` in the same desk. A dispatch can
+    /// append its `DeskTaskCompleted` and not yet reach
+    /// `journal_dispatch_replies`, leaving a window in which another accepted
+    /// chat's ambiguous `@name` interleaves that advisory between the pill
+    /// and the genuine relay. Before this guard the advisory — not the relay —
+    /// was "the first `AgentReply` after `pill`", so the scan returned
+    /// `Ok(false)` for the real relay's own reply and a review pass silently
+    /// ran as an ordinary chat turn instead (codex P2, PR #2052 fresh review
+    /// round). The advisory can never itself be the relay bubble a review
+    /// reply anchors to — nothing dispatches review feedback on a runtime
+    /// notice — so skipping it costs nothing a real relay could need.
+    ///
+    /// **"The runtime's own" is asked of the roster, not assumed from the
+    /// string.** [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) is a
+    /// [reserved agent id](crate::ports::types::RESERVED_AGENT_IDS), but the
+    /// reservation is *grandfathered* on reload — `CompanyManifest`'s
+    /// `from_path_for_reload` passes `enforce_reserved_agent_ids: false` — so a
+    /// company declared before the reservation can still carry a roster agent
+    /// literally called `system`, whose replies are ordinary teammate replies
+    /// and whose relay bubble a blanket author filter would skip, silently
+    /// losing that company's review pass instead of the one this guard exists
+    /// to protect (codex P2, 2026-09-04). So the filter applies only when the
+    /// live roster does **not** claim the id, resolved once per scan through
+    /// [`Self::roster_declares_system_author`]. Read failure falls back to
+    /// filtering, which is the pre-existing behaviour and the direction that
+    /// cannot mistake an advisory for a relay.
     ///
     /// Pages forward past [`RELAY_SCAN_PAGE`] rather than giving up at one
     /// page, for the same company-wide-log reason as [`settle_pill_before`].
@@ -4500,6 +4970,9 @@ impl CompanyRuntime {
         pill: EventSeq,
         parent: EventSeq,
     ) -> Result<bool> {
+        // Resolved once, outside the page loop: it is a property of the
+        // company, not of any event, and the scan can read many pages.
+        let system_is_a_teammate = self.roster_declares_system_author().await;
         let mut cursor = pill;
         for page_index in 0..RELAY_SCAN_MAX_PAGES {
             let forward = self
@@ -4516,18 +4989,21 @@ impl CompanyRuntime {
                     CompanyEvent::AgentReply {
                         task_id: None,
                         chat_id,
+                        agent_id,
                         ..
-                    } if crate::server::chat_history::same_conversation(
-                        Some(chat_id.as_str()),
-                        Some(desk),
-                    ) =>
+                    } if (system_is_a_teammate || agent_id != crate::ports::SYSTEM_AUTHOR)
+                        && crate::server::chat_history::same_conversation(
+                            Some(chat_id.as_str()),
+                            Some(desk),
+                        ) =>
                     {
                         return Ok(seq == parent);
                     }
                     CompanyEvent::DeskTaskCompleted { origin_chat_id, .. }
-                        if origin_chat_id.as_deref().is_some_and(|origin| {
-                            crate::server::chat_history::same_conversation(Some(origin), Some(desk))
-                        }) =>
+                        if crate::server::chat_history::stamped_conversation_is(
+                            origin_chat_id.as_deref(),
+                            desk,
+                        ) =>
                     {
                         return Ok(false);
                     }
@@ -4540,6 +5016,36 @@ impl CompanyRuntime {
             };
         }
         Ok(false)
+    }
+
+    /// Whether this company's live roster declares an agent whose id is
+    /// [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR) — i.e. whether a reply
+    /// attributed to that id is a *teammate* speaking here rather than the
+    /// runtime reporting on itself.
+    ///
+    /// Normally `false`, and cheaply so: the id is reserved
+    /// ([`RESERVED_AGENT_IDS`](crate::ports::types::RESERVED_AGENT_IDS)), so
+    /// no company declared since that reservation can claim it. The reservation
+    /// is grandfathered on reload, though (`from_path_for_reload` passes
+    /// `enforce_reserved_agent_ids: false`), so an older bundle can, and a
+    /// runtime guard that assumed otherwise would misread that company's
+    /// ordinary replies as its own notices.
+    ///
+    /// A store that cannot answer reads as `false`. That is the pre-existing
+    /// behaviour of every caller, and the safe direction for all of them: it
+    /// keeps the runtime's advisories out of a scan that must not mistake one
+    /// for an agent's reply, at the cost of a grandfathered `system` teammate
+    /// losing a review anchor it could not have had before this method existed
+    /// either.
+    #[cfg(feature = "openhuman")]
+    async fn roster_declares_system_author(&self) -> bool {
+        matches!(
+            self.store.load(&self.id).await,
+            Ok(Some(record))
+                if record
+                    .resolve_roster_agent_id(crate::ports::SYSTEM_AUTHOR)
+                    .is_some()
+        )
     }
 
     /// Whether `pill` is the most recent settle pill for `task_id` in `desk`'s
@@ -6054,6 +6560,16 @@ impl CompanyRuntime {
     /// stopped both a task and a workflow node never folds into one group —
     /// a verdict does not mean the same thing to each, so a group must never
     /// mix them. Oldest-first, the order `pending` already returns.
+    ///
+    /// Matched through
+    /// [`stamped_conversation_is`](crate::server::chat_history::stamped_conversation_is)
+    /// rather than `same_conversation`, so a blocker that names **no** thread is
+    /// pending in no conversation rather than in General. `park_blocker` always
+    /// stamps the sender's DM, but `cycle_conversation` hands back a thread-less
+    /// `ApprovalConversation` for every park that came from no conversation at
+    /// all — a planning pass, a scheduler tick, an unaddressed trigger — and
+    /// through `same_conversation` each of those read as pending in `#general`,
+    /// where the next top-level message was consumed as its answer.
     #[cfg(feature = "openhuman")]
     fn pending_blocker_groups(&self, desk: &str) -> Vec<PendingBlockerGroup> {
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
@@ -6062,7 +6578,7 @@ impl CompanyRuntime {
             if !p.effect.kind.starts_with(&prefix) {
                 continue;
             }
-            if !crate::server::chat_history::same_conversation(p.thread.as_deref(), Some(desk)) {
+            if !crate::server::chat_history::stamped_conversation_is(p.thread.as_deref(), desk) {
                 continue;
             }
             let Ok(payload) = serde_json::from_value::<crate::ports::blockers::BlockerPayload>(
@@ -6132,10 +6648,10 @@ impl CompanyRuntime {
                 thread,
                 ..
             } if effect_kind.starts_with(&prefix)
-                && crate::server::chat_history::same_conversation(
-                    thread.as_deref(),
-                    Some(desk),
-                )
+                // Same rule as `pending_blocker_groups`: a card stamped with no
+                // thread was raised by no conversation, so no conversation's
+                // reply anchors to it — General included.
+                && crate::server::chat_history::stamped_conversation_is(thread.as_deref(), desk)
                 && self.is_blocker(&approval_id) =>
             {
                 Ok(Some(approval_id))
@@ -6494,15 +7010,28 @@ impl CompanyRuntime {
     /// Posts the ask-which question back into the DM (issue #1862) as a durable
     /// reply, so it survives a reload the way any transcript line does. Attributed
     /// to the teammate whose DM this is — the `dm:<agent>` thread names them.
+    ///
+    /// `parent` is the root the caller resolved for the message this reply
+    /// answers, re-resolved here through
+    /// [`resolvable_parent`](Self::resolvable_parent): a blocker's anchor can be
+    /// days old by the time it is answered, and a root that is gone threads
+    /// nothing. Required rather than defaulted so a caller holding an anchor
+    /// has to decide about it.
     #[cfg(feature = "openhuman")]
-    pub(crate) async fn post_blocker_prompt(&self, thread: &str, prompt: &str) -> Result<()> {
+    pub(crate) async fn post_blocker_prompt(
+        &self,
+        thread: &str,
+        parent: Option<EventSeq>,
+        prompt: &str,
+    ) -> Result<()> {
         let agent_id = thread.strip_prefix("dm:").unwrap_or(thread).to_string();
+        let parent = self.resolvable_parent(parent, thread).await;
         self.events
             .append(
                 &self.id,
                 CompanyEvent::AgentReply {
                     audience: Vec::new(),
-                    parent: None,
+                    parent,
                     chat_id: thread.to_string(),
                     agent_id,
                     text: prompt.to_string(),
@@ -6514,6 +7043,72 @@ impl CompanyRuntime {
             )
             .await?;
         Ok(())
+    }
+
+    /// Says, in the conversation itself, that an `@name` reached more than one
+    /// thing and therefore reached nobody (B-101).
+    ///
+    /// Attributed to [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR), which the
+    /// console renders as a centred system pill rather than as a teammate
+    /// speaking — the runtime is reporting its own refusal, and putting a
+    /// roster face on that would be a small lie about who decided.
+    ///
+    /// **Journaled, not returned in the POST response.** The response reaches
+    /// only the sender's own request, and this has to survive a reload and be
+    /// readable by anyone who later reads the channel — including the person
+    /// wondering why a reply is talking about them in the third person. It is
+    /// also what makes the notice reach an API poster, who never renders a chip
+    /// and for whom the old signal (a missing chip) did not exist at all.
+    ///
+    /// Never fatal: a message whose advisory line could not be appended is still
+    /// a delivered message, so a failure is logged and swallowed on exactly the
+    /// terms `resolve_mentions` already refuses to fail a send.
+    ///
+    /// Threaded the same way every real reply is: `parent` is the root the
+    /// caller resolved for the message this note is about, re-resolved here
+    /// through [`resolvable_parent`](Self::resolvable_parent) so a note about a
+    /// threaded reply lands in that thread rather than falling to the channel
+    /// timeline — the doc comment above promises "in the conversation itself",
+    /// and a thread is part of that conversation.
+    pub async fn post_mention_ambiguity_note(
+        &self,
+        desk: &str,
+        parent: Option<EventSeq>,
+        refused: &[crate::runtime::mentions::AmbiguousMention],
+    ) {
+        let Some(text) = crate::runtime::mentions::ambiguity_note(refused) else {
+            return;
+        };
+        let parent = self.resolvable_parent(parent, desk).await;
+        if let Err(err) = self
+            .events
+            .append(
+                &self.id,
+                CompanyEvent::AgentReply {
+                    parent,
+                    chat_id: desk.to_string(),
+                    agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                    text,
+                    steps: Vec::new(),
+                    task_id: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    // Desk-visible, the ordinary case: the whole point of the
+                    // notice is that everyone reading the channel — including
+                    // whoever the ping failed to reach — can see it.
+                    audience: Vec::new(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                company = %self.id,
+                desk = %desk,
+                error = %err,
+                "[mentions] an ambiguous @name could not be reported in the channel; the ping \
+                 still reached nobody and now nothing says so"
+            );
+        }
     }
 
     /// Captures a feedback item: persists it to the feedback family and logs a
@@ -6706,6 +7301,29 @@ impl CompanyRuntime {
         supplied: Option<Vec<Mention>>,
         sender: Option<&Actor>,
     ) -> Vec<Mention> {
+        self.resolve_mentions_reporting(text, supplied, sender)
+            .await
+            .mentions
+    }
+
+    /// [`resolve_mentions`](Self::resolve_mentions), also reporting every
+    /// `@name` that matched more than one thing and therefore matched nobody
+    /// (B-101).
+    ///
+    /// The refusal itself is correct and long-standing — see
+    /// [`crate::runtime::mentions`], never guess a ping — but it used to be
+    /// announced only by the *absence* of a chip. An absence is not a signal: it
+    /// is invisible in a wall of text and completely invisible over the API, so
+    /// a founder's `@Priya` reached neither the teammate nor the person of that
+    /// name, the channel's catch-all answered, and the reply talked about her in
+    /// the third person. Whoever refuses has to be the one who says so, which is
+    /// why this is here and not a second guess in the console.
+    pub async fn resolve_mentions_reporting(
+        &self,
+        text: &str,
+        supplied: Option<Vec<Mention>>,
+        sender: Option<&Actor>,
+    ) -> crate::runtime::mentions::Extraction {
         // Issue: on the operator-message path this runs BEFORE the journal
         // append (`mention_responder` reads the resolved mentions off the
         // journaled event, so the append cannot go first), which puts these
@@ -6717,7 +7335,7 @@ impl CompanyRuntime {
             tokio::join!(self.store.load(&self.id), self.users().list_users(&self.id));
         let record = match record {
             Ok(Some(record)) => record,
-            Ok(None) => return Vec::new(),
+            Ok(None) => return Default::default(),
             Err(err) => {
                 tracing::warn!(
                     company = %self.id,
@@ -6725,7 +7343,7 @@ impl CompanyRuntime {
                     "[mentions] the company record could not be read; this message is \
                      journaled with no mentions"
                 );
-                return Vec::new();
+                return Default::default();
             }
         };
         let mut users = user_list.unwrap_or_else(|err| {
@@ -6747,7 +7365,7 @@ impl CompanyRuntime {
         // otherwise resolve `@sam-2` to a different person than the one the
         // picker showed under that label.
         users.sort_by(|a, b| a.id.cmp(&b.id));
-        crate::runtime::mentions::resolve(text, supplied, sender, &record, &users)
+        crate::runtime::mentions::resolve_reporting(text, supplied, sender, &record, &users)
     }
 
     /// A status snapshot, loading the company record for name and lifecycle.
@@ -7005,9 +7623,13 @@ impl CompanyRuntime {
             .set_emergency(emergency_from_load(stopped));
     }
 
-    /// Engages the emergency stop: every new effect outside
-    /// [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other) is denied
+    /// Engages the emergency stop: the company admits no further work, and
+    /// every new effect outside
+    /// [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other) is denied,
     /// until an operator releases it.
+    ///
+    /// The halt is [`ensure_not_emergency_stopped`](Self::ensure_not_emergency_stopped),
+    /// which has the in-flight semantics and the list of doorways it guards.
     ///
     /// **Order is load-bearing: the flag flips before the event is appended.**
     /// Stopping is the safe direction, so enforcement must not wait on I/O that
@@ -7062,7 +7684,11 @@ impl CompanyRuntime {
     ///
     /// Returns `true` when this call released the stop, `false` when it did
     /// not (it was not engaged, or a concurrent release already cleared it).
-    pub async fn emergency_resume(&self, by: Actor, reason: Option<String>) -> Result<bool> {
+    pub async fn emergency_resume(
+        self: &Arc<Self>,
+        by: Actor,
+        reason: Option<String>,
+    ) -> Result<bool> {
         if !self.approval_gate.is_emergency() {
             return Ok(false);
         }
@@ -7080,7 +7706,72 @@ impl CompanyRuntime {
         // Only now, with the release durably recorded, does enforcement stop.
         // A restart between the append and this line comes up running, which
         // matches what the log says the operator decided.
-        Ok(self.approval_gate.set_emergency(false))
+        let released = self.approval_gate.set_emergency(false);
+        if released {
+            // Codex review finding on PR #2140 (`3951723403`): a blocked node
+            // stranded by `reconcile_stranded_blocked_nodes`'s own emergency-stop
+            // guard while this company was stopped otherwise sat armed until the
+            // next full restart — that function's own doc says "this runs again
+            // on the boot after the release", which was true only because
+            // nothing ran it any sooner. Running it here catches the same case
+            // up on the still-live process, the moment an operator actually
+            // releases the stop, instead of leaving a durable decision
+            // undelivered until somebody restarts the host.
+            self.reconcile_stranded_blocked_nodes().await;
+            // A durable explicit-request continuation whose dispatch this same
+            // stop refused (`spawn_follow_up`'s check, above) is not a blocked-
+            // node stash, so the reconciler above never sees it — it is still
+            // sitting in `self.journal.approval_continuations`, exactly as a
+            // cold boot's replay would find it. Re-arming and re-running the
+            // boot recovery pair catches it up on this live process instead of
+            // leaving it for the next restart.
+            self.arm_replayed_continuation_recovery();
+            self.schedule_replayed_continuations();
+            // Codex review finding on PR #2140 (`3955615146`): a durable
+            // blocker answer whose settlement this same stop refused
+            // (`settle_approval`'s emergency check) is neither an explicit
+            // continuation nor a blocked-node stash, so neither call above
+            // sees it — it is still sitting in `self.journal.blocker_resolutions`,
+            // exactly as a cold boot's replay would find it (`recover`, above).
+            // Re-arming and re-running that pair catches it up on this live
+            // process instead of leaving it for the next restart.
+            self.arm_replayed_blocker_recovery();
+            self.schedule_replayed_blocker_resolutions();
+            // Codex review finding on PR #2140 (`3955615141`): a workflow gate
+            // batch this same stop refused to release
+            // (`WorkflowGateQueue::release`'s emergency check) is left fully
+            // decided in the queue rather than destroyed, exactly so this can
+            // hand it back to `resume_run` the moment the stop lifts instead of
+            // requiring an operator to notice and manually re-run the workflow.
+            for turn in self.workflow_gates.ready_for_release() {
+                let rt = Arc::clone(self);
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        crate::runtime::workflow_resume::resume_run(&rt, &turn).await
+                    {
+                        tracing::error!(
+                            company = %rt.id,
+                            %turn,
+                            %error,
+                            "[approval] a workflow gate batch released by an emergency-resume \
+                             redrive failed"
+                        );
+                        // CodeRabbit review finding on PR #2140 (`3960328835`):
+                        // matches `resume_workflow_run`'s own failure path — a
+                        // silent log here is every sign-off already in, with
+                        // nothing telling the operator the run still needs a
+                        // manual re-run.
+                        rt.announce_to_operator(&format!(
+                            "Every sign-off on a workflow step blocked by the emergency stop is \
+                             in, but the run could not be restarted after release: {error}. \
+                             Re-run the workflow to pick it back up."
+                        ))
+                        .await;
+                    }
+                });
+            }
+        }
+        Ok(released)
     }
 
     /// Rejects operation on a company that is not accepting work.
@@ -7203,6 +7894,7 @@ impl PendingBlockerGroup {
 
 /// What resolving a blocker reply does, decided before anything is written.
 #[cfg(feature = "openhuman")]
+#[derive(Debug)]
 pub(crate) enum BlockerReplyPlan {
     /// Not a verdict, or no blocker pending here — run an ordinary turn.
     NotBlocker,
@@ -7221,6 +7913,9 @@ pub(crate) enum BlockerReplyPlan {
 #[cfg(feature = "openhuman")]
 const BLOCKER_CANCELLED: &str =
     "cancelled from the blocker chat — the work was stopped, not failed";
+
+#[cfg(feature = "openhuman")]
+const BLOCKER_WAIVED: &str = "blocker question waived by the operator — no work was run";
 
 /// The one line posted back into a blocker's DM when its answer re-enters the
 /// stopped step (issue #1863), phrased per verdict so the operator sees what
@@ -8834,6 +9529,7 @@ mod tests {
         // exactly as `HarnessBrain` would. Journaling never reads it; it only
         // drives `relay_speaker`.
         let record = crate::ports::types::CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: crate::ports::types::CompanyId::new("acme"),
@@ -9186,6 +9882,168 @@ mod tests {
     /// rather than rendering it flat, so a stale root would make the
     /// continuation invisible — strictly worse than the bug being fixed, since
     /// today's answer at least reaches the channel.
+
+    /// A runtime whose one agent is allowed to refer to the `design` desk, so a
+    /// forward reaches the width bound instead of stopping at authorization.
+    #[cfg(all(feature = "openhuman", feature = "hivemind"))]
+    async fn runtime_that_may_refer() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir)
+    {
+        let home_dir = tempfile::Builder::new()
+            .prefix("opencompany-refer-")
+            .tempdir()
+            .expect("tempdir");
+        let manifest: crate::company::types::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            delegates_to = ["design"]
+
+            [[agent]]
+            id = "designer"
+            role = "Designer"
+
+            [[group_chat]]
+            id = "design"
+            name = "Design"
+            members = ["designer"]
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let rt = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .expect("runtime");
+        (rt, home_dir)
+    }
+
+    /// **The width bound: how many desks one pass may ask.**
+    ///
+    /// `max_hops` bounds how DEEP a chain runs and says nothing about how WIDE
+    /// it is — the library leaves that to the host, because only a host knows
+    /// what a question costs it. Here it is a full model turn on another desk.
+    ///
+    /// Pinned with a cap of 1 so the second forward is the one that trips it,
+    /// and with distinct triggers so the idempotency marker cannot be what
+    /// refuses it.
+    #[cfg(all(feature = "openhuman", feature = "hivemind"))]
+    #[tokio::test]
+    async fn a_second_crossing_question_is_refused_once_the_width_is_spent() {
+        use tinyhivemind::dispatch::{EnqueueOutcome, EnqueueRefusal};
+        use tinyhivemind::referral::ReferralQueue;
+
+        let (rt, _home) = runtime_that_may_refer().await;
+        let rt = Arc::new(rt);
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let queue =
+            crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1, 4, None);
+
+        let forward = |trigger: u64| tinyhivemind::referral::Referral {
+            key: tinyhivemind::dispatch::DispatchKey {
+                trigger_sequence: trigger,
+            },
+            kind: tinyhivemind::referral::ReferralKind::Forward,
+            source_id: "ceo".to_string(),
+            target_id: "designer".to_string(),
+            content: "who owns the login screen?".to_string(),
+            from: tinyhivemind::dispatch::DispatchConversation {
+                desk_id: "engineering".to_string(),
+                thread_root: None,
+            },
+            to: tinyhivemind::dispatch::DispatchConversation {
+                desk_id: "design".to_string(),
+                thread_root: None,
+            },
+            origin: None,
+            child_hop: 1,
+        };
+
+        assert_eq!(
+            queue.enqueue_once(forward(101)).await.expect("decides"),
+            EnqueueOutcome::Enqueued,
+            "the first question is within the cap"
+        );
+        assert_eq!(
+            queue.enqueue_once(forward(202)).await.expect("decides"),
+            EnqueueOutcome::Refused {
+                reason: EnqueueRefusal::FeatureDisabled
+            },
+            "a different trigger, so this is the WIDTH bound refusing it, not the marker"
+        );
+    }
+
+    /// **Fail-closed, and leave nothing behind.** The fixture roster declares
+    /// no `delegates_to`, so an agent may not cause a turn on another desk —
+    /// referral is off until an operator opts somebody in.
+    ///
+    /// And a refusal writes no marker, so it cannot be mistaken for a completed
+    /// enqueue on the next attempt: the second call is refused for the same
+    /// reason as the first, rather than coming back `Already`.
+    #[cfg(all(feature = "openhuman", feature = "hivemind"))]
+    #[tokio::test]
+    async fn an_unauthorized_forward_is_refused_and_leaves_no_marker() {
+        use tinyhivemind::dispatch::EnqueueOutcome;
+        use tinyhivemind::referral::ReferralQueue;
+
+        let (rt, _home) = runtime_with_events().await;
+        let rt = Arc::new(rt);
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        // A cap high enough not to be what this test measures: the second
+        // enqueue must be refused as `Already`, by the marker, not by width.
+        let queue =
+            crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 8, 4, None);
+
+        let referral = tinyhivemind::referral::Referral {
+            key: tinyhivemind::dispatch::DispatchKey {
+                trigger_sequence: 77,
+            },
+            kind: tinyhivemind::referral::ReferralKind::Forward,
+            source_id: "ceo".to_string(),
+            target_id: "ceo".to_string(),
+            content: "who owns the login screen?".to_string(),
+            from: tinyhivemind::dispatch::DispatchConversation {
+                desk_id: "engineering".to_string(),
+                thread_root: None,
+            },
+            to: tinyhivemind::dispatch::DispatchConversation {
+                desk_id: "design".to_string(),
+                thread_root: None,
+            },
+            origin: None,
+            child_hop: 1,
+        };
+
+        // The fixture roster declares no `delegates_to`, so the FIRST call is
+        // refused on authorization — which is itself the fail-closed default
+        // worth pinning: referral is off until an operator opts an agent in.
+        let first = queue.enqueue_once(referral.clone()).await.expect("decides");
+        assert_eq!(
+            first,
+            EnqueueOutcome::Refused {
+                reason: tinyhivemind::dispatch::EnqueueRefusal::Unauthorized
+            },
+            "an agent with no `delegates_to` may not cause a turn on another desk"
+        );
+
+        // And a refusal leaves NO marker, so it is not mistaken for a
+        // completed enqueue on the next attempt.
+        let replay = queue.enqueue_once(referral).await.expect("decides");
+        assert_eq!(
+            replay,
+            EnqueueOutcome::Refused {
+                reason: tinyhivemind::dispatch::EnqueueRefusal::Unauthorized
+            },
+            "a refusal must not write the marker — otherwise a retry after the \
+             operator grants permission would report `Already` and drop the work"
+        );
+    }
+
     /// A runtime with a live event log, for the thread-root tests. Returns the
     /// tempdir too: dropping it deletes the log the runtime is reading.
     async fn runtime_with_events() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
@@ -9700,6 +10558,260 @@ mod tests {
         assert!(
             rt2.approval_gate.sweep_expired(new_deadline - 1).is_empty(),
             "the rehydrated gate must enforce the extension, not the original park"
+        );
+    }
+
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
+    /// every `ApprovalExtended` line and passes everything else through to an
+    /// in-memory backend.
+    struct RefusingExtendStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RefusingExtendStore {
+        async fn append_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            if line.contains("ApprovalExtended") {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "RefusingExtendStore: the volume is full".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            lines: Vec<String>,
+        ) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// `extend_approval` moves the gate's live deadline **before**
+    /// it journals the extension. When the journal append then fails, the
+    /// caller sees the error, but the live view already reflects the later
+    /// deadline — and nothing durable backs that, so a restart from the same
+    /// journal comes back believing the approval was never extended at all.
+    /// This pins that sequence exactly, as the real, current consequence: a
+    /// caller told the extend failed still sees the live queue disagree with
+    /// it until the next restart quietly settles the disagreement in the
+    /// caller's favor.
+    #[tokio::test]
+    async fn a_failed_extend_append_leaves_a_live_extension_that_reverts_on_restart() {
+        use crate::ports::types::{Actor, ActorKind};
+
+        let manifest: crate::company::types::CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"supervised\"\n")
+                .expect("manifest");
+        let store = std::sync::Arc::new(RefusingExtendStore {
+            inner: crate::ports::journal::MemoryJournalStore::default(),
+        });
+        let home_dir = tempfile::tempdir().expect("tempdir");
+
+        let rt1 =
+            crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest.clone())
+                .with_journal_store(store.clone())
+                .build()
+                .await
+                .expect("runtime");
+        let id = seed_parked(&rt1, "appr-extend-fail", 1_000).await;
+        let ttl = rt1.approval_gate.ttl_millis();
+        let original_deadline = 1_000 + ttl;
+
+        let extend = rt1
+            .extend_approval(
+                &id,
+                Actor {
+                    kind: ActorKind::User,
+                    id: "operator".into(),
+                },
+            )
+            .await;
+        assert!(extend.is_err(), "the forced append failure must surface");
+        assert!(
+            rt1.pending_approvals()[0].expires_at_millis.unwrap() > original_deadline,
+            "the live gate already moved the deadline even though nothing durable recorded it"
+        );
+        drop(rt1);
+
+        let rt2 = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_journal_store(store)
+            .build()
+            .await
+            .expect("runtime");
+        let replayed = rt2.pending_approvals();
+        assert_eq!(replayed.len(), 1, "the approval is still parked");
+        assert_eq!(
+            replayed[0].expires_at_millis,
+            Some(original_deadline),
+            "the extension a caller was told failed must not silently revert on restart"
+        );
+    }
+
+    /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
+    /// every `ApprovalExpired` line and passes everything else through.
+    struct RefusingExpiredStore {
+        inner: crate::ports::journal::MemoryJournalStore,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::journal::JournalStore for RefusingExpiredStore {
+        async fn append_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            line: &str,
+            durability: crate::ports::journal::Durability,
+        ) -> crate::Result<()> {
+            if line.contains("ApprovalExpired") {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "RefusingExpiredStore: the volume is full".to_string(),
+                ));
+            }
+            self.inner.append_journal(id, line, durability).await
+        }
+
+        async fn read_journal(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<Vec<String>> {
+            self.inner.read_journal(id).await
+        }
+
+        async fn journal_imported(
+            &self,
+            id: &crate::ports::types::CompanyId,
+        ) -> crate::Result<bool> {
+            self.inner.journal_imported(id).await
+        }
+
+        async fn complete_import(
+            &self,
+            id: &crate::ports::types::CompanyId,
+            lines: Vec<String>,
+        ) -> crate::Result<()> {
+            self.inner.complete_import(id, lines).await
+        }
+    }
+
+    /// `sweep_expired_capped` removes every id in the batch from the
+    /// live `parked` map up front, stashing each one's effect in
+    /// `expired_effects` for [`CompanyRuntime::retire_approval`] to collect.
+    /// `sweep_expired_approvals` then walks that batch and returns on the
+    /// **first** `retire_approval` failure (`?`), so a durable-write failure
+    /// partway through strands every id after it: already gone from `parked`,
+    /// still sitting in `expired_effects`, and never revisited because the
+    /// next sweep's scan is over `parked`, which no longer names them.
+    #[tokio::test]
+    async fn a_failed_retirement_mid_batch_strands_the_rest_of_the_batch() {
+        use crate::ports::types::{Actor, ActorKind, Verdict};
+
+        let manifest: crate::company::types::CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"supervised\"\n")
+                .expect("manifest");
+        let store = std::sync::Arc::new(RefusingExpiredStore {
+            inner: crate::ports::journal::MemoryJournalStore::default(),
+        });
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let rt = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+                .with_journal_store(store)
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let ttl = rt.approval_gate.ttl_millis();
+        let long_expired = crate::ports::now_millis().saturating_sub(ttl + 60_000);
+        // Alphabetical order matches park-time order here, so the cap sorts
+        // "appr-a" first — the one whose retirement is attempted (and fails)
+        // — and "appr-b" is the untouched survivor stranded behind it.
+        seed_parked(&rt, "appr-a", long_expired).await;
+        seed_parked(&rt, "appr-b", long_expired).await;
+        assert_eq!(
+            rt.pending_approvals().len(),
+            2,
+            "both are parked and expired"
+        );
+
+        let swept = rt.sweep_expired_approvals().await;
+        assert!(
+            swept.is_err(),
+            "the forced ApprovalExpired failure must surface"
+        );
+
+        // `record_expired` moves its in-memory `parked` entry out **before**
+        // journaling the expiry — the same optimistic-then-persist order
+        // The extend case pins the same shape — so "appr-a"'s failed attempt still drops
+        // it from the journal's own pending view in-memory, with nothing
+        // durable behind that removal. Only "appr-b", whose retirement was
+        // never even attempted, is left on the console's pending list.
+        let pending = rt.pending_approvals();
+        assert_eq!(
+            pending.len(),
+            1,
+            "only the untried survivor is left on the console's pending list: {pending:?}"
+        );
+        assert_eq!(
+            pending[0].id,
+            crate::ports::types::ApprovalId::new("appr-b")
+        );
+
+        // The gate's own live `parked` map already dropped both — that is
+        // what `sweep_expired_capped` did before the failing retirement ever
+        // ran — so a decision on the survivor is not a decision on anything:
+        // it comes back as a safe no-op, never as the operator's verdict.
+        let (receipt, _handle) = rt
+            .resolve_approval_spawned(
+                &crate::ports::types::ApprovalId::new("appr-b"),
+                Verdict::Approve,
+                Actor {
+                    kind: ActorKind::User,
+                    id: "operator".into(),
+                },
+                crate::runtime::grants::GrantScope::Once,
+            )
+            .await
+            .expect("a losing resolve is a receipt, not an error");
+        assert!(
+            matches!(
+                receipt,
+                crate::runtime::cycle::ResolveReceipt::AlreadyResolved
+            ),
+            "the survivor is gone from the gate's live map, so even the operator's own \
+             decision on it silently no-ops instead of settling it: {receipt:?}"
+        );
+
+        // A later sweep never even reaches the still-refusing store: its scan
+        // is over `parked`, which no longer names either id, so it succeeds
+        // trivially with nothing to report — the stranded survivor is retired
+        // by nothing and never seen again, while the console goes on listing it.
+        let second_sweep = rt
+            .sweep_expired_approvals()
+            .await
+            .expect("nothing left in `parked` to retire");
+        assert!(
+            second_sweep.is_empty(),
+            "the stranded survivor is never retried by a later sweep: {second_sweep:?}"
         );
     }
 
@@ -10668,6 +11780,196 @@ mod tests {
         );
     }
 
+    /// A DM reply and a console verdict both resolve through
+    /// `claim_blocker_resolution`, so they cannot both win — but until now
+    /// nothing drove one of each at the same blocker and checked the loser's
+    /// **own return value**, only the armed slot's content (see the test
+    /// above). `resolve_approval_spawned` and `apply_blocker_reply_spawned`
+    /// both hold `self.blocker_resolutions` for their claim-and-settle window,
+    /// so true interleaving is impossible by construction; what remains
+    /// untested is that the second caller in, whichever surface it is, is
+    /// handed back `AlreadyResolved` rather than a receipt that reads like it
+    /// was the one that settled the blocker.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_console_verdict_after_a_dm_reply_already_won_is_told_it_lost() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let runtime = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        };
+        let id = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks");
+
+        // The DM reply lands first and wins the claim.
+        let (dm_receipt, dm_follow_up) = runtime
+            .apply_blocker_reply_spawned(
+                std::slice::from_ref(&id),
+                &id,
+                crate::ports::blockers::BlockerVerdict::Retry,
+                "",
+                None,
+            )
+            .await
+            .expect("the dm reply claims and settles");
+        assert!(
+            matches!(
+                dm_receipt,
+                crate::runtime::cycle::ResolveReceipt::Settled(_)
+            ),
+            "the dm reply must be the one that settles the blocker: {dm_receipt:?}"
+        );
+        drop(dm_follow_up);
+
+        // The console verdict arrives on the same id after the claim is
+        // already taken. It must not error, and it must not be told it won.
+        let (console_receipt, _console_follow_up) = runtime
+            .resolve_approval_spawned(
+                &id,
+                crate::ports::types::Verdict::Deny,
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                },
+                crate::runtime::grants::GrantScope::Once,
+            )
+            .await
+            .expect("a losing resolve is a receipt, not an error");
+        assert!(
+            matches!(
+                console_receipt,
+                crate::runtime::cycle::ResolveReceipt::AlreadyResolved
+            ),
+            "a console verdict racing a dm reply it lost must be reported to its own \
+             caller as already-resolved, not silently accepted as though it settled \
+             the blocker: {console_receipt:?}"
+        );
+    }
+
+    /// The mirror of the test above: the console verdict wins the claim, and a
+    /// DM reply arriving after it on the same blocker must be told it lost
+    /// through its own return value rather than being silently accepted.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_dm_reply_after_a_console_verdict_already_won_is_told_it_lost() {
+        let home = tempfile::tempdir().expect("home");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let runtime = std::sync::Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                .with_id(crate::ports::types::CompanyId::new("acme"))
+                .build()
+                .await
+                .expect("runtime"),
+        );
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: crate::ports::blockers::BlockerKind::Infrastructure,
+            source: crate::ports::blockers::BlockerSource::Provider,
+            step: Some(crate::ports::blockers::BlockerStep::Task {
+                task_id: "t-1".to_string(),
+            }),
+            reason: "the model `gpt-nonexistent` was rejected".to_string(),
+            needed: "a model id this provider serves".to_string(),
+            group_key: None,
+        };
+        let id = runtime
+            .park_blocker(
+                &payload,
+                "t-1",
+                crate::company::blocker_sender::BlockerSenderSignals::default(),
+            )
+            .await
+            .expect("parks");
+
+        let (console_receipt, _console_follow_up) = runtime
+            .resolve_approval_spawned(
+                &id,
+                crate::ports::types::Verdict::Approve,
+                crate::ports::types::Actor {
+                    kind: crate::ports::types::ActorKind::Operator,
+                    id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                },
+                crate::runtime::grants::GrantScope::Once,
+            )
+            .await
+            .expect("the console verdict claims and settles");
+        assert!(
+            matches!(
+                console_receipt,
+                crate::runtime::cycle::ResolveReceipt::Settled(_)
+            ),
+            "the console verdict must be the one that settles the blocker: {console_receipt:?}"
+        );
+
+        let (dm_receipt, dm_follow_up) = runtime
+            .apply_blocker_reply_spawned(
+                std::slice::from_ref(&id),
+                &id,
+                crate::ports::blockers::BlockerVerdict::Retry,
+                "",
+                None,
+            )
+            .await
+            .expect("a losing dm reply is a receipt, not an error");
+        assert!(
+            matches!(
+                dm_receipt,
+                crate::runtime::cycle::ResolveReceipt::AlreadyResolved
+            ),
+            "a dm reply racing a console verdict it lost must be reported to its own \
+             caller as already-resolved, not silently accepted as though it settled \
+             the blocker: {dm_receipt:?}"
+        );
+        drop(dm_follow_up);
+    }
+
     /// The thread-as-review-surface: a reply to a settled `in_review` dispatch
     /// card's settle pill or relay bubble routes as review feedback and re-runs
     /// the card; an Approve verdict finishes it.
@@ -10701,6 +12003,15 @@ mod tests {
             }
             async fn upsert(&self, _company: &CompanyId, _task: &TaskRecord) -> crate::Result<()> {
                 Ok(())
+            }
+            async fn update_if_column(
+                &self,
+                _company: &CompanyId,
+                _task: &TaskRecord,
+                _observed: &TaskRecord,
+                _expected_column: &str,
+            ) -> crate::Result<bool> {
+                Ok(false)
             }
             async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
                 Ok(false)
@@ -10807,6 +12118,33 @@ mod tests {
             (runtime, home)
         }
 
+        /// A company whose **durable record** declares an agent literally
+        /// called `system` — the grandfathered shape
+        /// [`CompanyRuntime::roster_declares_system_author`] exists for.
+        ///
+        /// Built by saving the roster over an ordinary company rather than by
+        /// booting one from that manifest, because `RuntimeBuilder::build`
+        /// validates with the reservation *enforced* and would refuse it. That
+        /// is the point: the only way a live company carries this id is the
+        /// reload path, which grandfathers it
+        /// (`CompanyManifest::from_path_for_reload` passes
+        /// `enforce_reserved_agent_ids: false`) and hands the runtime a record
+        /// exactly like the one written here. The record is what
+        /// `roster_declares_system_author` reads, so this reproduces the state
+        /// under test without pretending the builder would mint it.
+        async fn runtime_with_a_system_teammate() -> (Arc<Runtime>, TempDir) {
+            let (runtime, home) = runtime().await;
+            let mut record = runtime
+                .store
+                .load(runtime.id())
+                .await
+                .expect("load")
+                .expect("record");
+            record.manifest.agents[0].id = crate::ports::SYSTEM_AUTHOR.to_string();
+            runtime.store.save(&record).await.expect("save");
+            (runtime, home)
+        }
+
         fn card(id: &str, origin: &str, column: &str) -> TaskRecord {
             TaskRecord {
                 id: id.to_string(),
@@ -10848,6 +12186,26 @@ mod tests {
                 chat_id: origin.to_string(),
                 agent_id: "ceo".to_string(),
                 text: "Here is the draft.".to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                parent: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+            }
+        }
+
+        /// The B-101 mention-ambiguity advisory
+        /// ([`CompanyRuntime::post_mention_ambiguity_note`]) — an `AgentReply`
+        /// with the identical `task_id: None` shape a relay bubble has, but
+        /// authored by [`crate::ports::SYSTEM_AUTHOR`] rather than a roster
+        /// agent. Used to seed the interleaving `is_relay_bubble_for` must not
+        /// be fooled by (codex P2, PR #2052 fresh review round).
+        fn advisory_bubble(origin: &str) -> CompanyEvent {
+            CompanyEvent::AgentReply {
+                audience: Vec::new(),
+                chat_id: origin.to_string(),
+                agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                text: "@sam matches two people here, so it pinged nobody.".to_string(),
                 steps: Vec::new(),
                 task_id: None,
                 parent: None,
@@ -10965,6 +12323,101 @@ mod tests {
                 "replying to a later ordinary turn must run a normal turn, not \
                  re-open the earlier card just because the pill is still the \
                  nearest one before it"
+            );
+        }
+
+        /// PR #2052 fresh review round, codex P2: a dispatch that has appended
+        /// its `DeskTaskCompleted` but has not yet run
+        /// `journal_dispatch_replies` leaves a window in which another
+        /// accepted chat's ambiguous `@name` can interleave a same-desk B-101
+        /// advisory before the genuine relay lands. The advisory carries
+        /// `task_id: None` exactly like a relay bubble, so it must not be
+        /// mistaken for "the first `AgentReply` after the pill" — that would
+        /// make the real relay's own reply fail `seq == parent` and silently
+        /// run as an ordinary chat turn instead of review feedback.
+        #[tokio::test]
+        async fn the_resolver_skips_an_interleaved_ambiguity_advisory_to_find_the_real_relay() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            // The advisory lands between the pill and the relay: exactly the
+            // interleaving window the finding describes.
+            append(&rt, advisory_bubble("strategy")).await;
+            let true_relay = append(&rt, relay_bubble("strategy")).await;
+
+            assert_eq!(
+                rt.review_feedback_target("strategy", true_relay)
+                    .await
+                    .unwrap()
+                    .map(|c| c.id),
+                Some("t-1".to_string()),
+                "the real relay must still anchor to its card past an \
+                 interleaved system advisory"
+            );
+        }
+
+        /// The negative half: a reply to the advisory itself is not a relay
+        /// bubble and must not anchor to the card either — only the genuine
+        /// relay does.
+        #[tokio::test]
+        async fn a_reply_to_the_advisory_itself_is_not_review_feedback() {
+            let (rt, _home) = runtime().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            let advisory = append(&rt, advisory_bubble("strategy")).await;
+            append(&rt, relay_bubble("strategy")).await;
+
+            assert!(
+                rt.review_feedback_target("strategy", advisory)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the advisory is not itself a relay bubble, so replying to it \
+                 must run an ordinary chat turn"
+            );
+        }
+
+        /// codex P2, 2026-09-04: the advisory filter above must not be a
+        /// blanket ban on the *string* `system`.
+        ///
+        /// `SYSTEM_AUTHOR` is a reserved agent id, but the reservation is
+        /// grandfathered on reload, so a company declared before it can carry
+        /// a roster teammate literally called `system`. Its replies are
+        /// ordinary teammate replies; skipping them would lose that company's
+        /// review anchor entirely — trading the bug the filter fixes for a
+        /// worse one on the companies it does not apply to.
+        #[tokio::test]
+        async fn a_grandfathered_system_teammate_still_anchors_its_own_relay() {
+            let (rt, _home) = runtime_with_a_system_teammate().await;
+            seed(&rt, &card("t-1", "strategy", COLUMN_IN_REVIEW)).await;
+            append(&rt, settle_pill("t-1", "strategy")).await;
+            // Authored by the roster agent `system`: on this company that is a
+            // teammate speaking, not the runtime reporting on itself.
+            let relay = append(
+                &rt,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    chat_id: "strategy".to_string(),
+                    agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
+                    text: "Here is the draft.".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                },
+            )
+            .await;
+
+            assert_eq!(
+                rt.review_feedback_target("strategy", relay)
+                    .await
+                    .unwrap()
+                    .map(|c| c.id),
+                Some("t-1".to_string()),
+                "a roster teammate whose id happens to be `system` keeps its \
+                 relay bubble; the filter is for the runtime's own advisories, \
+                 which this company has none of"
             );
         }
 
@@ -11320,6 +12773,296 @@ mod tests {
         );
     }
 
+    /// B-101: an `@name` that reaches two things reaches nobody — and the
+    /// conversation is told so, in the conversation.
+    mod ambiguous_mentions {
+        use crate::company::runtime::CompanyRuntime;
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        /// A company where one spelling reaches two different things: a roster
+        /// teammate `writer` and a desk `writer`. The reported case was a
+        /// teammate and a *person* sharing a name, which `mentions.rs` covers
+        /// directly; the collision is the same one and this needs no user store
+        /// to set up.
+        async fn runtime() -> (Arc<CompanyRuntime>, TempDir) {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-ambiguous-mentions-")
+                .tempdir()
+                .expect("tempdir");
+            let manifest: crate::company::CompanyManifest = toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[agent]]\nid = \"writer\"\nrole = \"Writer\"\n\
+                 [[group_chat]]\nid = \"writer\"\nname = \"Writer desk\"\nmembers = [\"writer\"]\n",
+            )
+            .expect("manifest");
+            let runtime = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                    .with_id(CompanyId::new("acme"))
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            (runtime, home)
+        }
+
+        /// Every `AgentReply` journaled so far, as `(agent, chat, text)`.
+        async fn replies(runtime: &Arc<CompanyRuntime>) -> Vec<(String, String, String)> {
+            runtime
+                .events
+                .read_from(runtime.id(), EventSeq::new(0), 500)
+                .await
+                .expect("events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    CompanyEvent::AgentReply {
+                        agent_id,
+                        chat_id,
+                        text,
+                        ..
+                    } => Some((agent_id, chat_id, text)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The signal the founder never got: a positive line in the channel
+        /// saying the ping matched two things and reached neither. It is
+        /// attributed to the runtime itself, not to a teammate — the console
+        /// renders `SYSTEM_AUTHOR` as a centred system pill, and putting a
+        /// roster face on the runtime's own refusal would misstate who decided.
+        #[tokio::test]
+        async fn an_ambiguous_name_is_reported_in_the_channel_it_was_sent_to() {
+            let (runtime, _home) = runtime().await;
+            let resolved = runtime
+                .resolve_mentions_reporting("@writer can you draft the autumn brief?", None, None)
+                .await;
+            assert!(
+                resolved.mentions.is_empty(),
+                "the ping is still refused: {:?}",
+                resolved.mentions
+            );
+            assert_eq!(resolved.ambiguous.len(), 1, "and reported once");
+
+            runtime
+                .post_mention_ambiguity_note("main", None, &resolved.ambiguous)
+                .await;
+
+            let posted = replies(&runtime).await;
+            assert_eq!(posted.len(), 1, "exactly one line: {posted:?}");
+            let (agent, chat, text) = &posted[0];
+            assert_eq!(agent, crate::ports::SYSTEM_AUTHOR);
+            assert_eq!(chat, "main", "into the conversation it was sent to");
+            assert!(text.contains("@writer"), "names the literal typed: {text}");
+            assert!(
+                text.contains("pinged nobody"),
+                "states what happened: {text}"
+            );
+        }
+
+        /// The threaded case: an ambiguous `@name` sent as a reply inside a
+        /// thread must get its explanatory note posted into that same thread,
+        /// not top-level in the channel — otherwise the note contradicts its own
+        /// doc comment's promise to speak "in the conversation itself" the
+        /// moment the operator is looking at a thread rather than the main
+        /// timeline.
+        #[tokio::test]
+        async fn an_ambiguous_name_in_a_thread_is_reported_into_that_thread() {
+            let (runtime, _home) = runtime().await;
+
+            // Seed a root message to thread off of, the same way a real
+            // threaded reply would name an existing event as its parent.
+            let root = runtime
+                .events
+                .append(
+                    runtime.id(),
+                    CompanyEvent::OperatorMessage {
+                        text: "kicking off a thread".to_string(),
+                        by: None,
+                        chat: Some("main".to_string()),
+                        parent: None,
+                        deliverable: None,
+                        mentions: Vec::new(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .await
+                .expect("root event");
+
+            let resolved = runtime
+                .resolve_mentions_reporting("@writer can you draft the autumn brief?", None, None)
+                .await;
+            assert_eq!(resolved.ambiguous.len(), 1, "reported once");
+
+            runtime
+                .post_mention_ambiguity_note("main", Some(root), &resolved.ambiguous)
+                .await;
+
+            let threaded = runtime
+                .events
+                .read_from(runtime.id(), EventSeq::new(0), 500)
+                .await
+                .expect("events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    CompanyEvent::AgentReply {
+                        parent, chat_id, ..
+                    } => Some((parent, chat_id)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(threaded.len(), 1, "exactly one reply: {threaded:?}");
+            let (parent, chat) = &threaded[0];
+            assert_eq!(chat, "main");
+            assert_eq!(
+                *parent,
+                Some(root),
+                "the note lands in the thread the ambiguous ping was sent in, \
+                 not top-level in the channel"
+            );
+        }
+
+        /// The negative half, and the one that keeps the notice worth reading: a
+        /// message whose names all resolve says nothing at all.
+        #[tokio::test]
+        async fn an_unambiguous_message_posts_nothing() {
+            let (runtime, _home) = runtime().await;
+            let resolved = runtime
+                .resolve_mentions_reporting("@ceo can you take a look?", None, None)
+                .await;
+            assert_eq!(resolved.mentions.len(), 1, "the ping resolves");
+            runtime
+                .post_mention_ambiguity_note("main", None, &resolved.ambiguous)
+                .await;
+            assert!(
+                replies(&runtime).await.is_empty(),
+                "nothing is posted for a message that named somebody"
+            );
+        }
+    }
+
+    /// `notify_mentions`'s own comment calls a notification-store failure
+    /// "deliberately not fatal": the mention still renders as a chip and the
+    /// message still lands, only the badge is missing. Nothing forced that
+    /// store to fail and checked which half of the promise actually held.
+    mod notify_mentions_best_effort {
+        use crate::company::runtime::CompanyRuntime;
+        use crate::ports::notifications::{Notification, NotificationStore};
+        use crate::ports::types::{Actor, ActorKind, CompanyId, EventSeq, Mention, MentionTarget};
+        use crate::ports::users::{UserRecord, UserRole, UserStatus};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        /// A notification store whose `append` always refuses — the store is
+        /// down, not merely empty.
+        struct FailingNotifications;
+
+        #[async_trait::async_trait]
+        impl NotificationStore for FailingNotifications {
+            async fn append(
+                &self,
+                _company: &CompanyId,
+                _notification: &Notification,
+            ) -> crate::Result<()> {
+                Err(crate::error::OpenCompanyError::Store(
+                    "notification append always fails in this test".to_string(),
+                ))
+            }
+            async fn list(
+                &self,
+                _company: &CompanyId,
+                _user: &str,
+            ) -> crate::Result<Vec<crate::ports::notifications::NotificationView>> {
+                Ok(Vec::new())
+            }
+            async fn mark_read(
+                &self,
+                _company: &CompanyId,
+                _user: &str,
+                _ids: Option<&[String]>,
+            ) -> crate::Result<u64> {
+                Ok(0)
+            }
+        }
+
+        /// A one-agent company with one active human collaborator, and a
+        /// notification store that refuses every write.
+        async fn runtime_with_failing_notifications() -> (Arc<CompanyRuntime>, TempDir, String) {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-mention-notify-fail-")
+                .tempdir()
+                .expect("tempdir");
+            let manifest: crate::company::CompanyManifest = toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
+            )
+            .expect("manifest");
+            let runtime = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+                    .with_id(CompanyId::new("acme"))
+                    .with_notifications(Arc::new(FailingNotifications))
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            let user_id = crate::ports::generate_id();
+            let now = crate::ports::now_millis();
+            runtime
+                .users()
+                .upsert_user(
+                    runtime.id(),
+                    &UserRecord {
+                        id: user_id.clone(),
+                        email: "mentioned@example.test".to_string(),
+                        display_name: None,
+                        avatar: None,
+                        role: UserRole::Member,
+                        status: UserStatus::Active,
+                        password_hash: None,
+                        must_change_password: false,
+                        created_at_millis: now,
+                        last_seen_at_millis: None,
+                        updated_at_millis: now,
+                    },
+                )
+                .await
+                .expect("seed user");
+            (runtime, home, user_id)
+        }
+
+        /// The exact promise `notify_mentions`'s own comment makes: a
+        /// notification store that will not answer must not fail somebody's
+        /// message. Called directly rather than through the chat route, so the
+        /// assertion lands on the one function the promise is about.
+        #[tokio::test]
+        async fn a_failing_notification_store_does_not_panic_or_propagate() {
+            let (runtime, _home, user_id) = runtime_with_failing_notifications().await;
+            let mention = Mention {
+                target: MentionTarget::User { id: user_id },
+                text: "@mentioned".to_string(),
+                offset: 0,
+                quiet: false,
+            };
+            // The whole assertion: `notify_mentions` returns `()`, not a
+            // `Result`, and this completes without panicking even though the
+            // store behind it always errors.
+            runtime
+                .notify_mentions(
+                    runtime.id(),
+                    std::slice::from_ref(&mention),
+                    &EventSeq::new(1),
+                    Some(&Actor {
+                        kind: ActorKind::User,
+                        id: "someone-else".to_string(),
+                    }),
+                    "main",
+                )
+                .await;
+        }
+    }
+
     /// Blocker DMs + reply attribution (issue #1862): a parked blocker surfaces
     /// in the responsible teammate's DM, groups by root cause, and an operator's
     /// reply routes back as a verdict.
@@ -11603,6 +13346,114 @@ mod tests {
             );
         }
 
+        /// Parks a blocker the way a cycle that came from **no** conversation
+        /// does: `cycle_conversation` answers with a default
+        /// `ApprovalConversation`, so the journal row carries `thread: None`.
+        /// Every planning-pass park written before commit `26d558c92` has the
+        /// same shape, and those rows survive journal replay.
+        async fn park_thread_less_blocker(runtime: &Arc<CompanyRuntime>, task_id: &str) {
+            use crate::ports::types::{Effect, EffectGroup};
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+            let payload = blocker(task_id, None);
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(&payload).expect("payload"),
+                agent: None,
+                run_id: None,
+            };
+            let id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("parks");
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    super::super::now_millis(),
+                    TaskLink::from_task_id(Some(task_id)),
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("journals");
+        }
+
+        /// A blocker that names no conversation is pending in **no**
+        /// conversation — `#general` least of all.
+        ///
+        /// The bug (B-059): `pending_blocker_groups` matched through
+        /// `same_conversation`, which reads a missing chat id as "unaddressed,
+        /// therefore General". A thread-less park therefore read as pending in
+        /// the company-wide line, and the founder's next top-level message there
+        /// was consumed as its *answer* — accepted, settled in milliseconds with
+        /// no cycle and no reply, and indistinguishable in the console from a
+        /// message being worked on.
+        ///
+        /// All four General spellings are asserted because the fold admits all
+        /// four (`is_general_chat`), so fixing only the console's `"main"` would
+        /// leave the same drop reachable from a host addressing `"General"`.
+        #[tokio::test]
+        async fn a_thread_less_blocker_is_pending_in_no_conversation() {
+            let (runtime, _home) = runtime().await;
+            park_thread_less_blocker(&runtime, "t-1").await;
+            assert_eq!(
+                runtime.pending_approvals()[0].thread,
+                None,
+                "the park under test is the thread-less shape"
+            );
+
+            for desk in ["main", "general", "General", ""] {
+                let plan = runtime
+                    .plan_blocker_reply(desk, None, "please retry the nightly import")
+                    .await
+                    .expect("plan");
+                assert!(
+                    matches!(plan, BlockerReplyPlan::NotBlocker),
+                    "a top-level message in {desk:?} must run as an ordinary turn, not settle a \
+                     blocker no conversation raised: {plan:?}"
+                );
+            }
+            assert_eq!(
+                runtime.pending_approvals().len(),
+                1,
+                "nothing was consumed, so the blocker still pends for whoever can actually answer it"
+            );
+        }
+
+        /// The carve-out is not a blanket refusal: a blocker stamped with a real
+        /// thread still answers to it. Guards the fix from being "skip every
+        /// blocker", which would pass the test above and break #1862 outright.
+        #[tokio::test]
+        async fn a_threaded_blocker_still_answers_in_its_own_dm() {
+            let (runtime, _home) = runtime().await;
+            park_thread_less_blocker(&runtime, "t-1").await;
+            runtime
+                .park_blocker(&blocker("t-2", None), "t-2", assignee("eng"))
+                .await
+                .expect("parks");
+
+            let plan = runtime
+                .plan_blocker_reply("dm:eng", None, "retry it")
+                .await
+                .expect("plan");
+            match plan {
+                BlockerReplyPlan::Resolve { ids, .. } => assert_eq!(
+                    ids.len(),
+                    1,
+                    "only the blocker stamped with this DM is in scope; the thread-less one is in \
+                     no conversation and must not be fanned in"
+                ),
+                other => panic!("the DM's own blocker still resolves: {other:?}"),
+            }
+        }
+
         /// An unrelated reply is not a verdict — it falls through to an ordinary
         /// turn rather than settling the blocker.
         #[tokio::test]
@@ -11877,12 +13728,42 @@ mod tests {
             );
         }
 
-        /// A bare agent question — `step: None`, so no board card is needed and
-        /// the resume note alone distinguishes one verdict from another.
-        ///
-        /// Deliberately not the module's `blocker()` helper: that one carries a
-        /// Task step, and with no card seeded both retry and cancel resume as
-        /// "card not found", which cannot tell the two verdicts apart.
+        /// The paused card a parked blocker's approval links to.
+        async fn seed_paused_card(runtime: &Arc<CompanyRuntime>, id: &str) {
+            use crate::ports::tasks::{COLUMN_PAUSED, TaskDeliverable, TaskRecord, TaskTitle};
+
+            runtime
+                .ops
+                .tasks
+                .upsert(
+                    &runtime.id,
+                    &TaskRecord {
+                        id: id.to_string(),
+                        title: TaskTitle::authored("Draft the launch note"),
+                        note: None,
+                        column: COLUMN_PAUSED.to_string(),
+                        priority: "medium".to_string(),
+                        assignee: "eng".to_string(),
+                        updated_at_millis: 1,
+                        origin: crate::ports::TaskOrigin::new(Some("dm:eng".to_string()), None),
+                        parent_task_id: None,
+                        output: None,
+                        plan: None,
+                        planning_attempts: Vec::new(),
+                        deliverable: TaskDeliverable::Once,
+                        workflow_proposal: None,
+                        origin_run_id: None,
+                        origin_workflow_id: None,
+                        origin_message_seq: None,
+                        bounced: None,
+                    },
+                )
+                .await
+                .expect("seed card");
+        }
+
+        /// A bare agent question: `step: None`, so the resume has only the
+        /// approval's task link to work from.
         fn question() -> BlockerPayload {
             BlockerPayload {
                 kind: BlockerKind::Information,
@@ -12002,6 +13883,7 @@ mod tests {
 
             let (runtime, home) = runtime().await;
             let payload = question();
+            seed_paused_card(&runtime, "t-1").await;
             let id = runtime
                 .park_blocker(&payload, "t-1", assignee("eng"))
                 .await
@@ -12072,15 +13954,8 @@ mod tests {
                     .expect("follow-up runs");
             }
 
-            // The mechanism under test: for a step-less blocker, the resume
-            // posts a DIFFERENT acknowledgement into the DM depending on which
-            // verdict it reads off the armed side-channel — "Got it — picking
-            // that back up now." for retry, "Okay — cancelled." for cancel
-            // (`blocker_resume_note`). Exactly one resume runs (the loser's
-            // settle is `AlreadyResolved`, which owes no follow-up), so
-            // whichever note landed must match the winner — a
-            // last-write-wins race could instead post the LOSER's note under
-            // the WINNER's durable verdict.
+            // Retry and cancel post different notes into the DM, and exactly
+            // one resume runs, so the note that landed must match the winner.
             let notes: Vec<String> = runtime
                 .events
                 .read_from(
@@ -12102,12 +13977,16 @@ mod tests {
                 .collect();
 
             let (expected, contradicting) = match winner_verdict {
-                BlockerVerdict::Retry => {
-                    ("Got it — picking that back up now.", "Okay — cancelled.")
-                }
-                BlockerVerdict::Cancel => {
-                    ("Okay — cancelled.", "Got it — picking that back up now.")
-                }
+                BlockerVerdict::Retry => (
+                    "Got it — picking that back up now.",
+                    "Okay — I've cancelled that. It's back in To-do if you want to pick it up \
+                     later.",
+                ),
+                BlockerVerdict::Cancel => (
+                    "Okay — I've cancelled that. It's back in To-do if you want to pick it up \
+                     later.",
+                    "Got it — picking that back up now.",
+                ),
                 _ => unreachable!(),
             };
             assert!(
@@ -12152,7 +14031,8 @@ mod tests {
         use crate::company::task_intent::BlockerReplyIntent;
         use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
         use crate::ports::tasks::{
-            COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord, TaskTitle,
+            COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable,
+            TaskRecord, TaskTitle,
         };
         use crate::ports::types::CompanyId;
         use std::path::Path;
@@ -12181,6 +14061,14 @@ mod tests {
                 .tempdir()
                 .expect("tempdir");
             let runtime = build(home.path()).await;
+            (runtime, home)
+        }
+
+        async fn runtime_with_harness() -> (Arc<CompanyRuntime>, TempDir) {
+            let (mut runtime, home) = runtime().await;
+            Arc::get_mut(&mut runtime)
+                .expect("runtime is not shared yet")
+                .set_harness(Arc::new(crate::harness::HarnessPool::new()));
             (runtime, home)
         }
 
@@ -12317,12 +14205,15 @@ mod tests {
             );
         }
 
-        /// A skip proceeds past the blocker — the card re-dispatches without a
-        /// correction.
         #[tokio::test]
-        async fn skip_redispatches_the_paused_card() {
-            let (runtime, _home) = runtime().await;
-            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+        async fn skip_settles_the_paused_card_without_another_run() {
+            use crate::ports::runs::RunFilter;
+
+            let (runtime, _home) = runtime_with_harness().await;
+            let mut paused = card("t-1", COLUMN_PAUSED);
+            paused.origin = crate::ports::TaskOrigin::new(Some("general".to_string()), None);
+            paused.bounced = Some("an older attempt failed".to_string());
+            seed(&runtime, &paused).await;
             runtime
                 .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
                 .await
@@ -12338,7 +14229,46 @@ mod tests {
                 .await
                 .expect("resumes");
 
-            assert_eq!(stored(&runtime, "t-1").await.column, COLUMN_IN_PROGRESS);
+            let runs = runtime
+                .runs()
+                .list_runs(runtime.id(), &RunFilter::for_task("t-1"))
+                .await
+                .expect("list runs");
+            assert_eq!(runs.len(), 0, "a skip must not open another attempt");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(after.column, COLUMN_IN_REVIEW);
+            assert!(after.output.is_none());
+            assert!(after.bounced.is_none());
+            assert_eq!(after.origin_chat_id(), Some("dm:eng"));
+            assert!(
+                after
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains("blocker question waived by the operator"))
+            );
+
+            let replies = dm_notes(&runtime).await;
+            assert!(replies.iter().any(|reply| {
+                reply
+                    == "Okay — I've waived that blocker. The card is in review; nothing ran again."
+            }));
+
+            let notification = runtime
+                .notifications()
+                .list(runtime.id(), "eng")
+                .await
+                .expect("notifications")
+                .into_iter()
+                .find(|notification| notification.notification.kind == "blocker_resumed")
+                .expect("settle notification");
+            assert!(notification.notification.title.contains("was waived"));
+            assert!(
+                !notification
+                    .notification
+                    .title
+                    .contains("picking it back up")
+            );
         }
 
         /// A cancel settles the card and starts nothing: it lands back in To-do
@@ -12369,6 +14299,365 @@ mod tests {
                 "a cancel abandons the work rather than re-dispatching it"
             );
             assert!(after.bounced.is_some(), "the card is marked not-fresh");
+        }
+
+        /// What an agent's own `escalate_to_human` parks: a question with no
+        /// step, because the tool holds neither a card nor a node.
+        async fn dm_notes(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
+            runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    crate::ports::types::CompanyEvent::AgentReply { chat_id, text, .. }
+                        if chat_id == "dm:eng" =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Journals an operator line in the teammate's DM and hands back its
+        /// sequence, the root a reply in that DM threads off.
+        async fn asked_in_dm(runtime: &Arc<CompanyRuntime>) -> crate::ports::types::EventSeq {
+            runtime
+                .events
+                .append(
+                    &runtime.id,
+                    crate::ports::types::CompanyEvent::OperatorMessage {
+                        text: "which brief is current?".to_string(),
+                        chat: Some("dm:eng".to_string()),
+                        parent: None,
+                        by: None,
+                        deliverable: None,
+                        mentions: Vec::new(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .await
+                .expect("journal the question")
+        }
+
+        async fn dm_replies(
+            runtime: &Arc<CompanyRuntime>,
+        ) -> Vec<(String, Option<crate::ports::types::EventSeq>)> {
+            runtime
+                .events
+                .read_from(
+                    runtime.id(),
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("read events")
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    crate::ports::types::CompanyEvent::AgentReply {
+                        chat_id,
+                        text,
+                        parent,
+                        ..
+                    } if chat_id == "dm:eng" => Some((text, parent)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn agent_question() -> BlockerPayload {
+            BlockerPayload {
+                kind: BlockerKind::Information,
+                source: BlockerSource::AgentQuestion,
+                step: None,
+                reason: "which of the two briefs is the current one?".to_string(),
+                needed: "an answer from you".to_string(),
+                group_key: None,
+            }
+        }
+
+        /// Parks a blocker the journal records as belonging to **no** card, the
+        /// way a workflow node's does. `park_blocker` always links the card it
+        /// is given, so the unlinked case has to be built here.
+        async fn park_unlinked(
+            runtime: &Arc<CompanyRuntime>,
+            payload: &BlockerPayload,
+        ) -> crate::ports::types::ApprovalId {
+            use crate::ports::now_millis;
+            use crate::ports::types::{Effect, EffectGroup};
+            use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+            let effect = Effect {
+                kind: payload.effect_kind(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::to_value(payload).expect("payload"),
+                agent: None,
+                run_id: None,
+            };
+            let id = runtime
+                .approvals
+                .park(&runtime.id, effect.clone())
+                .await
+                .expect("parks");
+            runtime
+                .journal
+                .record_parked(
+                    &id,
+                    &effect,
+                    now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation {
+                        thread: Some("dm:eng".to_string()),
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("records");
+            id
+        }
+
+        /// The defect this tier was missing: a question parked with no step of
+        /// its own still re-enters the card its approval is linked to, and the
+        /// operator's answer rides onto it.
+        #[tokio::test]
+        async fn an_agent_question_re_enters_the_card_its_approval_links() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&agent_question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(
+                    &ids,
+                    BlockerReplyIntent::Amend,
+                    "the second brief is current",
+                    None,
+                )
+                .await
+                .expect("resumes");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_IN_PROGRESS,
+                "a stepless question resumes through its approval's task link"
+            );
+            assert!(
+                after
+                    .note
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("the second brief is current"),
+                "the answer reaches the re-run: {:?}",
+                after.note
+            );
+        }
+
+        /// The same fallback settles rather than re-dispatches when the answer
+        /// is a cancel — the arm that moves a card for the first time.
+        #[tokio::test]
+        async fn an_agent_question_cancelled_settles_the_linked_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&agent_question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+
+            runtime
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Cancel, "drop it", None)
+                .await
+                .expect("settles");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(after.column, COLUMN_TODO);
+            assert!(after.bounced.is_some(), "the card is marked not-fresh");
+        }
+
+        /// The negative that keeps the fallback honest: a blocker the journal
+        /// records against no card touches no card, however it is answered. A
+        /// fallback that reached for "whichever card was paused" would resume
+        /// work nobody asked about.
+        #[tokio::test]
+        async fn an_unlinked_question_moves_no_card() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            let id = park_unlinked(&runtime, &agent_question()).await;
+
+            runtime
+                .apply_blocker_reply(&[id], BlockerReplyIntent::Retry, "go on", None)
+                .await
+                .expect("resumes");
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_PAUSED,
+                "an unlinked question leaves every card where it was"
+            );
+        }
+
+        /// A card an operator moved on from is not the step, so the answer
+        /// goes back into the conversation.
+        ///
+        /// Both card resumes leave a card that is no longer paused exactly
+        /// where it is and return without a word, so following the link to one
+        /// would deliver the answer nowhere at all while the blocker is still
+        /// recorded as resumed.
+        #[tokio::test]
+        async fn an_agent_question_whose_card_moved_on_answers_the_conversation() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&agent_question(), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let ids: Vec<_> = runtime
+                .pending_approvals()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+            seed(&runtime, &card("t-1", COLUMN_IN_PROGRESS)).await;
+
+            runtime
+                .apply_blocker_reply(
+                    &ids,
+                    BlockerReplyIntent::Amend,
+                    "the second brief is current",
+                    None,
+                )
+                .await
+                .expect("resumes");
+
+            let after = stored(&runtime, "t-1").await;
+            assert_eq!(
+                after.column, COLUMN_IN_PROGRESS,
+                "a card an operator moved on is left where they put it"
+            );
+            let notes = dm_notes(&runtime).await;
+            assert!(
+                notes.iter().any(
+                    |note| note == "Thanks — using that and carrying on from where it stopped."
+                ),
+                "the answer must reach the conversation it was asked in; posted: {notes:?}"
+            );
+        }
+
+        /// Every resume acknowledgement lands in the thread the question was
+        /// asked in, not at the channel root.
+        ///
+        /// The anchor is the one the approval recorded when it parked. Driven
+        /// directly because `park_blocker` records no
+        /// parent of its own: only an `escalate_to_human` park carries one, and
+        /// what is under test is that each resume passes on the anchor it is
+        /// handed rather than dropping it.
+        #[tokio::test]
+        async fn a_resume_note_threads_off_the_question_it_answers() {
+            use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
+
+            for (verdict, expected) in [
+                (BlockerVerdict::Retry, "Got it — picking that back up now."),
+                (
+                    BlockerVerdict::Cancel,
+                    "Okay — I've cancelled that. It's back in To-do if you want to pick it up \
+                     later.",
+                ),
+                (
+                    BlockerVerdict::Skip,
+                    "Okay — I've waived that blocker. The card is in review; nothing ran again.",
+                ),
+            ] {
+                let (runtime, _home) = runtime().await;
+                seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+                let root = asked_in_dm(&runtime).await;
+                let resolution = BlockerResolution {
+                    verdict,
+                    answer: String::new(),
+                    step: None,
+                };
+
+                match verdict {
+                    BlockerVerdict::Cancel => runtime
+                        .cancel_task_card("t-1", Some("dm:eng"), Some(root))
+                        .await
+                        .expect("cancels"),
+                    BlockerVerdict::Skip => runtime
+                        .skip_task_card("t-1", Some("dm:eng"), Some(root))
+                        .await
+                        .expect("skips"),
+                    BlockerVerdict::Retry => runtime
+                        .resume_task_card("t-1", &resolution, Some("dm:eng"), Some(root))
+                        .await
+                        .expect("resumes"),
+                    BlockerVerdict::Amend => unreachable!(),
+                }
+
+                let threaded: Vec<Option<crate::ports::types::EventSeq>> = dm_replies(&runtime)
+                    .await
+                    .into_iter()
+                    .filter(|(text, _)| text == expected)
+                    .map(|(_, parent)| parent)
+                    .collect();
+                assert_eq!(
+                    threaded,
+                    vec![Some(root)],
+                    "the {verdict:?} acknowledgement must hang off the question it answers"
+                );
+            }
+        }
+
+        /// A resume whose recorded anchor no longer exists still answers, in
+        /// the channel. A root that is gone threads nothing, and the
+        /// acknowledgement is owed either way.
+        #[tokio::test]
+        async fn a_resume_note_whose_anchor_is_gone_still_answers() {
+            use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
+
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            let resolution = BlockerResolution {
+                verdict: BlockerVerdict::Retry,
+                answer: String::new(),
+                step: None,
+            };
+
+            runtime
+                .resume_task_card(
+                    "t-1",
+                    &resolution,
+                    Some("dm:eng"),
+                    Some(crate::ports::types::EventSeq::new(9_999)),
+                )
+                .await
+                .expect("resumes");
+
+            let posted = dm_replies(&runtime).await;
+            assert_eq!(
+                posted,
+                vec![("Got it — picking that back up now.".to_string(), None)],
+                "an anchor that is gone falls back to the channel rather than swallowing the \
+                 acknowledgement"
+            );
         }
 
         /// The guard the whole tier turns on: a blocker's effect is inert, so a
@@ -12406,7 +14695,7 @@ mod tests {
         /// A card an operator has since dragged out of `paused` is theirs — a
         /// resume must not yank it back, exactly as the expiry mover leaves it.
         #[tokio::test]
-        async fn a_card_moved_out_of_paused_is_not_yanked_back() {
+        async fn a_skip_leaves_a_card_moved_out_of_paused_alone() {
             let (runtime, _home) = runtime().await;
             seed(&runtime, &card("t-1", COLUMN_TODO)).await;
             runtime
@@ -12420,7 +14709,7 @@ mod tests {
                 .collect();
 
             runtime
-                .apply_blocker_reply(&ids, BlockerReplyIntent::Retry, "retry", None)
+                .apply_blocker_reply(&ids, BlockerReplyIntent::Skip, "skip", None)
                 .await
                 .expect("resumes");
 
@@ -12537,6 +14826,78 @@ mod tests {
             assert!(
                 !runtime.journal.is_executed(&format!("approval:{id}")),
                 "a console Approve of a blocker must resume, never perform_effect"
+            );
+        }
+
+        /// **Codex review finding on PR #2140 (`3955615146`).** A durable
+        /// blocker answer banked but not yet settled — the exact window between
+        /// `arm_console_blocker_resolution` and `settle_claimed_blocker` a crash
+        /// or a stop can land in — is neither an explicit continuation nor a
+        /// blocked-node stash, so releasing the stop must redrive it itself
+        /// rather than leaving it for the next restart.
+        #[tokio::test]
+        async fn releasing_the_stop_redrives_a_blocker_answer_the_stop_itself_refused() {
+            let (runtime, _home) = runtime().await;
+            seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
+            runtime
+                .park_blocker(&blocker("t-1"), "t-1", assignee("eng"))
+                .await
+                .expect("parks");
+            let id = runtime
+                .pending_approvals()
+                .into_iter()
+                .next()
+                .expect("parked")
+                .id;
+
+            // Bank the operator's answer durably without settling it — the same
+            // intermediate state a crash or a stop between the claim and the
+            // resume leaves behind.
+            runtime
+                .arm_console_blocker_resolution(&id, crate::ports::types::Verdict::Approve)
+                .await
+                .expect("arms the resolution")
+                .then_some(())
+                .expect("the parked blocker must actually arm");
+
+            runtime
+                .emergency_pause(operator(), None)
+                .await
+                .expect("pause");
+
+            assert!(
+                runtime
+                    .journal
+                    .replayed_blocker_resolutions()
+                    .iter()
+                    .any(|(rid, _)| rid == &id),
+                "the banked answer is durable and still owed a settle"
+            );
+
+            runtime
+                .emergency_resume(operator(), None)
+                .await
+                .expect("resume");
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while runtime
+                    .journal
+                    .replayed_blocker_resolutions()
+                    .iter()
+                    .any(|(rid, _)| rid == &id)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("releasing the stop must redrive the banked answer, not strand it")
+            });
+
+            assert_eq!(
+                stored(&runtime, "t-1").await.column,
+                COLUMN_IN_PROGRESS,
+                "the redriven answer re-enters the paused card through the dispatch edge"
             );
         }
 
@@ -13491,6 +15852,608 @@ to = "draft"
                 "the reconciler must prune the checkpoint lineage an unapproved stranded stash \
                  names, not only release the stash: {remaining:?}"
             );
+        }
+
+        /// Codex review finding on PR #2140 (`3951723403`): a stash stranded by
+        /// [`CompanyRuntime::reconcile_stranded_blocked_nodes`]'s own
+        /// emergency-stop guard while the company was stopped previously stayed
+        /// armed until the next full restart — that function's own doc says
+        /// "this runs again on the boot after the release", true only because
+        /// nothing ran it any sooner. `emergency_resume` now runs it itself, so
+        /// releasing the stop catches this up on the still-live process instead
+        /// of requiring an operator to restart the host.
+        #[tokio::test]
+        async fn emergency_resume_reconciles_a_stranded_stash_without_a_restart() {
+            let home = seed_home();
+            let rt = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                    .with_id(CompanyId::new("acme"))
+                    .with_seed_dir(home.path().to_path_buf())
+                    .build()
+                    .await
+                    .expect("runtime builds"),
+            );
+
+            let operator = crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::Operator,
+                id: "owner".into(),
+            };
+            rt.emergency_pause(operator.clone(), None)
+                .await
+                .expect("pause");
+
+            // Stashed but never approved — the same "stranded, unapproved" shape
+            // a crash mid-cleanup leaves behind, here left behind by the stop
+            // instead of a restart.
+            let turn = workflow_node_turn_key(RUN_ID, NODE_ID);
+            rt.blocked_nodes.arm_checkpointed(
+                &turn,
+                "reporting",
+                &json!({ "topic": "quarterly numbers" }),
+                &crate::ports::types::StartedBy::from_scheduled(false),
+                Some(RUN_ID),
+                None,
+            );
+            assert!(
+                rt.blocked_nodes.is_armed(&turn),
+                "the stash exists while the company is stopped"
+            );
+
+            rt.emergency_resume(operator, None).await.expect("resume");
+
+            assert!(
+                !rt.blocked_nodes.is_armed(&turn),
+                "releasing the stop must reconcile the stranded stash immediately, without \
+                 waiting for a restart"
+            );
+        }
+    }
+
+    /// What an engaged emergency stop has to actually stop.
+    ///
+    /// Every assertion here is on a **mechanism** — the turn that did not run,
+    /// the tool body that never executed, the inference sample that was never
+    /// written — never on `is_emergency_paused()` reading `true`. The flag can
+    /// read `true` on a company that is still taking turns and still spending,
+    /// so asserting it proves nothing about the halt.
+    mod emergency_stop {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::super::{CompanyEvent, CompanyRuntime};
+        use crate::ports::Brain;
+        use crate::ports::brain::CycleHost;
+        use crate::ports::types::{
+            Actor, ActorKind, CycleRequest, CycleResult, OutboundMessage, TokenUsage,
+        };
+
+        /// A brain that does the three things a stopped company must not do:
+        /// take a turn, run a tool, and bill for the inference.
+        ///
+        /// The "tool" is a recorded line rather than a real dispatcher because
+        /// the assertion is that the turn body never ran at all — a real tool
+        /// would be reached through the same `run_cycle` that is not called.
+        #[derive(Default)]
+        struct WorkingBrain {
+            turns: AtomicUsize,
+            tool_log: Mutex<Vec<String>>,
+        }
+
+        impl WorkingBrain {
+            fn turns(&self) -> usize {
+                self.turns.load(Ordering::SeqCst)
+            }
+
+            fn tool_calls(&self) -> Vec<String> {
+                self.tool_log.lock().expect("tool log poisoned").clone()
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Brain for WorkingBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                _host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                self.turns.fetch_add(1, Ordering::SeqCst);
+                self.tool_log
+                    .lock()
+                    .expect("tool log poisoned")
+                    .push(format!("notify_slack({})", req.cycle_id));
+                Ok(CycleResult {
+                    channel_responses: vec![OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: Some("ceo".into()),
+                        text: "a full turn ran".into(),
+                        steps: Vec::new(),
+                        reply_to: None,
+                        mentions: Vec::new(),
+                    }],
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage {
+                        input: 4_000,
+                        output: 500,
+                        cached_input: 0,
+                        cost_usd: 0.12,
+                    },
+                })
+            }
+        }
+
+        /// A brain that parks an explicit `request_approval` call on every
+        /// `OperatorMessage` and counts every denial it is later told about.
+        #[derive(Default)]
+        struct ExplicitRequestBrain {
+            denials: AtomicUsize,
+        }
+
+        impl ExplicitRequestBrain {
+            fn denials(&self) -> usize {
+                self.denials.load(Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Brain for ExplicitRequestBrain {
+            async fn run_cycle(
+                &self,
+                req: CycleRequest,
+                host: &dyn CycleHost,
+            ) -> crate::Result<CycleResult> {
+                for event in &req.events {
+                    match event {
+                        CompanyEvent::OperatorMessage { .. } => {
+                            host.park_effect(crate::ports::types::Effect {
+                                kind: crate::ports::types::REQUEST_APPROVAL_EFFECT_KIND.into(),
+                                group: crate::ports::types::EffectGroup::Sign,
+                                amount_usd: Some(42.0),
+                                established_thread: false,
+                                first_time_counterparty: false,
+                                payload: serde_json::json!({
+                                    "title": "Submit the filing",
+                                    "question": "May I submit it?"
+                                }),
+                                agent: Some("ceo".into()),
+                                run_id: None,
+                            })
+                            .await?;
+                        }
+                        CompanyEvent::ApprovalResolved {
+                            verdict: crate::ports::types::Verdict::Deny,
+                            ..
+                        } => {
+                            self.denials.fetch_add(1, Ordering::SeqCst);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(CycleResult {
+                    channel_responses: Vec::new(),
+                    new_traces: Vec::new(),
+                    ledger_deltas: Vec::new(),
+                    token_usage: TokenUsage::default(),
+                })
+            }
+        }
+
+        fn manifest() -> crate::company::CompanyManifest {
+            toml::from_str(
+                "[company]\nname = \"Acme\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [policy]\nmode = \"full\"\n",
+            )
+            .expect("manifest")
+        }
+
+        fn operator() -> Actor {
+            Actor {
+                kind: ActorKind::Operator,
+                id: "owner".into(),
+            }
+        }
+
+        fn ask() -> CompanyEvent {
+            CompanyEvent::OperatorMessage {
+                text: "ship the release".into(),
+                by: Some(operator()),
+                chat: None,
+                parent: None,
+                deliverable: None,
+                mentions: Vec::new(),
+                attachments: Vec::new(),
+            }
+        }
+
+        /// A settled verdict, the receipt `spawn_follow_up` turns into a
+        /// continuation turn.
+        fn settled(approval: &str) -> super::super::ResolveReceipt {
+            use crate::ports::types::{ApprovalId, Verdict};
+            super::super::ResolveReceipt::Settled(Box::new(CompanyEvent::ApprovalResolved {
+                approval_id: ApprovalId::new(approval),
+                verdict: Verdict::Approve,
+                by: operator(),
+            }))
+        }
+
+        async fn working_company() -> (Arc<CompanyRuntime>, Arc<WorkingBrain>, tempfile::TempDir) {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-emergency-")
+                .tempdir()
+                .expect("tempdir");
+            let brain = Arc::new(WorkingBrain::default());
+            let rt = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                    .with_brain(brain.clone())
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            (rt, brain, home)
+        }
+
+        /// How many inference samples the meter holds — the bill.
+        async fn billed(rt: &CompanyRuntime) -> usize {
+            rt.usage()
+                .query(rt.id(), 0)
+                .await
+                .expect("usage query")
+                .len()
+        }
+
+        /// The stop must survive the runtime being *assembled*, not only the
+        /// runtime being constructed.
+        ///
+        /// `CompanyRuntime::new` gates the workflow gate queue, and then the
+        /// builder replaces that field wholesale with the queue it prepared —
+        /// a fresh one on a boot, the outgoing runtime's on a rebuild. Neither
+        /// has a company to ask, so neither carries a gate, and the queue that
+        /// actually reaches production carried none: a batch whose last sibling
+        /// expired during a stop was released and destroyed, and the approved
+        /// work in it could not be recovered.
+        ///
+        /// Built through the real builder rather than by hand, because
+        /// assembling it by hand is what hid this.
+        #[tokio::test]
+        async fn a_builder_assembled_runtime_still_refuses_to_release_a_batch_while_stopped() {
+            use crate::ports::types::{Effect, EffectGroup, Verdict};
+            use crate::runtime::workflow_resume::{PAYLOAD_NODE_ID, WORKFLOW_APPROVE_KIND};
+
+            let (rt, _brain, _home) = working_company().await;
+
+            let gate = Effect {
+                kind: WORKFLOW_APPROVE_KIND.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({ PAYLOAD_NODE_ID: "node-a" }),
+                agent: None,
+                run_id: Some("wr-1".to_string()),
+            };
+            let id = crate::ports::types::ApprovalId::new("appr-a");
+            rt.workflow_gates().arm("turn-1", &id, &gate);
+            rt.workflow_gates().decide("turn-1", &id, Verdict::Approve);
+
+            rt.workflow_gates()
+                .release("turn-1")
+                .expect("running, so the batch releases")
+                .expect("a batch was armed");
+
+            rt.workflow_gates().arm("turn-2", &id, &gate);
+            rt.workflow_gates().decide("turn-2", &id, Verdict::Approve);
+            rt.emergency_pause(operator(), None).await.expect("stop");
+
+            rt.workflow_gates()
+                .release("turn-2")
+                .expect_err("a stopped company must not release a decided batch");
+            assert!(
+                rt.workflow_gates().is_armed("turn-2"),
+                "the refused batch keeps every verdict it banked, for a redrive after the stop"
+            );
+            assert_eq!(
+                rt.workflow_gates().ready_for_release(),
+                vec!["turn-2".to_string()],
+                "and it is discoverable, which is what makes the approved work recoverable"
+            );
+        }
+
+        /// **The defect.** With the stop engaged, a new turn must not run, the
+        /// tool it would have called must not execute, and no inference may be
+        /// billed.
+        ///
+        /// The first cycle is deliberately run *before* the stop, so a fixture
+        /// that silently never works cannot pass this by doing nothing.
+        #[tokio::test]
+        async fn a_stopped_company_runs_no_turn_calls_no_tool_and_bills_nothing() {
+            let (rt, brain, _home) = working_company().await;
+
+            rt.run_cycle(vec![ask()]).await.expect("a running company");
+            assert_eq!(brain.turns(), 1, "the fixture must really run a turn");
+            assert_eq!(brain.tool_calls().len(), 1);
+            assert_eq!(billed(&rt).await, 1, "the fixture must really bill");
+
+            assert!(
+                rt.emergency_pause(operator(), Some("stop everything".into()))
+                    .await
+                    .expect("pause"),
+                "this call engaged the stop"
+            );
+
+            let refused = rt.run_cycle(vec![ask()]).await;
+            assert!(
+                matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+                "a stopped company must refuse a new cycle, got {refused:?}"
+            );
+            assert_eq!(
+                brain.turns(),
+                1,
+                "no turn may run while the emergency stop is engaged"
+            );
+            assert_eq!(
+                brain.tool_calls().len(),
+                1,
+                "no tool may execute while the emergency stop is engaged"
+            );
+            assert_eq!(
+                billed(&rt).await,
+                1,
+                "no inference may be billed while the emergency stop is engaged"
+            );
+        }
+
+        /// The journaled entry point is the one the chat route uses, so it owes
+        /// the same refusal — otherwise the switch is bypassed by whichever
+        /// ingress happens to append first.
+        #[tokio::test]
+        async fn a_stopped_company_refuses_a_journaled_cycle_too() {
+            let (rt, brain, _home) = working_company().await;
+            rt.emergency_pause(operator(), None).await.expect("pause");
+
+            let seq = rt.events().append(rt.id(), ask()).await.expect("append");
+            let refused = rt.run_journaled_cycle(vec![(seq, ask())], None).await;
+            assert!(
+                matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+                "the journaled entry point must refuse too, got {refused:?}"
+            );
+            assert_eq!(brain.turns(), 0);
+            assert_eq!(billed(&rt).await, 0);
+        }
+
+        /// The continuation funnel: every follow-up turn — an operator's
+        /// verdict, a TTL expiry, a released blocker, a workflow replay —
+        /// reaches its dispatch through `spawn_follow_up`. A stop that guarded
+        /// only the ingress would leave that whole family running, and the TTL
+        /// sweep reaches it without passing an ingress at all.
+        #[tokio::test]
+        async fn a_stopped_company_runs_no_continuation_turn() {
+            let (rt, brain, _home) = working_company().await;
+            rt.emergency_pause(operator(), None).await.expect("pause");
+
+            let refused = rt
+                .spawn_follow_up(settled("appr-continuation"))
+                .await
+                .expect("the follow-up task joins");
+            assert!(
+                matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+                "a follow-up turn must be refused while stopped, got {refused:?}"
+            );
+            assert_eq!(
+                brain.turns(),
+                0,
+                "a continuation must not run a turn while the stop is engaged"
+            );
+            assert_eq!(billed(&rt).await, 0);
+        }
+
+        /// Releasing restores **all** of it. A company that cannot resume is a
+        /// worse bug than one that cannot stop.
+        #[tokio::test]
+        async fn releasing_the_stop_restores_turns_tools_and_billing() {
+            let (rt, brain, _home) = working_company().await;
+            rt.emergency_pause(operator(), None).await.expect("pause");
+            assert!(rt.run_cycle(vec![ask()]).await.is_err());
+
+            assert!(
+                rt.emergency_resume(operator(), Some("all clear".into()))
+                    .await
+                    .expect("resume"),
+                "this call released the stop"
+            );
+
+            rt.run_cycle(vec![ask()]).await.expect("a released company");
+            assert_eq!(brain.turns(), 1, "the turn runs again after the release");
+            assert_eq!(brain.tool_calls().len(), 1, "tools execute again");
+            assert_eq!(billed(&rt).await, 1, "inference is billed again");
+
+            rt.spawn_follow_up(settled("appr-released"))
+                .await
+                .expect("the follow-up task joins")
+                .expect("a released company");
+            assert_eq!(
+                brain.turns(),
+                2,
+                "continuations run again after the release"
+            );
+        }
+
+        /// The stop survives a restart as **enforcement**, not only as a flag.
+        ///
+        /// `emergency_paused: true` on a rebooted company that still runs turns
+        /// is the exact shape of the defect, so the reboot is asserted by
+        /// dispatching a cycle into it.
+        #[tokio::test]
+        async fn the_stop_survives_a_restart_and_the_rebooted_company_still_refuses_work() {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-emergency-reboot-")
+                .tempdir()
+                .expect("tempdir");
+
+            let first = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                .with_brain(Arc::new(WorkingBrain::default()))
+                .build()
+                .await
+                .expect("runtime");
+            first
+                .emergency_pause(operator(), None)
+                .await
+                .expect("pause");
+            drop(first);
+
+            let brain = Arc::new(WorkingBrain::default());
+            let rebooted = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                    .with_brain(brain.clone())
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+            assert!(rebooted.is_emergency_paused(), "the stop replayed");
+
+            let refused = rebooted.run_cycle(vec![ask()]).await;
+            assert!(
+                matches!(refused, Err(crate::OpenCompanyError::EmergencyStop(_))),
+                "a rebooted stopped company must still refuse work, got {refused:?}"
+            );
+            assert_eq!(brain.turns(), 0);
+            assert_eq!(billed(&rebooted).await, 0);
+
+            // And the release still works on the rebooted runtime.
+            rebooted
+                .emergency_resume(operator(), None)
+                .await
+                .expect("resume");
+            rebooted.run_cycle(vec![ask()]).await.expect("released");
+            assert_eq!(brain.turns(), 1);
+        }
+
+        /// The native-effect path is untouched: an engaged stop still denies a
+        /// side-effecting effect and still refuses to park one, exactly as
+        /// before, and releasing restores both.
+        #[tokio::test]
+        async fn native_effect_denial_is_unchanged_by_the_admission_gate() {
+            use crate::ports::approvals::ApprovalGate;
+            use crate::ports::types::{Effect, EffectGroup, PolicyDecision};
+
+            let (rt, _brain, _home) = working_company().await;
+            let effect = Effect {
+                kind: "filing.submit".into(),
+                group: EffectGroup::Sign,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({}),
+                agent: Some("ceo".into()),
+                run_id: None,
+            };
+
+            rt.emergency_pause(operator(), None).await.expect("pause");
+            assert_eq!(
+                rt.approval_gate
+                    .evaluate(rt.id(), &effect)
+                    .await
+                    .expect("evaluate"),
+                PolicyDecision::Deny,
+                "the gate still denies a side-effecting effect while stopped"
+            );
+            assert!(
+                matches!(
+                    rt.approval_gate.park(rt.id(), effect.clone()).await,
+                    Err(crate::OpenCompanyError::EmergencyStop(_))
+                ),
+                "the gate still refuses to park one while stopped"
+            );
+
+            rt.emergency_resume(operator(), None).await.expect("resume");
+            assert_eq!(
+                rt.approval_gate
+                    .evaluate(rt.id(), &effect)
+                    .await
+                    .expect("evaluate"),
+                PolicyDecision::Allow,
+                "releasing restores the company's own `full` policy"
+            );
+        }
+
+        /// An explicit-request continuation whose dispatch a live stop refused
+        /// is not a blocked-node stash, so `reconcile_stranded_blocked_nodes`
+        /// never sees it. Releasing the stop must still redeliver it on this
+        /// same live process rather than leaving it for the next restart.
+        #[tokio::test]
+        async fn releasing_the_stop_redelivers_a_continuation_the_stop_itself_refused() {
+            let home = tempfile::Builder::new()
+                .prefix("opencompany-emergency-continuation-")
+                .tempdir()
+                .expect("tempdir");
+            let gate = Arc::new(
+                crate::policy::ManifestApprovalGate::new(manifest().policy.clone())
+                    .with_ttl_millis(0),
+            );
+            let brain = Arc::new(ExplicitRequestBrain::default());
+            let rt = Arc::new(
+                crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+                    .with_brain(brain.clone())
+                    .with_approvals(gate)
+                    .build()
+                    .await
+                    .expect("runtime"),
+            );
+
+            let report = rt
+                .run_cycle(vec![ask()])
+                .await
+                .expect("a running company parks the request");
+            assert_eq!(
+                report.parked.len(),
+                1,
+                "the fixture must really park an explicit request"
+            );
+            let approval_id = report.parked[0].clone();
+
+            rt.emergency_pause(operator(), None).await.expect("pause");
+
+            // The gate's zero TTL means the approval is already past its
+            // deadline: the sweep retires it, mints its continuation, and
+            // tries to dispatch it — the dispatch `spawn_follow_up`'s own
+            // check refuses while the company is stopped.
+            rt.sweep_expired_approvals().await.expect("sweep");
+
+            // Let the refused dispatch's spawned task actually run (and fail)
+            // before asserting on it.
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+
+            assert_eq!(
+                brain.denials(),
+                0,
+                "the stop must have refused the continuation's dispatch"
+            );
+            assert!(
+                rt.grants.peek_continuation(&approval_id).is_some(),
+                "a continuation the stop refused to dispatch must stay durable, not be lost"
+            );
+
+            rt.emergency_resume(operator(), None).await.expect("resume");
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while brain.denials() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "releasing the stop must redeliver the continuation it refused, without a \
+                     restart; continuation_live={}",
+                    rt.grants.peek_continuation(&approval_id).is_some()
+                )
+            });
+            assert_eq!(brain.denials(), 1);
         }
     }
 }

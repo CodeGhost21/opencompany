@@ -348,7 +348,7 @@ describe("resetting to the manifest's policy", () => {
     });
     expect(del).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain(
-      "Give teammates more autonomy?",
+      "Give agents more autonomy?",
     );
     expect(document.body.textContent).toContain(
       "Broadest execution autonomy",
@@ -437,7 +437,7 @@ describe("resetting to the manifest's policy", () => {
     });
     expect(del).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain(
-      "Give teammates more autonomy?",
+      "Give agents more autonomy?",
     );
     expect(document.body.textContent).not.toContain("Instead of:");
     expect(document.body.textContent).toContain(

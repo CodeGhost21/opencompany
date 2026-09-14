@@ -47,6 +47,7 @@ import { useHostAddress, useHostRoute } from "@/hooks/use-host-route";
 import { absorbHubSetupHandoff } from "@/setup/state";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 import { AddHostPage } from "@/views/setup/AddHostPage";
+import { captureKeyLink } from "@/lib/pending-key-link";
 import { cn } from "@/lib/utils";
 
 /**
@@ -58,11 +59,28 @@ import { cn } from "@/lib/utils";
  * dropping the code and the company. Clearing is a side effect, so it lives in
  * an effect: see `clearMagicLinkFromUrl`.
  */
-function readMagicLink(): { company: string | null; code: string } | null {
-  const params = new URLSearchParams(window.location.search);
+export function readMagicLinkFrom(search: string): { company: string | null; code: string } | null {
+  const params = new URLSearchParams(search);
   const code = params.get("code");
   if (!code) return null;
+  // `?code=` alone is not enough to say what kind of code it is. The key-grant
+  // return leg lands here as `?company=…&key=link&state=…&code=…`, and this
+  // read predates that marker: it took the grant code for a magic link and
+  // posted it to `/auth/verify`, which answers 409 on a company with no
+  // sign-in and "that sign-in didn't complete" on every other kind — for a
+  // round trip that had in fact succeeded, whose real code was sitting in
+  // `pending-key-link` waiting for the card that asked for it.
+  //
+  // So a marked landing belongs to whoever marked it. `key=auth` is the hub's
+  // sign-in return (`readHubToken`) and `key=link` is this console's own grant
+  // return (`readKeyLink`); a magic link carries no marker at all.
+  const marker = params.get("key");
+  if (marker === "link" || marker === "auth") return null;
   return { company: params.get("company"), code };
+}
+
+function readMagicLink(): { company: string | null; code: string } | null {
+  return readMagicLinkFrom(window.location.search);
 }
 
 /**
@@ -85,6 +103,61 @@ function readHubToken(): string | null {
   const params = new URLSearchParams(window.location.search);
   if (params.get("key") !== "auth") return null;
   return params.get("token");
+}
+
+/**
+ * Reads `?key=link&state=&code=` off a key-grant landing.
+ *
+ * The console's own marker, deliberately distinct from the hub's `key=auth`:
+ * both legs come back to this same origin, and one mints a session while the
+ * other mints a company credential. Confusing them would mean redeeming a grant
+ * code as a sign-in, or vice versa.
+ *
+ * **Pure**, like its two neighbours, because StrictMode double-invokes the
+ * `useMemo` this runs in — stripping the URL here would make the second
+ * invocation read a cleaned URL and drop the code.
+ *
+ * Not redeemed here. Unlike a magic link this is not a session credential and
+ * does not gate the boot, so it is stashed and left to the page that asked for
+ * it, where the spinner belongs on the card the operator clicked.
+ */
+function readKeyLink(): { state: string; code: string } | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("key") !== "link") return null;
+  const state = params.get("state");
+  const code = params.get("code");
+  if (!state || !code) return null;
+  return { state, code };
+}
+
+/** Whether the hub bounced a key grant back refused (or the person cancelled). */
+function readKeyLinkError(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("key") === "link" && params.get("error") !== null;
+}
+
+/**
+ * Strips the key-grant result out of the address bar.
+ *
+ * Same `replaceState` discipline as `clearHubResultFromUrl`, and for the same
+ * reason: `code` is a live single-use credential, and a back button that
+ * restored it — or a `Referer` that carried it — would hand it to something
+ * else. `company` is kept; it is not a credential and is what scopes the
+ * console.
+ */
+export function clearKeyLinkFromUrl(): void {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("key") !== "link") return;
+  params.delete("state");
+  params.delete("code");
+  params.delete("error");
+  params.delete("key");
+  const query = params.toString();
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+  );
 }
 
 /** Whether the hub bounced the sign-in back with a failure rather than a token. */
@@ -414,6 +487,11 @@ function Console() {
   // A pure read, so StrictMode's double render is harmless.
   const magicLink = useMemo(() => readMagicLink(), []);
   const hubToken = useMemo(() => readHubToken(), []);
+  // Captured before the strip below, and handed to whichever card started the
+  // grant. Not part of `auth` — a key grant does not sign anyone in and must not
+  // hold up the boot.
+  const keyLink = useMemo(() => readKeyLink(), []);
+  const keyLinkFailed = useMemo(() => readKeyLinkError(), []);
   const hubFailed = useMemo(() => readHubError(), []);
   /**
    * The in-flight redemption, so a link is redeemed exactly once.
@@ -431,6 +509,10 @@ function Console() {
   // Now that any credential is captured in state, take it out of the URL.
   useEffect(() => {
     if (magicLink) clearMagicLinkFromUrl();
+    if (keyLink || keyLinkFailed) {
+      captureKeyLink(keyLink, keyLinkFailed);
+      clearKeyLinkFromUrl();
+    }
     if (hubToken || hubFailed) {
       clearHubResultFromUrl();
       // A hub sign-in that was asked to land on setup's destination carries it
@@ -440,7 +522,7 @@ function Console() {
       // with the welcome suppressed, exactly as a setup link would have.
       absorbHubSetupHandoff();
     }
-  }, [magicLink, hubToken, hubFailed]);
+  }, [magicLink, hubToken, hubFailed, keyLink, keyLinkFailed]);
 
   /**
    * Redeem a landing credential before any console asks for data.

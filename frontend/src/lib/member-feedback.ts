@@ -108,7 +108,7 @@ export function addMemberMessage(outcome: AddMemberOutcome): AddMemberMessage {
         level: "warning",
         title: `Added ${outcome.name} to this console only.`,
         description: [
-          "This host can't save teammates, so they'll be gone when the console reloads.",
+          "This host can't save agents, so they'll be gone when the console reloads.",
           outcome.note,
         ]
           .filter(Boolean)
@@ -145,12 +145,12 @@ export function reportAddMember(outcome: AddMemberOutcome): void {
  * says why. Shared so the two answers to one host condition stay recognisably
  * the same answer.
  */
-export const NO_TEAM_WRITE_PLANE = "This host can't create teammates.";
+export const NO_TEAM_WRITE_PLANE = "This host can't create agents.";
 
 /** The host's own words where it gave any, else a caller-chosen fallback. */
 export function addMemberFailure(
   error: unknown,
-  fallback = "Couldn't add teammate.",
+  fallback = "Couldn't add agent.",
 ): AddMemberOutcome {
   return { kind: "failed", message: error instanceof Error ? error.message : fallback };
 }

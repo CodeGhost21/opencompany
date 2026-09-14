@@ -25,10 +25,10 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
  * drag-and-drop does not scroll a nested scroll container, so a column parked
  * off-screen could not be reached by the gesture at all.
  *
- * # Why this one drives `#/ledgers/tasks`
+ * # Why this one drives `#/company/work/tasks`
  *
  * Because that is where the board is. `LedgerBoard` renders every ledger's
- * columns under `#/ledgers/<slug>`, and the task board is one of them — the
+ * columns under `#/company/work/<slug>`, and the task board is one of them — the
  * `tasks` ledger — since issue #1140 retired the standalone Tasks page that had
  * been showing the same records through the same component.
  *
@@ -59,7 +59,7 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
 const API = "/api/v1/company";
 
 /** The board's address now that the standalone screen is gone. */
-const BOARD = "/#/ledgers/tasks";
+const BOARD = "/#/company/work/tasks";
 
 /**
  * Board order (issue #301), so a column can be addressed by position.

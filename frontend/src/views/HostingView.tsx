@@ -44,7 +44,7 @@ function reason(err: unknown): string {
 }
 
 /**
- * Settings → Hosting: the company's hosting provider connection.
+ * Connections → Hosting: the company's hosting provider connection.
  *
  * With a key stored here and the `hosting` grant in the manifest, a teammate can
  * put a site in this company's workspace on the public internet — with a managed
@@ -163,7 +163,7 @@ export function HostingView({ client, company }: Props) {
       width="full"
       description={
         <>
-          Connect a hosting provider so your teammates can put a site from this
+          Connect a hosting provider so your agents can put a site from this
           company&rsquo;s workspace on the internet — with a managed database
           behind it, and a custom domain in front.
         </>
@@ -217,7 +217,7 @@ export function HostingView({ client, company }: Props) {
         {/* The two problems this form cannot fix, said before the form so an
           operator does not fill it in and wonder why nothing happened. */}
         {!status.inBuild ? (
-          <Alert data-testid="hosting-not-in-build">
+          <Alert variant="warning" data-testid="hosting-not-in-build">
             <TriangleAlert className="size-4" />
             <AlertDescription>
               This host was built without the hosting tools, so these settings
@@ -233,7 +233,7 @@ export function HostingView({ client, company }: Props) {
             company={company}
             namespace="hosting"
             canManage={canManage}
-            explanation="No teammate will get the deployment tools even once a key is saved."
+            explanation="No agent will get the deployment tools even once a key is saved."
             onGranted={load}
             testId="hosting-not-granted"
           />
@@ -319,7 +319,7 @@ export function HostingView({ client, company }: Props) {
                       <AlertDialogTitle>Disconnect {status.provider}?</AlertDialogTitle>
                       <AlertDialogDescription>
                         This clears the write-only hosting token and team setting. They cannot be
-                        recovered; reconnect with a new token before teammates can deploy again.
+                        recovered; reconnect with a new token before agents can deploy again.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
@@ -336,7 +336,7 @@ export function HostingView({ client, company }: Props) {
         </Card>
 
         <p className="text-xs text-muted-foreground">
-          A deployment publishes the files in a teammate&rsquo;s workspace to the
+          A deployment publishes the files in an agent&rsquo;s workspace to the
           public internet under this account, and provisioning a database is a
           bill this account pays. Nothing else in this app can read the
           connection string a database produces — the provider injects it into

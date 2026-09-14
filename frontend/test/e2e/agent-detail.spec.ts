@@ -61,50 +61,12 @@ async function dismissOnboarding(page: Page) {
 }
 
 /**
- * Which Add-teammate dialog this host renders (issue #1989).
- *
- * The dialog has two shapes: a name and one box on a company whose copilot can
- * draft, and the original six-field form on one whose cannot. Both ship, and
- * this spec runs against both hosts — the default-feature lane compiles no
- * harness at all, and the live-brain lane has a model behind it — so it has to
- * ask rather than assume.
- *
- * Asked of the **host**, over the same route the dialog itself reads, rather
- * than sniffed off the DOM. Sniffing cannot work here: `cognition` is `null`
- * until `/inference` answers, and `null` renders the reduced dialog, so a probe
- * that looked at the dialog a moment after opening it would report "reduced" on
- * an `echo` host and then watch the form replace it. Asking the host is also
- * the stronger claim — it makes the branch an assertion about a company rather
- * than a description of whatever appeared.
- *
- * The rule is `addTeammateSurface`'s, restated deliberately: a spec that asked
- * the component which surface it had chosen would agree with itself no matter
- * what either of them did.
- *
- * A restatement has to be kept **complete**, which is the cost of the choice
- * above and one this helper has already paid once. It read `cognition` alone,
- * because that was the whole rule when it was written; the rule then grew a
- * second input — `designsProfiles`, the host's own answer about whether a
- * design pass can run — and a `hosted` or `sidecar` company reports a non-`echo`
- * cognition with no drafter behind it. Production renders the full form there
- * and this said `describe`, so the spec would have waited for a box that was
- * never going to appear. Both inputs, in the same order the component takes
- * them.
+ * Issue #1989's reduced-vs-full Add-teammate dialog split is retired.
+ * `AddMemberDialog` (`views/room/AddMemberDialog.tsx`) is the only
+ * Add-teammate surface now, on every host: name, icon, post, and it always
+ * lands the operator on the new agent's own page with the edit form open —
+ * there is no design pass and no second shape to detect.
  */
-async function addTeammateSurface(page: Page): Promise<"describe" | "form"> {
-  const status = await page.request.get("/api/v1/company/inference");
-  if (!status.ok()) return "describe";
-  const { cognition, designsProfiles } = (await status.json()) as {
-    cognition?: string;
-    designsProfiles?: boolean;
-  };
-  if (cognition === "echo") return "form";
-  // Only an explicit `false`. A host too old to report the capability says
-  // nothing, and the component reads that as "unknown" and offers the reduced
-  // dialog — so this must too.
-  if (designsProfiles === false) return "form";
-  return "describe";
-}
 
 async function goToTeam(page: Page) {
   // The Company page, whose Cards half is the roster (issue #1141). Bare
@@ -133,7 +95,7 @@ test("a company agent opens from its card and shows what it is", async ({ page }
 
   // A sub-page, not a modal: the agent is addressable, so it survives a
   // refresh and Back returns to the roster.
-  await expect(page).toHaveURL(/#\/team\/ceo$/);
+  await expect(page).toHaveURL(/#\/company\/agent\/ceo$/);
 
   await expect(page.getByTestId("agent-name")).toHaveText("Chief Executive");
 
@@ -143,12 +105,15 @@ test("a company agent opens from its card and shows what it is", async ({ page }
 
   // The instructions it was defined with — the "AGENT.md for that agent" the
   // issue asks for, which the manifest always carried and the console never
-  // showed after creation.
+  // showed after creation. Lives on the Instructions tab, not the Overview
+  // tab this arrival opens on.
+  await page.getByRole("tab", { name: "Instructions" }).click();
   await expect(page.getByTestId("agent-description")).toContainText("Sets direction");
 
   // The effective tool grants. Every one of these is an intersection of the
   // agent's own `tools` line with the company allow-list, and none of it was
-  // readable anywhere before this issue.
+  // readable anywhere before this issue — reported on its own Tools tab.
+  await page.getByRole("tab", { name: "Tools" }).click();
   const tools = page.getByTestId("agent-tools");
   await expect(tools).toContainText("workspace.read");
   await expect(tools).toContainText("composio");
@@ -163,7 +128,9 @@ test("a company agent opens from its card and shows what it is", async ({ page }
   // action behind it for a hosted tenant that has no checkout to edit and no
   // redeploy to make. A manifest teammate is editable now, through an overlay
   // layered on the record rather than a rewrite of the blueprint, so the button
-  // is live and the read-only note is gone.
+  // is live and the read-only note is gone. Back on Instructions, where Edit
+  // lives.
+  await page.getByRole("tab", { name: "Instructions" }).click();
   await expect(page.getByTestId("agent-edit")).toBeEnabled();
   await expect(page.getByTestId("agent-readonly-note")).toHaveCount(0);
 
@@ -190,7 +157,7 @@ test("a company agent opens from its card and shows what it is", async ({ page }
 test("desk membership is on the agent, and an agent is reachable by link", async ({ page }) => {
   // Deep link straight to an agent: the detail view resolves the id against the
   // host rather than falling back to the roster.
-  await page.goto("/#/team/engineer");
+  await page.goto("/#/company/agent/engineer");
   await dismissOnboarding(page);
 
   await expect(page.getByTestId("agent-name")).toHaveText("Engineer", { timeout: 30_000 });
@@ -202,84 +169,54 @@ test("desk membership is on the agent, and an agent is reachable by link", async
 
 test("an agent defined in the console can be read back and edited", async ({ page }) => {
   const role = "Spec Runner";
-  // What the record holds before the edit. On the full form it is what this
-  // spec types; on the reduced dialog it is what the host's design pass wrote,
-  // which no spec can predict — so it is read off the form the create lands on
-  // rather than asserted, and what IS asserted there is the property that
-  // matters: three separate, non-empty fields and a role that is a job title
-  // rather than a slice of the sentence.
-  let seededRole = role;
-  let seededDescription = "Original instructions.";
+  const seededDescription = "Original instructions.";
 
   // The `try` opens BEFORE the teammate is created, not after. The POST lands
   // as soon as the dialog is submitted, so a failure in the assertion that
   // follows it would otherwise skip the cleanup and leave the teammate on the
   // host — which breaks the next run of a spec that is meant to be repeatable,
   // and leaves a second card for `card(page, role)` to match.
-  const surface = await addTeammateSurface(page);
-
   try {
-    // Define one through the dialog the issue calls create-only.
-    await page.getByRole("button", { name: "Add teammate" }).first().click();
+    // Define one through the dialog the issue calls create-only: a name and a
+    // post. The description is written on the page this redirects to.
+    await page.getByRole("button", { name: "Add agent" }).first().click();
     const dialog = page.getByRole("dialog");
-    if (surface === "describe") {
-      await expect(dialog.getByTestId("team-describe-box")).toBeVisible();
-      // Nothing else to fill: Role, What they do, Instructions, the budget and
-      // the inbox are not on this dialog at all.
-      await expect(dialog.getByTestId("agent-field-role")).toHaveCount(0);
-      await dialog.getByTestId("team-describe-name").fill("Detail Spec");
-      await dialog
-        .getByTestId("team-describe-box")
-        .fill("Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm.");
-      await dialog.getByRole("button", { name: "Add teammate" }).click();
-      // The design pass is a model call, so this is the slow step of the walk.
-      await expect(page).toHaveURL(/#\/team\/[^?]+\?edit/, { timeout: 60_000 });
+    await dialog.getByLabel("Name").fill("Detail Spec");
+    await dialog.getByLabel("Post").fill(role);
+    await dialog.getByRole("button", { name: "Add agent" }).click();
 
-      // What the host designed, read off the form the create opened — which is
-      // the point of the redirect: a role a model wrote is in front of the
-      // operator, editable, before it can matter.
-      seededRole = await page.getByTestId("agent-field-role").inputValue();
-      seededDescription = await page.getByTestId("agent-field-description").inputValue();
-      const instructions = await page.getByTestId("agent-field-instructions").inputValue();
+    // The redirect lands on the new agent's own page with the edit form
+    // already open, so the description goes there.
+    await expect(page).toHaveURL(/#\/company\/agent\/[^?]+\?edit/, { timeout: 30_000 });
+    await page.getByTestId("agent-field-description").fill(seededDescription);
+    await page.getByTestId("agent-save").click();
+    await expect(page.getByTestId("agent-description")).toContainText(seededDescription, {
+      timeout: 30_000,
+    });
 
-      // The teeth on the whole redesign, and every one of these was false
-      // before the design pass existed: the role was the first sixty characters
-      // of the sentence with an ellipsis on the end, the description was the
-      // raw sentence, and the instructions were empty.
-      expect(seededRole, "a designed role is a job title").not.toContain("…");
-      expect(seededRole.trim().length).toBeGreaterThan(0);
-      expect(seededRole.length, "a job title, not a sentence").toBeLessThanOrEqual(60);
-      expect(seededDescription.trim().length).toBeGreaterThan(0);
-      expect(instructions.trim().length, "born with a persona, not a promise").toBeGreaterThan(0);
-      expect(instructions.trim(), "three fields, not one repeated").not.toBe(
-        seededDescription.trim(),
-      );
-      expect(seededRole.trim()).not.toBe(seededDescription.trim());
-
-      // Back to the roster, so the walk below is the same walk on both hosts.
-      await goToTeam(page);
-    } else {
-      await expect(dialog.getByTestId("agent-field-role")).toBeVisible();
-      await dialog.getByTestId("agent-field-name").fill("Detail Spec");
-      await dialog.getByTestId("agent-field-role").fill(role);
-      await dialog.getByTestId("agent-field-description").fill(seededDescription);
-      await dialog.getByRole("button", { name: "Add teammate" }).click();
-    }
-    // By name, not by role: on the reduced dialog the role is the host's and
-    // this spec does not know it until it has read it back.
+    // Back to the roster, so the walk below starts from the same place the
+    // rest of this file's tests do.
+    await goToTeam(page);
     await expect(card(page, "Detail Spec")).toBeVisible({ timeout: 30_000 });
 
     // Open it. This is the half that was impossible: the roster was write-once
     // per member, so iterating on an agent meant deleting it and starting over.
     await card(page, "Detail Spec").getByTestId("team-card-open").click();
     await expect(page.getByTestId("agent-source")).toHaveText("Added here");
+
+    // Description and persona live on the Instructions tab, not the Overview
+    // tab this plain (non-`?edit`) arrival opens on.
+    await page.getByRole("tab", { name: "Instructions" }).click();
     await expect(page.getByTestId("agent-description")).toContainText(seededDescription);
 
     // A console-defined agent holds the company's standard grant, so it reads
-    // back with the whole allow-list rather than an empty tool list.
+    // back with the whole allow-list rather than an empty tool list — reported
+    // on its own Tools tab.
+    await page.getByRole("tab", { name: "Tools" }).click();
     await expect(page.getByTestId("agent-tools")).toContainText("composio");
 
-    // Edit it.
+    // Edit it, back on Instructions.
+    await page.getByRole("tab", { name: "Instructions" }).click();
     await page.getByTestId("agent-edit").click();
     await page.getByTestId("agent-field-description").fill("Rewritten instructions.");
     await page.getByTestId("agent-field-role").fill("Spec Runner II");
@@ -304,6 +241,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
     });
     await page.reload();
     await dismissOnboarding(page);
+    await page.getByRole("tab", { name: "Instructions" }).click();
     await expect(page.getByTestId("agent-description")).toContainText("Rewritten instructions.", {
       timeout: 30_000,
     });
@@ -318,7 +256,7 @@ test("an agent defined in the console can be read back and edited", async ({ pag
     await goToTeam(page);
     const leftover = page.getByTestId("team-card").filter({ hasText: "Detail Spec" }).first();
     if (await leftover.count()) {
-      await leftover.getByLabel("Teammate actions").click();
+      await leftover.getByLabel("Agent actions").click();
       await page.getByRole("menuitem", { name: "Remove" }).click();
       await expect(leftover).toHaveCount(0, { timeout: 30_000 });
     }

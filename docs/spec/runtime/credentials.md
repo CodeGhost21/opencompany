@@ -16,7 +16,142 @@ backend derives the Composio entity from whatever bearer it is handed, and a
 TinyHumans key is a bearer it recognises. So the key **authorizes Composio
 directly** — there is no provisioning step that trades it for a second token,
 and no per-tenant provider application to register with Google, Slack or GitHub.
-A company with a key set connects Gmail by clicking Connect.
+
+### Not every TinyHumans key reaches Composio
+
+The bearer has to carry the `connections` scope. The backend requires it on
+*every* `/agent-integrations/composio` request, safe methods included, and
+refuses to mint it on `POST /api-keys` — so a key a person created by hand in
+their TinyHumans account, and then pasted into `PUT …/credential`, connects
+nothing. It is a real credential that authenticates fine and is refused at that
+one surface.
+
+Two principals do carry it:
+
+- **An attested hosted tenant.** The manager-issued, audience-bound cluster
+  token the instance authenticates with is granted
+  `read`/`connections`/`inference` automatically. A hosted company therefore
+  reaches Composio with no key set at all.
+- **A key issued by the grant flow below**, when the console that asked for it
+  is a provisioned tenant origin.
+
+This is worth stating plainly because the console cannot tell the difference
+from the outside: `PUT …/credential` accepts any string, and a pasted key
+reports `configured: true` and `source: company` whether or not it can do the
+thing the card describes.
+
+## Getting the key without pasting one
+
+`POST …/credential/link/start` → the hub → `POST …/credential/link/finish`.
+Modelled on OpenRouter's PKCE key exchange, and it exists because the
+alternative was an operator leaving the app to mint a key by hand and carrying
+it back on a clipboard.
+
+1. **Start.** The host mints a `code_verifier`, keeps it in memory
+   (`server::hub_link`), and answers with the hub URL to navigate to — carrying
+   only `base64url(sha256(verifier))` and an opaque `state`.
+2. **The hub.** The person signs in with their provider and approves a consent
+   screen naming the requesting origin and the scopes.
+
+   The URL is the **site's** `/connect` page where a site is derivable, and the
+   API's `GET /auth/key` where it is not. `/auth/key` defaults to
+   `provider=google` and redirects there immediately: an admin who pressed a
+   button in their own console arrived at a Google account picker naming nobody,
+   with no way to use the account they actually sign in here with. `/connect`
+   names the instance asking, says what will be created, offers the same three
+   providers the sign-in screen does, and hands off to `/auth/key?provider=…`
+   with every grant parameter passed through — `server::hub_identity::key_grant_query`
+   builds them once, so the two pages cannot disagree about the challenge. The hub decides those
+   scopes from the callback origin: a **provisioned tenant origin** may receive
+   `connections`; a loopback console receives what a human could mint by hand.
+3. **Finish.** The browser returns with a single-use `code`. The host looks up
+   the verifier by `state`, redeems both at the hub, and stores what comes back.
+
+The verifier never leaves the host and the key never reaches the browser. That
+is the reason the exchange is server-side rather than done in the page: whatever
+redeems the code receives the key, and a `connections` key passing through a tab
+is a credential in a place nobody can account for.
+
+**Where the browser comes back to.** The callback is
+`{callback_origin}/?company=…&key=link&state=…`, resolved in this order
+(`server::ops::company_key::callback_origin`):
+
+1. **A stated `OPENCOMPANY_PUBLIC_URL`** always wins — the console's own origin,
+   because the console is what holds the session that may call `finish` and
+   what redeems the code.
+2. **A loopback `Origin` request header**, when nothing is stated — `http://` to
+   `localhost` or a loopback literal only, the same shape the hub's own gate
+   admits. This is what makes local development need no configuration at all:
+   the dev console on `http://localhost:5173` is sent back to itself, because
+   whatever pressed the button is where the answer should come back to. A
+   non-loopback origin is not trusted here even though a stolen code redeems
+   nothing without the verifier this host keeps.
+3. **`host_base_url()`** — `http://{bind}` — otherwise. This is the wrong
+   answer for local development in a way that only shows up at the end of the
+   flow: the host on `127.0.0.1:8080` serves no page unless
+   `OPENCOMPANY_CONSOLE_DIR` is set, so an operator signed in, approved, and
+   landed on a 404 holding a spent code, with nothing on that page able to say
+   what had gone wrong.
+
+A host that advertises a stated origin serving no console still answers the
+return leg with a 404 and the grant dies holding a spent code. In a hosted
+tenant the console is served from that origin already; locally, either rely on
+tier 2 automatically, set `OPENCOMPANY_CONSOLE_DIR` to a built `frontend/dist`
+so the host origin serves it, or point `OPENCOMPANY_PUBLIC_URL` at the dev
+server (`http://localhost:5173`).
+
+**The key never reaches the browser.** The return leg carries `state` and a
+one-time `code`, and nothing else — the console posts both to its own host,
+which redeems them and stores the key. There is deliberately no screen anywhere
+in this flow that displays the key: whatever holds the code and the verifier can
+mint it, and a `connections`-scoped credential rendered into a page is one that
+has passed through a tab, its history, and any extension reading either. A key
+somebody wants to see with their own eyes is minted by hand on the dashboard's
+API-keys page instead.
+
+**One grant arms two credentials.** The minted key is stored as both
+`tinyhumans/key` and `inference/key`, and the company's inference provider is
+declared `managed`. An admin who had to run the flow once per page — once for
+Connections, once for Inference — would be back to two errands, which is the
+thing this replaces.
+
+The paste field stays. A host with no hub wired reports `hubLink: false` on
+`GET …/credential`, the console renders no button, and the screen is exactly
+what it was before this existed.
+
+### Which hub, and the two pages the console does not reimplement
+
+Everything above happens against whichever hub `TINYHUMANS_API_URL` names — the
+production one by default, `https://staging-api.tinyhumans.ai` for a console
+working against staging. Nothing else has to be set to move the flow: the
+authorize URL is built from that value (`server::hub_identity::key_grant_url`),
+and so is the callback, from `OPENCOMPANY_PUBLIC_URL`.
+
+Two things the grant deliberately cannot do are **revoke** the key it minted and
+**pay** for what that key spends. Both end an errand somewhere this console has
+no business being — one withdraws an instance's access, the other moves money —
+so both are links out to the hub's own dashboard, behind that person's own
+sign-in:
+
+| Page | Path |
+|---|---|
+| Choose a provider and approve a grant | `{site}/connect?…` |
+| Manage API keys — see, name, revoke | `{site}/dashboard?tab=api-keys` |
+| Top up the balance those keys spend | `{site}/dashboard?tab=billing` |
+
+`GET …/credential` carries them as `account.manageKeysUrl` and
+`account.topUpUrl`, resolved on the **host**. The console never assembles them,
+because only the host knows which hub it was pointed at: a link built in the
+browser would send an operator working on staging to production's billing page,
+where the top-up would arrive in the wrong account and look like it had simply
+not arrived.
+
+`{site}` is derived from `api_url` by the ecosystem's naming convention
+(`server::hub_account`): `api.tinyhumans.ai` → `tinyhumans.ai`,
+`staging-api.tinyhumans.ai` → `staging.tinyhumans.ai`. A backend the convention
+does not describe — self-hosted, loopback — derives nothing, `account` is absent,
+and the console renders no link rather than one pointing at a host that need not
+exist. `TINYHUMANS_WEB_URL` states the site outright where that is wrong.
 
 ## Where a connection lives
 

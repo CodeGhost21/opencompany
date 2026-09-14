@@ -268,7 +268,7 @@ describe("deriving stops the moment the id is somebody's (#1053)", () => {
   it("starts derivable again on the next open, so the latch is not one-way", async () => {
     await openCreateForm();
     await type(field("id"), "the-first-one");
-    await type(field("name"), "First workflow");
+    await type(field("name"), "First automation");
     expect(field("id").value).toBe("the-first-one");
 
     // The latch is deliberately sticky WITHIN an open — clobbering a chosen id
@@ -278,8 +278,8 @@ describe("deriving stops the moment the id is somebody's (#1053)", () => {
     await render({ open: false });
     await openCreateForm();
 
-    await type(field("name"), "Second workflow");
-    expect(field("id").value).toBe("second-workflow");
+    await type(field("name"), "Second automation");
+    expect(field("id").value).toBe("second-automation");
   });
 
   it("never derives over the id a copilot correction came back to", async () => {

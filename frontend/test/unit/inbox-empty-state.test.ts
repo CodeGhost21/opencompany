@@ -44,7 +44,7 @@ describe("the empty inbox state", () => {
       (anchor) => anchor.textContent === "Company page",
     );
     expect(link?.getAttribute("href")).toBe("#/company");
-    expect(container.textContent).toContain("open a teammate to flip on the inbox toggle");
+    expect(container.textContent).toContain("open an agent to flip on the inbox toggle");
     expect(container.textContent).not.toContain("Team page");
   });
 });

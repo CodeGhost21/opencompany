@@ -16,7 +16,7 @@ use super::{
 use crate::runtime::builder::{agent_scoped_grants, effective_grants};
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn subdirs(dir: &Path) -> Vec<PathBuf> {
@@ -104,25 +104,25 @@ fn every_company_skill_and_workspace_parses() {
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
 const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
-    "agentic_accounting_firm",
-    "agentic_consultation_firm",
-    "agentic_customer_support",
-    "agentic_design_studio",
-    "agentic_enterprise_sales",
-    "agentic_game_business",
-    "agentic_game_studio",
-    "agentic_influencer_business",
-    "agentic_law_firm",
-    "agentic_marketing_agency",
-    "agentic_media_company",
-    "agentic_pharma_startup",
-    "agentic_product_team",
-    "agentic_realestate_company",
-    "agentic_recruiting_company",
-    "agentic_research_lab",
-    "agentic_software_company",
-    "agentic_venture_capital",
-    "agentic_venture_studio",
+    "accounting_firm",
+    "consultation_firm",
+    "customer_support",
+    "design_studio",
+    "enterprise_sales",
+    "game_business",
+    "game_studio",
+    "influencer_business",
+    "law_firm",
+    "marketing_agency",
+    "media_company",
+    "pharma_startup",
+    "product_team",
+    "realestate_company",
+    "recruiting_company",
+    "research_lab",
+    "software_company",
+    "venture_capital",
+    "venture_studio",
     "signals_opportunity_studio",
     "startup_accelerator",
 ];
@@ -130,7 +130,7 @@ const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
 /// Templates that must NEVER reach the metered search backend: `e2e_harness` and
 /// `e2e_setup` are deterministic fixtures (a priced network call would make them
 /// non-hermetic and flaky), `openhuman_demo` is a walkthrough nobody opted
-/// into spend for, and `agentic_math_lab` is denied for a reason of its own —
+/// into spend for, and `math_lab` is denied for a reason of its own —
 /// its whole claim (and `hive_math_lab`'s, the same lab on one deliberating desk) is that it *computes* an exact answer, and a lab that can
 /// search can look one up. A run that looked the answer up passes the lab's
 /// end-to-end spec while proving nothing about whether the roster can solve
@@ -142,13 +142,20 @@ const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
 /// a desk that could reach the web would answer about vending machines in general
 /// instead of about these eight. Withholding the network is what makes a decision
 /// there attributable to the fleet it was made about.
-const SEARCH_DENIED_COMPANIES: [&str; 6] = [
-    "agentic_math_lab",
+const SEARCH_DENIED_COMPANIES: [&str; 7] = [
+    "math_lab",
     "hive_math_lab",
     "e2e_harness",
     "e2e_setup",
     "openhuman_demo",
     "vending_machine_co",
+    // Denied on exactly `vending_machine_co`'s argument. Every fact this bundle
+    // reasons from — what is on the order, which variants are in stock, what the
+    // customer paid — is a tool call against the shared tau2 retail state, and a
+    // desk that could reach the web would answer about online retail in general
+    // instead of about THIS order. It is also scored against that state, so a
+    // fact from outside it is not merely off-topic, it is unattributable.
+    "retail_co",
 ];
 
 /// Templates that simply do not grant `search` today. Unlike
@@ -167,7 +174,7 @@ const SEARCH_DENIED_COMPANIES: [&str; 6] = [
 ///
 /// This list exists so the posture is a *partition* rather than an allow-list.
 /// An allow-list asserts a decision someone remembered, so it cannot notice a
-/// company nobody remembered: `agentic_software_company` shipped with nine
+/// company nobody remembered: `software_company` shipped with nine
 /// agents and no search grant, and the suite stayed green for it (issue #878).
 /// [`every_company_declares_a_search_posture`] asserts this list plus the other
 /// two covers `companies/` exactly, so a new template fails CI until whoever
@@ -177,10 +184,10 @@ const SEARCH_UNGRANTED_COMPANIES: [&str; 0] = [];
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
 /// excluded: it overrides the default down to a research-only belt on purpose,
-/// and `agentic_research_lab` is excluded for the same reason — its belt is
+/// and `research_lab` is excluded for the same reason — its belt is
 /// `["*", "search"]`, dropping `media` and `composio`, because a research lab
 /// has no use for image generation or third-party OAuth side effects and both
-/// are opt-in spend. `agentic_product_team` is excluded on that same
+/// are opt-in spend. `product_team` is excluded on that same
 /// research-lab argument: it produces documents and ledger rows, so it drops
 /// both opt-in namespaces too.
 const FULL_BELT_PLUS_SEARCH: [&str; 8] = [
@@ -189,14 +196,14 @@ const FULL_BELT_PLUS_SEARCH: [&str; 8] = [
     // this list actually guards — that an extended `allow` did not silently
     // drop an inherited entry — which is independent of *which* namespace the
     // template extended it with.
-    "agentic_accounting_firm",
-    "agentic_consultation_firm",
-    "agentic_design_studio",
-    "agentic_law_firm",
-    "agentic_marketing_agency",
-    "agentic_media_company",
-    "agentic_software_company",
-    "agentic_venture_studio",
+    "accounting_firm",
+    "consultation_firm",
+    "design_studio",
+    "law_firm",
+    "marketing_agency",
+    "media_company",
+    "software_company",
+    "venture_studio",
 ];
 
 fn load_company(name: &str) -> CompanyManifest {
@@ -278,7 +285,7 @@ fn fixture_templates_never_grant_search() {
 ///
 /// The guard #312 left behind was allow-list shaped: it checked that the six
 /// companies someone listed do grant `search`, and said nothing about the
-/// fifteen it did not list. `agentic_software_company` therefore shipped nine
+/// fifteen it did not list. `software_company` therefore shipped nine
 /// agents whose `web_search` was never wired, with a green suite. An allow-list
 /// can only ever assert a decision somebody remembered.
 ///
@@ -542,10 +549,10 @@ fn a_deskless_teammate_minted_with_no_scope_never_inherits_billing() {
     use super::{CreationGrant, creation_default_grants};
 
     for company in [
-        "agentic_marketing_agency",
-        "agentic_accounting_firm",
-        "agentic_venture_studio",
-        "agentic_software_company",
+        "marketing_agency",
+        "accounting_firm",
+        "venture_studio",
+        "software_company",
     ] {
         let manifest = load_company(company);
         // The state that makes the escalation reachable: a minter scoped only by
@@ -745,8 +752,7 @@ fn every_bundled_workflow_is_runnable_against_its_roster() {
 fn the_marketing_campaign_preset_is_runnable() {
     use crate::workflows::translate;
 
-    let path =
-        repo_root().join("companies/agentic_marketing_agency/workflows/campaign_pipeline.toml");
+    let path = repo_root().join("companies/marketing_agency/workflows/campaign_pipeline.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     let graph = translate(&parse_workflow(&text).expect("campaign parses"));
     let node = |id: &str| {
@@ -779,7 +785,7 @@ fn the_marketing_campaign_preset_is_runnable() {
 /// the stripping.
 #[test]
 fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
-    let manifest = load_company("agentic_marketing_agency");
+    let manifest = load_company("marketing_agency");
     let creative = manifest
         .group_chats
         .iter()
@@ -839,7 +845,7 @@ fn a_restricting_desk_does_not_strip_the_workspace_write_token() {
 /// that names it.
 #[test]
 fn a_marketing_biller_can_be_named_from_the_console() {
-    let manifest = load_company("agentic_marketing_agency");
+    let manifest = load_company("marketing_agency");
 
     // The desks this PR touched state no ceiling — the exclusion must not live
     // on an unwidenable layer.
@@ -921,7 +927,7 @@ fn a_marketing_biller_can_be_named_from_the_console() {
 /// ceiling exists, and no shipped teammate resolves to holding it.
 #[test]
 fn the_software_company_ships_billing_that_reaches_nobody_yet() {
-    let manifest = load_company("agentic_software_company");
+    let manifest = load_company("software_company");
 
     assert!(
         grants_chargebee_explicit(&manifest.tools.allow),
@@ -994,7 +1000,7 @@ fn the_software_company_ships_billing_that_reaches_nobody_yet() {
 /// alone. Pinned through the same three-level narrowing the roster build uses.
 #[test]
 fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
-    let manifest = load_company("agentic_marketing_agency");
+    let manifest = load_company("marketing_agency");
     let strategy = manifest
         .group_chats
         .iter()
@@ -1052,12 +1058,12 @@ fn a_creative_member_cross_seated_on_an_unrestricted_desk_stays_billing_less() {
 ///     output. The single exception is named below so removing any other
 ///     destination fails rather than passing as "well, some have none".
 ///
-/// `agentic_research_lab` explains in its own manifest why it has no desk: its
+/// `research_lab` explains in its own manifest why it has no desk: its
 /// workflow is the proving ground for collapsing desk coordination into the
 /// graph itself.
 #[test]
 fn every_seeded_output_destination_resolves_against_its_own_manifest() {
-    const DESKLESS_WORKFLOW_TEMPLATE: &str = "agentic_research_lab";
+    const DESKLESS_WORKFLOW_TEMPLATE: &str = "research_lab";
 
     let mut checked = 0;
     let mut with_destination = 0;
@@ -1327,26 +1333,26 @@ fn every_company_ledger_can_be_closed_and_says_why() {
 /// is empty because whoever added this bundle forgot" are indistinguishable
 /// afterwards.
 const SETUP_SEEDED_COMPANIES: [&str; 24] = [
-    "agentic_accounting_firm",
-    "agentic_consultation_firm",
-    "agentic_customer_support",
-    "agentic_design_studio",
-    "agentic_enterprise_sales",
-    "agentic_game_business",
-    "agentic_game_studio",
-    "agentic_influencer_business",
-    "agentic_law_firm",
-    "agentic_marketing_agency",
-    "agentic_math_lab",
-    "agentic_media_company",
-    "agentic_pharma_startup",
-    "agentic_product_team",
-    "agentic_realestate_company",
-    "agentic_recruiting_company",
-    "agentic_research_lab",
-    "agentic_software_company",
-    "agentic_venture_capital",
-    "agentic_venture_studio",
+    "accounting_firm",
+    "consultation_firm",
+    "customer_support",
+    "design_studio",
+    "enterprise_sales",
+    "game_business",
+    "game_studio",
+    "influencer_business",
+    "law_firm",
+    "marketing_agency",
+    "math_lab",
+    "media_company",
+    "pharma_startup",
+    "product_team",
+    "realestate_company",
+    "recruiting_company",
+    "research_lab",
+    "software_company",
+    "venture_capital",
+    "venture_studio",
     "hive_math_lab",
     "signals_opportunity_studio",
     "startup_accelerator",
@@ -1359,7 +1365,16 @@ const SETUP_SEEDED_COMPANIES: [&str; 24] = [
 /// and `openhuman_demo` also declare their own `[[mcp_server]]` inline — so
 /// seeded cards and a second declaration of `deepwiki` would both perturb what
 /// they exist to pin down.
-const FIXTURE_COMPANIES: [&str; 3] = ["e2e_harness", "e2e_setup", "openhuman_demo"];
+const FIXTURE_COMPANIES: [&str; 4] = [
+    "e2e_harness",
+    "e2e_setup",
+    "openhuman_demo",
+    // A benchmark fixture: it proves a mechanism and is asserted against
+    // exactly, by tau2's own `evaluation_criteria`. Seeded cards would be
+    // work nobody asked for sitting in a company whose only job is to answer
+    // one replayed task and be scored on the end state.
+    "retail_co",
+];
 
 /// Every company is either a vertical that ships setup content or a fixture that
 /// deliberately does not — and the classification is re-derived from the files
@@ -1563,4 +1578,174 @@ fn every_shipped_setup_card_is_pickable() {
             }
         }
     }
+}
+
+/// One teammate's effective grants under the full three-level narrowing a
+/// running company applies: `[tools].allow ∩ group_chat.tools ∩ [[agent]].tools`.
+///
+/// Runs the real `agent_scoped_grants` over the desks this teammate actually
+/// sits on, so a bundle cannot pass here and fail in the harness. The
+/// two-level `grants_for_one_agent` above skips the desk ceiling, which is the
+/// level a reachability question turns on.
+fn desk_scoped_grants(manifest: &CompanyManifest, agent: &super::Agent) -> Vec<String> {
+    let desk_tools: Vec<Vec<String>> = manifest
+        .group_chats
+        .iter()
+        .filter(|chat| chat.members.iter().any(|member| member == &agent.id))
+        .map(|chat| chat.tools.clone())
+        .collect();
+    let desk_refs: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+    agent_scoped_grants(&manifest.tools.allow, &desk_refs, agent.tools.as_deref())
+}
+
+/// Every bundle, with its global baseline left on — the roster a running
+/// company actually has.
+fn load_company_with_globals(dir: &Path) -> CompanyManifest {
+    CompanyManifest::from_path(dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()))
+}
+
+/// A declared MCP server must be callable by somebody.
+///
+/// Declaring a server and granting the namespace are separate edits in
+/// separate files, and nothing until this test compared them. A bundle could
+/// ship a server, document it in its README, pass every parse and safety check
+/// above, and still hand it to a roster where no teammate holds `mcp:*` — an
+/// install that connects, reports healthy, and answers no call anyone can make.
+///
+/// Asserted for declared servers whether or not they ship enabled: enabling is
+/// an operator's one click, and the grant has to already be right when they
+/// make it.
+#[test]
+fn every_declared_mcp_server_is_reachable_by_some_teammate() {
+    let mut checked = 0usize;
+    let mut unreachable = Vec::new();
+    for company in subdirs(&repo_root().join("companies")) {
+        let name = company.file_name().unwrap().to_str().unwrap().to_string();
+        let manifest = load_company_with_globals(&company);
+        for server in &manifest.mcp_servers {
+            checked += 1;
+            let reached = manifest.agents.iter().any(|agent| {
+                crate::runtime::tools::grants_cover_server(
+                    &desk_scoped_grants(&manifest, agent),
+                    &server.name,
+                )
+            });
+            if !reached {
+                unreachable.push(format!(
+                    "  {name}: `{}` — company grants {:?}",
+                    server.name, manifest.tools.allow
+                ));
+            }
+        }
+    }
+    assert!(
+        unreachable.is_empty(),
+        "{} declared MCP server(s) no teammate can reach. Connecting one reports healthy \
+         and answers no call anybody can make:\n{}",
+        unreachable.len(),
+        unreachable.join("\n")
+    );
+    assert!(
+        checked > 0,
+        "no shipped bundle declared an MCP server, so this check looked at nothing — \
+         the walk found no manifests rather than finding them clean"
+    );
+}
+
+/// A desk that can reach none of the company's MCP servers is a dead end.
+///
+/// A desk is a conversation an operator opens, so "somebody in the company can
+/// call it" is not the promise the screen makes — the promise is that the
+/// teammates in front of them can.
+///
+/// Deliberately "at least one server", not "every server". Scoping a single
+/// server to the desk that owns it is the point of the middle level:
+/// `retail_co` gives each teammate exactly one `mcp:<server>` and its desks
+/// reach only their own, which is correct and must keep passing. What a desk
+/// may not be is cut off entirely from a company that installed servers.
+///
+/// This is the level that `every_declared_mcp_server_is_reachable_by_some_teammate`
+/// cannot see: a bundle whose other desks hold the grant passes it while the
+/// desk an operator is typing into holds nothing.
+#[test]
+fn every_desk_can_reach_at_least_one_declared_mcp_server() {
+    let mut dead_ends = Vec::new();
+    for company in subdirs(&repo_root().join("companies")) {
+        let name = company.file_name().unwrap().to_str().unwrap().to_string();
+        let manifest = load_company_with_globals(&company);
+        if manifest.mcp_servers.is_empty() {
+            continue;
+        }
+        for chat in &manifest.group_chats {
+            if chat.members.is_empty() {
+                continue;
+            }
+            let reached = chat.members.iter().any(|member| {
+                manifest
+                    .agents
+                    .iter()
+                    .find(|agent| &agent.id == member)
+                    .is_some_and(|agent| {
+                        let grants = desk_scoped_grants(&manifest, agent);
+                        manifest.mcp_servers.iter().any(|server| {
+                            crate::runtime::tools::grants_cover_server(&grants, &server.name)
+                        })
+                    })
+            });
+            if !reached {
+                dead_ends.push(format!(
+                    "  {name}: desk `{}` reaches none of {} installed server(s) — desk ceiling {:?}",
+                    chat.id,
+                    manifest.mcp_servers.len(),
+                    chat.tools
+                ));
+            }
+        }
+    }
+    assert!(
+        dead_ends.is_empty(),
+        "{} desk(s) narrow the company grant past a server the company installed. An \
+         operator talking to one gets a teammate that cannot call a server the console \
+         reports as connected:\n{}",
+        dead_ends.len(),
+        dead_ends.join("\n")
+    );
+}
+
+/// The global baseline reaches MCP.
+///
+/// Every company inherits these teammates whichever vertical it started from,
+/// including one minted by the setup wizard, and they answer in the main
+/// channel. A baseline teammate without the namespace makes MCP unreachable in
+/// a company whose own roster and grants are entirely correct — the one gap
+/// neither check above can see, because it is not any bundle's fault.
+///
+/// `BASE_BELT` already grants it to every teammate the wizard mints; this holds
+/// the hand-authored baseline to the same rule.
+#[test]
+fn every_global_teammate_can_reach_an_installed_mcp_server() {
+    let globals = crate::globals::agents();
+    assert!(
+        !globals.is_empty(),
+        "the global baseline is empty, so this check looked at nothing"
+    );
+    let allow = vec!["mcp:*".to_string()];
+    let unreachable: Vec<String> = globals
+        .iter()
+        .filter(|agent| {
+            !crate::runtime::tools::grants_cover_server(
+                &agent_scoped_grants(&allow, &[], agent.tools.as_deref()),
+                "any-installed-server",
+            )
+        })
+        .map(|agent| format!("  `{}` — belt {:?}", agent.id, agent.tools))
+        .collect();
+    assert!(
+        unreachable.is_empty(),
+        "{} global teammate(s) cannot reach an installed MCP server. Every company \
+         inherits these, so the gap follows the baseline into companies whose own grants \
+         are correct:\n{}",
+        unreachable.len(),
+        unreachable.join("\n")
+    );
 }

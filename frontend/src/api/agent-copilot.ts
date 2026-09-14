@@ -152,11 +152,11 @@ export interface ProfileDraft {
 export function refusalNotice(reason: DraftRefusal | undefined): string {
   switch (reason) {
     case "no_model":
-      return "This company has no model configured, so the copilot can't draft yet — set one up in Settings → Inference, or write the field yourself.";
+      return "This company has no model configured, so the copilot can't draft yet — set one up in Connections → Inference, or write the field yourself.";
     case "model_unreachable":
-      return "The model didn't answer in time. Try again, or check the provider in Settings → Inference.";
+      return "The model didn't answer in time. Try again, or check the provider in Connections → Inference.";
     case "unreadable":
-      return "The model's answer couldn't be used. Try again, or add a note saying what this teammate should own.";
+      return "The model's answer couldn't be used. Try again, or add a note saying what this agent should own.";
     case "budget_exhausted":
       // The one reason with nothing to retry: the ceiling is a plan setting,
       // not a transient failure, so "try again" would be advice that cannot
@@ -229,7 +229,7 @@ export function draftNewAgentField(
   company: string | null,
   field: DraftableField,
   conversation: CopilotTurn[],
-  teammate: {
+  agent: {
     role: string;
     name?: string;
     description?: string;
@@ -239,10 +239,10 @@ export function draftNewAgentField(
   return client.post<ProfileDraft>(`${client.scopeFor(company)}/team/draft`, {
     field,
     messages: conversation.map(turnForWire),
-    role: teammate.role.trim(),
-    name: teammate.name?.trim() || undefined,
-    description: teammate.description?.trim() || undefined,
-    instructions: teammate.instructions?.trim() || undefined,
+    role: agent.role.trim(),
+    name: agent.name?.trim() || undefined,
+    description: agent.description?.trim() || undefined,
+    instructions: agent.instructions?.trim() || undefined,
   });
 }
 
@@ -341,14 +341,14 @@ const DESIGN_TIMEOUT_MS = 105_000;
 export function designTeammate(
   client: OpenCompanyClient,
   company: string | null,
-  teammate: { name?: string; description: string },
+  agent: { name?: string; description: string },
   signal?: AbortSignal,
 ): Promise<TeammateDesign> {
   return client.post<TeammateDesign>(
     `${client.scopeFor(company)}/team/design`,
     {
-      name: teammate.name?.trim() || undefined,
-      description: teammate.description.trim(),
+      name: agent.name?.trim() || undefined,
+      description: agent.description.trim(),
     },
     { signal, timeoutMs: DESIGN_TIMEOUT_MS },
   );

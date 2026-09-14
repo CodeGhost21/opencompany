@@ -53,6 +53,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { consoleHref } from "@/lib/console-paths";
 import { personName } from "@/lib/person";
 import { roleSubtitle, toneFor, type TeamMember } from "@/lib/team";
 import {
@@ -81,7 +82,7 @@ import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
 import {
   AddMemberDialog,
   type NewMemberFields,
-} from "@/views/chat/AddMemberDialog";
+} from "@/views/room/AddMemberDialog";
 
 const SEAT_MIME = "application/x-opencompany-seat";
 
@@ -111,8 +112,8 @@ interface DragSeat {
 }
 
 /**
- * Where a teammate named on this chart opens: `#/team/<agentId>`, the sub-page
- * `TeamView` already routes to `AgentDetailView` (issue #1102).
+ * Where a teammate named on this chart opens: `#/company/agent/<agentId>`,
+ * the sub-page `TeamView` already routes to `AgentDetailView` (issue #1102).
  *
  * A **link**, not a click handler on a `div`. The console routes on the hash,
  * so an `<a href>` is the real address: middle-click and cmd-click open a
@@ -126,12 +127,15 @@ interface DragSeat {
  *
  * `null` for an id that is blank or missing, which is the whole point of
  * routing through this function: a teammate with no usable id must render as
- * plain text rather than as a link to `#/team/undefined`, which is a page that
- * cannot exist and would report the teammate as deleted.
+ * plain text rather than as a link to `#/company/agent/undefined`, which is a
+ * page that cannot exist and would report the teammate as deleted.
+ *
+ * Through `consoleHref` rather than a hand-composed template, so this cannot
+ * drift from the address `formatConsolePath` gives every other Company link.
  */
 function teamHref(agentId: string | null | undefined): string | null {
   const id = agentId?.trim();
-  return id ? `#/team/${encodeURIComponent(id)}` : null;
+  return id ? consoleHref("team", id) : null;
 }
 
 /**
@@ -372,7 +376,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
 
   /**
    * Company creation is durable structure, so a host without the team write
-   * plane must explain the refusal rather than borrow ChatView's local-only
+   * plane must explain the refusal rather than borrow RoomView's local-only
    * fallback. A local row could not be placed on a desk and would vanish on
    * the next chart read.
    */
@@ -467,7 +471,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
       // is fixed on the chart they are leaving) and only then taken away.
       if (fields.landOnProfile) onOpenAgent?.(created.id, { edit: true });
     } catch (e) {
-      outcome = addMemberFailure(e, "Could not create teammate.");
+      outcome = addMemberFailure(e, "Could not create agent.");
       if (createdOnHost) {
         // The teammate exists and something after it threw. Clearing the
         // dialog is right here: a retry would create a second one.
@@ -498,7 +502,7 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
       */}
       <PageHeader
         title="Desks"
-        width="4xl"
+        width="full"
         rowTestId="desks-header"
         eyebrow={
           onBack && (
@@ -553,12 +557,12 @@ export function OrgChartView({ client, company, focusDeskId, onBack, onOpenAgent
                 }}
               >
                 <UserPlus className="mr-1.5 size-4" />
-                Add teammate
+                Add agent
               </Button>
           </>
         }
       />
-      <div className="mx-auto min-h-0 w-full max-w-4xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         {error && (
           <Alert variant="destructive">
@@ -988,25 +992,25 @@ function DeskNode({
           {/*
             One control, two ways to staff a desk.
 
-            This was two adjacent controls: a full-width "Add teammate" button
+            This was two adjacent controls: a full-width "Add agent" button
             that seated somebody already on the roster, and — flush against it,
-            with no label — a `UserPlus` icon that *created* a teammate here.
+            with no label — a `UserPlus` icon that *created* an agent here.
             Three problems, all of them the same problem:
 
-            - the labelled one said "Add teammate" and meant "add an existing
-              one", while the page header's "New teammate" wore the identical
-              icon to the unlabelled one beside it. "Add teammate" named two
+            - the labelled one said "Add agent" and meant "add an existing
+              one", while the page header's "New agent" wore the identical
+              icon to the unlabelled one beside it. "Add agent" named two
               different actions on the same screen;
             - an icon button with no visible label, touching a button that
               already says the words, is not discoverable. Nobody looking for
-              "define a new teammate on this desk" finds a bare glyph;
-            - when every roster teammate was already seated, the labelled
+              "define a new agent on this desk" finds a bare glyph;
+            - when every roster agent was already seated, the labelled
               control went disabled and read "Everyone is on this desk" — so
               the only remaining way in was the affordance nobody can see.
 
-            Now the button always says "Add teammate", is never disabled, and
+            Now the button always says "Add agent", is never disabled, and
             its menu carries both: whoever is left on the roster, then
-            "New teammate…". "Everyone on the roster is already here" is a
+            "New agent…". "Everyone on the roster is already here" is a
             piece of information inside the menu rather than a dead trigger.
           */}
           <div className="pt-1">
@@ -1025,7 +1029,7 @@ function DeskNode({
                 }
               >
                 <Plus className="size-4" />
-                Add teammate
+                Add agent
               </DropdownMenuTrigger>
               {/*
                 A fixed width, not the trigger's. The trigger is full-bleed
@@ -1071,10 +1075,10 @@ function DeskNode({
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={onCreateMember}
-                  aria-label={`Add teammate to ${desk.name}`}
+                  aria-label={`Add agent to ${desk.name}`}
                 >
                   <UserPlus className="size-4" />
-                  New teammate…
+                  New agent…
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -1326,7 +1330,7 @@ function Unplaced({ tree }: { tree: OrgTree }) {
         <section className="space-y-2">
           <h3 className="text-sm font-medium text-muted-foreground">Not on a desk</h3>
           <p className="text-xs text-muted-foreground">
-            Roster teammates the company has not staffed anywhere. Add them to a
+            Roster agents the company has not staffed anywhere. Add them to a
             desk above.
           </p>
           <ul className="flex flex-wrap gap-1.5">
@@ -1356,7 +1360,7 @@ function Unplaced({ tree }: { tree: OrgTree }) {
                     // No usable id, so there is nothing to open. Rendered flat
                     // rather than as a pill: the border is what made the inert
                     // version of this chip a lie.
-                    <InertChip title="This teammate has no id, so their page can't be opened.">
+                    <InertChip title="This agent has no id, so their page can't be opened.">
                       <TeammateAvatar
                         name={member.name}
                         avatar={member.avatar}
@@ -1376,7 +1380,7 @@ function Unplaced({ tree }: { tree: OrgTree }) {
         <section className="space-y-2">
           <h3 className="text-sm font-medium text-muted-foreground">People</h3>
           <p className="text-xs text-muted-foreground">
-            The humans who can sign in. Desks staff teammates, so the company
+            The humans who can sign in. Desks staff agents, so the company
             declares no desk for a person, and this chart does not guess one.
           </p>
           <ul className="flex flex-wrap gap-1.5">
@@ -1387,7 +1391,7 @@ function Unplaced({ tree }: { tree: OrgTree }) {
                 pill treatment is dropped rather than left promising one. */}
             {tree.people.map((person) => (
               <li key={person.id}>
-                <InertChip title="People sign in to the console. Desks staff agents, so a person has no teammate page.">
+                <InertChip title="People sign in to the console. Desks staff agents, so a person has no agent page.">
                   {person.name}
                   <span className="ml-1.5">{person.role}</span>
                 </InertChip>

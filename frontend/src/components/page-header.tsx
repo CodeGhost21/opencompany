@@ -171,6 +171,18 @@ export type PageHeaderProps = {
    */
   children?: ReactNode;
   /**
+   * A `PageTabs` strip, at the bottom of the bar and flush with its hairline.
+   *
+   * Its own slot rather than `children` because position is the whole point:
+   * the strip has to be the last thing in the bar for the active tab's
+   * underline to land on the rule, and `children` is a free-form block that
+   * Ledgers already fills with a `<details>`. A page may have both.
+   *
+   * See `components/page-tabs.tsx` for when a page wants tabs rather than
+   * sub-pages.
+   */
+  tabs?: ReactNode;
+  /**
    * The page is its own content: keep the accessible name, paint nothing.
    * Everything else on this component is ignored, which is deliberate — an
    * invisible header with actions in it would be actions nobody can reach.
@@ -208,6 +220,7 @@ export function PageHeader({
   trailing,
   eyebrow,
   children,
+  tabs,
   hidden = false,
   width = "full",
   gutter = GUTTER,
@@ -263,6 +276,7 @@ export function PageHeader({
           </p>
         )}
         {children}
+        {tabs}
       </div>
     </div>
   );

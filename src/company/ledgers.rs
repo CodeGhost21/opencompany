@@ -49,20 +49,33 @@ use crate::ledger::{
 use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 
-/// One company's one ledger, by slug — the key a write lock is scoped to.
-type LedgerKey = (CompanyId, String);
+/// What a write lock covers.
+///
+/// A ledger's rows are its own, so they lock per slug and unrelated ledgers
+/// never queue behind each other. The set of declarations is not any one
+/// ledger's: the cap counts across slugs, and no two ledgers may write the
+/// same derived file. Both are answered by reading every spec, so a
+/// declaration locks the registry rather than the slug it is about.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum LockScope {
+    Registry,
+    Rows(String),
+}
 
-/// A registry of per-[`LedgerKey`] async locks, one per every distinct ledger
+/// One company's one lock scope — the key a write lock is held under.
+type LedgerKey = (CompanyId, LockScope);
+
+/// A registry of per-[`LedgerKey`] async locks, one per every distinct scope
 /// a write has touched.
 struct LedgerLocks {
     inner: StdMutex<HashMap<LedgerKey, Arc<AsyncMutex<()>>>>,
 }
 
 impl LedgerLocks {
-    fn get(&self, company: &CompanyId, slug: &str) -> Arc<AsyncMutex<()>> {
+    fn get(&self, company: &CompanyId, scope: LockScope) -> Arc<AsyncMutex<()>> {
         let mut locks = self.inner.lock().expect("ledger-write-lock map poisoned");
         locks
-            .entry((company.clone(), slug.to_string()))
+            .entry((company.clone(), scope))
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
     }
@@ -81,14 +94,27 @@ static LEDGER_WRITE_LOCKS: LazyLock<LedgerLocks> = LazyLock::new(|| LedgerLocks 
     inner: StdMutex::new(HashMap::new()),
 });
 
-/// The write lock for one company's one ledger.
+/// The write lock for one company's one ledger's rows.
 ///
 /// Held across a check-then-append (or a purge) so the two never observe each
-/// other's half-done state. Scoped to `(company, slug)` rather than to the
-/// whole store, so writes to unrelated ledgers — or unrelated companies —
-/// never queue behind each other.
-fn ledger_lock(company: &CompanyId, slug: &str) -> Arc<AsyncMutex<()>> {
-    LEDGER_WRITE_LOCKS.get(company, slug)
+/// other's half-done state. Scoped to one slug rather than to the whole store,
+/// so writes to unrelated ledgers — or unrelated companies — never queue
+/// behind each other.
+fn rows_lock(company: &CompanyId, slug: &str) -> Arc<AsyncMutex<()>> {
+    LEDGER_WRITE_LOCKS.get(company, LockScope::Rows(slug.to_string()))
+}
+
+/// The write lock for one company's set of declarations.
+///
+/// Held across a check-then-write so that what [`Registry::admits`] answered
+/// is still true when the spec lands. Its two rules — the cap on how many a
+/// company declares, and one writer per derived file — range over every
+/// declaration, so two declarations of *different* slugs contend just as two
+/// of the same slug do.
+///
+/// A path that takes both takes this one first.
+fn registry_lock(company: &CompanyId) -> Arc<AsyncMutex<()>> {
+    LEDGER_WRITE_LOCKS.get(company, LockScope::Registry)
 }
 
 /// Everything a ledger operation needs, without a whole [`CompanyRuntime`].
@@ -402,7 +428,7 @@ async fn record_amending(
 ) -> Result<engine::Entry> {
     let id = guard_write(spec, author, id)?;
 
-    let lock = ledger_lock(&ctx.company, &spec.slug);
+    let lock = rows_lock(&ctx.company, &spec.slug);
     let _guard = lock.lock().await;
 
     let fields = normalize_fields(fields);
@@ -568,8 +594,9 @@ pub async fn close(
 /// malformed, collides with an existing ledger, or is past the cap.
 pub async fn define(ctx: &Ledgers, document: &serde_json::Value) -> Result<LedgerSpec> {
     let spec = crate::ledger::parse(document, false)?;
-    let registry = registry(ctx).await?;
-    registry.admits(&spec)?;
+    let lock = registry_lock(&ctx.company);
+    let _guard = lock.lock().await;
+    registry(ctx).await?.admits(&spec)?;
     ctx.ledgers.put_spec(&ctx.company, &spec).await?;
     // Rendered immediately, empty, so the ledger is visible in `derived/` from
     // the moment it exists rather than from its first row. A folder that gains
@@ -594,6 +621,8 @@ pub async fn define(ctx: &Ledgers, document: &serde_json::Value) -> Result<Ledge
 /// nothing carries that slug.
 pub async fn retire(ctx: &Ledgers, author: &LedgerAuthor, slug: &str, purge: bool) -> Result<()> {
     refuse_non_human(author, "retire a ledger")?;
+    let lock = registry_lock(&ctx.company);
+    let _guard = lock.lock().await;
     let registry = registry(ctx).await?;
     let spec = registry.require(slug)?;
     if spec.builtin {
@@ -605,7 +634,7 @@ pub async fn retire(ctx: &Ledgers, author: &LedgerAuthor, slug: &str, purge: boo
     }
     ctx.ledgers.delete_spec(&ctx.company, &spec.slug).await?;
     if purge {
-        let lock = ledger_lock(&ctx.company, &spec.slug);
+        let lock = rows_lock(&ctx.company, &spec.slug);
         let _guard = lock.lock().await;
         ctx.ledgers.purge_ledger(&ctx.company, &spec.slug).await?;
     }
@@ -635,7 +664,7 @@ pub async fn delete_entry(
             spec.slug, spec.written_by
         )));
     }
-    let lock = ledger_lock(&ctx.company, &spec.slug);
+    let lock = rows_lock(&ctx.company, &spec.slug);
     let _guard = lock.lock().await;
     let removed = ctx
         .ledgers

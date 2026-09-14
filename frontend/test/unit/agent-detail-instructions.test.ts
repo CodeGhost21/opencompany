@@ -83,6 +83,10 @@ async function mount(client: OpenCompanyClient, agentId: string) {
   });
   // Flush the boot() read so the view settles into `ready`.
   await act(async () => {});
+  // The agent's definition is tabbed, and Overview leads — it is what the page
+  // is opened to answer. Everything this file drives lives on the Instructions
+  // tab, so open it before asserting, the way an operator does.
+  await click("agent-tab-instructions");
 }
 
 async function click(testid: string) {

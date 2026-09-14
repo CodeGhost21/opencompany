@@ -37,7 +37,7 @@ cargo test                          # full test suite
 ```sh
 cargo run --bin opencompany                       # the CLI
 cargo run --bin opencompany -- serve              # HTTP server on 127.0.0.1:8080
-cargo run --bin opencompany -- serve --company companies/agentic_marketing_agency
+cargo run --bin opencompany -- serve --company companies/marketing_agency
 ```
 
 ## Feature flags

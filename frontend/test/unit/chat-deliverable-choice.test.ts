@@ -6,9 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OpenCompanyClient } from "@/api/client";
 import type { MessageIntent } from "@/api/tasks";
-import { MessageComposer } from "@/views/chat/MessageComposer";
-import type { ChannelKind } from "@/views/chat/model";
-import { offersDeliverableChoice } from "@/views/chat/model";
+import { MessageComposer } from "@/views/room/MessageComposer";
+import type { ChannelKind } from "@/views/room/model";
+import { offersDeliverableChoice } from "@/views/room/model";
 
 /**
  * Issue #845: which composers offer "Do it once" / "Build me the workflow".
@@ -105,7 +105,7 @@ describe("client.chat — what the composer's choice puts on the wire", () => {
     expect(await chatBody(undefined)).toEqual({ text: "morning all" });
   });
 
-  it("still sends `workflow`, unchanged from #580", async () => {
+  it("still sends `automation`, unchanged from #580", async () => {
     expect(await chatBody("workflow")).toEqual({ text: "morning all", deliverable: "workflow" });
   });
 
@@ -161,15 +161,16 @@ async function send(text: string) {
 }
 
 describe("composer intent selection (issue #984)", () => {
-  it("starts unselected, sends no override, and resets to unselected after a choice", async () => {
+  it("draws no intent chips, and sends no override without them", async () => {
     await renderComposer();
 
+    // `COMPOSER_INTENT_HIDDEN`. The chips are hidden, not deleted — the
+    // selection logic below still runs, and this asserts the two halves agree:
+    // nothing to press, and therefore no `intent` on the wire.
     for (const intent of ["chat", "once", "workflow"]) {
       expect(
-        container.querySelector(`[data-testid="composer-deliverable-${intent}"]`)?.getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("false");
+        container.querySelector(`[data-testid="composer-deliverable-${intent}"]`),
+      ).toBeNull();
     }
 
     await send("ordinary message");
@@ -178,18 +179,14 @@ describe("composer intent selection (issue #984)", () => {
     // mentions?)`, and a message with neither passes them as absent.
     expect(sent).toHaveBeenLastCalledWith("ordinary message", undefined, undefined, undefined);
 
-    await act(async () => {
-      (container.querySelector('[data-testid="composer-deliverable-workflow"]') as HTMLButtonElement).click();
-    });
+    // Picking "Build me the automation" and asserting the override reached
+    // `onSend`, then that the choice reset, was the rest of this test. Both
+    // halves need a chip to press.
+    //
+    // What is still worth pinning is that a second message is unaffected: with
+    // no way to set an intent, every send is an ordinary one, and a composer
+    // that started smuggling a default would be the regression.
     await send("make it reusable");
-    expect(sent).toHaveBeenLastCalledWith("make it reusable", "workflow", undefined, undefined);
-
-    for (const intent of ["chat", "once", "workflow"]) {
-      expect(
-        container.querySelector(`[data-testid="composer-deliverable-${intent}"]`)?.getAttribute(
-          "aria-pressed",
-        ),
-      ).toBe("false");
-    }
+    expect(sent).toHaveBeenLastCalledWith("make it reusable", undefined, undefined, undefined);
   });
 });

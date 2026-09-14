@@ -40,6 +40,8 @@ import {
   type ConnectionState,
   type CreateDeskInput,
   type DeskDto,
+  type DeskHiveDto,
+  type DeskHiveDeclared,
   type EditAgentInput,
   type FeedbackInput,
   type FeedbackResponse,
@@ -779,6 +781,48 @@ export class OpenCompanyClient {
    * Delete an operator-created desk. A manifest (blueprint) desk cannot be
    * deleted at runtime and returns a 409; an unknown id is a 404.
    */
+  /**
+   * A desk's move grammar (`GET {scope}/desks/{id}/hive`).
+   *
+   * Its own call rather than a field on `listDesks`, because the payload
+   * carries the whole seat table and the derived numbers — an N+1 the desk list
+   * has no reason to pay on every render.
+   */
+  getDeskHive(deskId: string, company?: string | null): Promise<DeskHiveDto> {
+    return this.request<DeskHiveDto>(
+      "GET",
+      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/hive`,
+    );
+  }
+
+  /**
+   * Install or replace a desk's move grammar, without rewriting `company.toml`.
+   *
+   * Returns the derived result of what was installed, so the caller renders the
+   * effective numbers without a second round trip. A refusal comes back as an
+   * `ApiError` carrying the host's own sentence — rendered verbatim, because the
+   * host is the authority on why a table is invalid.
+   */
+  putDeskHive(
+    deskId: string,
+    declared: DeskHiveDeclared,
+    company?: string | null,
+  ): Promise<DeskHiveDto> {
+    return this.request<DeskHiveDto>(
+      "PUT",
+      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/hive`,
+      declared,
+    );
+  }
+
+  /** Drop the installed grammar and fall back to the manifest's own block. */
+  resetDeskHive(deskId: string, company?: string | null): Promise<DeskHiveDto> {
+    return this.request<DeskHiveDto>(
+      "DELETE",
+      `${this.scope(company)}/desks/${encodeURIComponent(deskId)}/hive`,
+    );
+  }
+
   deleteDesk(deskId: string, company?: string | null): Promise<void> {
     return this.request<void>(
       "DELETE",

@@ -256,7 +256,7 @@ describe("run row — files associated (issue #1684)", () => {
     const wsLink = container.querySelector<HTMLAnchorElement>(
       '[data-testid="workflow-run-file-workspace"]',
     );
-    expect(wsLink?.getAttribute("href")).toBe("#/workspace/node-9");
+    expect(wsLink?.getAttribute("href")).toBe("#/company/workspace/node-9");
   });
 
   it("shows an empty state for a run that produced no files", async () => {

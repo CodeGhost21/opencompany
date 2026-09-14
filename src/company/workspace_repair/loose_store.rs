@@ -28,7 +28,6 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
-use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{
     BlobStream, FolderClaim, NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore,
@@ -134,12 +133,13 @@ impl WorkspaceStore for LooseWorkspace {
         crate::ports::workspace::read_capped_by_reading(self, company, id, max_bytes).await
     }
 
-    async fn write(
+    async fn write_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         content: &str,
         author: WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode> {
         self.with(company, |state, key| {
             let node = state
@@ -152,7 +152,10 @@ impl WorkspaceStore for LooseWorkspace {
                     "only a prose file can be written as text".to_string(),
                 ));
             }
-            node.updated_at_millis = now_millis();
+            node.updated_at_millis = crate::ports::workspace::next_write_revision(
+                node.updated_at_millis,
+                expected_updated_at,
+            )?;
             node.updated_by = author;
             let node = node.clone();
             state.text.insert(id.to_string(), content.to_string());
@@ -311,7 +314,8 @@ impl WorkspaceStore for LooseWorkspace {
             if let Some(parent) = parent {
                 node.parent_id = parent.map(str::to_string);
             }
-            node.updated_at_millis = now_millis();
+            node.updated_at_millis =
+                crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
             let node = node.clone();
             if let Some(hook) = state.after_move.take() {
                 hook(state.tree(&key));

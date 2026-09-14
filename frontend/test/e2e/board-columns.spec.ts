@@ -19,7 +19,7 @@ import { LIVE_BRAIN } from "./capabilities";
  * a broken ledger read, a dropped label — fails here and nowhere else. It is
  * also the guard on intake: one prompt box, landing in To-do.
  *
- * **It drives `#/ledgers/tasks`, not `#/tasks`.** The standalone Tasks page was
+ * **It drives `#/company/work/tasks`, not `#/tasks`.** The standalone Tasks page was
  * retired in issue #1140 and the board it showed is the `tasks` ledger's
  * columns, rendered by the same component it always was. The two claims that
  * deletion could have taken with it — that work can still be *created*, and
@@ -66,13 +66,13 @@ function columnLabels(page: Page) {
 /**
  * Issue #1140 — the two things retiring the Tasks page could have taken.
  *
- * `#/tasks` is in every operator's history and fingers, and `#/tasks/<id>` is
+ * `#/tasks` is in every operator's history and fingers, and `#/company/tasks/<id>` is
  * linked from chat, from an approval card and from a workflow run's rows. The
  * first has to land on the board and the second has to keep opening the card,
  * and both failures are quiet: the router drops an address it does not know and
  * renders Overview, which looks like a link that worked.
  */
-test("the retired #/tasks lands on the board, and #/tasks/<id> still opens the card", async ({
+test("the retired #/tasks lands on the board, and #/company/tasks/<id> still opens the card", async ({
   page,
   request,
 }) => {
@@ -88,18 +88,18 @@ test("the retired #/tasks lands on the board, and #/tasks/<id> still opens the c
   // rather than a replace would leave `#/tasks` one Back away, bouncing the
   // operator forward again on arrival.
   await expect(columnLabels(page)).toHaveText(EXPECTED_COLUMNS, { timeout: 15_000 });
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/tasks");
 
   // And the card detail, which Ledgers deliberately does not reproduce.
-  await page.goto(`/#/tasks/${id}`);
+  await page.goto(`/#/company/tasks/${id}`);
   await expect(page.getByRole("heading", { name: title })).toBeVisible({ timeout: 15_000 });
-  expect(new URL(page.url()).hash).toBe(`#/tasks/${id}`);
+  expect(new URL(page.url()).hash).toBe(`#/company/tasks/${id}`);
 });
 
 test("the board renders the three phases in order, and none of the retired columns", async ({
   page,
 }) => {
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
   await dismissTour(page);
 
   // The columns are a read now, not a literal, so the board is not itself
@@ -138,7 +138,7 @@ test("an empty board leaves its column affordances to explain the empty state", 
   expect(declared.ok()).toBeTruthy();
 
   try {
-    await page.goto(`/#/ledgers/${slug}`);
+    await page.goto(`/#/company/work/${slug}`);
     await dismissTour(page);
     // Declared ledgers open as readable rows (issue #1351); this test is
     // about the board's empty-state affordances, so switch to the board
@@ -168,7 +168,7 @@ test("an empty board leaves its column affordances to explain the empty state", 
 });
 
 test("new work enters through one prompt box and lands in Pending", async ({ page, request }) => {
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
   await dismissTour(page);
 
   // Exactly one entry point on the whole board (issue #206's rule, kept).
@@ -283,7 +283,7 @@ test("Plan first moves the card into planning without dispatching it", async ({
   expect(seeded.ok()).toBeTruthy();
   const id = (await seeded.json()).id as string;
 
-  await page.goto(`/#/tasks/${id}`);
+  await page.goto(`/#/company/tasks/${id}`);
   await dismissTour(page);
   await expect(page.getByRole("heading", { name: title })).toBeVisible({ timeout: 15_000 });
 
@@ -358,7 +358,7 @@ test("a card sent to Plan first is planned and settled, never left parked", asyn
   expect(seeded.ok()).toBeTruthy();
   const id = (await seeded.json()).id as string;
 
-  await page.goto(`/#/tasks/${id}`);
+  await page.goto(`/#/company/tasks/${id}`);
   await dismissTour(page);
   await expect(page.getByRole("heading", { name: title })).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "Plan first" }).click();

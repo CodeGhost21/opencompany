@@ -22,7 +22,7 @@ import {
   directMessageForId,
   dmThreadId,
   memberForThread,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * The built-in `#general` channel (issue #1743).
@@ -172,7 +172,7 @@ describe("the built-in #general channel", () => {
     expect(channels(ROSTER, [])[0].name).toBe(GENERAL_CHANNEL);
   });
 
-  it("holds the whole roster, derived — a teammate added later is in it", () => {
+  it("holds the whole roster, derived — an agent added later is in it", () => {
     const before = channels(ROSTER, DESKS)[0];
     expect(channelMembers(before, ROSTER)!.map((m) => m.id)).toEqual(["ceo", "eng"]);
 
@@ -227,11 +227,11 @@ describe("resolving a host thread to the general channel", () => {
     expect(channelIdForThread("engineering", DESKS, ROSTER)).toBe("engineering");
   });
 
-  it("still resolves a teammate DM", () => {
+  it("still resolves an agent DM", () => {
     expect(channelIdForThread("eng", DESKS, ROSTER)).toBe("dm:eng");
   });
 
-  it("keeps the line for the company when a teammate's id is a General spelling", () => {
+  it("keeps the line for the company when an agent's id is a General spelling", () => {
     // The host reserves `main` and `general` against newly minted teammates
     // (`RESERVED_AGENT_IDS`), but a manifest can still declare one. This used
     // to answer `dm:main` — the roster was consulted before the fold — and the
@@ -266,7 +266,7 @@ describe("resolving a host thread to the general channel", () => {
    *
    * The fold above is deliberate — `chat_responder("main")` is `None`, so a
    * teammate called `main` cannot capture the company's line — but it left the
-   * DM writable and unreadable at once: `ChatView` addressed the host with the
+   * DM writable and unreadable at once: `RoomView` addressed the host with the
    * bare `member.id` (issue #364 re-keyed DMs onto it), so a message composed
    * in that DM was written and answered in `#general`, under a transcript the
    * DM could not read back.
@@ -276,7 +276,7 @@ describe("resolving a host thread to the general channel", () => {
    * frames it emits under that key. Asserted here because the comment above has
    * claimed this routing since #1743 while nothing held the sender to it.
    */
-  it("reads back the DM of a teammate whose id is a General spelling", () => {
+  it("reads back the DM of an agent whose id is a General spelling", () => {
     const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
     expect(channelIdForThread("dm:main", DESKS, withMain)).toBe("dm:main");
     // The bare key still belongs to the company, unchanged by the arm above.
@@ -300,7 +300,7 @@ describe("resolving a host thread to the general channel", () => {
    * rejecting an explicit `#/chat/dm:main` link, which is the one address the
    * rest of this change exists to honour.
    */
-  it("offers that teammate as a DM target, now that the address is its own", () => {
+  it("offers that agent as a DM target, now that the address is its own", () => {
     const withMain = [...ROSTER, member({ id: "main", name: "Mainard" })];
     const ids = directMessageChannels(withMain).map((c) => c.id);
     expect(ids).toContain("dm:main");
@@ -314,13 +314,13 @@ describe("resolving a host thread to the general channel", () => {
   /**
    * And the sender actually uses it.
    *
-   * `activeThreadId` is what `ChatView` puts in `chat`. The resolver above is
+   * `activeThreadId` is what `RoomView` puts in `chat`. The resolver above is
    * inert unless that one DM is addressed prefixed, so this holds the sender to
    * the same rule rather than trusting the comment beside it.
    */
   it("addresses that one DM prefixed, and leaves every other bare", () => {
     const view = readFileSync(
-      new URL("../../src/views/ChatView.tsx", import.meta.url),
+      new URL("../../src/views/RoomView.tsx", import.meta.url),
       "utf8",
     );
     expect(view).toContain("dmThreadId(active.member)");
@@ -377,7 +377,7 @@ describe("resolving a host thread to the general channel", () => {
   /**
    * The rule itself, rather than the call sites that apply it.
    */
-  it("addresses only the General-spelling teammate prefixed", () => {
+  it("addresses only the General-spelling agent prefixed", () => {
     const mainard = member({ id: "main", name: "Mainard" });
     const eng = member({ id: "eng", name: "Engie" });
     expect(dmThreadId(mainard)).toBe("dm:main");
@@ -469,10 +469,10 @@ describe("isGeneralChannel", () => {
 });
 
 /**
- * The two desk affordances `ChatView` derives from a channel, and why neither
+ * The two desk affordances `RoomView` derives from a channel, and why neither
  * may reach the built-in one.
  *
- * A full `ChatView` render needs the whole client and every hook, so this uses
+ * A full `RoomView` render needs the whole client and every hook, so this uses
  * the source-contract idiom `chat-rail-focus.test.ts` established for exactly
  * that case: pin the wiring the behaviour rests on. The behaviour itself is
  * verified in a browser — see the PR.
@@ -483,9 +483,9 @@ describe("isGeneralChannel", () => {
  * tests read as "has membership ⇒ is a desk" — an inference that is true of
  * every channel except this one.
  */
-describe("ChatView offers no desk affordance on the built-in channel", () => {
+describe("RoomView offers no desk affordance on the built-in channel", () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+  const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
   // Collapsed so an assertion pins the wiring rather than the line wrapping
   // Prettier happens to choose for it.
   const source = chatView.replace(/\s+/g, " ");
@@ -526,7 +526,7 @@ describe("ChatView offers no desk affordance on the built-in channel", () => {
  * the host's own history for that desk was empty.
  *
  * The map is module-private to `app-shell.tsx`, so this pins the wiring the
- * same way the `ChatView` block above does.
+ * same way the `RoomView` block above does.
  */
 describe("the shell maps the main line to #general, not to the first desk", () => {
   const here2 = dirname(fileURLToPath(import.meta.url));
@@ -636,11 +636,11 @@ describe("resolving a live frame's thread id against the shell's map", () => {
     expect(channelForThread(MAP, "dm:eng")).toBe("dm:eng");
   });
 
-  it("answers null for a dm:-prefixed id naming no teammate in the map", () => {
+  it("answers null for a dm:-prefixed id naming no agent in the map", () => {
     expect(channelForThread(MAP, "dm:ghost")).toBeNull();
   });
 
-  it("folds a dm:-prefixed id's case, the way the host resolves the teammate it names", () => {
+  it("folds a dm:-prefixed id's case, the way the host resolves the agent it names", () => {
     expect(channelForThread(MAP, "dm:ENG")).toBe("dm:eng");
   });
 });

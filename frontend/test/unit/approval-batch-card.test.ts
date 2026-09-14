@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import type { ApprovalThreadLink } from "@/components/approval-card";
 import { money } from "@/lib/language";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
 
 /**
  * The consolidated card's decisions (issue #842).
@@ -345,7 +345,7 @@ describe("the consolidated approval card", () => {
     // transcript rows. The receipt is about the one release, not the clicks.
     expect(receipts()).toHaveLength(1);
     expect(receipts()[0].textContent).toContain(
-      "Approved 3 actions — the teammate is picking it up now",
+      "Approved 3 actions — the agent is picking it up now",
     );
     expect(container.querySelectorAll("button")).toHaveLength(0);
 
@@ -369,7 +369,7 @@ describe("the consolidated approval card", () => {
 
     expect(receipts()).toHaveLength(1);
     expect(receipts()[0].textContent).toContain(
-      "Approved 1 action and declined 1 action — the teammate is picking it up now",
+      "Approved 1 action and declined 1 action — the agent is picking it up now",
     );
     // Nothing left to decide, so nothing left to press.
     expect(container.querySelectorAll("button")).toHaveLength(0);
@@ -380,7 +380,7 @@ describe("the consolidated approval card", () => {
 
     expect(receipts()).toHaveLength(1);
     expect(receipts()[0].textContent).toContain(
-      "Declined 2 actions — the teammate will not take them",
+      "Declined 2 actions — the agent will not take them",
     );
     expect(receipts()[0].querySelector("details")?.open).toBe(false);
   });

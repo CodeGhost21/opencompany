@@ -31,14 +31,14 @@ import {
  */
 
 const TEMPLATE = {
-  id: "agentic_marketing_agency",
+  id: "marketing_agency",
   name: "Agentic Marketing Agency",
   agent_count: 8,
   output: "Campaigns across every channel",
 };
 
 const OTHER_TEMPLATE = {
-  id: "agentic_law_firm",
+  id: "law_firm",
   name: "Agentic Law Firm",
   agent_count: 5,
   output: "Filings and advice",
@@ -160,8 +160,13 @@ async function walkToReview(client: OpenCompanyClient, template: string | null) 
   await act(async () => {
     root.render(createElement(SetupWizard, { client, onDone: () => {} }));
   });
+  // "No model" — the picker's last option, whose popup base-ui portals onto
+  // `document.body` and only mounts once the trigger opens it.
   await act(async () => {
-    (container.querySelector('[data-testid="setup-skip-model"]') as HTMLElement).click();
+    (container.querySelector('[data-testid="setup-provider-select"]') as HTMLElement).click();
+  });
+  await act(async () => {
+    (document.body.querySelector('[data-testid="setup-provider-none"]') as HTMLElement).click();
   });
   await next(); // -> business
   if (template) await pickTemplate(template);
@@ -369,6 +374,15 @@ describe("whether a finished wizard seeds a template or a designed company", () 
 
   it("seeds nothing onto a host that already has a company", () => {
     expect(shouldSeedTemplate({ ...picked, hasCompany: true })).toBe(false);
+  });
+
+  it("designs instead when no template id is actually carried", () => {
+    // `source: "preset"` names the picker's answer, not proof a template id
+    // rode along with it — an empty or whitespace-only `template` has nothing
+    // for the host to seed from, so this must fall to the designed path the
+    // same as any other incomplete pick.
+    expect(shouldSeedTemplate({ ...picked, template: "" })).toBe(false);
+    expect(shouldSeedTemplate({ ...picked, template: "   " })).toBe(false);
   });
 });
 

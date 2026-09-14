@@ -89,44 +89,19 @@ let desksReadable = true;
 let desks: Desk[] = [];
 
 /**
- * What this stub's `/inference` reports, which decides which Add-teammate
- * dialog renders (issue #1989).
- *
- * `echo` — the offline brain — is the default, and that is a statement about
- * what these tests are for rather than a way to keep the old ones passing. Every
- * test in this file is about the *chart*: a desk that takes a member, a
- * half-landed placement, a teammate the chart cannot read back, a toast that
- * names the right person. The full form is the surface a real no-model company
- * gets, it is what those walks were written against, and it is the one that
- * stays on the chart long enough to assert a tree — the reduced dialog leaves
- * for `#/team/<id>?edit` by design, so a desk assertion after it would be an
- * assertion about a page the operator is no longer on.
- *
- * The reduced dialog gets a test of its own below, which sets this to `harness`
- * and asserts the departure rather than working around it. Without one, a mock
- * that answers `echo` for everything would quietly retire the redesign from
- * this file — which is the same silent failure `addTeammateSurface` exists to
- * make impossible.
+ * What this stub's `/inference` reports. `AgentDetailView`'s copilot button
+ * reads this; the Add-teammate dialog no longer does — issue #1989's
+ * reduced/full split was itself retired in favor of one three-field dialog
+ * (name, icon, post) that writes nothing until the operator lands on the new
+ * agent's own page.
  */
 let cognition = "echo";
-
-/**
- * Whether the design pass answers with a teammate (issue #1989).
- *
- * `false` is the refusal path: the reduced dialog writes nothing and hands the
- * operator the full form carrying what they typed. Its own switch rather than a
- * cognition value, because the two failures are different — a company with no
- * model never shows the reduced dialog at all, while a company whose provider
- * is down shows it and then cannot finish.
- */
-let designAvailable = true;
 
 function reset() {
   writes = [];
   roster = [...ROSTER];
   teamWriteAvailable = true;
   cognition = "echo";
-  designAvailable = true;
   deskAddAvailable = true;
   desksReadFailsAfterCreate = false;
   desksReadable = true;
@@ -274,23 +249,6 @@ async function mockApi(page: Page) {
       return json(desks);
     }
 
-    // POST .../team/design — the pass that turns the reduced dialog's one
-    // sentence into a role, a mandate and a persona before anything is written
-    // (issue #1989). Answered here rather than by the catch-all because the
-    // catch-all's `[]` has no `source`, which reads as a refusal and would send
-    // every reduced-dialog test to the full form.
-    if (path.endsWith("/team/design") && method === "POST") {
-      const body = request.postDataJSON() as { name?: string; description?: string };
-      writes.push({ method, path, body });
-      if (!designAvailable)
-        return json({ source: "unavailable", reason: "model_unreachable" });
-      return json({
-        source: "model",
-        role: "Wholesale Account Manager",
-        description: "Owns the stockist pipeline and the terms behind it.",
-        instructions: "Check terms against the price list before quoting.",
-      });
-    }
     if (path.endsWith("/team") && method === "POST") {
       if (!teamWriteAvailable) return json({ error: "not supported" }, 404);
       const body = request.postDataJSON() as {
@@ -316,7 +274,7 @@ async function mockApi(page: Page) {
     const agent = path.match(/\/team\/([^/]+)$/);
     if (agent && method === "GET") {
       const found = roster.find((m) => m.id === agent[1]);
-      if (!found) return json({ error: "no such teammate" }, 404);
+      if (!found) return json({ error: "no such agent" }, 404);
       return json({
         ...found,
         source: "manifest",
@@ -360,10 +318,8 @@ async function mockApi(page: Page) {
     // `undefined` and, since `/me` above already resolves this operator as
     // admin, opens the blocking gate over every one of this file's tests
     // instead of the shell they actually exercise.
-    // Which Add-teammate dialog renders is decided on this (issue #1989). Before
-    // it existed the catch-all below answered `[]`, whose `cognition` is
-    // `undefined` — read as "can draft", so every test in this file met the
-    // reduced dialog and waited forever for a Role field it does not have.
+    // Read by `AgentDetailView`'s copilot button (issue #1776), not by the
+    // Add-teammate dialog — see the `cognition` doc comment above.
     if (path.endsWith("/inference"))
       return json({
         provider: "managed",
@@ -377,12 +333,6 @@ async function mockApi(page: Page) {
         usageMetering: cognition === "echo" ? "none" : "perTurn",
         restartRequired: false,
         harnessReachable: cognition !== "echo",
-        // The host builds a profile drafter only on the embedded-harness path
-        // (`workflow_harness_deps`), so this is `cognition === "harness"` and
-        // NOT `!== "echo"` — `hosted`, `sidecar` and `custom` companies report
-        // a non-echo cognition with no drafter behind them. Modelled here
-        // because the dialog reads it: a mock that omitted it would exercise
-        // the older-host fallback rather than the contract that ships.
         designsProfiles: cognition === "harness",
       });
     if (path.endsWith("/activation"))
@@ -431,12 +381,12 @@ const memberPane = (page: Page) => page.getByRole("complementary").last();
 /**
  * Open the chat member pane if it is shut.
  *
- * Its open state lives in `ChatView`, which unmounts when the operator steps
+ * Its open state lives in `RoomView`, which unmounts when the operator steps
  * into another view — so this has to be re-run after a round trip through the
  * chart, and a blind click would close what a previous call opened.
  */
 async function openMemberPane(page: Page) {
-  const toggle = page.getByRole("button", { name: /teammates$/i });
+  const toggle = page.getByRole("button", { name: /agents$/i });
   if ((await toggle.getAttribute("aria-pressed")) !== "true")
     await toggle.click();
   await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
@@ -577,7 +527,7 @@ test("#311 membership can be edited from the chart and survives a reload", async
   ).toContainText("Turing");
 
   const engineering = deskNode(page, "Engineering");
-  await engineering.getByRole("button", { name: "Add teammate" }).click();
+  await engineering.getByRole("button", { name: "Add agent" }).click();
   await page.getByRole("menuitem", { name: "Linus" }).click();
 
   await expect(
@@ -606,7 +556,7 @@ test("#311 membership can be edited from the chart and survives a reload", async
   await expect(deskNode(page, "Engineering")).not.toContainText("Linus");
 });
 
-test("#839 creates a teammate on a selected desk and persists it", async ({
+test("#839 creates an agent on a selected desk and persists it", async ({
   page,
 }) => {
   await mockApi(page);
@@ -615,17 +565,18 @@ test("#839 creates a teammate on a selected desk and persists it", async ({
   const growth = deskNode(page, "Growth");
   // One control per desk now, and "New teammate…" is an item inside its menu
   // rather than an unlabelled icon button beside it.
-  await growth.getByRole("button", { name: "Add teammate" }).click();
+  await growth.getByRole("button", { name: "Add agent" }).click();
   await page
-    .getByRole("menuitem", { name: "Add teammate to Growth" })
+    .getByRole("menuitem", { name: "Add agent to Growth" })
     .click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Babbage");
-  await dialog.getByLabel("Role").fill("Platform Engineer");
-  await dialog.getByLabel("What they do").fill("Builds the platform");
-  await dialog.getByRole("button", { name: "Add teammate" }).click();
+  await dialog.getByLabel("Post").fill("Platform Engineer");
+  await dialog.getByRole("button", { name: "Add agent" }).click();
 
-  await expect(growth).toContainText("Babbage");
+  // The dialog always lands the operator on the new agent's own page now, so
+  // the chart is checked after a trip back to it rather than in place.
+  await expect(page).toHaveURL(/#\/company\/agent\/[^?]+\?edit/, { timeout: 30_000 });
   expect(
     writes.find(
       (write) => write.method === "POST" && write.path.endsWith("/team"),
@@ -638,120 +589,42 @@ test("#839 creates a teammate on a selected desk and persists it", async ({
     ),
   ).toBeTruthy();
 
+  await openChart(page);
+  await expect(deskNode(page, "Growth")).toContainText("Babbage");
+
   await page.reload();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
   await expect(deskNode(page, "Growth")).toContainText("Babbage");
 });
 
-test("#1989 the reduced dialog derives a role and lands on the teammate's page", async ({
-  page,
-}) => {
-  // The redesign, on the surface three of its four entry points share. The
-  // sentence below is the one that made this worth fixing: no comma and no
-  // semicolon, which is ordinary English, and which the clause split this
-  // replaced turned into "Runs wholesale outreach to boutique retailers and
-  // keeps the…" — ellipsis included, stored as the teammate's job title. What
-  // goes on the wire now is the sentence itself, and what comes back is a job.
-  cognition = "harness";
-  const sentence =
-    "Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm.";
+// Issue #1989 gave the Add-teammate dialog a reduced (name + one sentence)
+// shape next to the full form, with a design pass that turned the sentence
+// into a role, description and instructions before anything was written. That
+// split is itself retired: `AddMemberDialog` (`views/room/AddMemberDialog.tsx`)
+// is now the only Add-teammate surface, unconditionally three fields — name,
+// icon, post — and writes an agent with an empty description and empty
+// instructions. There is no design pass and no `POST .../team/design` call
+// left to reach, so the two tests this comment replaces (deriving a role from
+// a sentence, and handing over to a full form when the design pass fails) test
+// a dialog shape and a host route that no longer exist. Drafting a
+// description and instructions now happens only on the created agent's own
+// page, through `FieldCopilot`, after the redirect this file's other tests
+// already cover via `?edit`.
+
+test("#839 creates an agent with no desk as unplaced", async ({ page }) => {
   await mockApi(page);
   await openChart(page);
 
-  const growth = deskNode(page, "Growth");
-  await growth.getByRole("button", { name: "Add teammate" }).click();
-  await page.getByRole("menuitem", { name: "Add teammate to Growth" }).click();
-  const dialog = page.getByRole("dialog");
-
-  // A name and a box, and nothing else. Role is derived; What they do IS the
-  // box; the persona, the budget and the inbox are on the page this lands on.
-  await expect(dialog.getByTestId("team-describe-box")).toBeVisible();
-  await expect(dialog.getByLabel("Role")).toHaveCount(0);
-  await dialog.getByTestId("team-describe-name").fill("Sable");
-  await dialog.getByTestId("team-describe-box").fill(sentence);
-  await dialog.getByRole("button", { name: "Add teammate" }).click();
-
-  // `?edit` opens the edit form on arrival, which is where the copilot is. Land
-  // on the read-only profile instead and the reduction is fields taken away.
-  await expect(page).toHaveURL(/#\/team\/new-5\?edit/, { timeout: 30_000 });
-
-  // The sentence reached the design pass whole — not split, not cut, not
-  // pre-chewed on the console side.
-  const designed = writes.find(
-    (write) => write.method === "POST" && write.path.endsWith("/team/design"),
-  );
-  expect(designed, "the host designs the teammate before anything is written").toBeTruthy();
-  expect(designed!.body).toEqual({ name: "Sable", description: sentence });
-
-  const created = writes.find(
-    (write) => write.method === "POST" && write.path.endsWith("/team"),
-  );
-  expect(created, "the teammate is written before the operator is taken away").toBeTruthy();
-  const body = created!.body as {
-    role: string;
-    description: string;
-    instructions: string;
-  };
-  // A job title, and the three fields properly apart. The role is what
-  // `persona_prompt` interpolates and what the orchestrator's Team block
-  // renders, so a piece of a sentence here is a piece of a sentence in every
-  // prompt this teammate is ever built with.
-  expect(body.role).toBe("Wholesale Account Manager");
-  expect(body.role).not.toContain("…");
-  expect(body.description).toBe("Owns the stockist pipeline and the terms behind it.");
-  // Born with a persona, rather than with an empty one and a promise.
-  expect(body.instructions).toBe("Check terms against the price list before quoting.");
-  expect(body.instructions).not.toBe(body.description);
-
-  // And the desk placement happened first: the operator is told what half-landed
-  // on the chart they are leaving, and only then taken off it.
-  expect(
-    writes.some(
-      (write) =>
-        write.method === "POST" && write.path.endsWith("/desks/growth/members"),
-    ),
-  ).toBe(true);
-});
-
-test("#1989 a design the host cannot produce writes nothing and hands over the form", async ({
-  page,
-}) => {
-  // The other half of the reduced dialog's contract, and the half that has to
-  // hold for the redesign to be safe at all: when the pass cannot run, nothing
-  // is written. The previous version wrote a teammate regardless, because it
-  // derived the role itself by cutting the sentence — so there was no failure
-  // path, only a worse success.
-  cognition = "harness";
-  designAvailable = false;
-  await mockApi(page);
-  await openChart(page);
-
-  await page.getByRole("button", { name: "Add teammate" }).first().click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByTestId("team-describe-name").fill("Sable");
-  await dialog.getByTestId("team-describe-box").fill("Runs wholesale outreach.");
-  await dialog.getByRole("button", { name: "Add teammate" }).click();
-
-  // The full form, carrying what was typed, with the host's own reason.
-  await expect(dialog.getByLabel("Role")).toBeVisible();
-  await expect(dialog.getByTestId("chat-add-handover")).toContainText("didn't answer in time");
-  await expect(dialog.getByLabel("Name")).toHaveValue("Sable");
-  // And nothing was created.
-  expect(
-    writes.some((write) => write.method === "POST" && write.path.endsWith("/team")),
-  ).toBe(false);
-  await expect(page).toHaveURL(/#\/company/);
-});
-
-test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
-  await mockApi(page);
-  await openChart(page);
-
-  await page.getByRole("button", { name: "Add teammate" }).first().click();
+  await page.getByRole("button", { name: "Add agent" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("No Desk");
-  await dialog.getByLabel("Role").fill("Roaming Engineer");
-  await dialog.getByRole("button", { name: "Add teammate" }).click();
+  await dialog.getByLabel("Post").fill("Roaming Engineer");
+  await dialog.getByRole("button", { name: "Add agent" }).click();
+
+  // The dialog always lands the operator on the new agent's own page now, so
+  // the chart is checked after a trip back to it rather than in place.
+  await expect(page).toHaveURL(/#\/company\/agent\/[^?]+\?edit/, { timeout: 30_000 });
+  await openChart(page);
 
   await expect(
     page.getByRole("heading", { name: "Not on a desk" }),
@@ -765,34 +638,34 @@ test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
   expect(writes.some((write) => write.path.includes("/members"))).toBe(false);
 });
 
-test("#839 refuses a company-page teammate add when the host has no team write plane", async ({
+test("#839 refuses a company-page agent add when the host has no team write plane", async ({
   page,
 }) => {
   teamWriteAvailable = false;
   await mockApi(page);
   await openChart(page);
 
-  await page.getByRole("button", { name: "Add teammate" }).first().click();
+  await page.getByRole("button", { name: "Add agent" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Not Saved");
-  await dialog.getByLabel("Role").fill("Unavailable");
-  await dialog.getByRole("button", { name: "Add teammate" }).click();
+  await dialog.getByLabel("Post").fill("Unavailable");
+  await dialog.getByRole("button", { name: "Add agent" }).click();
 
-  await expect(toasts(page)).toContainText("can't create teammates");
+  await expect(toasts(page)).toContainText("can't create agents");
   await expect(chart(page).locator("text=Not Saved")).toHaveCount(0);
 });
 
-test("#1099 a teammate added from the company page is confirmed by name", async ({
+test("#1099 an agent added from the company page is confirmed by name", async ({
   page,
 }) => {
   await mockApi(page);
   await openChart(page);
 
-  await page.getByRole("button", { name: "Add teammate" }).first().click();
+  await page.getByRole("button", { name: "Add agent" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Katherine");
-  await dialog.getByLabel("Role").fill("Navigator");
-  await dialog.getByRole("button", { name: "Add teammate" }).click();
+  await dialog.getByLabel("Post").fill("Navigator");
+  await dialog.getByRole("button", { name: "Add agent" }).click();
 
   // The whole of #1099 on this surface: the operator is told, by name, rather
   // than left to infer the add from a chart that repaints a moment later.
@@ -803,7 +676,7 @@ test("#1099 a teammate added from the company page is confirmed by name", async 
   await expect(toasts(page).first()).toHaveAttribute("data-type", "success");
 });
 
-test("#1099 a teammate the chart cannot read back is not confirmed as added", async ({
+test("#1099 an agent the chart cannot read back is not confirmed as added", async ({
   page,
 }) => {
   // The host takes the teammate and then the chart's own read fails. `boot`
@@ -814,11 +687,11 @@ test("#1099 a teammate the chart cannot read back is not confirmed as added", as
   await mockApi(page);
   await openChart(page);
 
-  await page.getByRole("button", { name: "Add teammate" }).first().click();
+  await page.getByRole("button", { name: "Add agent" }).first().click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Grace Murray");
-  await dialog.getByLabel("Role").fill("Compiler");
-  await dialog.getByRole("button", { name: "Add teammate" }).click();
+  await dialog.getByLabel("Post").fill("Compiler");
+  await dialog.getByRole("button", { name: "Add agent" }).click();
 
   const notice = toasts(page).first();
   await expect(notice).toContainText("Added Grace Murray, but");
@@ -882,11 +755,11 @@ test("a desk offers one add control, and it stays usable when the roster is exha
   // it, unlabelled — a `UserPlus` icon that created a teammate here. The icon
   // wore the same glyph as the page header's "New teammate", touching a button
   // that already said the words, so the create path was invisible.
-  await expect(engineering.getByRole("button", { name: /teammate/i })).toHaveCount(1);
+  await expect(engineering.getByRole("button", { name: /agent/i })).toHaveCount(1);
 
   // Seat everyone the roster has left, through the menu.
   for (const name of ["Linus", "Hedy", "Turing"]) {
-    await engineering.getByRole("button", { name: "Add teammate" }).click();
+    await engineering.getByRole("button", { name: "Add agent" }).click();
     await page.getByRole("menuitem", { name }).click();
     await expect(engineering).toContainText(name);
   }
@@ -895,18 +768,18 @@ test("a desk offers one add control, and it stays usable when the roster is exha
   // teammate here is still something an operator can do. It used to go
   // disabled and read "Everyone is on this desk", which left the unlabelled
   // icon as the only way in.
-  const add = engineering.getByRole("button", { name: "Add teammate" });
+  const add = engineering.getByRole("button", { name: "Add agent" });
   await expect(add).toBeEnabled();
   await add.click();
 
   const menu = page.getByRole("menu");
   await expect(menu).toContainText("Everyone on the roster is already here.");
   await expect(
-    menu.getByRole("menuitem", { name: "Add teammate to Engineering" }),
+    menu.getByRole("menuitem", { name: "Add agent to Engineering" }),
   ).toBeVisible();
 });
 
-test("#839 a teammate created but not placed is still on the chart to place by hand", async ({
+test("#839 an agent created but not placed is still on the chart to place by hand", async ({
   page,
 }) => {
   // The half-done case: the host takes the teammate and then refuses the desk.
@@ -920,15 +793,19 @@ test("#839 a teammate created but not placed is still on the chart to place by h
   const growth = deskNode(page, "Growth");
   // One control per desk now, and "New teammate…" is an item inside its menu
   // rather than an unlabelled icon button beside it.
-  await growth.getByRole("button", { name: "Add teammate" }).click();
+  await growth.getByRole("button", { name: "Add agent" }).click();
   await page
-    .getByRole("menuitem", { name: "Add teammate to Growth" })
+    .getByRole("menuitem", { name: "Add agent to Growth" })
     .click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Hopper");
-  await dialog.getByLabel("Role").fill("Compiler");
-  await dialog.getByRole("button", { name: "Add teammate" }).click();
+  await dialog.getByLabel("Post").fill("Compiler");
+  await dialog.getByRole("button", { name: "Add agent" }).click();
 
+  // The dialog always lands the operator on the new agent's own page now —
+  // the toast survives that trip (it renders at the shell layer), but the
+  // chart itself has to be revisited to check the unplaced list.
+  await expect(page).toHaveURL(/#\/company\/agent\/[^?]+\?edit/, { timeout: 30_000 });
   const halfLanded = toasts(page).first();
   await expect(halfLanded).toContainText("couldn't be added to that desk");
   await expect(halfLanded).toContainText("Hopper");
@@ -940,6 +817,7 @@ test("#839 a teammate created but not placed is still on the chart to place by h
   // up to place by hand. Asserted against that list rather than the page: the
   // alert names Hopper too, so a page-wide match would pass whether or not the
   // chart had re-read at all.
+  await openChart(page);
   const unplaced = page
     .locator("section", {
       has: page.getByRole("heading", { name: "Not on a desk" }),
@@ -1262,7 +1140,7 @@ test("#485 a membership edit on the chart is there when you get back to chat", a
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 
   const engineering = deskNode(page, "Engineering");
-  await engineering.getByRole("button", { name: "Add teammate" }).click();
+  await engineering.getByRole("button", { name: "Add agent" }).click();
   await page.getByRole("menuitem", { name: "Turing" }).click();
   await expect(
     engineering.locator('[role="treeitem"][aria-level="3"]'),
@@ -1301,7 +1179,7 @@ test("#311 a seat naming nobody on the roster is shown, not hidden", async ({
   await expect(seats.nth(1)).toContainText("Not on the roster");
 });
 
-test("#1102 a teammate on the chart opens their detail page", async ({
+test("#1102 an agent on the chart opens their detail page", async ({
   page,
 }) => {
   await mockApi(page);
@@ -1315,9 +1193,9 @@ test("#1102 a teammate on the chart opens their detail page", async ({
     .locator('[role="treeitem"][aria-level="3"]')
     .first()
     .getByRole("link", { name: "Grace" });
-  await expect(grace).toHaveAttribute("href", "#/team/grace");
+  await expect(grace).toHaveAttribute("href", "#/company/agent/grace");
   await grace.click();
-  await expect.poll(() => page.url()).toContain("#/team/grace");
+  await expect.poll(() => page.url()).toContain("#/company/agent/grace");
   await expect(page.getByTestId("agent-breadcrumb-company")).toBeVisible({
     timeout: 30_000,
   });
@@ -1331,9 +1209,9 @@ test("#1102 a teammate on the chart opens their detail page", async ({
     })
     .last();
   const turing = unplaced.getByRole("link", { name: "Turing" });
-  await expect(turing).toHaveAttribute("href", "#/team/turing");
+  await expect(turing).toHaveAttribute("href", "#/company/agent/turing");
   await turing.click();
-  await expect.poll(() => page.url()).toContain("#/team/turing");
+  await expect.poll(() => page.url()).toContain("#/company/agent/turing");
 });
 
 test("#1102 a seat naming nobody on the roster is not offered as a link", async ({
@@ -1344,7 +1222,7 @@ test("#1102 a seat naming nobody on the roster is not offered as a link", async 
   await mockApi(page);
   await openChart(page);
 
-  // `#/team/ghost` is a dead end that only repeats the badge beside the name,
+  // `#/company/agent/ghost` is a dead end that only repeats the badge beside the name,
   // so the ghost seat stays text. The link on the seat above it is the teeth:
   // without it this would pass on a chart that linked nothing at all.
   const seats = deskNode(page, "Engineering").locator(

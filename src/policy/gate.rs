@@ -248,6 +248,12 @@ impl ManifestApprovalGate {
     }
 
     /// Whether the emergency stop is currently engaged.
+    ///
+    /// This flag is the switch's single source of truth, but this gate is not
+    /// its only enforcer: denying effects leaves the turns that ask for them
+    /// running. The halt on work itself is
+    /// [`CompanyRuntime::ensure_not_emergency_stopped`](crate::runtime::CompanyRuntime::ensure_not_emergency_stopped),
+    /// which reads this same flag.
     pub fn is_emergency(&self) -> bool {
         self.emergency.load(Ordering::SeqCst)
     }
@@ -268,6 +274,19 @@ impl ManifestApprovalGate {
     /// the gate does not enforce.
     pub fn ttl_millis(&self) -> u64 {
         self.ttl_millis.load(Ordering::Relaxed)
+    }
+
+    /// Whether this gate currently turns policy (the tier, `always_approve`,
+    /// the spend cap) into approval requests, as opposed to allowing
+    /// everything the hard denials do not already refuse.
+    ///
+    /// Read by [`PolicyDto`](crate::server::ops::policy::PolicyDto) so the
+    /// console states this fact rather than assuming it: every gate built by
+    /// [`with_policy_hitl_disabled`](Self::with_policy_hitl_disabled) reports
+    /// `false` here, and a copy of that assumption in TypeScript would drift
+    /// the moment a gate is built without it.
+    pub fn policy_hitl_enabled(&self) -> bool {
+        self.policy_hitl_enabled.load(Ordering::Relaxed)
     }
 
     /// The policy snapshot the gate currently evaluates against.
@@ -749,10 +768,12 @@ impl ApprovalGate for ManifestApprovalGate {
         //    releasing it. Denial returns to the brain as a refusal it replans
         //    around, which is what "park all new work" has to mean.
         //
-        //    `EffectGroup::Other` is exempt so chat survives — the operator has
-        //    to be able to ask the company what it was doing. The gate does not
-        //    police which tools `Other` covers, so "chat survives" is an
-        //    observation, not a promise about every non-conversational effect.
+        //    `EffectGroup::Other` is exempt at this layer only. It used to be
+        //    the carve-out that kept chat alive under a stop; since the runtime
+        //    admits no cycle at all while stopped
+        //    ([`CompanyRuntime::ensure_not_emergency_stopped`]), nothing reaches
+        //    this gate to take the exemption during one. It remains so that
+        //    releasing restores evaluation to exactly its pre-stop shape.
         if self.is_emergency() && effect.group != EffectGroup::Other {
             return Ok(PolicyDecision::Deny);
         }
@@ -882,6 +903,16 @@ mod test {
         gate.evaluate(&company(), effect).await.unwrap()
     }
 
+    #[test]
+    fn policy_hitl_enabled_reflects_the_gate_that_reports_it() {
+        let live = ManifestApprovalGate::new(policy("supervised", None));
+        assert!(live.policy_hitl_enabled());
+
+        let disabled =
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
+        assert!(!disabled.policy_hitl_enabled());
+    }
+
     #[tokio::test]
     async fn disabled_policy_hitl_allows_legacy_parks_but_keeps_hard_denials() {
         let gate =
@@ -917,6 +948,68 @@ mod test {
             )
             .await,
             PolicyDecision::Allow
+        );
+    }
+
+    /// `mode` is validated against `POLICY_MODES` before a company loads, so an
+    /// unrecognized word here should be unreachable in a healthy deployment —
+    /// but `evaluate` itself does not re-check it. Under the HITL-*enabled*
+    /// dispatch (`mode_decision`), an unrecognized mode fails *closed*
+    /// (`RequireApproval`, see the doc comment on the `Ok(Self::mode_decision(..))`
+    /// line). The disabled-HITL path — the one every production company
+    /// actually runs, per [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) —
+    /// has no such fence: it special-cases only `readonly` and allows
+    /// everything else, unrecognized words included. This pins down that real,
+    /// currently-shipped behavior rather than the safer one the enabled path's
+    /// fail-closed default might suggest it has.
+    #[tokio::test]
+    async fn disabled_policy_hitl_fails_open_on_an_unrecognized_mode() {
+        let gate =
+            ManifestApprovalGate::new(policy("not-a-real-tier", None)).with_policy_hitl_disabled();
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Allow
+        );
+    }
+
+    /// Only one of this suite's gate constructions matches how
+    /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) actually builds a
+    /// company's gate (`.with_policy_hitl_disabled()`); this is the one test
+    /// that exercises *that* gate under genuine concurrent access — many
+    /// in-flight `evaluate` reads racing a policy write via
+    /// `apply_effective_policy`, exactly as concurrent operator chat turns race
+    /// an admin's `PUT {scope}/policy` in production. Proves the `RwLock` does
+    /// not deadlock or poison under the access pattern production actually
+    /// produces, and that once every writer has landed the same policy, every
+    /// reader converges on it rather than a torn mix of the old and new snapshot.
+    #[tokio::test]
+    async fn disabled_policy_hitl_evaluate_is_race_safe_under_concurrent_policy_updates() {
+        let gate = std::sync::Arc::new(
+            ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled(),
+        );
+
+        let mut tasks = Vec::new();
+        for i in 0..50u32 {
+            let gate = gate.clone();
+            tasks.push(tokio::spawn(async move {
+                if i % 5 == 0 {
+                    gate.apply_effective_policy(policy("readonly", None));
+                } else {
+                    let _ = decide(&gate, &effect("payment.send", EffectGroup::Spend)).await;
+                }
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("a concurrent read or write must not panic or poison the lock");
+        }
+
+        // Every writer converged on the same policy, so once they have all
+        // landed the gate must answer from it — not a torn mix of the
+        // original snapshot and the update.
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Deny
         );
     }
 
@@ -2008,6 +2101,61 @@ mod test {
         // one-shot, and "last write wins" must hold in both directions.
         events.append(&id, change(true)).await.unwrap();
         assert!(replayed_emergency(&events, &id).await.unwrap());
+    }
+
+    /// The realistic shape of a company's log: the last
+    /// `EmergencyPauseChanged` is not the last event in the log at all — chat,
+    /// webhooks and everything else keep being appended after an operator
+    /// releases (or engages) the switch, right up to the moment this reads it.
+    /// `replayed_emergency` finds the *last matching* event scanning backward
+    /// ([`Iterator::rev`] plus [`Iterator::find_map`]), not the last event of
+    /// any kind, so trailing unrelated events must not shadow it.
+    #[tokio::test]
+    async fn replay_finds_the_last_emergency_event_under_trailing_unrelated_events() {
+        use crate::ports::EventLog;
+        use crate::ports::types::CompanyEvent;
+        use std::sync::Arc;
+
+        let home = tempfile::Builder::new()
+            .prefix("oc-emergency-replay-trailing-")
+            .tempdir()
+            .expect("tempdir");
+        let events: Arc<dyn EventLog> = Arc::new(crate::store::FsEventLog::new(home.path()));
+        let id = company();
+
+        let filler = || CompanyEvent::WebhookReceived {
+            channel: "test".to_string(),
+            body: serde_json::Value::Null,
+        };
+        let change = |engaged: bool| CompanyEvent::EmergencyPauseChanged {
+            engaged,
+            by: operator(),
+            reason: None,
+        };
+
+        for _ in 0..5 {
+            events.append(&id, filler()).await.unwrap();
+        }
+        events.append(&id, change(true)).await.unwrap();
+        for _ in 0..25 {
+            events.append(&id, filler()).await.unwrap();
+        }
+
+        assert!(
+            replayed_emergency(&events, &id).await.unwrap(),
+            "25 trailing unrelated events must not shadow the last real \
+             EmergencyPauseChanged"
+        );
+
+        events.append(&id, change(false)).await.unwrap();
+        for _ in 0..25 {
+            events.append(&id, filler()).await.unwrap();
+        }
+
+        assert!(
+            !replayed_emergency(&events, &id).await.unwrap(),
+            "the release must still be found under the same trailing noise"
+        );
     }
 
     /// A fresh gate is not stopped. The boot path is the only caller that can

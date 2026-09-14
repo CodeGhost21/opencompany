@@ -64,7 +64,7 @@ const PANE_1440 = { width: 1198, height: 756 };
 /** The same at 1100px, where the unclamped fit was worse (0.28). */
 const PANE_1100 = { width: 858, height: 756 };
 
-describe("the opening viewport for a workflow canvas", () => {
+describe("the opening viewport for an automation canvas", () => {
   it("holds a ten-node pipeline at the legible floor rather than fitting it", () => {
     const fit = startAnchoredFit(contentBounds(chain(10)), PANE_1440.width, PANE_1440.height);
     expect(fit).not.toBeNull();
@@ -116,7 +116,7 @@ describe("the opening viewport for a workflow canvas", () => {
     expect(top).toBeCloseTo(PANE_1440.height - bottom, 5);
   });
 
-  it("leaves a short workflow entirely alone", () => {
+  it("leaves a short automation entirely alone", () => {
     // Four nodes — `nightly_digest`. Its natural fit is already above the
     // floor, so React Flow's own fit is correct and must not be second-guessed.
     expect(

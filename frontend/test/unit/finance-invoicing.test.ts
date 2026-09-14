@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
+import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { InvoicingView } from "@/views/finance/InvoicingView";
 import { resolveFinancePage } from "@/views/finance/FinanceSection";
 
@@ -50,7 +51,12 @@ let root: Root;
 
 async function show(client: OpenCompanyClient) {
   await act(async () => {
-    root.render(createElement(InvoicingView, { client, company: "acme" }));
+    root.render(
+      createElement(ConnectionScopeProvider, {
+        scope: { connection: "local", company: "acme" },
+        children: createElement(InvoicingView, { client, company: "acme" }),
+      }),
+    );
   });
 }
 
@@ -63,6 +69,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  window.localStorage.clear();
 });
 
 afterEach(() => {

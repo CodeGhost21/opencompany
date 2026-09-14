@@ -239,7 +239,16 @@ function Sidebar({
             <SheetTitle>Sidebar</SheetTitle>
             <SheetDescription>Displays the mobile sidebar.</SheetDescription>
           </SheetHeader>
-          <div className="flex h-full w-full flex-col">{children}</div>
+          {/* The sheet's own scroller.
+              `sidebar-inner` below is the desktop branch only, so when the
+              column's single scroller moved there the sheet was left with none:
+              a phone showing five nav rows, a channel list and every agent
+              simply ran off the bottom with no way to reach the end. Same two
+              classes, same reason — one scroller for the whole column — and the
+              hover treatment is deliberately NOT applied, because a touch
+              pointer never hovers and a bar it cannot summon is a bar it does
+              not have. */}
+          <div className="flex h-full w-full flex-col overflow-y-auto">{children}</div>
         </SheetContent>
       </Sheet>
     )
@@ -302,7 +311,29 @@ function Sidebar({
           //
           // The mobile sheet above keeps its fill: it is an overlay dragged
           // over the page, not a pane of the shell.
-          className="flex size-full flex-col bg-transparent group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
+          // `overflow-y-auto` HERE, not on an inner region: the whole column
+          // scrolls as one, the way Slack's does. It used to be
+          // `SidebarContent` that scrolled, with the destinations pinned above
+          // it and the channel list scrolling inside its own box — so the
+          // column had two scroll positions and a channel list whose viewport
+          // was whatever was left after the fixed rows, which on a short window
+          // was a few rows tall while the column beside it sat still.
+          //
+          // One scroller means the nav rows scroll away with everything else,
+          // which is the trade and is the right one: they are five rows at the
+          // top of a list you are already scrolling, not chrome. What is
+          // genuinely chrome — the switcher, Overview, Settings, Feedback,
+          // Discord, the autonomy tier and you — is in the window's title row
+          // and never moves.
+          //
+          // The bar appears on hover and is hidden otherwise
+          // (`scrollbar-on-hover` in `index.css`). This column is standing
+          // furniture behind every view, and a permanent bar down its edge is a
+          // vertical rule the layout spent some effort removing — but it is
+          // also the whole column that scrolls now, so an operator reaching for
+          // it has to find it. Hover is where the reach begins, which makes it
+          // the moment to show the bar and no earlier.
+          className="scrollbar-on-hover flex size-full flex-col overflow-y-auto bg-transparent group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:shadow-sm group-data-[variant=floating]:ring-1 group-data-[variant=floating]:ring-sidebar-border"
         >
           {children}
         </div>
@@ -455,19 +486,38 @@ function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-content"
       data-sidebar="content"
-      // The collapsed rail used to clip rather than scroll here
-      // (`overflow-hidden`), which was harmless while the rail's own chrome
-      // was short enough that the nav list always fit above the fold. Issue
-      // #1931 review: it no longer always is — the macOS traffic-light inset
-      // (`WindowControlsInset`) and the four-utility bar (`SidebarUtilityBar`)
-      // both stack vertically above the nav in collapsed mode, and at the
-      // desktop's supported minimum window height that stack plus a full nav
-      // list can exceed the rail's height, clipping the last row(s) out of
-      // reach with no way to get to them. `overflow-y-auto` keeps them
-      // reachable by scroll; `no-scrollbar` (already applied above) keeps the
-      // rail visually identical when everything already fits.
+      // This region does not scroll and does not clip: `sidebar-inner` is the
+      // column's single scroller (issue #1931 review, and the Slack-style
+      // whole-column scroll that replaced it).
+      //
+      // It used to own the overflow, and answered it with `overflow-hidden`
+      // while the rail's chrome was short enough that the nav list always fit.
+      // That stopped being true — the macOS traffic-light inset stacks above
+      // the nav in collapsed mode, and at the supported minimum window height
+      // that stack plus a full nav list exceeded the rail, clipping the last
+      // rows out of reach with no way to get to them.
+      //
+      // Moving the scroller to the whole column fixes the collapsed rail by
+      // construction rather than by a second `collapsible=icon` rule: there is
+      // one scrolling box, at every state. `flex-none` is what keeps this
+      // region from absorbing the slack instead of the channel list below it.
+      // `pt-4.5` (18px) starts the nav list level with the first row of the
+      // page beside it, instead of at the top of its own column. Both columns
+      // begin at the same y under the title row, but the content surface
+      // spends its first band on a header — `ChatHeader`'s `h-15.5`, 62px with
+      // its title vertically centred — while the sidebar put its first 32px row
+      // flush against the top. The two first rows therefore sat 18px apart, and
+      // the eye reads that as the column having slipped rather than as two
+      // different kinds of thing.
+      //
+      // The number is that gap, derived rather than dialled: centring a 32px
+      // row in the 62px header band is `(62 - 32) / 2` = 15px from the surface's
+      // top edge, which sits 3px below the sidebar's. Views with the shorter
+      // `h-13` header (52px) land 5px high of their own first row — worth it
+      // for the view every session opens on, and the fix for those is to settle
+      // on one header height rather than to average this.
       className={cn(
-        "no-scrollbar flex min-h-0 flex-1 flex-col gap-1 overflow-auto group-data-[collapsible=icon]:overflow-y-auto",
+        "flex w-full flex-none flex-col gap-1 pt-4.5",
         className
       )}
       {...props}
@@ -480,12 +530,26 @@ function SidebarGroup({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="sidebar-group"
       data-sidebar="group"
-      // `px-3 py-1` — the group's gutter matches the header's, so a nav row's
-      // icon and the switcher's glyph stand on the same vertical line, and the
-      // group contributes only rhythm vertically. The rail narrows to `px-2`
-      // for the reason `SidebarHeader` gives.
+      // `pl-3` matches the header's gutter, so a nav row's icon and the
+      // switcher's glyph stand on the same vertical line.
+      //
+      // The trailing gutter is the SCROLLBAR's width, not the leading one's.
+      // With `pr-3` the rows stopped 12px short of the column edge and the
+      // 10px scrollbar then sat in that gap with 2px to spare, so a row's right
+      // edge lined up with nothing: not the bar beside it, and not the content
+      // card past it. `--scrollbar-size` puts the row's edge exactly where the
+      // bar begins, which makes the column read as one measure ending at the
+      // card rather than as rows floating inside a wider box.
+      //
+      // No padding on TOP. `SidebarContent` already separates its children with
+      // `gap-1`, so a `pt-1` here stacked on that gap and pushed every group
+      // away from whatever sits above it — most visibly the first group under
+      // the nav buttons, which read as belonging to a different column than the
+      // rows they follow. Spacing between groups is the parent's job; this
+      // keeps only the trailing breath that stops the last row of one group
+      // touching the next group's label.
       className={cn(
-        "relative flex w-full min-w-0 flex-col px-3 py-1 group-data-[collapsible=icon]:px-2",
+        "relative flex w-full min-w-0 flex-col pb-1 pl-3 pr-(--scrollbar-size) group-data-[collapsible=icon]:px-2",
         className,
       )}
       {...props}
@@ -700,24 +764,38 @@ function SidebarMenuBadge({
   )
 }
 
-/*
- * `SidebarMenuDot` used to live here — the attention mark that survived the
- * rail collapsing (issue #1018).
+/**
+ * The attention mark that survives the rail collapsing (issue #1018).
  *
- * It existed for one reason: `SidebarMenuBadge` carries
- * `group-data-[collapsible=icon]:hidden`, so the approvals count — the
- * sidebar's only attention signal — vanished the moment the sidebar collapsed
- * to icons, and a collapsed rail showing nothing is indistinguishable from
- * all-clear. The dot was the same `pending` value rendered small enough to
- * survive 32px, mirrored so exactly one of the two ever showed.
+ * `SidebarMenuBadge` above carries `group-data-[collapsible=icon]:hidden`, so a
+ * count rendered only there vanishes the moment the sidebar collapses to icons
+ * — and a collapsed rail showing nothing is indistinguishable from all-clear.
+ * This is the same value rendered small enough to survive 32px, and the two are
+ * mirrored so exactly one of them is ever on screen.
  *
- * The signal has moved to the window's title row (`ApprovalsButton`), which is
- * chrome: it does not collapse, and it is on screen on every page in every
- * sidebar state. The disappearance the dot was protecting against can no longer
- * happen, so the dot is deleted rather than left as a second mechanism for a
- * count that is no longer here. Do not re-add it without re-adding a sidebar
- * badge for it to mirror.
+ * It was deleted once, when Approvals was chrome in the window's title row: the
+ * title row does not collapse, so the disappearance this guards against could
+ * not happen, and a second mechanism for a count that had left the sidebar was
+ * worth removing. Approvals is a sidebar row again, so the hazard is back and so
+ * is this. Whichever of the two moves, they move together — a badge with no dot
+ * is issue #1018 verbatim.
  */
+function SidebarMenuDot({ className, ...props }: React.ComponentProps<"span">) {
+  return (
+    <span
+      data-slot="sidebar-menu-dot"
+      data-sidebar="menu-dot"
+      aria-hidden="true"
+      className={cn(
+        // The mirror of the badge's own hide rule: shown ONLY on the icon rail.
+        "pointer-events-none absolute top-1.5 right-1.5 hidden size-2 rounded-full",
+        "bg-status-blocked-text group-data-[collapsible=icon]:block",
+        className
+      )}
+      {...props}
+    />
+  )
+}
 
 function SidebarMenuSkeleton({
   className,
@@ -831,6 +909,7 @@ export {
   SidebarMenu,
   SidebarMenuAction,
   SidebarMenuBadge,
+  SidebarMenuDot,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSkeleton,

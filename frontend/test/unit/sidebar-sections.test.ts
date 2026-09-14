@@ -39,6 +39,8 @@ function render(view: View) {
       createElement(
         SidebarProvider,
         null,
+        // No `pending` to pass: the approvals count is the title row's bell's
+        // now, and `title-bar-jumps.test.ts` owns it.
         createElement(SidebarNavigation, { view, onNavigate: () => {} }),
       ),
     ),
@@ -91,20 +93,28 @@ describe("the sidebar's section table", () => {
       "Room",
       "Company",
       "Connections",
-      "Flows",
+      "Automations",
     ]);
   });
 
   it("keeps the surfaces that lost their row out of the table entirely", () => {
-    // Overview and Approvals moved up into the window's title row; Observatory
-    // moved down into Settings. A row left behind as a comment is the failure
-    // this codebase has already had once (#1311), so the assertion above is a
+    // Overview moved up into the window's title row; Observatory moved down
+    // into Settings. A row left behind as a comment is the failure this
+    // codebase has already had once (#1311), so the assertion above is a
     // whole-table equality — a commented row is not a member of it — and this
     // one says the same thing from the other side.
+    //
+    // Approvals is NOT in this list. It is the Approvals tab of the
+    // Notifications page now, reached from a bell in the window's title row
+    // beside Overview and Settings — so the column draws neither the row nor
+    // the `SidebarMenuBadge`/`SidebarMenuDot` pair that used to carry its
+    // count. See `components/notifications-button.tsx` for why this position
+    // settles an argument the previous two did not.
     const views = NAV_SECTIONS.map((section) => section.view as string);
     expect(views).not.toContain("overview");
-    expect(views).not.toContain("approvals");
     expect(views).not.toContain("observatory");
+    expect(views).not.toContain("approvals");
+    expect(views).not.toContain("notifications");
   });
 
   it("files the company's five surfaces under Company, in this order", () => {
@@ -118,14 +128,14 @@ describe("the sidebar's section table", () => {
     ]);
   });
 
-  it("calls the workflow surface Flows, over the view id every address uses", () => {
+  it("calls the automation surface Automations, over the view id every address uses", () => {
     // A view id is an address — every `#/workflows/<id>` a run row points at —
     // and renaming a row is not a reason to break them. "Work" has been the
     // `ledgers` view since #1284 for the same reason. The `data-tour` anchors
     // follow the view id, so the tour and the e2e specs do not move when a word
     // does.
-    const flows = NAV_SECTIONS.find((section) => section.label === "Flows")!;
-    expect(flows.view).toBe("workflows");
+    const automations = NAV_SECTIONS.find((section) => section.label === "Automations")!;
+    expect(automations.view).toBe("workflows");
 
     const room = NAV_SECTIONS.find((section) => section.label === "Room")!;
     expect(room.view).toBe("chat");
@@ -161,8 +171,14 @@ describe("the sidebar's section table", () => {
     }
     expect(new Set(anchors).size, anchors.join(", ")).toBe(anchors.length);
 
+    // Agents used to land on its section's own address (`#/company`) with no
+    // sub, so its anchor would have been `nav-company` — the collision this
+    // test is about, and why `childAnchor` returned nothing for it. It has its
+    // own address now (`#/company/agents`, because a row reading "Agents" over
+    // an address reading "company" was the mismatch the prefix work removed),
+    // so it gets an anchor of its own and there is nothing to collide with.
     const company = NAV_SECTIONS.find((s) => s.view === "company")!;
-    expect(childAnchor(company, company.children![0])).toBeUndefined();
+    expect(childAnchor(company, company.children![0])).toBe("nav-agents");
     expect(childAnchor(company, company.children![1])).toBe("nav-ledgers");
   });
 
@@ -193,20 +209,29 @@ describe("which section an address belongs to", () => {
   });
 
   it("claims nothing for the surfaces that are deliberately not in the nav", () => {
-    // Settings and Feedback live in the sidebar's footer; Overview and
-    // Approvals in the window's title row; Observatory under Settings; Pages is
-    // direct-URL only (#1171, #1172); `not-found` is nowhere by design.
+    // Settings and Feedback live in the sidebar's footer; Overview in the
+    // window's title row; Observatory under Settings; Pages is direct-URL only
+    // (#1171, #1172); `not-found` is nowhere by design. Approvals is absent
+    // from this list only because it shares a page with `notifications`: the
+    // two heads are asserted unowned together, below, rather than here.
     for (const view of [
       "settings",
       "feedback",
       "pages",
       "overview",
-      "approvals",
       "observatory",
       "not-found",
     ] as View[]) {
       expect(sectionOwning(view)).toBeUndefined();
     }
+  });
+
+  it("owns neither half of the Notifications page", () => {
+    // Both heads render the same page, and it is reached from chrome rather
+    // than from this column — so no section lights up for either. A section
+    // that claimed one would light a row an operator did not come from.
+    expect(sectionOwning("approvals" as View)).toBeUndefined();
+    expect(sectionOwning("notifications" as View)).toBeUndefined();
   });
 });
 
@@ -232,16 +257,17 @@ describe("which child row is open", () => {
 });
 
 describe("the rendered sidebar", () => {
-  it("is the four rows and the Room rail's slot, on every section", () => {
+  it("is the top-level rows and the Room rail's slot, on every section", () => {
     // The middle region stopped swapping with the section you are in (issue
-    // #2130). It is the channel list, always — so the four rows are the only
+    // #2130). It is the channel list, always — so the section rows are the only
     // rows this column paints, whichever address is open, and a section's own
     // pages are rows on its content rail instead
     // (`section-rail-layout.test.ts`).
+    const rows = ["Room", "Company", "Connections", "Automations"];
     for (const view of ["chat", "company", "connections", "workflows"] as View[]) {
       render(view);
-      expect(fixedRows(), view).toEqual(["Room", "Company", "Connections", "Flows"]);
-      expect(renderedRows(), view).toEqual(["Room", "Company", "Connections", "Flows"]);
+      expect(fixedRows(), view).toEqual(rows);
+      expect(renderedRows(), view).toEqual(rows);
       expect(
         container.querySelectorAll("[data-testid='room-rail-slot']"),
         view,
@@ -258,9 +284,14 @@ describe("the rendered sidebar", () => {
 
     const groups = [...container.querySelectorAll("[data-sidebar='group']")];
     expect(groups).toHaveLength(2);
-    // Deliberate, not the row rhythm: `py-1` on the group either side of it is
-    // 4px, and the break has to be legible at a glance.
-    expect(groups[1].className).toContain("pt-5");
+    // The row rhythm, and nothing on top of it: the fixed block's `pb-1` plus
+    // `SidebarContent`'s `gap-1` is the same 8px step as any two rows in the
+    // column. This carried a `pt-5` — 24px — on the argument that the break had
+    // to be legible at a glance; it read instead as the channel list having
+    // come loose from the four rows above it, which are one navigation surface
+    // with it. No top padding on either group, so neither can drift back.
+    expect(groups[0].className).not.toContain("pt-");
+    expect(groups[1].className).not.toContain("pt-");
   });
 
   it("keeps the rail on the 3rem icon rail rather than hiding it there", () => {

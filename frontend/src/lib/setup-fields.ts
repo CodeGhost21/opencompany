@@ -25,7 +25,7 @@ export interface FieldCopy {
 
 const COPY: Record<string, FieldCopy> = {
   brain_mode: {
-    label: "How your teammates think",
+    label: "How your agents think",
     hint: "Hosted cognition, or a local runtime you point at yourself.",
   },
   api_url: {
@@ -54,7 +54,7 @@ const COPY: Record<string, FieldCopy> = {
   },
   tinyhumans_api_key: {
     label: "TinyHumans API key",
-    hint: "What your teammates think with.",
+    hint: "What your agents think with.",
   },
   auth_mode: {
     label: "Sign-in mode",

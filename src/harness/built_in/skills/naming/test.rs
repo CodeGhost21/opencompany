@@ -160,6 +160,26 @@ async fn legacy_workflow_id_argument_still_resolves() {
     assert!(out.contains("Web Research"), "{out}");
 }
 
+/// `to_inner_args` only ever *adds* the upstream key from ours
+/// (`map.entry(UPSTREAM_ID_ARG).or_insert(id)`), so a call carrying both keys
+/// at once is resolved by whichever key the inner tool happens to prefer —
+/// here, the legacy `workflow_id` silently wins over `skill_id` rather than
+/// either being refused as ambiguous or `skill_id` taking precedence as the
+/// tool's own documented argument.
+#[tokio::test]
+async fn both_id_keys_at_once_resolve_by_the_legacy_key_not_skill_id() {
+    let (_ws, tools) = tools_for("web-research", "Web Research");
+    let out = find(&tools, DESCRIBE_SKILL_TOOL)
+        .execute(json!({ SKILL_ID_ARG: "nope", UPSTREAM_ID_ARG: "web-research" }))
+        .await
+        .expect("describe")
+        .output_for_llm(false);
+    assert!(
+        out.contains("Web Research"),
+        "the legacy key silently wins over skill_id, undocumented: {out}"
+    );
+}
+
 /// `read_skill_resource`'s payload echoes the id back under its own key.
 #[tokio::test]
 async fn read_resource_echoes_skill_id_not_workflow_id() {
@@ -294,4 +314,71 @@ fn nested_content_is_never_rewritten() {
     let entry = &payload["skills"][0];
     assert_eq!(entry["name"], "Workflow Builder");
     assert_eq!(entry["description"], "Explains the workflow registry");
+}
+
+/// Materializes `n` skills and returns their read tools.
+fn tools_for_many(n: usize) -> (tempfile::TempDir, Vec<Box<dyn Tool>>) {
+    let src = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    for i in 0..n {
+        let dir = src.path().join("skills").join(format!("skill-{i:03}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: Skill {i:03}\ndescription: {}\n---\n\n# Skill {i:03}\n\nBODY.\n",
+                "a long enough description that a hundred of them are not free ".repeat(3)
+            ),
+        )
+        .unwrap();
+    }
+    let eff =
+        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[]).unwrap();
+    let tools = eff.read_tools();
+    (ws, tools)
+}
+
+/// `list_skills` renders every installed skill with its name, dir,
+/// description, tags, tool hints, scope and warnings, and nothing bounds how
+/// many. The skill tree is materialized from what the company installs, so its
+/// size is not a constant the wrapper gets to assume — and this output lands
+/// in the turn's context, where an unbounded block crowds out the work.
+///
+/// Every other listing on the belt is capped and says how many it left out;
+/// this one is the exception.
+#[tokio::test]
+#[ignore = "list_skills renders every installed skill with no cap and no elision line"]
+async fn listing_a_large_skill_tree_is_bounded_and_says_what_it_left_out() {
+    let (_ws, tools) = tools_for_many(200);
+    let out = find(&tools, LIST_SKILLS_TOOL)
+        .execute(json!({}))
+        .await
+        .expect("list")
+        .output_for_llm(false);
+
+    assert!(
+        out.len() < 20_000,
+        "the listing grew to {} characters for 200 installed skills, with nothing bounding it",
+        out.len()
+    );
+    assert!(
+        out.contains("more"),
+        "a truncated listing must say how many skills it did not name: {out}"
+    );
+}
+
+/// The bound on the cap: a tree small enough to render whole must still render
+/// whole, so the cap above cannot be satisfied by a listing that hides skills
+/// an agent could have used.
+#[tokio::test]
+async fn a_small_skill_tree_is_listed_in_full() {
+    let (_ws, tools) = tools_for_many(3);
+    let out = find(&tools, LIST_SKILLS_TOOL)
+        .execute(json!({}))
+        .await
+        .expect("list")
+        .output_for_llm(false);
+    for i in 0..3 {
+        assert!(out.contains(&format!("skill-{i:03}")), "{out}");
+    }
 }

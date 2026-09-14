@@ -231,14 +231,14 @@ test("an operator names the account, and the page says so", async ({ page }) => 
   // The claim is the host's, re-read: the mark is drawn from `GET
   // …/composio/connections`, so a passing assertion here means the choice was
   // stored and reported, not merely painted locally.
-  await expect(gmail.getByTestId("account-ca_billing")).toContainText("teammates act as this");
+  await expect(gmail.getByTestId("account-ca_billing")).toContainText("agents act as this");
   await expect(gmail).not.toContainText("Composio picks");
 
   await page.reload();
   await openConnections(page);
   await expect(
     page.getByTestId("accounts-gmail").getByTestId("account-ca_billing"),
-  ).toContainText("teammates act as this", { timeout: 30_000 });
+  ).toContainText("agents act as this", { timeout: 30_000 });
 
   // Choosing for Gmail says nothing about any other provider.
   const rows = await page.request.get("/api/v1/company/composio/connections");
@@ -298,7 +298,15 @@ test.describe("the agent acts as the chosen account", () => {
     // `exact`. The composer's button is labelled exactly "Send"; the sidebar's
     // thread preview takes its accessible name from the last message, so a
     // loose match resolves to both as soon as any message mentions sending.
-    await page.getByRole("button", { name: "Send", exact: true }).click();
+    //
+    // `clickClearOfToasts`, not a bare `.click()`: this runs right after the
+    // "Act as this" pick above, whose confirmation toast is `position: fixed`
+    // in the same bottom-right corner the composer's Send button sits in on a
+    // narrow viewport. `page.goto("/#/chat")` is a hash change, not a reload —
+    // the toaster stays mounted across it — so a toast still counting down from
+    // that pick can still be up here and swallow the click for the whole retry
+    // budget (see the helper's own doc, and issue #1303).
+    await clickClearOfToasts(page.getByRole("button", { name: "Send", exact: true }));
     expect((await posted).ok(), "the chat POST did not succeed").toBeTruthy();
 
     await expect
@@ -331,7 +339,7 @@ test.describe("the agent acts as the chosen account", () => {
     );
     await expect(
       page.getByTestId("accounts-gmail").getByTestId("account-ca_billing"),
-    ).toContainText("teammates act as this");
+    ).toContainText("agents act as this");
 
     // …and the next turn acts as it. This is the whole issue in one assertion:
     // the choice made on the page reaches the request the harness sends, which

@@ -171,7 +171,7 @@ function Control({
       return (
         <Select value={value} onValueChange={(v) => onChange(v ?? "")}>
           <SelectTrigger className="h-8" aria-label={ariaLabel}>
-            <SelectValue placeholder="Pick a workflow" />
+            <SelectValue placeholder="Pick an automation" />
           </SelectTrigger>
           <SelectContent>
             {others.map((w) => (

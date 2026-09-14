@@ -877,6 +877,11 @@ impl CompanyStore for MongoStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_agent_edits: overlay.agent_edits,
+            // Off the blob, for the reason the filesystem and SQLite backends
+            // read it that way: the write side persists it, so defaulting here
+            // would drop an installed move grammar on every load — and on this
+            // backend that is a hosted tenant losing it.
+            overlay_desk_hive: overlay.desk_hive,
             overlay_retired_agents: overlay.retired_agents,
             overlay_policy: overlay.policy,
             overlay_tool_grants: overlay.tool_grants,
@@ -1698,6 +1703,46 @@ impl crate::ports::tasks::TaskStore for MongoStore {
             .await
             .map_err(mongo_err)?;
         Ok(())
+    }
+
+    async fn update_if_column(
+        &self,
+        company: &CompanyId,
+        task: &crate::ports::tasks::TaskRecord,
+        observed: &crate::ports::tasks::TaskRecord,
+        expected_column: &str,
+    ) -> Result<bool> {
+        if observed.id != task.id || observed.column != expected_column {
+            return Ok(false);
+        }
+        let collection = self.collection("tasks");
+        let Some(current) = collection
+            .find_one(doc! {"company_id": company.as_ref(), "task_id": &task.id})
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Ok(false);
+        };
+        let current_json = get_str(&current, "task_json")?;
+        let current_task: crate::ports::tasks::TaskRecord = serde_json::from_str(&current_json)?;
+        if current_task != *observed {
+            return Ok(false);
+        }
+        let result = collection
+            .update_one(
+                doc! {
+                    "company_id": company.as_ref(),
+                    "task_id": &task.id,
+                    "task_json": current_json,
+                },
+                doc! {"$set": {
+                    "task_json": serde_json::to_string(task)?,
+                    "updated_ms": task.updated_at_millis as i64,
+                }},
+            )
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.matched_count == 1)
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
@@ -3822,52 +3867,60 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         Ok(Some((node, get_str(&doc, "content")?, len.max(0) as u64)))
     }
 
-    async fn write(
+    async fn write_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         content: &str,
         author: crate::ports::workspace::WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
-        let doc = self
-            .collection("workspace_nodes")
-            .find_one(doc! {"company_id": company.as_ref(), "node_id": id})
-            .await
-            .map_err(mongo_err)?;
-        let Some(doc) = doc else {
-            return Err(OpenCompanyError::CompanyNotFound(format!(
-                "workspace node {id}"
-            )));
-        };
-        let mut node: crate::ports::workspace::WorkspaceNode =
-            serde_json::from_str(&get_str(&doc, "node_json")?)?;
-        if node.kind != NodeKind::File {
-            return Err(OpenCompanyError::InvalidRequest(
-                "cannot write content to a folder".to_string(),
-            ));
+        loop {
+            let doc = self
+                .collection("workspace_nodes")
+                .find_one(doc! {"company_id": company.as_ref(), "node_id": id})
+                .projection(doc! {"node_json": 1})
+                .await
+                .map_err(mongo_err)?;
+            let Some(doc) = doc else {
+                return Err(OpenCompanyError::CompanyNotFound(format!(
+                    "workspace node {id}"
+                )));
+            };
+            let original_json = get_str(&doc, "node_json")?;
+            let mut node: crate::ports::workspace::WorkspaceNode =
+                serde_json::from_str(&original_json)?;
+            if node.kind != NodeKind::File {
+                return Err(OpenCompanyError::InvalidRequest(
+                    "cannot write content to a folder".to_string(),
+                ));
+            }
+            if let Some(mime) = node.mime.clone() {
+                return Err(OpenCompanyError::InvalidRequest(
+                    crate::ports::workspace::binary_write_refusal(&node.name, &mime),
+                ));
+            }
+            node.updated_at_millis = crate::ports::workspace::next_write_revision(
+                node.updated_at_millis,
+                expected_updated_at,
+            )?;
+            node.updated_by = author.clone();
+            let updated = self.collection("workspace_nodes")
+                .update_one(
+                    doc! {"company_id": company.as_ref(), "node_id": id, "node_json": original_json},
+                    doc! {"$set": {
+                        "node_json": serde_json::to_string(&node)?,
+                        "content": content,
+                        "updated_ms": node.updated_at_millis as i64,
+                    }},
+                )
+                .await
+                .map_err(mongo_err)?;
+            if updated.matched_count == 1 {
+                return Ok(node);
+            }
         }
-        if let Some(mime) = node.mime.clone() {
-            return Err(OpenCompanyError::InvalidRequest(
-                crate::ports::workspace::binary_write_refusal(&node.name, &mime),
-            ));
-        }
-        node.updated_at_millis = now_millis();
-        // Authorship rides the same stamp as the timestamp. The node is stored
-        // as opaque JSON in `node_json`, so this needs no schema change.
-        node.updated_by = author;
-        self.collection("workspace_nodes")
-            .update_one(
-                doc! {"company_id": company.as_ref(), "node_id": id},
-                doc! {"$set": {
-                    "node_json": serde_json::to_string(&node)?,
-                    "content": content,
-                    "updated_ms": node.updated_at_millis as i64,
-                }},
-            )
-            .await
-            .map_err(mongo_err)?;
-        Ok(node)
     }
 
     async fn create(
@@ -4240,68 +4293,71 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         parent: Option<Option<&str>>,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
-        let nodes = self.workspace_nodes(company).await?;
-        if !nodes.contains_key(id) {
-            return Err(OpenCompanyError::CompanyNotFound(format!(
-                "workspace node {id}"
-            )));
-        }
-        // A move to root (`Some(None)`) never forms a cycle.
-        if let Some(Some(parent)) = parent {
-            if parent == id || mongo_workspace_descendants(&nodes, id).contains(parent) {
-                return Err(OpenCompanyError::InvalidRequest(
-                    "cannot move a folder into its own subtree".to_string(),
-                ));
+        loop {
+            let original = self
+                .collection("workspace_nodes")
+                .find_one(doc! {"company_id": company.as_ref(), "node_id": id})
+                .projection(doc! {"node_json": 1})
+                .await
+                .map_err(mongo_err)?
+                .ok_or_else(|| OpenCompanyError::CompanyNotFound(format!("workspace node {id}")))?;
+            let original_json = get_str(&original, "node_json")?;
+            let nodes = self.workspace_nodes(company).await?;
+            if !nodes.contains_key(id) {
+                return Err(OpenCompanyError::CompanyNotFound(format!(
+                    "workspace node {id}"
+                )));
             }
-            if nodes.get(parent).map(|p| p.kind) != Some(NodeKind::Folder) {
-                return Err(OpenCompanyError::InvalidRequest(
-                    "target parent is not a folder".to_string(),
-                ));
+            if let Some(Some(parent)) = parent {
+                if parent == id || mongo_workspace_descendants(&nodes, id).contains(parent) {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "cannot move a folder into its own subtree".to_string(),
+                    ));
+                }
+                if nodes.get(parent).map(|p| p.kind) != Some(NodeKind::Folder) {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "target parent is not a folder".to_string(),
+                    ));
+                }
             }
-        }
-        let mut node = nodes.get(id).cloned().expect("node present");
-        if let Some(name) = name {
-            node.name = name.to_string();
-        }
-        if let Some(parent) = parent {
-            node.parent_id = parent.map(str::to_string);
-        }
-        node.updated_at_millis = now_millis();
-        // A rename or a reparent moves the file to a different path, so its
-        // claim has to move with it (issue #697) or the index would keep
-        // guarding the path it left and ignore the one it took.
-        let mut set = doc! {
-            "node_json": serde_json::to_string(&node)?,
-            "updated_ms": node.updated_at_millis as i64,
-        };
-        let mut unset = Document::new();
-        match node_path_key(&node) {
-            Some(key) => {
-                set.insert("file_path_key", key);
+            let mut node: crate::ports::workspace::WorkspaceNode =
+                serde_json::from_str(&original_json)?;
+            if let Some(name) = name {
+                node.name = name.to_string();
             }
-            None => {
-                unset.insert("file_path_key", "");
+            if let Some(parent) = parent {
+                node.parent_id = parent.map(str::to_string);
             }
-        }
-        // A moved folder **drops** its claim rather than carrying it (issue
-        // #759). The claim exists to decide a race between two publishers on the
-        // publish walk; an operator who moved the folder by hand has taken it
-        // out of that walk's reach, and a key that travelled with it would keep
-        // guarding the path it left — refusing that path to every later publish
-        // forever, which is the very outage this primitive exists to prevent.
-        // Demoting to unguarded is what every console-made folder already is.
-        if node.kind == NodeKind::Folder {
-            unset.insert("folder_path_key", "");
-        }
-        let mut update = doc! {"$set": set};
-        if !unset.is_empty() {
-            update.insert("$unset", unset);
-        }
-        self.collection("workspace_nodes")
-            .update_one(doc! {"company_id": company.as_ref(), "node_id": id}, update)
+            node.updated_at_millis =
+                crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
+            let mut set = doc! {
+                "node_json": serde_json::to_string(&node)?,
+                "updated_ms": node.updated_at_millis as i64,
+            };
+            let mut unset = Document::new();
+            match node_path_key(&node) {
+                Some(key) => {
+                    set.insert("file_path_key", key);
+                }
+                None => {
+                    unset.insert("file_path_key", "");
+                }
+            }
+            if node.kind == NodeKind::Folder {
+                unset.insert("folder_path_key", "");
+            }
+            let mut update = doc! {"$set": set};
+            if !unset.is_empty() {
+                update.insert("$unset", unset);
+            }
+            let result = self.collection("workspace_nodes")
+            .update_one(doc! {"company_id": company.as_ref(), "node_id": id, "node_json": original_json}, update)
             .await
             .map_err(mongo_err)?;
-        Ok(node)
+            if result.matched_count == 1 {
+                return Ok(node);
+            }
+        }
     }
 
     async fn swap_files(
@@ -4334,6 +4390,11 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                 "only files can be promoted from a staging path".to_string(),
             ));
         }
+
+        let mut promoted = replacement.clone();
+        promoted.name = name.to_string();
+        promoted.updated_at_millis =
+            crate::ports::workspace::next_write_revision(promoted.updated_at_millis, None)?;
 
         let expected_doc = match expected_id {
             Some(id) => nodes
@@ -4387,10 +4448,6 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             self.drop_blobs(company, replacement_id, None).await?;
             return Ok(None);
         }
-
-        let mut promoted = replacement.clone();
-        promoted.name = name.to_string();
-        promoted.updated_at_millis = now_millis();
 
         // Issue #697, the first-publish arm. The staged document has just been
         // detached, so re-inserting it under the final name is the whole
@@ -5565,6 +5622,7 @@ mod test {
 
         for id in [&owned, &orphan] {
             let record = CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
@@ -5646,6 +5704,7 @@ mod test {
 
         for (id, tenant) in [(&id_a, "tenant-a"), (&id_b, "tenant-b")] {
             let record = CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 id: id.clone(),
                 manifest: manifest.clone(),
@@ -6246,6 +6305,20 @@ mod test {
         drop_db(&s).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_conditional_write() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_conditional_write(s.clone(), s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_revision_mutations() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_revision_mutations(s.clone(), s.clone()).await;
+        drop_db(&s).await;
+    }
+
     #[tokio::test]
     async fn conformance_workspace_sibling_names() {
         let Some(s) = store().await else { return };
@@ -6278,6 +6351,13 @@ mod test {
     async fn conformance_workspace_folder_claims() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_folder_claims(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_create_rejects_an_absent_or_foreign_parent() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_create_rejects_an_absent_or_foreign_parent(s.clone()).await;
         drop_db(&s).await;
     }
 

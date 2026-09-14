@@ -75,7 +75,7 @@ test("the box drafts, saves, and lands on the canvas — one gesture", async ({
 
     const dialog = await openOneBox(page);
     // The whole dialog: no Name, no Workflow ID, no node rows to fill in.
-    await expect(dialog.getByLabel("Workflow ID", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByLabel("Automation ID", { exact: true })).toHaveCount(0);
     await expect(dialog.getByLabel("Name", { exact: true })).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: "Add node" })).toHaveCount(0);
 
@@ -107,7 +107,7 @@ test("the box drafts, saves, and lands on the canvas — one gesture", async ({
   }
 });
 
-test("with no copilot, the box still creates — naming the workflow from the sentence", async ({
+test("with no copilot, the box still creates — naming the automation from the sentence", async ({
   page,
   request,
 }) => {
@@ -197,7 +197,7 @@ test("a write that fails for a reason nobody can act on leaves the box up", asyn
   // …and the box is still the whole dialog, with the sentence still in it.
   await expect(dialog.getByTestId("workflow-describe-box")).toHaveValue(sentence);
   await expect(
-    dialog.getByLabel("Workflow ID", { exact: true }),
+    dialog.getByLabel("Automation ID", { exact: true }),
     "a 500 must not hand over the graph form",
   ).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Add node" })).toHaveCount(0);
@@ -218,8 +218,8 @@ test("a copilot that could not draft says so, rather than advising it be done by
     {
       automatable: false,
       reason:
-        "the described workflow could not be drafted into one that would be accepted: " +
-        "invalid request: a workflow needs exactly one `trigger` node to say what " +
+        "the described automation could not be drafted into one that would be accepted: " +
+        "invalid request: an automation needs exactly one `trigger` node to say what " +
         "starts it (found 0).",
     },
     drafts,
@@ -237,7 +237,7 @@ test("a copilot that could not draft says so, rather than advising it be done by
   // The vocabulary the one box exists to retire never reaches the operator.
   await expect(declined).not.toContainText("trigger");
   await expect(declined).not.toContainText("invalid request");
-  await expect(declined).toContainText("could not turn that into a workflow");
+  await expect(declined).toContainText("could not turn that into an automation");
   // And the offered action is the canvas, not the overruling of a judgement.
   await expect(dialog.getByTestId("workflow-create-anyway")).toContainText(
     "Start it on the canvas",

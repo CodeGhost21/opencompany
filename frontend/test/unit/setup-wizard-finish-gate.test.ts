@@ -89,6 +89,26 @@ function button(label: string): HTMLButtonElement {
   return match as HTMLButtonElement;
 }
 
+/**
+ * Picks a provider from the model step's `Select`.
+ *
+ * The base-ui popup portals its items onto `document.body`, not into
+ * `container` — they do not exist in the DOM at all until the trigger opens
+ * the popup, unlike the button cards this replaced.
+ */
+async function selectProvider(id: string) {
+  const trigger = container.querySelector('[data-testid="setup-provider-select"]') as HTMLElement;
+  expect(trigger, "no provider select trigger").toBeTruthy();
+  await act(async () => {
+    trigger.click();
+  });
+  const item = document.body.querySelector(`[data-testid="setup-provider-${id}"]`) as HTMLElement;
+  expect(item, `no provider option ${id}`).toBeTruthy();
+  await act(async () => {
+    item.click();
+  });
+}
+
 /** Types into a step's field, so a required one can be left. */
 async function fill(testId: string, value: string) {
   const field = container.querySelector(`[data-testid="${testId}"]`) as
@@ -120,11 +140,7 @@ const next = async () =>
  * moved to the front.
  */
 async function skipModel() {
-  await act(async () => {
-    (
-      container.querySelector('[data-testid="setup-skip-model"]') as HTMLElement
-    ).click();
-  });
+  await selectProvider("none");
   await next(); // -> business
 }
 
@@ -169,8 +185,8 @@ describe("finishing setup with no companies on the host", () => {
       clientWith(
         status({
           templates: [
-            { id: "agentic_software_company", name: "Agentic Software Company", agent_count: 5, output: "Software" },
-            { id: "agentic_law_firm", name: "Agentic Law Firm", agent_count: 4, output: "Legal work" },
+            { id: "software_company", name: "Agentic Software Company", agent_count: 5, output: "Software" },
+            { id: "law_firm", name: "Agentic Law Firm", agent_count: 4, output: "Legal work" },
           ],
         }),
       ),
@@ -182,11 +198,11 @@ describe("finishing setup with no companies on the host", () => {
     ) as HTMLSelectElement;
     expect(picker).toBeTruthy();
     expect(Array.from(picker.options).map((option) => option.textContent)).toContain(
-      "Agentic Software Company (5 teammates)",
+      "Agentic Software Company (5 agents)",
     );
 
     await act(async () => {
-      picker.value = "agentic_software_company";
+      picker.value = "software_company";
       picker.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(
@@ -386,9 +402,7 @@ describe("finishing setup with no companies on the host", () => {
   it("requires an endpoint before testing Ollama", async () => {
     await show(clientWith(status()));
 
-    await act(async () => {
-      (container.querySelector('[data-testid="setup-provider-ollama"]') as HTMLElement).click();
-    });
+    await selectProvider("ollama");
     expect(button("Test connection").disabled).toBe(true);
 
     await fill("setup-field-base-url", "http://127.0.0.1:11434/v1");
@@ -552,13 +566,7 @@ describe("a hosted tenant whose inference comes from the house", () => {
     ).toBeTruthy();
 
     // ...and not on one the host refuses to forward it to.
-    const custom = container.querySelector(
-      '[data-testid="setup-provider-openai_compatible"]',
-    ) as HTMLElement | null;
-    expect(custom, "the model step should offer a custom endpoint").toBeTruthy();
-    await act(async () => {
-      custom!.click();
-    });
+    await selectProvider("openai_compatible");
 
     expect(
       container.querySelector('[data-testid="setup-key-on-the-house"]'),

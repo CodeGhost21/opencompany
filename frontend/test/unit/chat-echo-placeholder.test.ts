@@ -6,9 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { CognitionState } from "@/api/types";
 import type { ChatMessage } from "@/lib/chat";
-import { MessageTimeline } from "@/views/chat/MessageTimeline";
-import { ThreadPanel } from "@/views/chat/ThreadPanel";
-import { buildTimeline, buildTimelineItems, type Channel } from "@/views/chat/model";
+import { MessageTimeline } from "@/views/room/MessageTimeline";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
+import { buildTimeline, buildTimelineItems, type Channel } from "@/views/room/model";
 
 /**
  * Issue #1734 — a reply the offline echo brain produced must not read as

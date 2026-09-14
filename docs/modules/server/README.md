@@ -404,8 +404,8 @@ generation and validation succeed:
 ```bash
 cargo run --features tinyplace --bin opencompany -- \
   serve --discoverable \
-  --company companies/agentic_law_firm \
-  --company companies/agentic_marketing_agency
+  --company companies/law_firm \
+  --company companies/marketing_agency
 ```
 
 At boot each discoverable company runs the going-public flow (lifecycle step 3):

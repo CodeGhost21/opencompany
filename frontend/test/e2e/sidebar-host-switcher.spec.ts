@@ -13,8 +13,11 @@ import { expect, test } from "@playwright/test";
  * What carries over is why the spec exists at all. The broken state needed two
  * connections, and nothing else in the suite creates them — a design-system
  * migration and two contrast audits all passed straight over it, because every
- * one of them ran against the default single-host console. Two hosts is still
- * the only way to see the switcher be a control rather than a nameplate.
+ * one of them ran against the default single-host console. `HOSTS_HIDDEN`
+ * (`product-scope.ts`) is `false`, so even one host now opens the switcher's
+ * menu; two hosts is what still lets this spec see the menu carry more than
+ * one row and a "second host" to render as unreachable — the shape a
+ * single-host console cannot exercise.
  */
 
 // The first-run tour opens a dialog over the console and `aria-hidden`s
@@ -109,29 +112,35 @@ test("the sidebar owns the left edge, and its header names the company", async (
     "the switcher is inside the sidebar, not a column of its own to the left of it",
   ).toBeGreaterThanOrEqual(sidebarBox!.x);
 
-  // And it is a nameplate, not a control. Two hosts are seeded above and it
-  // still opens nothing: the roster, "Add a host" and "Manage hosts" are hidden
-  // while the product is scoped to one company (`src/product-scope.ts`).
+  // And it is a real control, not a nameplate: `HOSTS_HIDDEN`
+  // (`product-scope.ts`) is `false`, and two hosts are seeded above, so this
+  // is `hostSwitcherMenu`'s own `count >= 1` case — a genuine menu, carrying
+  // both hosts' rows plus "Add a host" and "Manage hosts".
   //
-  // Asserted after a click AND a keyboard Enter, because the trap this guards is
-  // a trigger that still opens — onto a menu with every group hidden, which is a
-  // chevron over an empty popup rather than a name.
+  // Asserted after a click AND a keyboard Enter, because either has to reach
+  // it — a trigger that opens under a pointer but not the keyboard is broken
+  // in a way a click-only assertion would miss.
   await switcher.click();
+  await expect(page.locator('[role="menu"]')).toBeVisible();
+  await expect(page.getByTestId("host-row-switcher-spec-primary")).toBeVisible();
+  await expect(page.getByTestId("host-row-switcher-spec-second")).toBeVisible();
+  await expect(page.getByTestId("host-switcher-add")).toBeVisible();
+  await expect(page.getByTestId("host-switcher-manage")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+
   await switcher.focus();
   await page.keyboard.press("Enter");
-
+  await expect(page.locator('[role="menu"]')).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
-  await expect(page.getByTestId("host-row-switcher-spec-primary")).toHaveCount(0);
-  await expect(page.getByTestId("host-row-switcher-spec-second")).toHaveCount(0);
-  await expect(page.getByTestId("host-switcher-add")).toHaveCount(0);
-  await expect(page.getByTestId("host-switcher-manage")).toHaveCount(0);
-  await expect(page.getByTestId("switcher-new-company")).toHaveCount(0);
 
-  // It still names the company, and still reports the roster's health to a
-  // reader that cannot open it — the two things the trigger carried all along.
-  // The count includes the browser's own same-origin bootstrap alongside the two
-  // seeded here, so this asserts the signal survives rather than a exact total.
+  // It still names the company, and still reports the roster's health,
+  // whether or not the menu is open — the two things the trigger carried all
+  // along, and still true now that it also opens something.
+  // The count includes the browser's own same-origin bootstrap alongside the
+  // two seeded here, so this asserts the signal survives rather than an
+  // exact total.
   await expect(switcher).toHaveAttribute("data-host-count", /\d+/);
   await expect(switcher).toHaveAttribute("data-worst-status", /\w+/);
-  await expect(switcher.locator("button")).toHaveCount(0);
 });

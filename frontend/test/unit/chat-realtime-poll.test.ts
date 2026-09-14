@@ -11,7 +11,7 @@ import { fromHistory, mergeHistoryInOrder, type ChatMessage } from "@/lib/chat";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appShell = readFileSync(resolve(here, "../../src/components/app-shell.tsx"), "utf8");
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 describe("chat channel history polling", () => {
   it("wires each resolved channel fan-out to a disposable 5s visible-tab poll", () => {
@@ -20,9 +20,9 @@ describe("chat channel history polling", () => {
   });
 
   /**
-   * Issue #1781 review (Codex P2): `ChatView` fetches the Operator channel's
+   * Issue #1781 review (Codex P2): `RoomView` fetches the Operator channel's
    * identity independently of this hydration pass, for rendering its pinned
-   * row. A single dropped request here — while `ChatView`'s own, later call
+   * row. A single dropped request here — while `RoomView`'s own, later call
    * succeeds — used to render the row but permanently omit its id from the
    * rehydration targets and this 5s poll, since this pass had already given
    * up on it. `fetchWithOneRetry` closes the common transient case.
@@ -35,7 +35,7 @@ describe("chat channel history polling", () => {
   });
 
   /**
-   * PR #1781 review (Codex P2, comment 3878524727): `ChatView`'s own
+   * PR #1781 review (Codex P2, comment 3878524727): `RoomView`'s own
    * render-side lookup of the same identity had the twin gap — a single
    * dropped request there, while `app-shell.tsx`'s independent, now-retried
    * lookup succeeded, left history hydrating with `operator` stuck `null`
@@ -43,7 +43,7 @@ describe("chat channel history polling", () => {
    * same fix, source-wiring-pinned the same way the shell's call site above
    * is (no render harness for either component in this repo).
    */
-  it("ChatView also retries the Operator channel fetch instead of giving up on the first miss", () => {
+  it("RoomView also retries the Operator channel fetch instead of giving up on the first miss", () => {
     expect(chatView).toContain("fetchWithOneRetry(() => client.getOperatorChannel(company))");
     expect(chatView).not.toContain("client.getOperatorChannel(company)\n      .then(");
   });
@@ -58,9 +58,9 @@ describe("chat channel history polling", () => {
    * logged, and only the `dto !== null` (i.e. not the already-collapsed
    * fetch-failure) case must log.
    */
-  it("ChatView logs a mismatched Operator channel shape instead of dropping it silently", () => {
+  it("RoomView logs a mismatched Operator channel shape instead of dropping it silently", () => {
     expect(chatView).toContain(
-      'console.debug("[ChatView] getOperatorChannel returned an unexpected shape", dto)',
+      'console.debug("[RoomView] getOperatorChannel returned an unexpected shape", dto)',
     );
     expect(chatView).toContain("} else if (dto !== null) {");
   });
@@ -80,9 +80,9 @@ describe("chat channel history polling", () => {
   });
 
   it("folds a first history read in and never duplicates it on a later tick", () => {
-    const hydrated = fromHistory([dto("1686", "The workflow finished.")]);
+    const hydrated = fromHistory([dto("1686", "The automation finished.")]);
     const first = mergeHistoryInOrder([], hydrated);
-    expect(first.map((message) => message.text)).toEqual(["The workflow finished."]);
+    expect(first.map((message) => message.text)).toEqual(["The automation finished."]);
 
     // Same durable row on the next tick is id-seen: the identical array
     // reference comes back, so a caller can skip the state write (and React

@@ -409,6 +409,132 @@ async fn a_read_only_grant_refuses_record_entry() {
     assert!(format!("{record:?}").contains("record"));
 }
 
+/// A store whose `list_specs` always fails, so `ledgers::registry` never
+/// resolves.
+struct FailingRegistryStore;
+
+#[async_trait::async_trait]
+impl crate::ports::ledgers::LedgerStore for FailingRegistryStore {
+    async fn list_specs(&self, _company: &CompanyId) -> crate::Result<Vec<LedgerSpec>> {
+        Err(crate::error::OpenCompanyError::Store("boom".into()))
+    }
+    async fn put_spec(&self, _company: &CompanyId, _spec: &LedgerSpec) -> crate::Result<()> {
+        unreachable!("list_ledgers only lists")
+    }
+    async fn delete_spec(&self, _company: &CompanyId, _slug: &str) -> crate::Result<bool> {
+        unreachable!("list_ledgers only lists")
+    }
+    async fn append(
+        &self,
+        _company: &CompanyId,
+        _event: &crate::ledger::LedgerEvent,
+    ) -> crate::Result<()> {
+        unreachable!("list_ledgers only lists")
+    }
+    async fn events(
+        &self,
+        _company: &CompanyId,
+        _ledger: &str,
+    ) -> crate::Result<Vec<crate::ledger::LedgerEvent>> {
+        unreachable!("list_ledgers only lists")
+    }
+    async fn purge_entry(
+        &self,
+        _company: &CompanyId,
+        _ledger: &str,
+        _entry: &str,
+    ) -> crate::Result<bool> {
+        unreachable!("list_ledgers only lists")
+    }
+    async fn purge_ledger(&self, _company: &CompanyId, _ledger: &str) -> crate::Result<bool> {
+        unreachable!("list_ledgers only lists")
+    }
+}
+
+/// `list_ledgers` reads the registry before anything else. When the store
+/// cannot answer `list_specs`, the tool must say so rather than report an
+/// empty or partial board.
+#[tokio::test]
+async fn a_registry_read_failure_is_reported_not_shown_as_an_empty_board() {
+    let store: Arc<dyn crate::ports::ledgers::LedgerStore> = Arc::new(FailingRegistryStore);
+    let ctx = Ledgers::new(CompanyId::new("acme"), store);
+    let tools = tools(&ctx);
+    let out = tool(&tools, LIST_LEDGERS_TOOL)
+        .execute(json!({}))
+        .await
+        .unwrap();
+    assert!(
+        out.is_error,
+        "a failed registry read must not render as a (misleadingly empty) board: {out:?}"
+    );
+    assert!(
+        format!("{out:?}").contains("Could not read this company's ledgers"),
+        "{out:?}"
+    );
+}
+
+/// A store whose `list_specs` succeeds (so the built-ins still resolve) but
+/// whose `events` always fails, isolating a mid-read backend failure from the
+/// registry lookup that precedes it.
+struct FailingEventsStore;
+
+#[async_trait::async_trait]
+impl crate::ports::ledgers::LedgerStore for FailingEventsStore {
+    async fn list_specs(&self, _company: &CompanyId) -> crate::Result<Vec<LedgerSpec>> {
+        Ok(Vec::new())
+    }
+    async fn put_spec(&self, _company: &CompanyId, _spec: &LedgerSpec) -> crate::Result<()> {
+        unreachable!("read_ledger only reads")
+    }
+    async fn delete_spec(&self, _company: &CompanyId, _slug: &str) -> crate::Result<bool> {
+        unreachable!("read_ledger only reads")
+    }
+    async fn append(
+        &self,
+        _company: &CompanyId,
+        _event: &crate::ledger::LedgerEvent,
+    ) -> crate::Result<()> {
+        unreachable!("read_ledger only reads")
+    }
+    async fn events(
+        &self,
+        _company: &CompanyId,
+        _ledger: &str,
+    ) -> crate::Result<Vec<crate::ledger::LedgerEvent>> {
+        Err(crate::error::OpenCompanyError::Store("boom".into()))
+    }
+    async fn purge_entry(
+        &self,
+        _company: &CompanyId,
+        _ledger: &str,
+        _entry: &str,
+    ) -> crate::Result<bool> {
+        unreachable!("read_ledger only reads")
+    }
+    async fn purge_ledger(&self, _company: &CompanyId, _ledger: &str) -> crate::Result<bool> {
+        unreachable!("read_ledger only reads")
+    }
+}
+
+/// `read_ledger` on a built-in, `LedgerSource::Events`-backed ledger (`goals`)
+/// must surface a backend failure as a refusal, not as a bounded-but-empty
+/// page indistinguishable from "this ledger truly has nothing yet".
+#[tokio::test]
+async fn a_backend_read_failure_is_reported_not_shown_as_a_bounded_empty_page() {
+    let store: Arc<dyn crate::ports::ledgers::LedgerStore> = Arc::new(FailingEventsStore);
+    let ctx = Ledgers::new(CompanyId::new("acme"), store);
+    let tools = tools(&ctx);
+    let out = tool(&tools, READ_LEDGER_TOOL)
+        .execute(json!({ "ledger": "goals" }))
+        .await
+        .unwrap();
+    assert!(
+        out.is_error,
+        "a store failure mid-read must not render as an empty, fully-read ledger: {out:?}"
+    );
+    assert!(format!("{out:?}").contains("boom"), "{out:?}");
+}
+
 /// `can_declare_ledgers = false` refuses `define_ledger` outright, whatever
 /// the manifest's other ledger grants say.
 #[tokio::test]
@@ -422,4 +548,131 @@ async fn can_declare_ledgers_false_refuses_define_ledger() {
         .unwrap();
     assert!(result.is_error);
     assert!(format!("{result:?}").contains("can_declare_ledgers"));
+}
+
+/// A store that answers every read from a real one and refuses every write.
+///
+/// The read failures above prove a read that cannot answer is not rendered as
+/// an empty ledger. This is the other direction: the tools' three write paths
+/// all reach the store *after* their own checks have passed, so a store that
+/// refuses at that point is the only remaining way a write fails — and the
+/// receipt the model reads is written by this layer, not by the store.
+struct RefusingWriteStore {
+    inner: Arc<dyn crate::ports::ledgers::LedgerStore>,
+}
+
+#[async_trait]
+impl crate::ports::ledgers::LedgerStore for RefusingWriteStore {
+    async fn list_specs(&self, company: &CompanyId) -> crate::Result<Vec<LedgerSpec>> {
+        self.inner.list_specs(company).await
+    }
+
+    async fn put_spec(&self, _company: &CompanyId, _spec: &LedgerSpec) -> crate::Result<()> {
+        Err(crate::error::OpenCompanyError::Store("disk is full".into()))
+    }
+
+    async fn delete_spec(&self, company: &CompanyId, slug: &str) -> crate::Result<bool> {
+        self.inner.delete_spec(company, slug).await
+    }
+
+    async fn append(
+        &self,
+        _company: &CompanyId,
+        _event: &crate::ledger::LedgerEvent,
+    ) -> crate::Result<()> {
+        Err(crate::error::OpenCompanyError::Store("disk is full".into()))
+    }
+
+    async fn events(
+        &self,
+        company: &CompanyId,
+        ledger: &str,
+    ) -> crate::Result<Vec<crate::ledger::LedgerEvent>> {
+        self.inner.events(company, ledger).await
+    }
+
+    async fn purge_entry(
+        &self,
+        company: &CompanyId,
+        ledger: &str,
+        entry: &str,
+    ) -> crate::Result<bool> {
+        self.inner.purge_entry(company, ledger, entry).await
+    }
+
+    async fn purge_ledger(&self, company: &CompanyId, ledger: &str) -> crate::Result<bool> {
+        self.inner.purge_ledger(company, ledger).await
+    }
+}
+
+/// A write the store refuses must reach the model as a refusal that names the
+/// reason — never as the success sentence the happy path returns. A turn told
+/// "Recorded" stops carrying the fact it was recording, and the row is not
+/// there.
+#[tokio::test]
+async fn a_write_the_store_refuses_is_reported_rather_than_receipted_as_recorded() {
+    let home = tempfile::tempdir().unwrap();
+    let real = ctx(&home);
+    tool(&tools(&real), DEFINE_LEDGER_TOOL)
+        .execute(risks())
+        .await
+        .unwrap();
+
+    let store: Arc<dyn crate::ports::ledgers::LedgerStore> = Arc::new(RefusingWriteStore {
+        inner: Arc::new(FsOps::new(home.path().to_path_buf())),
+    });
+    let ctx = Ledgers::new(CompanyId::new("acme"), store);
+    let tools = tools(&ctx);
+
+    let recorded = tool(&tools, RECORD_ENTRY_TOOL)
+        .execute(json!({
+            "ledger": "risks",
+            "id": "vendor-slip",
+            "fields": { "risk": "the vendor misses the date", "status": "open" }
+        }))
+        .await
+        .unwrap();
+    assert!(
+        recorded.is_error,
+        "an append the store refused must not read as a recorded row: {recorded:?}"
+    );
+    assert!(
+        format!("{recorded:?}").contains("disk is full"),
+        "{recorded:?}"
+    );
+
+    let closed = tool(&tools, CLOSE_ENTRY_TOOL)
+        .execute(json!({
+            "ledger": "risks",
+            "id": "vendor-slip",
+            "status": "closed",
+            "reason": "they delivered on the 4th"
+        }))
+        .await
+        .unwrap();
+    assert!(
+        closed.is_error,
+        "a close whose append never landed must not read as closed: {closed:?}"
+    );
+
+    let mut second = risks();
+    second["slug"] = json!("hazards");
+    second["title"] = json!("Hazards");
+    let declared = tool(&tools, DEFINE_LEDGER_TOOL)
+        .execute(second)
+        .await
+        .unwrap();
+    assert!(
+        declared.is_error,
+        "a spec the store refused to persist must not read as a declared ledger: {declared:?}"
+    );
+
+    let listed = tool(&tools, LIST_LEDGERS_TOOL)
+        .execute(json!({}))
+        .await
+        .unwrap();
+    assert!(
+        !format!("{listed:?}").contains("hazards"),
+        "nothing the store refused may show up on the board: {listed:?}"
+    );
 }

@@ -196,6 +196,38 @@ pub fn grants_composio_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "composio" || grant.starts_with("composio."))
 }
 
+/// Whether a tool-grant list **explicitly** grants the `mcp_registry`
+/// namespace — the operator-installed MCP registry surface
+/// (`mcp_registry_list_tools` / `mcp_registry_tool_call`).
+///
+/// This is distinct from the per-server `mcp:<name>` bridge
+/// ([`crate::runtime::tools::grants_cover_server`]): the bridge reaches only
+/// the servers a company declared in its manifest/`mcp.json` and an agent was
+/// scoped to by name, while the registry pair reaches **any** server the
+/// company has installed and connected through the console, addressed at call
+/// time by a bare `server_id` argument the tool itself accepts.
+///
+/// Like [`grants_composio_explicit`], the catch-all `*` does **not** grant it:
+/// `mcp_registry_tool_call` invokes an arbitrary tool on any connected server
+/// with no per-server scoping — the same "reaches a third party, moves a real
+/// side effect" shape as Composio, just against whichever servers happen to be
+/// installed rather than a fixed toolkit list. `mcp_registry_list_tools` (a
+/// read-only schema listing over the same registry) rides the SAME grant as
+/// the mutating tool rather than a split one of its own: every existing
+/// third-party-reaching family already bundles its read-only discovery tools
+/// under the single grant that covers the mutating ones (`composio_list_tools`
+/// sits behind the same `composio` grant as `composio_execute`), and splitting
+/// here would only recreate that shape with no sibling precedent for it.
+/// Matches the bare `mcp_registry` grant or any `mcp_registry.*` sub-grant.
+/// Lives here (always compiled) so both the feature-gated harness wiring
+/// (`build::build_agent`) and the manifest-narrowing gate
+/// (`runtime::builder::allow_covers`) key off one source of truth.
+pub fn grants_mcp_registry_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "mcp_registry" || grant.starts_with("mcp_registry."))
+}
+
 /// Whether a tool-grant list **explicitly** grants the `chargebee` billing
 /// namespace (issue #788).
 ///
@@ -580,6 +612,21 @@ pub struct Company {
     /// Company logo as a self-contained data:image/... URL (issue: operator-set brand logo).
     #[serde(default)]
     pub logo_url: Option<String>,
+    /// The desk that owns the company's own line — the General channel.
+    ///
+    /// Unset (the default) keeps the historical behaviour: General resolves to
+    /// no desk, so a message there is answered by a single responder off the
+    /// fallback ladder.
+    ///
+    /// **The named desk must not itself be called General.** tinyhivemind
+    /// refuses a hive episode on a desk whose id *or name* is a General
+    /// spelling (`reserved desk identity`), and that refusal lands in the turn
+    /// rather than at load — a company that names one boots clean and then
+    /// fails every message on its main thread. This key exists precisely so the
+    /// company line can reach a room without any desk having to be called
+    /// General: the channel is General, the desk it resolves to is not.
+    #[serde(default)]
+    pub general_desk: Option<String>,
 }
 
 /// A `[[agent]]` roster entry.
@@ -1906,6 +1953,34 @@ mod test {
         assert!(!grants_composio_explicit(&[]));
         // A substring match must not count as the composio namespace.
         assert!(!grants_composio_explicit(&["composiotools".into()]));
+    }
+
+    /// The operator-installed `mcp_registry` surface is granted ONLY by an
+    /// explicit `mcp_registry` / `mcp_registry.*` grant — never by the
+    /// catch-all `*`. `mcp_registry_tool_call` invokes an arbitrary tool on any
+    /// server the company has installed and connected, with no per-server
+    /// scoping, so a broadly-permissioned company must still opt into it by
+    /// name.
+    #[test]
+    fn mcp_registry_grant_requires_explicit_namespace_not_wildcard() {
+        assert!(grants_mcp_registry_explicit(&["mcp_registry".into()]));
+        assert!(grants_mcp_registry_explicit(
+            &["mcp_registry.notion".into()]
+        ));
+        assert!(grants_mcp_registry_explicit(&[
+            "web.*".into(),
+            "mcp_registry".into()
+        ]));
+        // The catch-all `*` must NOT grant the registry surface.
+        assert!(!grants_mcp_registry_explicit(&["*".into()]));
+        assert!(!grants_mcp_registry_explicit(&["web.*".into()]));
+        assert!(!grants_mcp_registry_explicit(&[]));
+        // The per-server bridge namespace (`mcp:<name>`) is a different grant
+        // and must not be mistaken for it.
+        assert!(!grants_mcp_registry_explicit(&["mcp:notion".into()]));
+        assert!(!grants_mcp_registry_explicit(&["mcp:*".into()]));
+        // A substring match must not count as the registry namespace.
+        assert!(!grants_mcp_registry_explicit(&["mcp_registryextra".into()]));
     }
 
     /// The `[tools.composio]` sub-section parses its toolkit allowlist and an

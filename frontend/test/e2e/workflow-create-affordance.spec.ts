@@ -41,19 +41,19 @@ async function dismissTour(page: Page) {
   await expect(skip).toBeHidden();
 }
 
-test("one control answers to 'New workflow', and clicking it opens the dialog", async ({
+test("one control answers to 'New automation', and clicking it opens the dialog", async ({
   page,
 }) => {
   await page.goto("/#/workflows");
   await dismissTour(page);
 
-  const create = page.getByRole("button", { name: "New workflow" });
+  const create = page.getByRole("button", { name: "New automation" });
   await expect(create).toHaveCount(1);
 
   // The click a strict-mode violation used to abort. Unqualified on purpose.
   await create.click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("New workflow", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("New automation", { exact: true })).toBeVisible();
 });
 
 test("the empty state's call to action is reachable and distinctly named", async ({
@@ -78,20 +78,20 @@ test("the empty state's call to action is reachable and distinctly named", async
   await page.goto("/#/workflows");
   await dismissTour(page);
 
-  await expect(page.getByText("This company has no saved workflows yet.")).toBeVisible();
+  await expect(page.getByText("This company has no saved automations yet.")).toBeVisible();
 
   // Both controls are on screen together here. That is fine — what is not fine
   // is them sharing a name.
-  const create = page.getByRole("button", { name: "New workflow" });
+  const create = page.getByRole("button", { name: "New automation" });
   await expect(create).toHaveCount(1);
 
-  const emptyCta = page.getByRole("button", { name: "Create a workflow" });
+  const emptyCta = page.getByRole("button", { name: "Create an automation" });
   await expect(emptyCta).toHaveCount(1);
 
   // The call to action still does its job: same dialog, different name.
   await emptyCta.click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("New workflow", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("New automation", { exact: true })).toBeVisible();
 });
 
 test("the empty state gives a first-time author an on-ramp, not just a button (#813)", async ({

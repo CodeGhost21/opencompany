@@ -73,7 +73,7 @@ function requestField(page: Page) {
   return page.getByLabel("Request for this run");
 }
 
-test.describe("running a workflow on a specific input (#1204)", () => {
+test.describe("running an automation on a specific input (#1204)", () => {
   test.beforeEach(async ({ request }) => {
     await removeWorkflow(request);
     await createWorkflow(request);

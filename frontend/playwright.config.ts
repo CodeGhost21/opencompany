@@ -103,7 +103,7 @@ const LIVE_LLM_SPEC = /orchestration-live\.spec\.ts$/;
 /**
  * The one spec whose verdict is a **published integer** rather than a shape on
  * the board, and which therefore needs a host serving the lab that computes it
- * (`companies/agentic_math_lab`). See `EULER` in `test/e2e/capabilities.ts`.
+ * (`companies/math_lab`). See `EULER` in `test/e2e/capabilities.ts`.
  */
 const EULER_SPEC = /euler-live\.spec\.ts$/;
 
@@ -268,7 +268,7 @@ const firstRunEnv: Record<string, string> =
 /**
  * What a Project Euler run tells `test/e2e/host.sh` to serve.
  *
- * The company is the point: `companies/agentic_math_lab` is the roster whose
+ * The company is the point: `companies/math_lab` is the roster whose
  * split — decide, program, break — and whose *withheld* grants (no `web`, no
  * `search`) are what the spec's verdict rests on. The data root is separate so
  * the answers ledger read at the end of a run cannot be holding the previous

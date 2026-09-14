@@ -70,7 +70,7 @@ const invalid = (problems: unknown) => ({
   problems,
 });
 
-describe("a refused workflow graph carries its per-node problems", () => {
+describe("a refused automation graph carries its per-node problems", () => {
   it("keeps the node and field the host named", async () => {
     const err = await refusal(
       invalid([

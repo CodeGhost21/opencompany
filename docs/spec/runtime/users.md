@@ -241,28 +241,30 @@ credential.
 
 `GET …/auth/hub` answers `{"providers": []}` — not a 404 — whenever this host
 cannot complete the flow, so the console has one code path and falls through to
-the magic-link form. Two things produce an empty list:
+the magic-link form. One thing produces an empty list:
 
 - **No hub.** A self-hosted host has no exchange, so it could not check a token
   that came back. Three buttons that send someone through Google to be turned
   away on return are worse than none.
-- **A redirect target the hub will refuse.** The return URL is
-  `{OPENCOMPANY_PUBLIC_URL}/?company={company_id}`, and the hub's redirect gate
-  currently accepts RFC 8252 **loopback** origins only. A local console on
-  `http://127.0.0.1:<port>` passes; every hosted `https://<slug>.<domain>`
-  origin is answered `400` before the provider handshake begins.
 
-The second is issue #512 and is a hosted-only gap: sign-in there is by magic
-link until `tinyhumansai/backend#1243` teaches that gate to accept provisioned
-tenant origins. Nothing here needs to change when it does — the origin comes
-from `OPENCOMPANY_PUBLIC_URL` — beyond deleting `hub_accepts_redirect_uri` and
-its one call site.
+Whether the **return origin** is acceptable is the hub's question, not this
+host's. The return URL is `{OPENCOMPANY_PUBLIC_URL}/?company={company_id}`, and
+the hub's `isAllowedFrontendRedirectUri` admits an RFC 8252 loopback `http://`
+URI **or** an origin that resolves to a provisioned tenant in its own registry
+(`<slug>.<base-domain>`, or a verified custom domain). A registry lookup is not
+something this crate can mirror, and a tenant de-provisioned mid-flow fails
+closed there rather than here.
 
-Note the shape the gate has to accept: **not** a bare origin. The `?company=`
-rides along, and in shared-single-DB mode the id is namespaced `<tenant>--<id>`,
-so it varies per tenant and over time. Only the origin component is stable, and
-a gate matching the whole string against a registry of origins would reproduce
-this failure exactly.
+This host once kept a local copy of that rule (`hub_accepts_redirect_uri`) so a
+console would not render a button that could only reach a `400` — issue #512,
+back when the gate was loopback-only. `tinyhumansai/backend#1243` has since
+landed, and the copy went with it: by then the copy, not the hub, was what hid
+the buttons on every hosted console.
+
+Note the shape the gate accepts: **not** a bare origin. The `?company=` rides
+along, and in shared-single-DB mode the id is namespaced `<tenant>--<id>`, so it
+varies per tenant and over time. Only the origin component is stable, which is
+why the hub matches on origin and leaves the query free.
 
 ## Passwords
 

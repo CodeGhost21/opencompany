@@ -228,9 +228,9 @@ describe("the create dialog while a create is in flight", () => {
     // content attribute is on the ancestor. Asserting `.disabled` here would
     // read false and hide a working lock.
     for (const [what, selector] of [
-      ["the workflow id", '[placeholder="e.g. campaign_pipeline"]'],
-      ["the workflow name", '[placeholder="e.g. Campaign pipeline"]'],
-      ["the description", '[placeholder="What does this workflow do?"]'],
+      ["the automation id", '[placeholder="e.g. campaign_pipeline"]'],
+      ["the automation name", '[placeholder="e.g. Campaign pipeline"]'],
+      ["the description", '[placeholder="What does this automation do?"]'],
       ["a node id", '[aria-label="Node id"]'],
       ["a node name", '[placeholder="display name"]'],
       ["the node kind select", '[aria-label="Node kind"]'],
@@ -283,7 +283,7 @@ describe("the create dialog while a create is in flight", () => {
 describe("the create dialog when the host refuses", () => {
   it("keeps the dialog open with the draft intact and announces the reason", async () => {
     const post = vi.fn(() =>
-      Promise.reject(new ApiError(409, "conflict", "a workflow named “Campaign pipeline” already exists", true)),
+      Promise.reject(new ApiError(409, "conflict", "an automation named “Campaign pipeline” already exists", true)),
     );
     await open(stubClient(post));
     await fillValidDraft();

@@ -57,12 +57,17 @@ pub const DEFAULT_TINYHUMANS_INFERENCE_URL: &str = "https://api.tinyhumans.ai/op
 /// Default hosted model/tier when none is configured.
 pub const DEFAULT_HOSTED_MODEL: &str = "chat-v1";
 
-/// The `HTTP-Referer` attribution header OpenRouter asks BYOK callers to send —
-/// it identifies the app in OpenRouter's dashboard/rankings.
-pub const OPENROUTER_REFERER: &str = "https://opencompany.tinyhumans.ai";
-
-/// The `X-Title` attribution header OpenRouter asks BYOK callers to send.
-pub const OPENROUTER_TITLE: &str = "OpenCompany";
+/// The OpenRouter attribution headers, re-exported from the catalogue so this
+/// module's long-standing spelling keeps resolving.
+///
+/// They used to be defined here, and a *second* pair was written out inline in
+/// [`roster_build`](crate::harness::roster_build) with a different `HTTP-Referer`
+/// — so a company's roster-build traffic and its turn traffic were attributed to
+/// two different apps in OpenRouter's dashboard. Nothing compared them, so
+/// nothing noticed. One constant now, in
+/// [`catalogue`](crate::company::inference::catalogue), with both callers
+/// reading it.
+pub use crate::company::inference::catalogue::{OPENROUTER_REFERER, OPENROUTER_TITLE};
 
 /// The key under which the managed billing/context metadata is stashed on
 /// [`ModelResponse::raw`] so openhuman's crate-native cost pipeline recovers the
@@ -1346,6 +1351,40 @@ fn output_cap(requested: Option<u32>) -> Option<u32> {
     }
 }
 
+/// Writes the caller's **intent** onto the body in the dialect `model` speaks,
+/// and reports which field names went out.
+///
+/// The names are returned rather than recomputed because the retry needs to know
+/// exactly what was sent: `inference::dialect::parameter_blamed_by` only accepts
+/// a rejection that names a parameter **we actually sent**, and after renaming
+/// (`max_tokens` → `max_completion_tokens`) the sent name is not the name the
+/// caller asked with.
+///
+/// Every vendor-specific decision lives in `inference::dialect::RULES`. Nothing
+/// here knows what a temperature is, which is the property that stops this
+/// function growing a vendor name the next time a model behaves differently.
+fn apply_sampling(
+    body: &mut serde_json::Value,
+    endpoint: &str,
+    model: &str,
+    sampling: inference::dialect::Sampling,
+    max_tokens: Option<u32>,
+) -> Vec<String> {
+    let mut knobs = sampling.knobs();
+    if let Some(cap) = output_cap(max_tokens) {
+        knobs.push(inference::dialect::Knob {
+            name: "max_tokens",
+            value: serde_json::json!(cap),
+        });
+    }
+    let mut sent = Vec::new();
+    for (name, value) in inference::dialect::translate(endpoint, model, knobs) {
+        body[&name] = value;
+        sent.push(name);
+    }
+    sent
+}
+
 #[async_trait]
 impl ChatModel<()> for MockProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
@@ -1455,16 +1494,19 @@ impl ChatModel<()> for HostedProvider {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
         let messages = wire_messages(&request.messages);
         let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
-        let temperature = request.temperature.unwrap_or(0.0);
 
         let mut body = serde_json::json!({
             "model": model,
-            "temperature": temperature,
             "messages": messages,
         });
-        if let Some(cap) = output_cap(request.max_tokens) {
-            body["max_tokens"] = serde_json::json!(cap);
-        }
+        // Intent in, this model's dialect out — see `apply_sampling`.
+        let _sent = apply_sampling(
+            &mut body,
+            &self.config.base_url,
+            model,
+            inference::dialect::Sampling::from_request(request.temperature),
+            request.max_tokens,
+        );
         // Native tool calling: expose the turn's tools so the model emits
         // structured `tool_calls` instead of hand-written `<tool_call>` XML.
         attach_tools(
@@ -1584,6 +1626,15 @@ pub struct RequestPlan {
     pub headers: Vec<(&'static str, String)>,
     /// The JSON request body.
     pub body: serde_json::Value,
+    /// The sampling/limit field names this body actually carries, **after**
+    /// per-model translation.
+    ///
+    /// Carried rather than recomputed because a rule may rename a field, so the
+    /// name the caller asked with is not always the name on the wire. The retry
+    /// will only drop a parameter the model names *and* that appears here, which
+    /// is what stops a rejection mentioning some field we never sent from
+    /// talking us into removing one.
+    pub tunable_fields: Vec<String>,
 }
 
 /// Builds the [`RequestPlan`] for one turn against a tenant provider.
@@ -1602,16 +1653,19 @@ pub async fn request_plan(
     decl: &InferenceDecl,
     abstract_model: &str,
     messages: Vec<serde_json::Value>,
-    temperature: f64,
+    sampling: inference::dialect::Sampling,
     max_tokens: Option<u32>,
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
 ) -> anyhow::Result<RequestPlan> {
-    // Tier -> what this endpoint understands. The direct path talks to
-    // OpenRouter, which has never heard of `chat-v1`, so the tier is resolved
-    // here; the proxied path keeps the tier, which is what the platform's
-    // registry routes on.
-    let model = inference::model_for_tier(abstract_model, &decl.models, decl.is_proxied());
+    // Tier -> what this endpoint understands, read off the endpoint's own
+    // published catalog rather than off who is paying for it. `is_proxied()`
+    // used to stand in for this and is now only the fallback inside
+    // `vocabulary()`: a tenant-keyed config pointed at a tier-native endpoint is
+    // not proxied, and rewriting `chat-v1` to an OpenRouter slug for it is what
+    // produced `Model 'anthropic/claude-sonnet-5' is not available` against an
+    // endpoint that publishes `chat-v1` itself.
+    let model = inference::model_for_tier(abstract_model, &decl.models, decl.vocabulary());
     let url = format!("{}/chat/completions", decl.base_url.trim_end_matches('/'));
     let bearer = decl
         .bearer()
@@ -1643,12 +1697,12 @@ pub async fn request_plan(
     }
     let mut body = serde_json::json!({
         "model": model,
-        "temperature": temperature,
         "messages": messages,
     });
-    if let Some(cap) = output_cap(max_tokens) {
-        body["max_tokens"] = serde_json::json!(cap);
-    }
+    // Intent in, this model's dialect out. `sent` is the field names that
+    // actually went, which the retry needs — a rename means the caller's name
+    // and the wire name differ. See `apply_sampling`.
+    let sent = apply_sampling(&mut body, &url, &model, sampling, max_tokens);
     let supports_parallel_control =
         decl.is_proxied() || inference::normalize_provider(&decl.provider) == "openrouter";
     attach_tools(&mut body, tools, tool_choice, supports_parallel_control);
@@ -1658,6 +1712,7 @@ pub async fn request_plan(
         bearer,
         headers,
         body,
+        tunable_fields: sent,
     })
 }
 
@@ -1666,6 +1721,15 @@ pub async fn request_plan(
 /// varies: the managed backend says `Model '<id>' is not available`, an
 /// OpenAI-compatible BYOK endpoint says `The model '<id>' does not exist`, and
 /// OpenRouter says `<id> is not a valid model ID`.
+///
+/// **Anthropic is the one that matters most and matched none of them.** It
+/// answers `404 {"type":"not_found_error","message":"model: agentic-v1"}` — a
+/// typed code rather than a sentence — so the whole repair path returned `None`
+/// for the provider an operator is most likely to connect first, and the
+/// operator got the raw 404 with no pointer to Settings → Inference and no
+/// `GET {base}/models` suggestion. Matching the type name rather than the
+/// message is what makes it reachable; the message is only ever `model: <id>`,
+/// which no generic substring could safely claim.
 const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
     "is not available",
     "not a valid model",
@@ -1673,6 +1737,7 @@ const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
     "unknown model",
     "invalid model",
     "does not exist",
+    "not_found_error",
 ];
 
 /// Rewrites a provider "unknown/unavailable model" refusal into an
@@ -1757,6 +1822,11 @@ fn model_unavailable_advice(
         ),
         (_, None) => "update the company's `[inference].models` mapping".to_string(),
     };
+    // Redacted here rather than at the two call sites, so a third one cannot
+    // reintroduce the leak. An endpoint may carry userinfo, and this sentence is
+    // operator-facing: it reaches the console and gets screenshotted into
+    // tickets.
+    let models_url = crate::company::inference::catalogue::redact_endpoint(models_url);
     Some(format!(
         "the configured inference model is not available from the provider — {where_to_fix}, to \
          one the provider offers (list them with `GET {models_url}`). {error}"
@@ -1777,7 +1847,86 @@ async fn send_plan(
     harness: Option<&str>,
     source: Option<InferenceSource>,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut request = client.post(&plan.url).json(&plan.body);
+    // **Bearer here, on purpose, for every provider including Anthropic — do not
+    // "fix" this to match the catalogue's `auth_style`.**
+    //
+    // This is the OpenAI-shaped chat path (`POST {base}/chat/completions`), and
+    // for `api.anthropic.com/v1` that reaches Anthropic's **OpenAI SDK
+    // compatibility layer**, which authenticates with `Authorization: Bearer`
+    // and takes no `anthropic-version`. Their *native* API is `POST
+    // /v1/messages` with an entirely different body, and it is the native
+    // endpoints — `GET /v1/models` among them — that want `x-api-key`.
+    //
+    // So `AuthStyle::Anthropic` means "this provider's NATIVE endpoints use
+    // x-api-key", and the only native call this product makes is the catalog
+    // listing (`inference_models::discover_models`). Applying it here would
+    // break a path that currently works.
+    //
+    // Verified at `platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk`.
+    // Note their own caveat: the compatibility layer is "primarily intended to
+    // test and compare model capabilities, and is not considered a long-term or
+    // production-ready solution for most use cases" — it ignores `strict` and
+    // `response_format`, supports no prompt caching, and hoists system messages.
+    match send_body(client, plan, &plan.body, credential, harness, source).await {
+        Ok(payload) => Ok(payload),
+        Err(SendFailure::Rejected {
+            parameter,
+            error: _,
+        }) => {
+            // The model told us, by name, that a parameter we sent is one it
+            // does not take. Drop that one parameter, remember it, and try once.
+            //
+            // **Bounded to a single retry, and only for this failure.** A 400 is
+            // billed nothing, so the cost of being wrong about a model is one
+            // wasted round-trip; the cost of not having this is a feature that
+            // stays broken until someone ships a table row. It is what makes
+            // `dialect::RULES` an optimisation rather than a dependency — a
+            // vendor that changes silently corrects us without a release.
+            inference::dialect::remember_omit(&plan.url, &plan.model, &parameter);
+            let mut body = plan.body.clone();
+            if let Some(object) = body.as_object_mut() {
+                object.remove(&parameter);
+            }
+            send_body(client, plan, &body, credential, harness, source)
+                .await
+                .map_err(SendFailure::into_error)
+        }
+        Err(other) => Err(other.into_error()),
+    }
+}
+
+/// Why a single attempt failed, keeping the one case the caller can act on
+/// separate from the ones it cannot.
+enum SendFailure {
+    /// The model named a parameter we sent as one it does not accept. The only
+    /// case worth a second attempt, because it is the only one where we know
+    /// what to change.
+    Rejected {
+        parameter: String,
+        error: anyhow::Error,
+    },
+    /// Everything else, already phrased for the operator.
+    Other(anyhow::Error),
+}
+
+impl SendFailure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Rejected { error, .. } | Self::Other(error) => error,
+        }
+    }
+}
+
+/// One attempt, with an explicit body so the retry can send a narrowed one.
+async fn send_body(
+    client: &reqwest::Client,
+    plan: &RequestPlan,
+    body: &serde_json::Value,
+    credential: &Credential,
+    harness: Option<&str>,
+    source: Option<InferenceSource>,
+) -> Result<serde_json::Value, SendFailure> {
+    let mut request = client.post(&plan.url).json(body);
     if let Some(bearer) = &plan.bearer {
         request = request.bearer_auth(bearer);
     }
@@ -1788,17 +1937,19 @@ async fn send_plan(
         Some(bearer) if !bearer.is_empty() => text.replace(bearer.as_str(), "<redacted>"),
         _ => text,
     };
-    let response = request
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("inference request failed: {}", scrub(e.to_string())))?;
+    let response = request.send().await.map_err(|e| {
+        SendFailure::Other(anyhow::anyhow!(
+            "inference request failed: {}",
+            scrub(e.to_string())
+        ))
+    })?;
     let status = response.status();
     if !status.is_success() {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             credential.invalidate();
         }
         let text = response.text().await.unwrap_or_default();
-        let error = format!("inference returned {status}: {}", scrub(text));
+        let error = format!("inference returned {status}: {}", scrub(text.clone()));
         // `plan.url` is always `{base_url}/chat/completions` (see
         // `RequestPlan::url`'s doc and `request_plan`'s construction of it), so
         // this recovers the same `base_url` the failed request actually used —
@@ -1811,14 +1962,28 @@ async fn send_plan(
             .unwrap_or_else(|| plan.url.clone());
         if let Some(advice) = model_unavailable_advice(status, &error, &models_url, harness, source)
         {
-            return Err(anyhow::anyhow!("{advice}"));
+            return Err(SendFailure::Other(anyhow::anyhow!("{advice}")));
         }
-        return Err(anyhow::anyhow!("{error}"));
+        // Only a 400 is a statement about the request's shape. A 5xx, a 429 or a
+        // 401 is about the service or the credential, and narrowing the body in
+        // response to one would drop a parameter over a problem it did not cause.
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && let Some(parameter) =
+                inference::dialect::parameter_blamed_by(&text, &plan.tunable_fields)
+        {
+            return Err(SendFailure::Rejected {
+                parameter,
+                error: anyhow::anyhow!("{error}"),
+            });
+        }
+        return Err(SendFailure::Other(anyhow::anyhow!("{error}")));
     }
-    response
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("inference response was not JSON: {}", scrub(e.to_string())))
+    response.json().await.map_err(|e| {
+        SendFailure::Other(anyhow::anyhow!(
+            "inference response was not JSON: {}",
+            scrub(e.to_string())
+        ))
+    })
 }
 
 /// The per-tenant inference model (issue #56 — BYOK).
@@ -1897,21 +2062,74 @@ impl TenantProvider {
         &self.scope.id
     }
 
+    /// The scope an authenticated catalog read on this provider's behalf is
+    /// cached under.
+    ///
+    /// Company **and** harness, not company alone. `resolve_effective_scoped`
+    /// resolves config and credentials per [`inference::HarnessScope`] — that
+    /// is exactly what lets one `built_in` harness ride the subscription while
+    /// another runs on a key of its own — so two harnesses in one company can
+    /// present different credentials to the same endpoint. Keyed on the company
+    /// only, the first harness's entitlement-scoped catalog was reused for the
+    /// second for an hour without its credential ever being presented, and the
+    /// second could then be handed a vocabulary its own key does not reach
+    /// (Codex review on #2045).
+    ///
+    /// Both halves are non-secret ids, and neither is the credential or derived
+    /// from it — the invariant `catalog_registry` documents. The separator is
+    /// the same control character that module uses to join scope to endpoint,
+    /// which no id or URL can contain, so the three-field key cannot be spelled
+    /// two ways.
+    fn catalog_scope(&self) -> String {
+        format!("{}\u{1}{}", self.company.as_ref(), self.harness_id())
+    }
+
     /// Re-resolves the effective config from the secret store and updates the
     /// cached telemetry slug. Errors when no provider is configured at all.
-    async fn resolve(&self) -> anyhow::Result<InferenceDecl> {
-        let decl = inference::resolve_effective_scoped(
+    ///
+    /// `tier` is the abstract tier **this** turn carries, and it is not
+    /// decoration: the company's routing table routes per workload, so resolving
+    /// without it answers "where does this company send work" when the question
+    /// is "where does this company send *this* work". Resolved per turn rather
+    /// than cached for the same reason the credential is — an operator moves a
+    /// row on the Routing tab and the next turn has to honour it.
+    async fn resolve(&self, tier: &str) -> anyhow::Result<InferenceDecl> {
+        let decl = inference::resolve_effective_for_tier(
             &self.company,
             &self.manifest,
             self.env_default.as_ref(),
             self.secrets.as_ref(),
             &self.scope,
+            tier,
         )
         .await
         .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
         .ok_or_else(|| anyhow::anyhow!("no inference provider is configured for this company"))?;
         *self.slug.write().unwrap() = decl.telemetry_slug();
-        Ok(decl)
+        // Ask the endpoint what vocabulary it speaks before deciding whether to
+        // rewrite this turn's tier. Cached per company, harness and endpoint for
+        // an hour (and per failure for a minute), so this is one extra request
+        // per provider per hour rather than one per turn — and it is a request
+        // to the same host the turn is about to call anyway.
+        //
+        // `turn_vocabulary`, not `discovered_vocabulary`: this is the turn path,
+        // whose callers time out in two to three seconds, so the read is spawned
+        // and only waited on for `TURN_CATALOG_BUDGET`. A `/models` slower than
+        // that leaves the decl on its pre-discovery fallback for this turn —
+        // exactly the behaviour that shipped before discovery existed — while
+        // the spawned read still finishes and records its answer for the next
+        // one. Awaiting it inline let a caller's own timeout cancel the read
+        // before it could memoize anything, so every later turn repeated it
+        // (Codex review on #2045).
+        let bearer = decl.bearer().await.ok().flatten();
+        let vocabulary = crate::server::inference_models::turn_vocabulary(
+            &decl.base_url,
+            bearer.as_deref(),
+            Some(&self.catalog_scope()),
+            crate::company::inference::catalogue::auth_style_for(&decl.provider),
+        )
+        .await;
+        Ok(decl.with_vocabulary(vocabulary))
     }
 }
 
@@ -1932,18 +2150,21 @@ impl ChatModel<()> for TenantProvider {
     ///
     /// [`Agent::turn`]: openhuman_core::openhuman::agent::Agent
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
+        // The tier first, because resolution now depends on it: the routing
+        // table decides per workload, so the decl cannot be resolved before the
+        // workload is known.
+        let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
         let decl = self
-            .resolve()
+            .resolve(model)
             .await
             .map_err(|e| InferenceError::Model(e.to_string()))?;
         let messages = wire_messages(&request.messages);
-        let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
-        let temperature = request.temperature.unwrap_or(0.0);
         let plan = request_plan(
             &decl,
             model,
             messages,
-            temperature,
+            // Intent recovered at the vendored boundary, which carries a float.
+            inference::dialect::Sampling::from_request(request.temperature),
             request.max_tokens,
             wire_tools(&request.tools),
             &request.tool_choice,
@@ -2030,7 +2251,10 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
         decl,
         DEFAULT_HOSTED_MODEL,
         messages,
-        0.0,
+        // A reachability check has no opinion about sampling. The hardcoded
+        // `0.0` here made the probe fail on exactly the providers it exists to
+        // reassure the operator about.
+        inference::dialect::Sampling::Default,
         Some(16),
         Vec::new(),
         &ToolChoice::Auto,
@@ -2101,6 +2325,45 @@ pub async fn probe(decl: &InferenceDecl, harness: Option<&str>) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
+
+    /// The original defect at this seam: `None` meant "no opinion" and we wrote
+    /// `0.0` — the one value Anthropic rejects across its entire current lineup
+    /// and the one Groq rewrites to `1e-8`. Nothing may appear at all.
+    #[test]
+    fn no_opinion_puts_no_sampling_field_on_the_wire() {
+        let mut body = serde_json::json!({ "model": "claude-sonnet-5" });
+        let sent = apply_sampling(
+            &mut body,
+            "https://api.example/v1",
+            "claude-sonnet-5",
+            inference::dialect::Sampling::Default,
+            None,
+        );
+        assert!(sent.is_empty(), "nothing was asked for: {sent:?}");
+        assert!(body.get("temperature").is_none(), "{body}");
+    }
+
+    /// The seam reports what it actually put on the wire, which is what the
+    /// retry needs: after a rename the caller's name is not the wire's name.
+    #[test]
+    fn the_seam_reports_the_field_names_it_sent_after_translation() {
+        let mut body = serde_json::json!({ "model": "gpt-5.6-sol" });
+        let sent = apply_sampling(
+            &mut body,
+            "https://api.example/v1",
+            "gpt-5.6-sol",
+            inference::dialect::Sampling::Deterministic,
+            Some(16384),
+        );
+        // A reasoning model takes no temperature and renames the cap.
+        assert!(!sent.contains(&"temperature".to_string()), "{sent:?}");
+        assert!(
+            sent.contains(&"max_completion_tokens".to_string()),
+            "{sent:?}"
+        );
+        assert!(body.get("max_tokens").is_none(), "{body}");
+        assert_eq!(body["max_completion_tokens"], serde_json::json!(16384));
+    }
 
     /// The output floor only ever raises the harness's cap (issue: reasoning
     /// models exhaust a 16k `max_tokens` on their hidden stream).
@@ -4086,7 +4349,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4110,6 +4373,8 @@ mod tests {
             plan.body.get("parallel_tool_calls").is_none(),
             "no parallel-tool setting without tools"
         );
+        // Asked for, so sent.
+        assert_eq!(plan.body["temperature"], serde_json::json!(0.2));
         assert_eq!(plan.bearer.as_deref(), Some("or-key"));
         assert!(plan.url.ends_with("/chat/completions"), "{}", plan.url);
         assert!(
@@ -4129,7 +4394,7 @@ mod tests {
             &decl,
             "reasoning-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4144,7 +4409,7 @@ mod tests {
             &decl,
             "anthropic/claude-sonnet-4.5",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4152,6 +4417,72 @@ mod tests {
         .await
         .expect("plan");
         assert_eq!(explicit.model, "anthropic/claude-sonnet-4.5");
+    }
+
+    /// The live defect, at the layer that puts the string on the wire.
+    ///
+    /// A company on `provider = "openrouter"` with its own key against a
+    /// tier-native endpoint is **not proxied** — the tenant pays. The old rule
+    /// read the vocabulary off exactly that bit, so every tier was rewritten to
+    /// an OpenRouter slug and the endpoint answered `Model
+    /// 'anthropic/claude-sonnet-5' is not available`, naming an id nobody had
+    /// chosen. With the endpoint's own catalog consulted, the tier reaches it
+    /// intact — and who is billed is unchanged, because that was never the same
+    /// question.
+    #[tokio::test]
+    async fn request_plan_keeps_the_tier_for_a_tier_native_endpoint_on_a_tenant_key() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let mut manifest = manifest_inference("openrouter");
+        manifest.base_url = Some(crate::company::inference::PLATFORM_BASE_URL.into());
+        inference::store_key(&company, &secrets, "test-token")
+            .await
+            .unwrap();
+        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .expect("a keyed openrouter config resolves");
+        assert!(!decl.is_proxied(), "a tenant key means the tenant pays");
+
+        // Pre-discovery: the payer-derived guess, which is what shipped.
+        let guessed = request_plan(
+            &decl,
+            "agentic-v1",
+            Vec::new(),
+            inference::dialect::Sampling::Deterministic,
+            None,
+            Vec::new(),
+            &ToolChoice::Auto,
+        )
+        .await
+        .expect("plan");
+        assert_eq!(
+            guessed.model, "anthropic/claude-opus-5",
+            "unchanged fallback when no catalog could be read"
+        );
+
+        // The endpoint published `agentic-v1`, so it resolves tiers itself.
+        let discovered =
+            decl.with_vocabulary(Some(crate::company::inference::TierVocabulary::Tiers));
+        let plan = request_plan(
+            &discovered,
+            "agentic-v1",
+            Vec::new(),
+            inference::dialect::Sampling::Deterministic,
+            None,
+            Vec::new(),
+            &ToolChoice::Auto,
+        )
+        .await
+        .expect("plan");
+        assert_eq!(
+            plan.model, "agentic-v1",
+            "the tier the provider publishes goes out as the tier"
+        );
+        assert!(
+            !discovered.is_proxied(),
+            "discovering the vocabulary must not re-bill the company"
+        );
     }
 
     #[tokio::test]
@@ -4168,7 +4499,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.0,
+            inference::dialect::Sampling::Deterministic,
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4214,7 +4545,7 @@ mod tests {
             &decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4266,7 +4597,7 @@ mod tests {
             &or_decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -4300,7 +4631,7 @@ mod tests {
             &compat_decl,
             "chat-v1",
             Vec::new(),
-            0.2,
+            inference::dialect::Sampling::Exact(0.2),
             None,
             Vec::new(),
             &ToolChoice::Auto,
@@ -5061,6 +5392,36 @@ mod tests {
         assert!(
             advice.contains("GET https://api.tinyhumans.ai/openai/v1/models"),
             "the caller-supplied catalog endpoint is used: {advice}"
+        );
+    }
+
+    /// The reported defect, at the last mechanism that could have caught it: a
+    /// fresh company adds Anthropic, every turn goes out as `model: agentic-v1`
+    /// because nothing asked which model the provider should serve, and
+    /// Anthropic answers `not_found_error`. That wording matched none of the
+    /// signatures, so the repair advice returned `None` and the operator got a
+    /// bare 404 naming a string with no pointer to where it is configured.
+    #[test]
+    fn anthropics_not_found_error_becomes_actionable() {
+        let raw = concat!(
+            "inference returned 404 Not Found: ",
+            r#"{"type":"error","error":{"type":"not_found_error","message":"model: agentic-v1"}}"#,
+        );
+        let advice = model_unavailable_advice(
+            reqwest::StatusCode::NOT_FOUND,
+            raw,
+            "https://api.anthropic.com/v1/models",
+            None,
+            None,
+        )
+        .expect("Anthropic's typed 404 is recognised as a missing model");
+        assert!(
+            advice.contains("GET https://api.anthropic.com/v1/models"),
+            "the advice points at the failing endpoint's own catalog: {advice}"
+        );
+        assert!(
+            advice.contains("agentic-v1"),
+            "the id that was actually sent survives for support: {advice}"
         );
     }
 

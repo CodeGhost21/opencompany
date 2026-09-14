@@ -6,7 +6,7 @@ import {
   dmChannelId,
   legacyDmChannelId,
   resolveDmChannelId,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 import type { Desk } from "@/lib/desks";
 import type { TeamMember } from "@/lib/team";
 
@@ -38,7 +38,7 @@ const GRACE = member({ id: "agent-grace", name: "Grace" });
 const ROSTER = [ADA, GRACE];
 
 describe("dmChannelId", () => {
-  it("keys on the teammate's id, so a rename cannot move their DM", () => {
+  it("keys on the agent's id, so a rename cannot move their DM", () => {
     const renamed = member({ id: "agent-ada", name: "Ada Lovelace" });
     expect(dmChannelId(renamed)).toBe(dmChannelId(ADA));
   });
@@ -107,7 +107,7 @@ describe("channelIdForThread (issue #367)", () => {
     expect(channelIdForThread("engineering", desks, ROSTER)).toBe("engineering");
   });
 
-  it("maps a teammate's agent id to the console-local DM channel id", () => {
+  it("maps an agent's agent id to the console-local DM channel id", () => {
     // The asymmetry that makes this function necessary: the host journals a DM
     // under the teammate's agent id, but the console addresses the channel by
     // `dm:<id>`. Routing the raw thread id would file the message under a

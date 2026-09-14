@@ -278,7 +278,7 @@ describe("AppShell keeps SetupController mounted across its branch transitions",
     // for exactly rather than folded into a `>=` that would let a genuine
     // re-read through unnoticed.
     const GRAPH_ROSTER_READS = 1;
-    // `ChatView` is mounted on every route since #2130, not only on `#/chat`:
+    // `RoomView` is mounted on every route since #2130, not only on `#/chat`:
     // the sidebar's channel rail is portalled out of it and is pinned there on
     // every section, so the view that feeds it has to outlive the route that
     // used to own it. It takes one roster read of its own on mount, for the

@@ -10,13 +10,12 @@
 
 import {
   Activity,
-  BrainCircuit,
+  MessageSquareWarning,
+  Palette,
+  ShieldCheck,
   ChartColumnBig,
-  Globe,
-  Search,
   type LucideIcon,
   Settings2,
-  Sparkles,
   UserCog,
 } from "lucide-react";
 
@@ -36,6 +35,21 @@ export const SETTINGS_PAGES = [
     hint: "Who can sign in, and as what",
     group: "identity",
   },
+  // The autonomy tier and the always-ask list. It was the second card on
+  // General, high on the page because it is what an operator drowning in
+  // approval cards comes here for — which is a reason to be a row, not a
+  // scroll position.
+  //
+  // NOT `#/approvals`, the sidebar row: that is the queue of decisions waiting
+  // right now, and this is the standing rule that decides what reaches it. The
+  // hints below are written to keep the two apart.
+  {
+    id: "approvals",
+    label: "Approvals",
+    icon: ShieldCheck,
+    hint: "The standing rule for what agents may do unattended",
+    group: "capability",
+  },
   // One question per page. "Connections" carried five — third-party accounts,
   // MCP servers, inference, channels, repositories — so each was something an
   // operator scrolled past on the way to another. The first three became pages;
@@ -49,32 +63,42 @@ export const SETTINGS_PAGES = [
   // resolve, rewritten onto the section by `console-route-rewrites.ts`, so
   // every link minted while they lived here works.
   //
-  // Inference stayed, and so did Hosting and Search below it, for the reason
-  // stated twice in this file: a credential form belongs beside the one thing
-  // it unlocks. The model, the deploy target and the search provider are three
-  // such things; filing them under a section named for the act of connecting
-  // would separate each credential from what it is for.
-  { id: "inference", label: "Inference", icon: BrainCircuit, hint: "The model teammates think with", group: "integrations" },
-  // A credential form belongs beside what it unlocks. An operator looking for
-  // "where do I put my Vercel token" searches for hosting, so it sits here
-  // rather than inside a third-party-accounts drawer.
-  { id: "hosting", label: "Hosting", icon: Globe, hint: "Where this company's sites go live", group: "integrations" },
-  // Beside Hosting for the same reason: a credential form belongs beside what
-  // it unlocks, and an operator looking for "where do I put my Brave key"
-  // searches for search.
-  { id: "search", label: "Search", icon: Search, hint: "Where teammates look things up", group: "integrations" },
-  // "What this company knows how to do" read as capability the company performs
-  // — the implication issue #569 exists to remove, set here *before* the tab
-  // gets a chance to correct it. The siblings describe their content; so does
-  // this now.
-  { id: "skills", label: "Skills", icon: Sparkles, hint: "Playbooks your teammates read", group: "capability" },
+  // Inference followed them, and this file used to say it would not. The
+  // reason given — a credential form belongs beside the one thing it unlocks —
+  // was answering the wrong question: this rail is not "beside the model", it
+  // is configuration an operator visits once, and the model a company thinks
+  // with is the most-read, most-changed thing that was on it. It is
+  // `#/connections/inference` now, rewritten from here so every link minted
+  // while it lived on this rail still works. Skills went with it, for the
+  // matching reason on the capability group below.
+  //
+  // Hosting and Search went too, which emptied the Integrations group and
+  // retired it. This file argued for years that a credential form belongs
+  // beside what it unlocks; what settled it is that the thing a deploy token
+  // and a search key each unlock IS the connection, so "beside what it
+  // unlocks" was always an argument for the Connections section rather than
+  // against it. Both resolve from their old addresses. See
+  // `connection-pages.ts`.
+  //
+  // What is left on this rail is what Settings is for: who can sign in, how
+  // the company behaves, what it did, and what it spends. No row below has an
+  // outside service at the other end of it, and a new row that does belongs in
+  // Connections rather than here.
+  // Skills is NOT here any more: it is `#/connections/skills`, rewritten from
+  // this rail so every link minted while it lived here works. Installing a
+  // skill is the same act as connecting an app — granting the company a
+  // capability it did not have a minute ago — and it is read far more often
+  // than it is set, which is the test the Connections section applies. See
+  // `connection-pages.ts`.
+  //
   // The run observatory: what the company's agents actually did, run by run.
   //
   // It had a nav row of its own and lost it to the four-section restructure.
   // Filed here rather than parked, because this is where an operator goes to
-  // ask a question *about* the company rather than to work in it — and beside
-  // Skills, which is the other half of the same pair: what teammates are told
-  // to do, and what they did.
+  // ask a question *about* the company rather than to work in it. It used to
+  // sit beside Skills as the other half of a pair — what teammates are told to
+  // do, and what they did — and keeps its place now that Skills has moved:
+  // what a company DID is a question about it, not a capability you grant it.
   //
   // This row is a doorway, not the address. `#/settings/observatory` is
   // rewritten straight back onto `#/observatory` by `console-route-rewrites.ts`
@@ -84,12 +108,28 @@ export const SETTINGS_PAGES = [
   // top-level shape, `#/observatory/<runId>`, because workflow rows, approval
   // cards and chat all link straight to one — burying that behind a settings
   // rail would break every link that names a run.
-  { id: "observatory", label: "Observatory", icon: Activity, hint: "What your teammates actually did", group: "capability" },
+  { id: "observatory", label: "Observatory", icon: Activity, hint: "What your agents actually did", group: "capability" },
+  // A fact about this browser rather than about the company: the theme is
+  // stored per client, and changing it changes nothing for anyone else who
+  // signs in. That is what separates it from every card left on General.
+  {
+    id: "appearance",
+    label: "Appearance",
+    icon: Palette,
+    hint: "Light, dark, or follow the system",
+    group: "console",
+  },
   // Brain is NOT here: it has its own nav row (`#/brain`). It was the one page
   // on this rail an operator came to *read* rather than to change — settings
   // are configuration, and what the company remembers is not configuration.
   // `#/settings/brain` still resolves, rewritten onto the row by
   // `console-route-rewrites.ts`, so every link minted while it lived here works.
+  // Feedback was a glyph in the window's title row, beside Settings — which
+  // made it chrome, on a par with "where you are" and "what the agents may do".
+  // It is not that: it is a page you visit rarely and deliberately, which is
+  // what this rail is a list of. Filed under "This console" because that is
+  // exactly what it is about — the product, not the company running in it.
+  { id: "feedback", label: "Feedback", icon: MessageSquareWarning, hint: "Tell us what is wrong or missing", group: "console" },
   { id: "usage", label: "Usage", icon: ChartColumnBig, hint: "What this company is spending", group: "spend" },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon; hint: string; group: string }[];
 
@@ -98,8 +138,8 @@ export type SettingsPage = (typeof SETTINGS_PAGES)[number]["id"];
 /** The settings rail groups related sub-pages without changing their routes. */
 export const SETTINGS_PAGE_GROUPS = [
   { id: "identity", label: "Identity & lifecycle" },
-  { id: "integrations", label: "Integrations" },
   { id: "capability", label: "Capability" },
+  { id: "console", label: "This console" },
   { id: "spend", label: "Spend" },
 ] as const satisfies readonly { id: (typeof SETTINGS_PAGES)[number]["group"]; label: string }[];
 

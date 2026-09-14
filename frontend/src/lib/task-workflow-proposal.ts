@@ -62,7 +62,7 @@ export type TaskProposalDiff = { diff: GraphDiff } | { reason: string };
  */
 export function taskProposalDiff(ops: unknown): TaskProposalDiff {
   if (!ops || typeof ops !== "object" || Array.isArray(ops)) {
-    return { reason: "This proposal's workflow could not be read." };
+    return { reason: "This proposal's automation could not be read." };
   }
   const spec = ops as { nodes?: unknown; edges?: unknown; summary?: unknown };
   const nodes = Array.isArray(spec.nodes) ? spec.nodes : [];

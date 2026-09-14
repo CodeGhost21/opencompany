@@ -32,6 +32,12 @@ import { expect, test, type Page } from "@playwright/test";
  *      ancestor up to `<html>`, lighting every nested scroller at once.
  */
 
+// Appearance is its own page now (`settings-pages.ts`), one Card deliberately
+// thin enough to read as a single subject — so at the suite's ordinary
+// viewport it never has a pane with more content than fits. A short viewport
+// is what still forces real overflow without touching the page itself.
+test.use({ viewport: { width: 1280, height: 280 } });
+
 /** The first-run tour opens a modal over a fresh console and eats every click. */
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -71,7 +77,7 @@ async function findScroller(page: Page): Promise<string> {
 }
 
 async function openSettings(page: Page) {
-  await page.goto("/#/settings");
+  await page.goto("/#/settings/appearance");
   await expect(page.getByRole("button", { name: "Change theme" })).toBeVisible({ timeout: 30_000 });
   return findScroller(page);
 }

@@ -297,7 +297,7 @@ export function ObservatoryView({ client, company, runId, eventTick }: Props) {
         <p className="text-muted-foreground text-sm">
           {runId
             ? "This run recorded no agent attempts."
-            : "No agent attempts recorded yet. Run a workflow and they will appear here."}
+            : "No agent attempts recorded yet. Run an automation and they will appear here."}
         </p>
       ) : tab === "analytics" ? (
         <AnalyticsLens runs={runs} />
@@ -414,7 +414,7 @@ function RunIndex({ runs }: { runs: ObservatoryRun[] }) {
   return (
     <section className="flex flex-col gap-1">
       <h3 className="text-muted-foreground text-xs uppercase tracking-wide">
-        Workflow runs
+        Automation runs
       </h3>
       <ul className="flex flex-col gap-1">
         {grouped.map(([workflowRunId, own]) => {

@@ -12,11 +12,11 @@ import { OpenCompanyClient } from "@/api/client";
  * #3866418876) only protects the console from redeeming a stale marker when
  * the request actually carries the marker id it last read — an omitted `id`
  * falls back to the server's pre-fix unconditional redeem. Before this fix,
- * `ChatView`'s "Add credits" CTA never read the marker back and this method
+ * `RoomView`'s "Add credits" CTA never read the marker back and this method
  * never appended `?id=` at all, so the atomic mismatch check on the server
  * had nothing to compare against and could never fire from the console.
  * These pin the URL shape directly, since there is no component-test harness
- * in this project to mount `ChatView`'s click handler (see
+ * in this project to mount `RoomView`'s click handler (see
  * `budget-pause-notice.test.ts`'s header doc comment for the same
  * constraint).
  */

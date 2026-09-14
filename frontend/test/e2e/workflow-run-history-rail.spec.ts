@@ -124,7 +124,7 @@ test("below xl the run history falls back to a strip under the canvas", async ({
   ).toBeLessThan(4);
 });
 
-test("the index carries no run chrome, and leaving a workflow takes the rail with it", async ({
+test("the index carries no run chrome, and leaving an automation takes the rail with it", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });

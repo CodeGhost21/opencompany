@@ -581,7 +581,7 @@ export function failedNodeOf(run: WorkflowRunOutcome): string | null {
  * The first version of this used a DFS and broke whichever edge closed onto the
  * recursion stack. That is wrong whenever a node *before* a loop branches
  * straight into the loop's middle, because the traversal then enters the loop
- * from the wrong side. The shipped `agentic_math_lab/euler_solve` is exactly
+ * from the wrong side. The shipped `math_lab/euler_solve` is exactly
  * that shape: `cost` fans out to both `solve` and `approach`, the DFS reaches
  * `solve` first, and it marked the ordinary forward edge `approach -> solve`
  * instead of the authored return `agree -> approach` — which laid `approach` out
@@ -722,7 +722,7 @@ export function layout(
         kind: n.kind,
         name: n.name,
         // Agent nodes surface their roster id; otherwise the node's summary.
-        summary: n.summary ?? (n.agent ? `Teammate: ${n.agent}` : ""),
+        summary: n.summary ?? (n.agent ? `Agent: ${n.agent}` : ""),
         emoji: meta.emoji,
         color: meta.color,
         runState: runStates[n.id],

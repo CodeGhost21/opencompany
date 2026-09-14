@@ -36,7 +36,7 @@ export function WelcomeDialog({
           </div>
           <DialogTitle>Welcome to your company</DialogTitle>
           <DialogDescription>
-            This is your operator console — where your AI staff, their desks, workflows, and
+            This is your operator console — where your AI staff, their desks, automations, and
             connections all live. Take a two-minute tour to see where everything is.
           </DialogDescription>
         </DialogHeader>

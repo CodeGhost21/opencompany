@@ -128,7 +128,7 @@ export const CONTEXT_ORIGINS: Exclude<MemoryOrigin, "fact">[] = [
 /** Human labels for each origin, for badges and the type filter. */
 export const ORIGIN_LABELS: Record<MemoryOrigin, string> = {
   fact: "Fact",
-  "agent-memory": "Teammate memory",
+  "agent-memory": "Agent memory",
   "task-outcome": "Task outcome",
   document: "Document",
 };

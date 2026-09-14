@@ -673,7 +673,7 @@ describe("notWired — a feature absent from the build is untested, not failed",
    */
   it("recognises the typed code", () => {
     const { notWired } = loadHarness()._internals;
-    expect(notWired({ body: { error: "workflow execution is not wired", code: "not_wired" } })).toBe(
+    expect(notWired({ body: { error: "automation execution is not wired", code: "not_wired" } })).toBe(
       true,
     );
   });
@@ -683,7 +683,7 @@ describe("notWired — a feature absent from the build is untested, not failed",
     // quiet the day somebody did, and silently start scoring absent features
     // as failures again.
     const { notWired } = loadHarness()._internals;
-    expect(notWired({ body: { error: "workflow execution is not wired in this deployment" } })).toBe(
+    expect(notWired({ body: { error: "automation execution is not wired in this deployment" } })).toBe(
       false,
     );
     expect(notWired({ body: { error: "boom", code: "internal" } })).toBe(false);
@@ -820,7 +820,7 @@ describe("usage-finances against a host that answers without the figures", () =>
   });
 });
 
-describe("probe() will not choose a workflow to run for real", () => {
+describe("probe() will not choose an automation to run for real", () => {
   /**
    * A real run fires real deliveries — a report into a channel, mail to a real
    * address. The first version took `flows[0]`, which on a production tenant is
@@ -865,7 +865,7 @@ describe("probe() will not choose a workflow to run for real", () => {
     expect(rows.find((r) => r.check === "probe-chat")?.verdict).toBe("PASS");
   });
 
-  it("skips the run, and fires no POST at any workflow, when none is named", async () => {
+  it("skips the run, and fires no POST at any automation, when none is named", async () => {
     const { ocqa, sent } = tenantHarness();
     const rows = await ocqa.probe();
     const row = rows.find((r) => r.check === "probe-workflow-run");

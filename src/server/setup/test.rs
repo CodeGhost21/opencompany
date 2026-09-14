@@ -11,11 +11,14 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+use async_trait::async_trait;
+
 use crate::app::config::MapEnv;
 use crate::company::CompanyManifest;
+use crate::company::runtime::CompanyRuntime;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
-use crate::runtime::RuntimeBuilder;
+use crate::runtime::{RebuildRequest, RuntimeBuilder, RuntimeRebuilder};
 use crate::server::ops::ConnectionsRuntime;
 use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
@@ -74,6 +77,7 @@ async fn with_company(state: &AppState, home: &std::path::Path) -> CompanyId {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -512,7 +516,7 @@ async fn applying_seeds_the_chosen_template() {
 
     let (status, body) = post_setup(
         state.clone(),
-        serde_json::json!({ "fields": {}, "template": "agentic_law_firm" }),
+        serde_json::json!({ "fields": {}, "template": "law_firm" }),
     )
     .await;
 
@@ -534,7 +538,7 @@ async fn applying_seeds_the_chosen_template() {
             .template_provenance
             .as_ref()
             .map(|p| p.source_id.as_str()),
-        Some("agentic_law_firm"),
+        Some("law_firm"),
         "provenance must record which template this install started from"
     );
 }
@@ -555,7 +559,7 @@ async fn choosing_no_sign_in_applies_to_the_company_it_seeds() {
         state.clone(),
         serde_json::json!({
             "fields": { "auth_mode": "none" },
-            "template": "agentic_law_firm",
+            "template": "law_firm",
         }),
     )
     .await;
@@ -629,6 +633,122 @@ async fn an_existing_company_that_cannot_rebuild_reports_a_restart() {
     );
 }
 
+/// A rebuilder that fails for exactly the company ids named in `fails`, and
+/// otherwise behaves like the production one.
+struct SelectiveRebuilder {
+    home: std::path::PathBuf,
+    fails: Vec<String>,
+}
+
+#[async_trait]
+impl RuntimeRebuilder for SelectiveRebuilder {
+    async fn rebuild(
+        &self,
+        state: &AppState,
+        request: RebuildRequest,
+    ) -> crate::Result<CompanyRuntime> {
+        if self.fails.iter().any(|id| id == request.id.as_ref()) {
+            return Err(crate::error::OpenCompanyError::Config(
+                "simulated rebuild failure".to_string(),
+            ));
+        }
+        // The auth-mode override is carried the way the boot rebuilder carries
+        // it, or a company rebuilt here keeps the manifest default and the
+        // mode the request chose is silently dropped.
+        RuntimeBuilder::new(self.home.clone(), request.manifest)
+            .with_id(request.id)
+            .with_handover(request.handover)
+            .with_auth_mode_override(state.auth_mode_override())
+            .build()
+            .await
+    }
+}
+
+/// PLAT-052: the rebuild loop is per-company best-effort. A company that
+/// cannot rebuild — in the middle of the list, not just the only one — must
+/// not stop the companies after it, and the honest `restart_required` must
+/// still be reported rather than silently dropped once anything succeeded.
+#[tokio::test]
+async fn a_failed_rebuild_mid_list_does_not_stop_the_rest() {
+    let home_dir = home();
+    let store = crate::store::FsCompanyStore::new(home_dir.path().to_path_buf());
+    let state = fresh_state(home_dir.path());
+    for name in ["acme", "globex", "initech"] {
+        let id = CompanyId::new(name);
+        store
+            .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_tool_grants: None,
+                overlay_desk_tools: std::collections::BTreeMap::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        state.registry().insert(id, Arc::new(runtime));
+    }
+    let state = state.with_rebuilder(Arc::new(SelectiveRebuilder {
+        home: home_dir.path().to_path_buf(),
+        fails: vec!["globex".to_string()],
+    }));
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({ "fields": { "auth_mode": "none" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    assert_eq!(
+        state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .unwrap()
+            .auth_mode(),
+        crate::app::config::AuthMode::None,
+        "a company before the failing one in the list must still be rebuilt"
+    );
+    assert_eq!(
+        state
+            .registry()
+            .get(&CompanyId::new("initech"))
+            .unwrap()
+            .auth_mode(),
+        crate::app::config::AuthMode::None,
+        "a company after the failing one must still be rebuilt: the loop must not abort mid-list"
+    );
+    assert!(
+        body["restart_required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("auth_mode")),
+        "the failing company means a restart is still genuinely owed, even though two of \
+         three succeeded: {body}"
+    );
+}
+
 /// A re-run must never hand the operator a second starter company.
 #[tokio::test]
 async fn applying_does_not_seed_when_a_company_already_exists() {
@@ -638,7 +758,7 @@ async fn applying_does_not_seed_when_a_company_already_exists() {
 
     let (status, body) = post_setup(
         state.clone(),
-        serde_json::json!({ "fields": {}, "template": "agentic_law_firm" }),
+        serde_json::json!({ "fields": {}, "template": "law_firm" }),
     )
     .await;
 
@@ -752,7 +872,7 @@ async fn a_failed_write_leaves_no_live_state_behind() {
         state.clone(),
         serde_json::json!({
             "fields": { "auth_mode": "wallet" },
-            "template": "agentic_marketing_agency",
+            "template": "marketing_agency",
         }),
     )
     .await;
@@ -1023,7 +1143,7 @@ async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, s
 async fn a_picked_template_proposes_its_own_roster() {
     let home_dir = home();
     let state = fresh_state(home_dir.path());
-    let expected = crate::desktop::preset("agentic_marketing_agency")
+    let expected = crate::desktop::preset("marketing_agency")
         .expect("a bundled template")
         .manifest_parsed()
         .expect("it parses")
@@ -1032,7 +1152,7 @@ async fn a_picked_template_proposes_its_own_roster() {
     let (status, body) = post_roster(
         state,
         serde_json::json!({
-            "template": "agentic_marketing_agency",
+            "template": "marketing_agency",
             "industry": "",
             "teamHint": "",
             "automate": "campaign briefs and weekly reporting",
@@ -1106,7 +1226,7 @@ async fn applying_a_template_seeds_it_under_the_name_the_operator_chose() {
         state.clone(),
         serde_json::json!({
             "fields": {},
-            "template": "agentic_marketing_agency",
+            "template": "marketing_agency",
             "name": "Northwind Studio",
         }),
     )
@@ -1137,7 +1257,7 @@ async fn applying_a_template_seeds_it_under_the_name_the_operator_chose() {
     // company's stored manifest also carries the roster `globals/` contributes,
     // so an equality here would be asserting the size of something this change
     // has nothing to do with.
-    let template_roles: Vec<String> = crate::desktop::preset("agentic_marketing_agency")
+    let template_roles: Vec<String> = crate::desktop::preset("marketing_agency")
         .unwrap()
         .manifest_parsed()
         .unwrap()
@@ -1171,7 +1291,7 @@ async fn a_template_seed_names_the_operator_as_its_admin() {
         state.clone(),
         serde_json::json!({
             "fields": {},
-            "template": "agentic_law_firm",
+            "template": "law_firm",
             "admin_email": "ada@example.com",
         }),
     )
@@ -1213,7 +1333,7 @@ async fn a_very_long_name_is_bounded_before_it_becomes_an_id() {
         state.clone(),
         serde_json::json!({
             "fields": {},
-            "template": "agentic_law_firm",
+            "template": "law_firm",
             "name": long,
         }),
     )
@@ -1259,7 +1379,7 @@ async fn a_blank_name_falls_back_to_the_templates_own() {
         state.clone(),
         serde_json::json!({
             "fields": {},
-            "template": "agentic_law_firm",
+            "template": "law_firm",
             "name": "   ",
         }),
     )
@@ -1376,6 +1496,36 @@ async fn a_routable_host_refuses_an_anonymous_proposal() {
         status,
         StatusCode::OK,
         "an unauthenticated caller must not reach this on a routable host"
+    );
+}
+
+/// CONSOLE-ADMIN-058: `propose_roster` is a pure read gated by the same
+/// [`authorize`](super::authorize) [`apply`](super::apply) is — but unlike
+/// `apply`, it persists nothing, so several proposals in flight at once must
+/// not block on each other (there is nothing to serialize) and must not leave
+/// any of them half-registering a company.
+#[tokio::test]
+async fn concurrent_roster_proposals_do_not_persist_anything() {
+    let home = home();
+    let state = fresh_state(home.path());
+    let request = || serde_json::json!({ "industry": "software", "teamHint": "", "automate": "" });
+
+    let (a, b, c) = tokio::join!(
+        post_roster(state.clone(), request()),
+        post_roster(state.clone(), request()),
+        post_roster(state.clone(), request()),
+    );
+
+    for (status, body) in [&a, &b, &c] {
+        assert_eq!(*status, StatusCode::OK, "{body}");
+    }
+    assert!(
+        state.registry().is_empty(),
+        "concurrent roster proposals must never register a company"
+    );
+    assert!(
+        !state.setup_complete(),
+        "a roster proposal must never mark setup complete"
     );
 }
 
@@ -1527,6 +1677,57 @@ async fn local_model_probe_normalizes_the_address_and_detects_its_model() {
     assert_eq!(result.model.as_deref(), Some("qwen3:8b"));
 }
 
+/// The first-run probe refuses an endpoint carrying a credential **before it
+/// sends anything**, and never echoes the credential back.
+///
+/// The server counts every request it receives: the catalogue read and the
+/// probe would each have presented the userinfo as basic auth, so a refusal
+/// that came after either of them would already have leaked it.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn setup_probe_refuses_a_credentialed_endpoint_before_sending_anything() {
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = axum::Router::new().fallback({
+        let hits = hits.clone();
+        move || {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { axum::http::StatusCode::NOT_FOUND }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let result = super::probe_inference(
+        &super::InferenceTestRequest {
+            provider: "openai_compatible".to_string(),
+            base_url: Some(format!("http://alice:hunter2@{address}/v1")),
+            ..Default::default()
+        },
+        &MapEnv::default(),
+    )
+    .await;
+    server.abort();
+
+    assert!(!result.ok, "a credentialed endpoint must not test green");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing may be sent to an endpoint carrying a credential"
+    );
+    assert!(
+        !result.base_url.contains("hunter2") && !result.base_url.contains("alice"),
+        "the echoed endpoint must be redacted: {}",
+        result.base_url
+    );
+    let error = result.error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("username or password"),
+        "expected the refusal sentence, got: {error}"
+    );
+    assert!(!error.contains("hunter2"), "{error}");
+}
+
 /// A designed company beats a template slug. An operator who answered three
 /// questions and edited a roster has expressed a preference a preset cannot
 /// override — and sending both must never produce two companies.
@@ -1538,7 +1739,7 @@ async fn a_designed_company_wins_over_a_template() {
     let (status, body) = post_setup(
         state.clone(),
         serde_json::json!({
-            "template": "agentic_marketing_agency",
+            "template": "marketing_agency",
             "company": designed_company(None),
         }),
     )
@@ -1585,6 +1786,45 @@ async fn a_second_apply_does_not_seed_another_company() {
         "a host with a company must not be handed a second: {body}"
     );
     assert_eq!(state.registry().list().len(), 1);
+}
+
+/// CONSOLE-ADMIN-056: the re-run guard above holds against a second,
+/// *sequential* apply. It must hold just as well when two first-run applies
+/// land concurrently — the case the guard's own doc comment is really about
+/// ("a re-run must never hand the operator a second starter company"), just
+/// reached by two racing callers instead of one later one.
+#[tokio::test]
+async fn concurrent_first_run_applies_seed_at_most_one_company() {
+    let home = home();
+    let state = fresh_state(home.path());
+    assert!(state.registry().is_empty(), "the premise: nothing yet");
+
+    let body = serde_json::json!({ "company": designed_company(None) });
+    let (first, second) = tokio::join!(
+        post_setup(state.clone(), body.clone()),
+        post_setup(state.clone(), body),
+    );
+
+    assert_eq!(first.0, StatusCode::OK, "{:?}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "{:?}", second.1);
+    assert_eq!(
+        state.registry().list().len(),
+        1,
+        "two concurrent first-run applies must seed exactly one company, not two: \
+         {first:?} {second:?}"
+    );
+
+    // Exactly one of the two responses may report a seed; the other must
+    // accurately report it found the registry already occupied by the time it
+    // ran, not silently invent (or omit) a second one.
+    let seeded = [&first.1, &second.1]
+        .iter()
+        .filter(|body| !body["seeded_company"].is_null())
+        .count();
+    assert_eq!(
+        seeded, 1,
+        "exactly one of the two concurrent calls may report a seed: {first:?} {second:?}"
+    );
 }
 
 /// The roster arrives over the wire after an operator edited it, so neither the

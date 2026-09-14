@@ -234,7 +234,7 @@ describe("useHostAddress", () => {
   it("repairs a scope dropped by a bare hash assignment", async () => {
     at("#/ledgers/tasks");
     await mount({ activeId: "conn-a", ids: "conn-a,conn-b", scoped: true });
-    // A view writing `location.hash` directly (`TaskDetailRoute`, `ChatView`)
+    // A view writing `location.hash` directly (`TaskDetailRoute`, `RoomView`)
     // drops the query. The event it fires is what puts the scope back.
     await back("#/tasks/abc");
     expect(window.location.hash).toBe("#/tasks/abc?host=conn-a");

@@ -322,6 +322,7 @@ async fn harness(
     dir: &std::path::Path,
 ) -> (HarnessPool, HarnessDeps, CompanyRecord) {
     let deps = HarnessDeps {
+        emergency_gate: None,
         notifications: None,
         ledgers: None,
         ledger_registry: Default::default(),
@@ -388,6 +389,7 @@ async fn harness(
     };
 
     let record = CompanyRecord {
+        overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
         id: CompanyId::new("acme"),

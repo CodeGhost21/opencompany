@@ -226,7 +226,7 @@ test("opening a channel clears only its own mentions", async ({ page }) => {
 test("opening a channel does not clear its mentions before history has loaded", async ({
   page,
 }) => {
-  // The Codex P1 finding: `ChatView` used to report a channel "viewed" on the
+  // The Codex P1 finding: `RoomView` used to report a channel "viewed" on the
   // same tick it switched to it, with no regard for whether that channel's
   // own `chat/history` had come back yet. A mention is durable and there is
   // no older-history pagination to recover one, so clearing it in that window

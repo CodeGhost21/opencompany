@@ -247,7 +247,7 @@ describe("what the always-ask field suggests", () => {
     // now it speaks — scoped to what the served set can prove, not a blanket
     // "not a tool" claim.
     expect(container.textContent).toContain(
-      "shell doesn't match any of the workflow tools wired here.",
+      "shell doesn't match any of the automation tools wired here.",
     );
   });
 
@@ -329,7 +329,7 @@ describe("what the always-ask field suggests", () => {
     expect(container.textContent).not.toContain("match any");
   });
 
-  it("flags a typo against the complete registry, not just the workflow set", async () => {
+  it("flags a typo against the complete registry, not just the automation set", async () => {
     // `shel` gates nothing in `knownTools` (a case-insensitive, segment-bound
     // match), so the note speaks — with the confident wording the full registry
     // earns.
@@ -414,7 +414,7 @@ describe("policy tier changes", () => {
       full?.click();
     });
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(document.body.textContent).toContain("Acts without asking.");
 
     const confirm = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find(
@@ -487,7 +487,7 @@ describe("policy tier changes", () => {
         new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
       );
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 
@@ -578,7 +578,7 @@ describe("policy tier changes", () => {
       );
     });
     expect(document.body.textContent).toContain(
-      "Give teammates more autonomy?",
+      "Give agents more autonomy?",
     );
     expect(document.body.textContent).toContain("Acts without asking.");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
@@ -635,7 +635,7 @@ describe("policy tier changes", () => {
     await act(async () => {
       full?.click();
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
 
     const confirm = Array.from(
       document.body.querySelectorAll<HTMLButtonElement>("button"),
@@ -648,7 +648,7 @@ describe("policy tier changes", () => {
     expect(failingPut).toHaveBeenCalledWith("/api/v1/acme/policy", {
       mode: "full",
     });
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(toasts.error).toHaveBeenCalled();
   });
 
@@ -674,7 +674,7 @@ describe("policy tier changes", () => {
     await act(async () => {
       full?.click();
     });
-    expect(document.body.textContent).not.toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).not.toContain("Give agents more autonomy?");
     expect((client.put as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 
@@ -767,7 +767,7 @@ describe("manifest resets", () => {
     });
     // Nothing persisted yet; the escalation confirmation is up instead.
     expect((client.del as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain("Give teammates more autonomy?");
+    expect(document.body.textContent).toContain("Give agents more autonomy?");
     expect(document.body.textContent).toContain("manifest's Full setting");
 
     const confirm = Array.from(
@@ -809,7 +809,7 @@ describe("manifest resets", () => {
       "/api/v1/acme/policy",
     );
     expect(document.body.textContent).not.toContain(
-      "Give teammates more autonomy?",
+      "Give agents more autonomy?",
     );
   });
 });

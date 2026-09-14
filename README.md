@@ -65,27 +65,27 @@ of moments where a human signs off:
 
 | You want to run a… | Your agents handle | You keep |
 | --- | --- | --- |
-| **[Venture Studio](companies/agentic_venture_studio/)** | Scouting, founding, building, launching, operating a portfolio | Capital allocation & strategy |
+| **[Venture Studio](companies/venture_studio/)** | Scouting, founding, building, launching, operating a portfolio | Capital allocation & strategy |
 | **[Startup Accelerator](companies/startup_accelerator/)** | Sourcing, screening, mentoring, demo day, investor intros | Investment decisions |
-| **[VC Firm](companies/agentic_venture_capital/)** | Deal flow, diligence, memos, portfolio support | The final "yes" |
-| **[Consulting Firm](companies/agentic_consultation_firm/)** | Research, analysis, modeling, decks, implementation plans | Executive workshops |
-| **[Software Company](companies/agentic_software_company/)** | PM, design, frontend, backend, QA, security, docs, support, DevRel | Product direction |
-| **[Product Team](companies/agentic_product_team/)** | A triaged queue, a groomed backlog, a defended roadmap | Prioritization calls & roadmap sign-off |
-| **[Marketing Agency](companies/agentic_marketing_agency/)** | Creative, copy, SEO, paid, email, landing pages, analytics | Campaign sign-off |
-| **[Design Studio](companies/agentic_design_studio/)** | Branding, UI, motion, illustration, user testing | Creative direction |
-| **[Media Company](companies/agentic_media_company/)** | Finding, verifying, writing, illustrating, distributing stories | Editorial standards |
-| **[Influencer Brand](companies/agentic_influencer_business/)** | Scripting, editing, thumbnails, posting, community, sponsorships | Your face (or an avatar) |
-| **[Game Studio](companies/agentic_game_studio/)** | Worlds, story, code, art, QA, balance, launch | Creative direction |
-| **[Game Business](companies/agentic_game_business/)** | UA, monetization, LiveOps, community, store optimization | Growth strategy |
-| **[Recruiting Firm](companies/agentic_recruiting_company/)** | Sourcing, outreach, screening, interviews, offers | Final hiring calls |
-| **[Enterprise Sales](companies/agentic_enterprise_sales/)** | Lead gen, outreach, CRM, proposals, contracts, follow-up | Closing strategic accounts |
-| **[Support Org](companies/agentic_customer_support/)** | Tickets, docs, bug reports, escalations, refunds | Policy & escalation |
-| **[Real Estate Co](companies/agentic_realestate_company/)** | Sourcing, analysis, underwriting, contractors, tenants | Purchase approvals |
-| **[Accounting Firm](companies/agentic_accounting_firm/)** | Bookkeeping, tax, payroll, forecasting, audit prep | Signing the filings |
-| **[Law Firm](companies/agentic_law_firm/)** | Research, drafting, litigation support, discovery, compliance | Approving filings |
-| **[Pharma Startup](companies/agentic_pharma_startup/)** | Literature, molecule discovery, simulation, trial planning | The lab work |
-| **[Research Lab](companies/agentic_research_lab/)** | Source-backed research reports with the evidence attached | Setting the question & accepting findings |
-| **[Math Lab](companies/agentic_math_lab/)** | Verified answers to computational problems, with the programs that produced them | Stating the problem & accepting the answer |
+| **[VC Firm](companies/venture_capital/)** | Deal flow, diligence, memos, portfolio support | The final "yes" |
+| **[Consulting Firm](companies/consultation_firm/)** | Research, analysis, modeling, decks, implementation plans | Executive workshops |
+| **[Software Company](companies/software_company/)** | PM, design, frontend, backend, QA, security, docs, support, DevRel | Product direction |
+| **[Product Team](companies/product_team/)** | A triaged queue, a groomed backlog, a defended roadmap | Prioritization calls & roadmap sign-off |
+| **[Marketing Agency](companies/marketing_agency/)** | Creative, copy, SEO, paid, email, landing pages, analytics | Campaign sign-off |
+| **[Design Studio](companies/design_studio/)** | Branding, UI, motion, illustration, user testing | Creative direction |
+| **[Media Company](companies/media_company/)** | Finding, verifying, writing, illustrating, distributing stories | Editorial standards |
+| **[Influencer Brand](companies/influencer_business/)** | Scripting, editing, thumbnails, posting, community, sponsorships | Your face (or an avatar) |
+| **[Game Studio](companies/game_studio/)** | Worlds, story, code, art, QA, balance, launch | Creative direction |
+| **[Game Business](companies/game_business/)** | UA, monetization, LiveOps, community, store optimization | Growth strategy |
+| **[Recruiting Firm](companies/recruiting_company/)** | Sourcing, outreach, screening, interviews, offers | Final hiring calls |
+| **[Enterprise Sales](companies/enterprise_sales/)** | Lead gen, outreach, CRM, proposals, contracts, follow-up | Closing strategic accounts |
+| **[Support Org](companies/customer_support/)** | Tickets, docs, bug reports, escalations, refunds | Policy & escalation |
+| **[Real Estate Co](companies/realestate_company/)** | Sourcing, analysis, underwriting, contractors, tenants | Purchase approvals |
+| **[Accounting Firm](companies/accounting_firm/)** | Bookkeeping, tax, payroll, forecasting, audit prep | Signing the filings |
+| **[Law Firm](companies/law_firm/)** | Research, drafting, litigation support, discovery, compliance | Approving filings |
+| **[Pharma Startup](companies/pharma_startup/)** | Literature, molecule discovery, simulation, trial planning | The lab work |
+| **[Research Lab](companies/research_lab/)** | Source-backed research reports with the evidence attached | Setting the question & accepting findings |
+| **[Math Lab](companies/math_lab/)** | Verified answers to computational problems, with the programs that produced them | Stating the problem & accepting the answer |
 | **[Signals + Opportunity Studio](companies/signals_opportunity_studio/)** | Scouting signals, clustering pains, ranking opportunities into a weekly brief | Which opportunities to fund |
 
 Twenty-two companies. One operator. Pick one and run it, or run several at once.

@@ -375,8 +375,8 @@ the console's Steps panel uses; `integrationConnected` requires a live Composio
 connection **and** an explicit `composio` grant in `[tools].allow` — except in
 two cases, where the step is waived rather than permanently blocking
 activation. First, when the manifest can never grant that namespace at all
-(several bundled companies drop `composio` on purpose, e.g. `agentic_math_lab`,
-`agentic_product_team`). Second, when the running binary was built without the
+(several bundled companies drop `composio` on purpose, e.g. `math_lab`,
+`product_team`). Second, when the running binary was built without the
 `composio` feature — including the documented default `cargo run --bin
 opencompany -- serve` — because that build has no client with which to hold a
 connection, so no company running under it could ever satisfy the step. In
@@ -427,6 +427,8 @@ credential: the old credential was unreachable by agents.
 ```text
 GET    …/credential                         whether the company has its own key + which tier it presents
 PUT    …/credential                         set / rotate / clear the company's TinyHumans key  [admin]
+POST   …/credential/link/start              begin a PKCE key grant; answers the hub URL to navigate to  [admin]
+POST   …/credential/link/finish             redeem the returned code; stores the minted key  [admin]
 GET    …/domain                             the stored domain + records + last verify result, or `null`
 PUT    …/domain                             set the custom domain  [admin]
 POST   …/domain/verify                       server-side DNS check
@@ -485,16 +487,14 @@ guarantee, and which surfaces are deliberately outside it.
 
 ### Retired native OAuth callback
 
-`/api/v1/oauth/callback` stays reachable for a browser that began consent
-immediately before a deploy. It returns a non-caching `410 Gone` HTML page that
-says the authorization was not saved, why native OAuth cannot make agents able
-to use the provider, and to use Composio instead. It ignores the provider's
+`/api/v1/oauth/callback` stays reachable for a browser that began consent just
+before a deploy. It returns a non-caching `410 Gone` HTML page saying the authorization was not saved, why native OAuth cannot make agents able
+to use the provider, and to use Composio instead — ignoring the provider's
 `code` and `state` rather than exchanging or storing them.
 
 `POST …/connections/{provider}/start` is likewise a `410 Gone` JSON response
 with stable code `native_oauth_retired`, an explanatory message, and
-`removalAfter: "2026-09-30"`. Both temporary endpoints send `Deprecation:
-true` and a `Sunset: Wed, 30 Sep 2026 00:00:00 GMT` header. #1023 removes the
-bridge after the cache compatibility window established by #979; it keeps
-Disconnect and the read projection so tenants can release credentials written
-before #828.
+`removalAfter: "2026-09-30"`. Both send `Deprecation: true` and a `Sunset: Wed,
+30 Sep 2026 00:00:00 GMT` header. #1023 removes the bridge after the cache
+window established by #979, keeping Disconnect and the read projection so
+tenants can release credentials written before #828.

@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachmentDto } from "@/api/types";
 import type { ChatMessage } from "@/lib/chat";
 import type { TeamMember } from "@/lib/team";
-import { ThreadPanel } from "@/views/chat/ThreadPanel";
-import type { Channel } from "@/views/chat/model";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
+import type { Channel } from "@/views/room/model";
 
 /**
  * Issue #1682 follow-up: a thread line must render attachments the way a main

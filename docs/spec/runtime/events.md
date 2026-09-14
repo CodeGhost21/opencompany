@@ -67,6 +67,20 @@ naming the thread inside that channel since issue #1890),
 `WorkflowDeleted` (issue #259 — a saved graph was replaced wholesale or removed;
 neither carries the TOML body, deliberately, since the journal reaches readers
 that have no business holding agent prompts or destination addresses),
+`TeammateAdded` / `DeskCreated` / `DeskDeleted` / `DeskMembersChanged` /
+`DeskHiveConfigured` (the structural audit trail: a teammate or desk minted at
+runtime, a seat moved, or a desk's move grammar installed or restored). These
+exist because **no durable row otherwise records that any of it happened** — the
+company record carries current state and nothing carries the change, so "who
+created whom" was unanswerable from the journal and a console could only infer
+it from a redacted tool-call frame that does not survive a reload. Both teammate
+creation paths (the orchestrator's `add_agent` tool and `POST {scope}/team`)
+journal the same variant, because two paths answering that question differently
+is how the gap opened. None carries a configuration body — the same rule
+`WorkflowUpdated` follows, since the journal reaches readers with no business
+holding an agent's prompt or a desk's move table. All five are **permanent**
+under the retention rule; their lifetime cardinality is "how often does an
+operator author these by hand", so permanence costs almost nothing),
 `WorkflowRunFinished` (issue #228 — the durable record of what a run did, from
 every entry point) and, from issue #371/#382, `WorkflowRunStarted` /
 `WorkflowNodeStarted` / `WorkflowNodeFinished` (the per-node progress trail; see

@@ -91,11 +91,11 @@ function linksFor(taskId: string, output: TaskOutput): TaskLink[] {
     links.push({
       kind: "workflow",
       href: workflowHref(workflow.workflowId, workflow.runId),
-      label: `Open workflow ${workflow.workflowId}`,
+      label: `Open automation ${workflow.workflowId}`,
       hint:
         workflow.action === "ran"
-          ? "Opens the workflow on its canvas, showing this run."
-          : "Opens the workflow this task built. It has not been run yet.",
+          ? "Opens the automation on its canvas, showing this run."
+          : "Opens the automation this task built. It has not been run yet.",
     });
   }
   // Always last, and always present: the producer is the deliverable when

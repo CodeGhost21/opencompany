@@ -27,6 +27,7 @@
 //! other stimulus — there is no fence bypass.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::http::HeaderMap;
@@ -48,6 +49,15 @@ use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::ports::types::{AgentCard, CardPayment, CompanyEvent, LedgerEntry};
 use crate::server::error::ApiError;
+
+/// How long an inbound A2A task may hold this connection — and the worker
+/// running its company cycle — open before the caller is told to retry.
+///
+/// `tasks/send` is fully synchronous: the HTTP response IS the cycle result,
+/// so a cycle that never returns (a stuck tool call, a hung provider) would
+/// otherwise pin this connection, and the task behind it, forever. A paying
+/// counterparty gets no other signal that anything went wrong.
+const A2A_CYCLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Builds the tiny.place A2A route fragment, merged into the main router.
 pub fn router() -> Router<AppState> {
@@ -324,16 +334,20 @@ async fn a2a_task(
     // model-based guard.
     let task = sanitize_value(rpc.params.clone());
 
-    // 6. Append the event and run one cycle (run_cycle persists the event).
-    let report = match runtime
-        .run_cycle(vec![CompanyEvent::A2aTaskReceived {
+    // 6. Append the event and run one cycle (run_cycle persists the event),
+    // bounded so a stuck cycle cannot hold this connection open forever.
+    let report = match tokio::time::timeout(
+        A2A_CYCLE_TIMEOUT,
+        runtime.run_cycle(vec![CompanyEvent::A2aTaskReceived {
             from: from.clone(),
             task,
-        }])
-        .await
+        }]),
+    )
+    .await
     {
-        Ok(report) => report,
-        Err(err) => return ApiError(err).into_response(),
+        Ok(Ok(report)) => report,
+        Ok(Err(err)) => return ApiError(err).into_response(),
+        Err(_) => return cycle_timeout(),
     };
 
     let result = json!({
@@ -352,6 +366,18 @@ fn unauthorized(err: &OpenCompanyError) -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({ "error": err.to_string(), "code": err.code() })),
+    )
+        .into_response()
+}
+
+/// Renders a cycle that outran [`A2A_CYCLE_TIMEOUT`] as a `504`.
+fn cycle_timeout() -> Response {
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(json!({
+            "error": "the company did not finish this task in time",
+            "code": "timeout",
+        })),
     )
         .into_response()
 }
@@ -465,6 +491,7 @@ mod test {
     use super::*;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -474,8 +501,10 @@ mod test {
     use crate::economy::signer::LocalSigner;
     use crate::economy::x402::X402Challenge;
     use crate::economy::{MockTinyplaceClient, TinyplaceEconomy};
-    use crate::ports::types::{CompanyId, EventSeq};
-    use crate::ports::{AgentEconomy, CompanyStore};
+    use crate::ports::types::{
+        CompanyId, CompressedTrace, CycleRequest, CycleResult, EventSeq, TokenUsage,
+    };
+    use crate::ports::{AgentEconomy, Brain, CompanyStore, CycleHost};
     use crate::runtime::RuntimeBuilder;
     use crate::store::FsCompanyStore;
 
@@ -521,6 +550,108 @@ mod test {
         // The counterparty (client) signs with its own identity.
         let client_signer = Arc::new(LocalSigner::generate());
         (state, client_signer)
+    }
+
+    /// Same as [`seeded_state`], but the company cycle is driven by `brain`
+    /// instead of the default hosted one — for tests that need to control how
+    /// long (or how) a cycle runs.
+    async fn seeded_state_with_brain(
+        home: &std::path::Path,
+        brain: Arc<dyn Brain>,
+    ) -> (AppState, Arc<LocalSigner>) {
+        let manifest: CompanyManifest = toml::from_str(DISCOVERABLE_TOML).unwrap();
+        let id = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> = Arc::new(FsCompanyStore::new(home.to_path_buf()));
+        let signer = Arc::new(LocalSigner::generate());
+        let mock = Arc::new(MockTinyplaceClient::new());
+        let economy: Arc<dyn AgentEconomy> = Arc::new(
+            TinyplaceEconomy::new(mock, signer.clone(), store.clone(), id.clone(), None)
+                .going_public(true),
+        );
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id)
+            .with_economy(economy)
+            .with_brain(brain)
+            .build()
+            .await
+            .unwrap();
+
+        let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+        state
+            .registry()
+            .insert(runtime.id().clone(), Arc::new(runtime));
+
+        let client_signer = Arc::new(LocalSigner::generate());
+        (state, client_signer)
+    }
+
+    /// A brain that never returns, so a test can prove the cycle it drives is
+    /// bounded by something other than the brain's own good behavior.
+    struct HangingBrain;
+
+    #[async_trait]
+    impl Brain for HangingBrain {
+        async fn run_cycle(
+            &self,
+            _req: CycleRequest,
+            _host: &dyn CycleHost,
+        ) -> crate::Result<CycleResult> {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            unreachable!("the cycle timeout must fire long before this wakes")
+        }
+    }
+
+    /// A brain that answers a cycle with nothing, cheaply — for tests that
+    /// only care about the transport, not what cognition produces.
+    struct SilentBrain;
+
+    #[async_trait]
+    impl Brain for SilentBrain {
+        async fn run_cycle(
+            &self,
+            req: CycleRequest,
+            _host: &dyn CycleHost,
+        ) -> crate::Result<CycleResult> {
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(req.cycle_id, "silent test brain")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// Builds an `AppState` with two distinct discoverable companies, each
+    /// answering only its own handle — for tests of the prosumer (single-
+    /// company) fallback's boundary.
+    async fn two_company_state(home: &std::path::Path) -> AppState {
+        let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+        for handle in ["acme", "globex"] {
+            let toml_src = format!(
+                r#"
+                [company]
+                name = "{handle}"
+                output = "audits"
+                handle = "{handle}"
+
+                [place]
+                discoverable = true
+                skills = [
+                    {{ id = "seo.free", price_usd = "0.00" }},
+                ]
+                "#
+            );
+            let manifest: CompanyManifest = toml::from_str(&toml_src).unwrap();
+            let id = CompanyId::new(handle);
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .with_brain(Arc::new(SilentBrain))
+                .build()
+                .await
+                .unwrap();
+            state.registry().insert(id, Arc::new(runtime));
+        }
+        state
     }
 
     /// Signs a POST body for `/a2a/{handle}` and returns the SIWX header value.
@@ -1266,5 +1397,138 @@ mod test {
             .unwrap();
         let md = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(md.contains("`seo.audit` — 25.00 USDC (solana)"));
+    }
+
+    /// PLAT-067 / PLAT-066-067: `tasks/send` is fully synchronous, so a cycle
+    /// that never returns must not be able to hold the connection (and the
+    /// task behind it) open forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_task_that_never_finishes_is_bounded_by_a_cycle_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state_with_brain(dir.path(), Arc::new(HangingBrain)).await;
+        let app = router().with_state(state);
+
+        let body = task_body("seo.free");
+        let header = siwx_header(&client, "acme", &body, now_secs());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "a company cycle that never returns must not hold the connection open forever"
+        );
+    }
+
+    /// PLAT-067: one `tasks/send` POST must append exactly one
+    /// `A2aTaskReceived` event — not a batch, not a loop that could run the
+    /// counterparty's task more than once.
+    #[tokio::test]
+    async fn exactly_one_cycle_runs_per_inbound_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, client) = seeded_state(dir.path()).await;
+        let runtime = state.registry().sole().unwrap();
+        let app = router().with_state(state);
+
+        let body = task_body("seo.free");
+        let header = siwx_header(&client, "acme", &body, now_secs());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/a2a/acme")
+                    .header(AUTHORIZATION, header)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stored = runtime
+            .events
+            .read_from(runtime.id(), EventSeq::new(0), 10)
+            .await
+            .unwrap();
+        let received = stored
+            .iter()
+            .filter(|e| matches!(&e.event, CompanyEvent::A2aTaskReceived { .. }))
+            .count();
+        assert_eq!(
+            received, 1,
+            "one POST to tasks/send must append exactly one A2aTaskReceived event: {stored:?}"
+        );
+    }
+
+    /// PLAT-066: the prosumer fallback is scoped to a genuinely sole company.
+    /// With two companies registered, an unmatched handle must 404 rather than
+    /// silently answering as either of them.
+    #[tokio::test]
+    async fn the_prosumer_fallback_does_not_fire_when_more_than_one_company_is_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = two_company_state(dir.path()).await;
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/nonexistent-handle/skill.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "with two companies registered, an unmatched handle must not resolve to either"
+        );
+    }
+
+    /// PLAT-066-067: this IS the SIWX design — a self-issued identity, not an
+    /// allow-listed one. Two independently generated keypairs, neither ever
+    /// provisioned or seen before, must each transact on their very first
+    /// request.
+    #[tokio::test]
+    async fn two_independent_strangers_each_transact_without_prior_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _seed_client) = seeded_state(dir.path()).await;
+        let app = router().with_state(state);
+
+        for _ in 0..2 {
+            let stranger = LocalSigner::generate();
+            let body = task_body("seo.free");
+            let header = siwx_header(&stranger, "acme", &body, now_secs());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/a2a/acme")
+                        .header(AUTHORIZATION, header)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "a freshly generated, never-before-seen keypair must transact on its first request"
+            );
+        }
     }
 }

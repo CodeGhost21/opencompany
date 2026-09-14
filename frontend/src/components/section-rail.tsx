@@ -48,6 +48,13 @@ export interface SectionRailRow {
    * deeper rail.
    */
   children?: SectionRailRow[];
+  /**
+   * Render as a caption over {@link children} rather than as a row.
+   *
+   * A group is a heading, not a destination: its pages are always listed, and
+   * `onSelect` is never called. See `NavChild.group`.
+   */
+  group?: boolean;
 }
 
 /**
@@ -93,7 +100,16 @@ export function SectionRail({
   // eight equal chips in a horizontal scroller, three of which are only
   // meaningful under a fourth. Following the rail costs one extra tap and keeps
   // the two surfaces saying the same thing.
-  const chips = rows.flatMap((row) => [row, ...(row.active ? (row.children ?? []) : [])]);
+  const chips = rows.flatMap((row) =>
+    // A group contributes its pages and NOT itself: there is nothing to press
+    // on a caption, and a chip that navigates nowhere is a dead control in a
+    // row of live ones. Its pages are always present for the same reason they
+    // are always listed on the rail above — a heading that hides what it heads
+    // is not a heading.
+    row.group
+      ? (row.children ?? [])
+      : [row, ...(row.active ? (row.children ?? []) : [])],
+  );
   // The DEEPEST active row, not the first. On `#/finances/wallet` both Finance
   // and Wallet are active and Finance comes first, so a `find` here named the
   // parent — "What it earns and spends" — on the one surface where the label
@@ -102,8 +118,14 @@ export function SectionRail({
   // current page, and an ancestor of it is not a second one.
   const current = chips.filter((row) => row.active).at(-1);
 
+  // No rows is a real state — Room and Flows have no sub-navigation — and it
+  // renders the same wrapper with neither the rail nor the chip row inside it.
+  // The wrapper is what has to be constant; see `SectionContentRail`.
+  const hasRail = rows.length > 0;
+
   return (
     <div className="flex min-h-0 flex-1">
+      {hasRail && (
       <nav
         aria-label={label}
         className="hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 lg:flex"
@@ -117,17 +139,39 @@ export function SectionRail({
         <div className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">{label}</div>
         {rows.map((row) => (
           <Fragment key={row.key}>
-            <RailRow row={row} current={row === current} />
-            {/* A row's own sub-pages, only while it is the row you are on.
-                Always-visible would put every leaf of every branch on one rail,
-                which is the wall `ledgers-console-ia.md` Rule 2 rejected. */}
-            {row.active &&
+            {row.group ? (
+              // A caption, matching the rail's own at the top of this column
+              // and the Settings rail's group headings — `pt-3` rather than
+              // `pt-1` because this one opens a group inside a list rather than
+              // sitting above one. Not a `<button>`, not a heading element: the
+              // `nav` is already named by its `aria-label`, and a heading here
+              // would land in the document outline ahead of the page's own `h1`
+              // (issue #1392).
+              <div className="px-2 pt-3 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                {row.label}
+              </div>
+            ) : (
+              <RailRow row={row} current={row === current} />
+            )}
+            {/* A group's pages are always listed; an ordinary row's appear only
+                while it is the row you are on. Always-visible for every row
+                would put every leaf of every branch on one rail, which is the
+                wall `ledgers-console-ia.md` Rule 2 rejected — a group is the
+                deliberate exception, and it earns it by being a heading rather
+                than a place. */}
+            {(row.group || row.active) &&
               row.children?.map((child) => (
-                <RailRow key={child.key} row={child} current={child === current} nested />
+                <RailRow
+                  key={child.key}
+                  row={child}
+                  current={child === current}
+                  nested={!row.group}
+                />
               ))}
           </Fragment>
         ))}
       </nav>
+      )}
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Below `lg` the rail collapses to a scrolling row of chips, so the
@@ -139,6 +183,7 @@ export function SectionRail({
             below `lg`. Without its own stacking context its links are
             unreachable at 880–1023px window widths — the same fix, for the same
             reason, that `SettingsSection`'s chip row carries. */}
+        {hasRail && (
         <div className="relative z-30 border-b lg:hidden">
           <div className="flex gap-1 overflow-x-auto p-2">
             {chips.map((row) => (
@@ -170,6 +215,7 @@ export function SectionRail({
               That is not a second line per row, which is what was removed. */}
           {current && <p className="px-3 pb-2 text-xs text-muted-foreground">{current.hint}</p>}
         </div>
+        )}
 
         {children}
       </div>
@@ -269,10 +315,30 @@ export function SectionContentRail({
   children: ReactNode;
 }) {
   const section = sectionOwning(view);
-  if (!section?.children) return <>{children}</>;
+  // ALWAYS the same element at this position, even for a section with no rail.
+  //
+  // This used to be `if (!section?.children) return <>{children}</>` beside a
+  // `<SectionRail>` return, and the two shapes are what made it a bug rather
+  // than a tidiness question: React reconciles by position and type, so
+  // swapping a Fragment for `SectionRail` unmounts and remounts everything
+  // under it — and `children` here is the console's whole content area,
+  // `ChatView` included.
+  //
+  // `ChatView` is deliberately mounted on every route (`room-rail.tsx`) so the
+  // channel list is never a round trip away and returning to Room refetches
+  // nothing. Remounting it on the way between Room and Company threw that away
+  // silently: the rail portalled into the sidebar was torn down and rebuilt on
+  // every such navigation, which reset the sidebar's scroll position to zero —
+  // the visible symptom, and the one that led here.
+  //
+  // Measured before the fix: Company → Connections (both draw a rail) kept the
+  // sidebar's scroll at 238px and unmounted nothing; Room → Company and
+  // Connections → Flows each unmounted the rail once and dropped the scroll to
+  // 0. Exactly the crossings that changed this element's type.
+  const rows = section?.children ? sectionRows(section, view, sub, onNavigate) : [];
 
   return (
-    <SectionRail label={section.label} rows={sectionRows(section, view, sub, onNavigate)}>
+    <SectionRail label={section?.label ?? ""} rows={rows}>
       {children}
     </SectionRail>
   );
@@ -286,7 +352,10 @@ function sectionRows(
   onNavigate: (view: View, sub?: string) => void,
 ): SectionRailRow[] {
   const row = (child: NavChild, active: boolean, anchor?: string): SectionRailRow => ({
-    key: `${child.view}/${child.sub ?? ""}`,
+    // The address, plus the caption's own name. Every ROW is one address, but
+    // Connections' three captions are all `connections` with no segment at all
+    // (#2259) — and two of them under one React key is one caption.
+    key: `${child.view}/${child.sub ?? ""}${child.group ? `#${child.label}` : ""}`,
     label: child.label,
     hint: child.hint,
     icon: child.icon,
@@ -297,11 +366,12 @@ function sectionRows(
 
   return (section.children ?? []).map((child) => ({
     ...row(child, childActive(section, child, view, sub), childAnchor(section, child)),
+    group: child.group,
     children: child.children?.map((grandchild) =>
       // No `data-tour` on a nested row: the anchors follow the address, and a
       // grandchild's address is its parent's view with a second segment — which
       // `childAnchor` would name after the view, colliding with the parent.
-      row(grandchild, grandchildActive(child, grandchild, view, sub)),
+      row(grandchild, grandchildActive(section, grandchild, view, sub)),
     ),
   }));
 }

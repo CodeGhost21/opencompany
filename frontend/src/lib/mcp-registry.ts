@@ -226,12 +226,12 @@ export function mcpProvenanceNote(source: McpSource): string {
 export function mcpRemovalNote(source: McpSource): string {
   switch (source) {
     case "manifest":
-      return "This server is declared in the company's bundle (company.toml or mcp.json), so it cannot be removed from the console — turning it off drops it from every teammate's tool belt on the next turn, and it returns on the next boot unless the manifest changes.";
+      return "This server is declared in the company's bundle (company.toml or mcp.json), so it cannot be removed from the console — turning it off drops it from every agent's tool belt on the next turn, and it returns on the next boot unless the manifest changes.";
     case "default":
-      return "This server ships with the installation, so it cannot be removed from the console — turning it off drops it from every teammate's tool belt on the next turn.";
+      return "This server ships with the installation, so it cannot be removed from the console — turning it off drops it from every agent's tool belt on the next turn.";
     case "registry":
       return "Uninstalling it removes the install from this host's registry store, closes its session and deletes the credential values stored for it.";
     case "runtime":
-      return "Removing it drops it from every teammate's tool belt on the next turn and deletes the credential stored here for it.";
+      return "Removing it drops it from every agent's tool belt on the next turn and deletes the credential stored here for it.";
   }
 }

@@ -351,11 +351,11 @@ reply that parses to a scalar, and a reply that parses to a JSON *object*
 (`{"a": 1}`) all fail with "is not a list — the shape does not match.". An
 unrecognized `require` value is rejected at author time by
 [`validate`](../../../src/company/workflow_file.rs) — a graph naming one never
-saves — and fails OPEN (a `tracing::warn!`, the node proceeds) if it somehow
-still reaches the evaluator, the same fail-open stance
-[`HarnessAgentRunner::run_turn`](../../../src/workflows/caps/mod.rs)'s own
-module doc applies to a failed attempt-row mint: observability must never be
-able to fail the work it is observing.
+saves — and **fails the node** if it somehow still reaches the evaluator, with a
+gap naming the predicate this build could not evaluate. A postcondition is a
+declared quality gate, not observability: a gate that cannot evaluate has not
+passed, and advancing on it would let a node report success against a check that
+silently did nothing.
 
 **On failure, the node halts — the same shape as `on_error = "stop"`.** The
 attempt settles `Failed` with a plain-English message naming the gap — e.g.

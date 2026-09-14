@@ -155,6 +155,7 @@ pub const QUERY_COMPANY_TOOL: &str = "query_company";
 // The `spawn_task` / `delegate_to_desk` names are the brain-agnostic canonical
 // constants (issue #176) — re-exported here so the harness path and the hosted
 // path share one definition and cannot drift.
+use crate::runtime::assignee;
 use crate::runtime::builder::agent_effective_grants;
 use crate::runtime::delegation_tools;
 pub use crate::runtime::delegation_tools::{
@@ -1991,7 +1992,7 @@ impl Tool for ReadTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Read one task card in full: its column, assignee, note, every attempt's status, and what it produced — use this to discuss a finished task, explain why one is stuck, or answer a follow-up about its output. Pass the card's `task_id`, from `list_tasks` or a board reference."
+        "Read one task card in full: its column, assignee, note, its 10 most recent attempts' status, and what it produced — use this to discuss a finished task, explain why one is stuck, or answer a follow-up about its output. Pass the card's `task_id`, from `list_tasks` or a board reference."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -2396,6 +2397,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn summarize_event(event: &CompanyEvent) -> String {
     match event {
         CompanyEvent::OperatorMessage { .. } => "operator message".to_string(),
+        // Structural only, like every arm here: which desks, never the content.
+        CompanyEvent::ReferralEnqueued {
+            from_desk, to_desk, ..
+        } => format!("referral {from_desk} → {to_desk}"),
         // Issue #983. Structural only, like every arm here: the turn id, which
         // is a minted identifier, and nothing else. Neither the desk nor the
         // failure reason is named — the desk is operator-authored free text on
@@ -2517,6 +2522,25 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowDeleted {
             workflow_id, name, ..
         } => format!("workflow deleted: {name} ({workflow_id})"),
+        // The structural rows. Ids and roles only — this is folded into the
+        // orchestrator's recent-activity context and read by a model, so the
+        // same rule the workflow arms follow applies: no free text, no actor
+        // ids, and no configuration.
+        CompanyEvent::TeammateAdded { .. } => "teammate added".into(),
+        CompanyEvent::DeskCreated { name, .. } => format!("desk created: {name}"),
+        CompanyEvent::DeskDeleted { .. } => "desk deleted".into(),
+        CompanyEvent::DeskMembersChanged { added, removed, .. } => format!(
+            "desk membership changed: +{} −{}",
+            added.len(),
+            removed.len()
+        ),
+        CompanyEvent::DeskHiveConfigured { reset, .. } => {
+            if *reset {
+                "desk move grammar restored".into()
+            } else {
+                "desk move grammar installed".into()
+            }
+        }
         // Issue #276. This one-liner is folded into the orchestrator's
         // recent-activity context, so it is read by a model — and the arms
         // around it drop free text and actor ids for that reason. Name and id
@@ -2656,12 +2680,22 @@ fn summarize_event(event: &CompanyEvent) -> String {
 /// [`Delegation::SpawnTask`]; the harness brain writes the card on drain.
 pub struct SpawnTaskTool {
     queue: DelegationQueue,
+    company: CompanyId,
+    /// The company store, read at call time so the roster an `assignee` is
+    /// grounded against is the **current** one — the same reasoning as
+    /// [`DelegateToDeskTool::store`].
+    store: Arc<dyn CompanyStore>,
 }
 
 impl SpawnTaskTool {
-    /// Builds the tool over the shared delegation queue.
-    pub fn new(queue: DelegationQueue) -> Self {
-        Self { queue }
+    /// Builds the tool over the shared delegation queue and the company store
+    /// it grounds an `assignee` against.
+    pub fn new(queue: DelegationQueue, company: CompanyId, store: Arc<dyn CompanyStore>) -> Self {
+        Self {
+            queue,
+            company,
+            store,
+        }
     }
 }
 
@@ -2704,12 +2738,55 @@ impl Tool for SpawnTaskTool {
             .filter(|a| !a.is_empty())
             .map(str::to_string);
 
+        // Ground the target before queuing anything, on the same terms
+        // `delegate_to_desk`/`delegate_to_teammate` already do (issue #272):
+        // a name that resolves to nobody is refused here, in the model's own
+        // turn, rather than surviving as a queued card the drain silently
+        // opens unowned with no signal anywhere that the assignee was bogus.
+        let owner = match assignee.as_deref() {
+            Some(name) => match self.store.load(&self.company).await {
+                Ok(Some(record)) => {
+                    let resolution = assignee::resolve(&record, name);
+                    if !resolution.names_something_real() {
+                        tracing::info!(
+                            company = %self.company,
+                            "[spawn_task] refused an assignee naming nobody on the roster"
+                        );
+                        return Ok(ToolResult::error(format!(
+                            "Could not open the card: {}",
+                            resolution.rejection().unwrap_or_else(|| format!(
+                                "\"{name}\" is not on this company's roster"
+                            ))
+                        )));
+                    }
+                    resolution.canonical().map(str::to_string)
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        "[spawn_task] could not ground assignee: this company's record is not \
+                         there"
+                    );
+                    Some(name.to_string())
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        company = %self.company,
+                        error = %err,
+                        "[spawn_task] could not read the company record to ground the assignee"
+                    );
+                    Some(name.to_string())
+                }
+            },
+            None => None,
+        };
+
         let effect = format!("the card \"{title}\" was NOT opened");
         match self.queue.push_within_cap(
             Delegation::SpawnTask {
                 title: title.clone(),
                 note,
-                assignee,
+                assignee: owner,
             },
             MAX_DELEGATIONS_PER_TURN,
             NO_DEPTH_BOUND,
@@ -3544,7 +3621,11 @@ pub fn delegation_tools(
     store: Arc<dyn CompanyStore>,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(SpawnTaskTool::new(queue.clone())),
+        Box::new(SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            store.clone(),
+        )),
         Box::new(DelegateToDeskTool::new(
             queue.clone(),
             company.clone(),
@@ -3584,7 +3665,11 @@ pub fn member_delegation_tools(
     scope: MemberScope,
 ) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(SpawnTaskTool::new(queue.clone())),
+        Box::new(SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            store.clone(),
+        )),
         Box::new(DelegateToDeskTool::for_member(
             queue.clone(),
             company.clone(),
@@ -3679,6 +3764,13 @@ pub struct AddAgentTool {
     /// The minter's **effective** grant — its line already narrowed by the
     /// company `allow`. The ceiling an explicit `tools` argument is clamped to.
     minter_grants: Vec<String>,
+    /// The journal, when this tool is wired with one.
+    ///
+    /// Optional and set through [`AddAgentTool::with_events`] rather than a
+    /// sixth constructor argument, so every test that builds this tool to
+    /// exercise the *mint* keeps compiling unchanged — the audit row is a
+    /// separate concern from the narrowing rules those tests are about.
+    events: Option<Arc<dyn EventLog>>,
 }
 
 impl AddAgentTool {
@@ -3710,7 +3802,18 @@ impl AddAgentTool {
             minter,
             minter_tools,
             minter_grants,
+            events: None,
         }
+    }
+
+    /// Wire the journal, so a mint leaves an audit row naming who did it.
+    ///
+    /// Without this the tool still mints — the row is best-effort and its
+    /// absence costs the console its spawn edges, not the teammate.
+    #[must_use]
+    pub fn with_events(mut self, events: Option<Arc<dyn EventLog>>) -> Self {
+        self.events = events;
+        self
     }
 }
 
@@ -3874,6 +3977,20 @@ impl Tool for AddAgentTool {
             .await?
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(self.company.to_string()))?;
 
+        let roster_size = record
+            .manifest
+            .own_agents()
+            .map(|agent| agent.id.as_str())
+            .chain(record.overlay_agents.iter().map(|agent| agent.id.as_str()))
+            .filter(|id| !record.is_retired(id))
+            .count();
+        if roster_size >= crate::company::setup::MAX_AGENTS {
+            return Ok(ToolResult::error(format!(
+                "The company roster has reached its limit of {} teammates, so \"{name}\" was not added.",
+                crate::company::setup::MAX_AGENTS
+            )));
+        }
+
         // The BYO real-money namespaces are not inherited by a minted teammate
         // (#788/#789). What an unstated grant inherits depends on the minter:
         // an empty minter line means the whole company allow-list (so an
@@ -3944,6 +4061,33 @@ impl Tool for AddAgentTool {
         };
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
+
+        // The audit row for one agent creating another.
+        //
+        // The console's activity graph draws its spawn edges from this: before
+        // it, "who made whom" could only be inferred from a tool-call frame
+        // whose arguments arrive redacted and which does not survive a reload.
+        // `POST {scope}/team` journals the identical variant, so the two
+        // creation paths cannot answer the question differently.
+        //
+        // Best-effort, appended after the teammate is durable: a journal that
+        // refuses the row must not undo a mint that already happened.
+        if let Some(events) = &self.events
+            && let Err(err) = events
+                .append(
+                    &self.company,
+                    crate::ports::types::CompanyEvent::TeammateAdded {
+                        agent_id: id.clone(),
+                        role: role.clone(),
+                        by_agent_id: Some(self.minter.clone()),
+                        // An agent did this, not a person.
+                        by: None,
+                    },
+                )
+                .await
+        {
+            tracing::warn!(error = %err, "teammate-added audit row could not be journaled");
+        }
 
         // Issue #619: the mint is observable — the minter, the teammate, and
         // the grant it was given. This was the condition attached to sanctioning
@@ -4108,7 +4252,7 @@ pub fn orchestrator_tools(
         workflow_source_dir,
         store.clone(),
         workflow_revisions,
-        events,
+        events.clone(),
     );
     tools.push(Box::new(
         crate::harness::workflow_admin::ReadWorkflowTool::new(workflow_admin.clone()),
@@ -4119,13 +4263,10 @@ pub fn orchestrator_tools(
     tools.push(Box::new(
         crate::harness::workflow_admin::DeleteWorkflowTool::new(workflow_admin),
     ));
-    tools.push(Box::new(AddAgentTool::new(
-        company,
-        store,
-        minter,
-        minter_tools,
-        minter_grants,
-    )));
+    tools.push(Box::new(
+        AddAgentTool::new(company, store, minter, minter_tools, minter_grants)
+            .with_events(events.clone()),
+    ));
     tools
 }
 
@@ -6304,7 +6445,11 @@ mod tests {
 
         let cases: Vec<(Box<dyn Tool>, Value, &str)> = vec![
             (
-                Box::new(SpawnTaskTool::new(queue.clone())),
+                Box::new(SpawnTaskTool::new(
+                    queue.clone(),
+                    CompanyId::new("acme"),
+                    store.clone(),
+                )),
                 json!({ "title": "Ship it" }),
                 "the card \"Ship it\" was NOT opened",
             ),
@@ -6363,10 +6508,14 @@ mod tests {
     async fn the_triage_refusal_says_it_read_a_question_and_offers_a_way_forward() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim_answering();
-        let refused = SpawnTaskTool::new(queue.clone())
-            .execute(json!({ "title": "Build the landing page" }))
-            .await
-            .expect("execute");
+        let refused = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        )
+        .execute(json!({ "title": "Build the landing page" }))
+        .await
+        .expect("execute");
         assert!(refused.is_error, "{}", refused.text());
         let text = refused.text();
 
@@ -6406,10 +6555,14 @@ mod tests {
     #[tokio::test]
     async fn the_unwired_refusal_still_says_the_context_cannot_do_board_work() {
         let queue = DelegationQueue::default();
-        let refused = SpawnTaskTool::new(queue.clone())
-            .execute(json!({ "title": "Ship it" }))
-            .await
-            .expect("execute");
+        let refused = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        )
+        .execute(json!({ "title": "Ship it" }))
+        .await
+        .expect("execute");
         let text = refused.text();
         assert!(refused.is_error, "{text}");
         assert!(
@@ -6469,7 +6622,11 @@ mod tests {
     async fn spawn_task_refuses_past_the_cap_instead_of_promising_a_discarded_card() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim();
-        let tool = SpawnTaskTool::new(queue.clone());
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         for i in 0..MAX_DELEGATIONS_PER_TURN {
             let ok = tool
                 .execute(json!({ "title": format!("item {i}") }))
@@ -6569,7 +6726,14 @@ mod tests {
     async fn spawn_task_tool_enqueues_a_task() {
         let queue = DelegationQueue::default();
         let _claim = queue.claim();
-        let tool = SpawnTaskTool::new(queue.clone());
+        // An empty store loads no record, so assignee grounding fails open and
+        // the string is queued exactly as typed — isolating this test to the
+        // plain enqueue path. Grounding itself is covered separately below.
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         tool.execute(json!({ "title": "Ship it", "note": "soon", "assignee": "eng" }))
             .await
             .expect("execute");
@@ -6587,7 +6751,11 @@ mod tests {
     #[tokio::test]
     async fn spawn_task_tool_requires_a_title() {
         let queue = DelegationQueue::default();
-        let tool = SpawnTaskTool::new(queue.clone());
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            CompanyId::new("acme"),
+            Arc::new(MemStore::default()),
+        );
         assert!(tool.execute(json!({ "note": "no title" })).await.is_err());
         assert_eq!(queue.queued(), 0);
     }
@@ -8296,6 +8464,7 @@ name = "Morning"
 
     fn seeded_record(id: &CompanyId) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -9714,6 +9883,7 @@ name = "Morning"
         )
         .expect("valid manifest");
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: company.clone(),
@@ -10792,7 +10962,7 @@ name = "Morning"
                 kind: "channel".into(),
                 target: Some("operator".into()),
                 status: crate::ports::DeliveryStatus::Failed,
-                detail: "`operator` is not a workflow delivery channel — this runtime has:                          engineering"
+                detail: "`operator` is not an automation delivery channel — this runtime has:                          engineering"
                     .into(),
                 reason: crate::ports::DeliveryReason::ChannelNotWired,
             }],
@@ -11945,6 +12115,45 @@ name = "Morning"
         assert!(text.contains("list_tasks"), "{text}");
     }
 
+    /// AUTH-axis (HT-072): `read_task` is company-scoped only through
+    /// `tasks.list(&self.company)` — a real backend (here `FsOps`, the
+    /// production store, not a hand-rolled fake) partitions its data by
+    /// company on disk, so a `task_id` that exists but is filed under a
+    /// DIFFERENT company must read as not-found, never leak.
+    #[tokio::test]
+    async fn read_task_never_leaks_a_task_id_belonging_to_another_company() {
+        let dir = tempfile::tempdir().unwrap();
+        let tasks: Arc<dyn TaskStore> = Arc::new(crate::store::FsOps::new(dir.path()));
+        tasks
+            .upsert(
+                &CompanyId::new("beta"),
+                &task_card(
+                    "t-secret",
+                    "beta's confidential rollout plan",
+                    crate::ports::tasks::COLUMN_TODO,
+                    "",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), Some(tasks), None, None);
+        let result = tool
+            .execute(json!({ "task_id": "t-secret" }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "acme asking about beta's task_id must read as not-found: {}",
+            result.text()
+        );
+        let text = result.output_for_llm(true);
+        assert!(
+            !text.contains("confidential rollout"),
+            "must not render beta's card: {text}"
+        );
+    }
+
     /// Fail-closed by construction (issue #1859's approved redaction posture):
     /// `read_task` never reads [`RunRecord::usage`], so a run's USD cost cannot
     /// reach its rendering no matter what that run cost.
@@ -12215,6 +12424,15 @@ name = "Morning"
             ))
         }
         async fn upsert(&self, _company: &CompanyId, _task: &TaskRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+        async fn update_if_column(
+            &self,
+            _company: &CompanyId,
+            _task: &TaskRecord,
+            _observed: &TaskRecord,
+            _expected_column: &str,
+        ) -> crate::Result<bool> {
             unimplemented!("not exercised by these tests")
         }
         async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
@@ -12707,6 +12925,35 @@ name = "Morning"
         );
     }
 
+    /// LIMIT-axis (HT-072): `ReadTaskTool::description()` used to promise the
+    /// model "every attempt's status" while the render silently truncates to
+    /// `READ_TASK_ATTEMPTS_LIMIT` rows — a false completeness claim the model
+    /// reads before ever calling the tool, independent of the honest
+    /// `_N earlier attempt(s) omitted_` notice the render itself carries (see
+    /// `read_task_bounds_rendered_attempts_...` above). The description must
+    /// name the same cap the render enforces, and the two are pinned against
+    /// the same literal so a change to one is forced to touch the other
+    /// instead of silently drifting out of step the way they did to get here.
+    #[test]
+    fn read_task_description_names_the_same_cap_the_render_enforces() {
+        let tool = ReadTaskTool::new(CompanyId::new("acme"), None, None, None);
+        assert!(
+            !tool.description().contains("every attempt's status"),
+            "the description must not promise completeness the render does not keep: {}",
+            tool.description()
+        );
+        assert!(
+            tool.description().contains("10 most recent"),
+            "the description should name the cap the render enforces: {}",
+            tool.description()
+        );
+        assert_eq!(
+            READ_TASK_ATTEMPTS_LIMIT, 10,
+            "pinned against the same literal the description names, so a cap change cannot \
+             drift silently out of step with the sentence the model reads"
+        );
+    }
+
     #[tokio::test]
     async fn read_task_bounds_the_rendered_title_so_attempts_and_output_stay_reachable() {
         let dir = tempfile::tempdir().unwrap();
@@ -12977,6 +13224,650 @@ name = "Morning"
         assert!(
             out.contains("wf-run-1"),
             "the workflow's run id must be surfaced for read_run: {out}"
+        );
+    }
+
+    // -- FAIL-axis: cross-tenant reach, ungrounded targets, unbounded growth -
+
+    /// A `RunStore` that genuinely partitions by company — the shape every
+    /// real backend promises — so a lookup under one company can never answer
+    /// with a row filed under another.
+    struct TenantScopedRunStore {
+        rows: std::sync::Mutex<Vec<RunRecord>>,
+    }
+
+    #[async_trait]
+    impl RunStore for TenantScopedRunStore {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<RunRecord> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn get_run(&self, company: &CompanyId, id: &str) -> crate::Result<Option<RunRecord>> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| &r.company == company && r.id == id)
+                .cloned())
+        }
+        async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &RunFilter,
+        ) -> crate::Result<Vec<RunRecord>> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    fn tenant_run(company: &str, id: &str) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            company: CompanyId::new(company),
+            task_id: None,
+            chat_id: None,
+            agent_id: "ceo".to_string(),
+            attempt: 1,
+            status: crate::ports::runs::RunStatus::Running,
+            trigger_event_seq: None,
+            thread_root: None,
+            created_at_millis: 1_000,
+            started_at_millis: None,
+            finished_at_millis: None,
+            error: None,
+            usage: crate::ports::types::TokenUsage::default(),
+            step_count: 0,
+            workflow_run_id: None,
+            node_id: None,
+        }
+    }
+
+    /// FAIL-axis (HT-073): `ReadRunTool` is company-scoped only by
+    /// construction — `self.company` is the sole company argument it ever
+    /// passes to the run store, never anything derived from the `run_id`
+    /// argument. This pins that structural argument against a store that
+    /// genuinely partitions by company: a `run_id` that exists, but filed
+    /// under a DIFFERENT company, must read as not found, never leak.
+    #[tokio::test]
+    async fn read_run_never_leaks_a_run_id_belonging_to_another_company() {
+        let runs: Arc<dyn RunStore> = Arc::new(TenantScopedRunStore {
+            rows: std::sync::Mutex::new(vec![tenant_run("beta", "r-secret")]),
+        });
+        let tool = ReadRunTool::new(CompanyId::new("acme"), Some(runs), None);
+        let out = tool
+            .execute(json!({ "run_id": "r-secret" }))
+            .await
+            .unwrap()
+            .output_for_llm(true);
+        assert!(
+            out.contains("No run"),
+            "acme asking about beta's run_id must read as not-found: {out}"
+        );
+        assert!(
+            !out.contains("Attempt"),
+            "must not render beta's run: {out}"
+        );
+    }
+
+    /// INPUT/STATE-axis (HT-074): `spawn_task` now grounds `assignee` on the
+    /// same terms `delegate_to_desk`/`delegate_to_teammate` already do (issue
+    /// #272) — a name that resolves to nobody on the roster is refused here,
+    /// in the model's own turn, rather than surviving as a queued card the
+    /// drain silently opens unowned with no signal anywhere that the assignee
+    /// was bogus.
+    ///
+    /// The store is seeded (not empty) so grounding actually resolves the
+    /// roster rather than taking the fail-open path — an empty store would
+    /// pass this test for the wrong reason.
+    #[tokio::test]
+    async fn spawn_task_refuses_an_assignee_that_names_nobody_on_the_roster() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(
+            queue.clone(),
+            company.clone(),
+            Arc::new(MemStore::seeded(seeded_record(&company))),
+        );
+
+        let outcome = tool
+            .execute(json!({
+                "title": "Investigate the outage",
+                "assignee": "totally-nonexistent-agent-id",
+            }))
+            .await
+            .unwrap();
+        assert!(
+            outcome.is_error,
+            "an assignee naming nobody on the roster must be refused before queuing"
+        );
+        assert!(
+            outcome.text().contains("totally-nonexistent-agent-id"),
+            "the refusal names the target the model typed: {}",
+            outcome.text()
+        );
+        assert_eq!(queue.queued(), 0, "nothing should have been staged");
+    }
+
+    /// The other half: a real teammate id grounds and queues under its
+    /// canonical form, and a blank/absent `assignee` opens the card unowned
+    /// without ever touching the store.
+    #[tokio::test]
+    async fn spawn_task_grounds_a_real_teammate_and_leaves_a_blank_assignee_alone() {
+        let company = CompanyId::new("acme");
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "eng"
+role = "Engineer"
+"#,
+        )
+        .expect("valid manifest");
+        let record = CompanyRecord {
+            manifest,
+            ..seeded_record(&company)
+        };
+        let store = Arc::new(MemStore::seeded(record));
+
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), company.clone(), store.clone());
+        let grounded = tool
+            .execute(json!({ "title": "Fix the outage", "assignee": "ENG" }))
+            .await
+            .expect("execute");
+        assert!(!grounded.is_error, "{}", grounded.text());
+
+        let unassigned_tool = SpawnTaskTool::new(queue.clone(), company, store);
+        let unassigned = unassigned_tool
+            .execute(json!({ "title": "Untargeted work" }))
+            .await
+            .expect("execute");
+        assert!(!unassigned.is_error, "{}", unassigned.text());
+
+        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(
+            drained,
+            vec![
+                Delegation::SpawnTask {
+                    title: "Fix the outage".to_string(),
+                    note: None,
+                    assignee: Some("eng".to_string()),
+                },
+                Delegation::SpawnTask {
+                    title: "Untargeted work".to_string(),
+                    note: None,
+                    assignee: None,
+                },
+            ],
+            "a display name grounds to the canonical roster id, and no assignee is queued as \
+             None rather than being pushed through the resolver at all"
+        );
+    }
+
+    /// A `CompanyStore` that genuinely partitions by company — unlike
+    /// `MemStore`, which ignores the `id` argument and answers for whichever
+    /// company it was seeded with regardless of who asks. Needed to prove
+    /// `spawn_task`'s grounding actually scopes its lookup to `self.company`
+    /// rather than happening to work because every test fixture only ever
+    /// holds one company's record.
+    struct TenantScopedCompanyStore {
+        records: std::collections::HashMap<String, CompanyRecord>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompanyStore for TenantScopedCompanyStore {
+        async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(self.records.get(id.as_ref()).cloned())
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// AUTH-axis (HT-074): `spawn_task`'s grounding must scope its roster
+    /// lookup to the tool's OWN company (`self.company`), never to a
+    /// different one — a teammate id that is real, but only on ANOTHER
+    /// company's roster, must be refused exactly as an invented id would be,
+    /// not accidentally admitted through a leaked cross-tenant read.
+    #[tokio::test]
+    async fn spawn_task_grounds_only_against_its_own_companys_roster() {
+        let acme = CompanyId::new("acme");
+        let beta = CompanyId::new("beta");
+        let beta_manifest = toml::from_str(
+            r#"
+[company]
+name = "Beta"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "eng"
+role = "Engineer"
+"#,
+        )
+        .expect("valid manifest");
+        let mut records = std::collections::HashMap::new();
+        records.insert("acme".to_string(), seeded_record(&acme));
+        records.insert(
+            "beta".to_string(),
+            CompanyRecord {
+                manifest: beta_manifest,
+                ..seeded_record(&beta)
+            },
+        );
+        let store = Arc::new(TenantScopedCompanyStore { records });
+
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), acme, store);
+
+        let outcome = tool
+            .execute(json!({ "title": "Fix the outage", "assignee": "eng" }))
+            .await
+            .unwrap();
+        assert!(
+            outcome.is_error,
+            "a teammate id real only on a DIFFERENT company's roster must be refused, not \
+             leaked in: {}",
+            outcome.text()
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// FAIL-axis (HT-074): when the company record cannot be read at all —
+    /// the same store failure `DelegateToDeskTool`/`DelegateToTeammateTool`
+    /// fail OPEN on for the orchestrator's own unrestricted copy (see
+    /// `Grounding::ungrounded`) — `spawn_task` must fail open too, not refuse
+    /// to open a card just because the roster could not be checked this
+    /// instant. The assignee is queued exactly as typed, unresolved, the same
+    /// as it has always been for a request with no assignee to ground.
+    #[tokio::test]
+    async fn spawn_task_fails_open_when_the_company_record_cannot_be_read() {
+        struct BrokenStore;
+        #[async_trait::async_trait]
+        impl CompanyStore for BrokenStore {
+            async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+                Err(crate::OpenCompanyError::Store("store is down".to_string()))
+            }
+            async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+                Ok(Vec::new())
+            }
+            async fn append_ledger(
+                &self,
+                _id: &CompanyId,
+                _entry: LedgerEntry,
+            ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = SpawnTaskTool::new(queue.clone(), company, Arc::new(BrokenStore));
+
+        let outcome = tool
+            .execute(json!({ "title": "Investigate the outage", "assignee": "eng" }))
+            .await
+            .unwrap();
+        assert!(
+            !outcome.is_error,
+            "a store failure must not block opening the card: {}",
+            outcome.text()
+        );
+        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(
+            drained,
+            vec![Delegation::SpawnTask {
+                title: "Investigate the outage".to_string(),
+                note: None,
+                assignee: Some("eng".to_string()),
+            }],
+            "the assignee is queued as typed, unresolved, when grounding could not run at all"
+        );
+    }
+
+    /// FAIL-axis (HT-076): every fixture in this module hand-writes its
+    /// `CompanyRecord` manifest with short, convenient agent ids ("ceo",
+    /// "writer"). The real setup pipeline
+    /// (`company::setup::manifest_from_setup`) derives ids from the agent's
+    /// ROLE text via `unique_agent_id`/`snake_id` — multi-word,
+    /// underscore-separated ids no hand fixture happens to produce. This
+    /// proves `delegate_to_teammate`'s grounding
+    /// (`CompanyRecord::resolve_teammate_key`) agrees with that real shape,
+    /// not just the fixtures' convenient one.
+    #[tokio::test]
+    async fn delegate_to_teammate_grounds_against_a_realistically_derived_roster_id() {
+        let agents = vec![
+            crate::company::setup::ProposedAgent {
+                name: "Head".to_string(),
+                role: "Head of Product Strategy".to_string(),
+                description: "Owns the roadmap.".to_string(),
+                focus: None,
+            },
+            crate::company::setup::ProposedAgent {
+                name: "Ops".to_string(),
+                role: "Chief Operating Officer".to_string(),
+                description: "Runs the business.".to_string(),
+                focus: None,
+            },
+        ];
+        let manifest = crate::company::setup::manifest_from_setup(
+            &crate::company::setup::SetupAnswers::default(),
+            &agents,
+            None,
+        );
+        let real_id = manifest.agents[0].id.clone();
+        assert!(
+            real_id.contains('_'),
+            "the real roster builder derives multi-word ids, unlike this module's short hand \
+             fixtures: got {real_id:?}"
+        );
+
+        let company = CompanyId::new("acme");
+        let record = CompanyRecord {
+            manifest,
+            ..seeded_record(&company)
+        };
+        let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record));
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = DelegateToTeammateTool::new(queue.clone(), company, store);
+
+        let out = tool
+            .execute(json!({ "teammate": real_id.clone(), "instruction": "review the roadmap" }))
+            .await
+            .unwrap();
+        assert!(
+            !out.is_error,
+            "grounding must resolve a real setup-derived id, not just the hand fixtures' short \
+             ones: {}",
+            out.text()
+        );
+        let drained = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        assert_eq!(
+            drained,
+            vec![Delegation::DelegateToTeammate {
+                teammate: real_id,
+                instruction: "review the roadmap".to_string(),
+            }]
+        );
+    }
+
+    /// The cap counts the company's own roster, and every load appends more.
+    ///
+    /// `apply_globals` puts the host's baseline teammates into `agents` on
+    /// every production load. A cap that counted the whole list would spend
+    /// most of its budget on teammates the company neither added nor can
+    /// remove, and a company with a designed roster would be refused its first
+    /// mint. The manifest here is built the way production builds one, so the
+    /// baseline is present and the count has to see past it.
+    #[tokio::test]
+    async fn add_agent_counts_manifest_teammates_toward_the_roster_cap() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        let mut manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"designer\"\nrole = \"Designer\"\n",
+        )
+        .expect("valid manifest");
+        manifest.apply_globals();
+        assert!(
+            manifest.agents.len() > manifest.own_agents().count(),
+            "this test is only meaningful while the baseline is appended to a roster"
+        );
+        record.manifest = manifest;
+        let store = Arc::new(MemStore::seeded(record));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        for i in 1..crate::company::setup::MAX_AGENTS {
+            let result = tool
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .expect("execute");
+            assert!(
+                !result.is_error,
+                "mint {i} unexpectedly refused: {}",
+                result.text()
+            );
+        }
+
+        let result = tool
+            .execute(json!({ "name": "One too many", "role": "Generalist" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{}", result.text());
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            crate::company::setup::MAX_AGENTS - 1,
+            "refusal must not persist another teammate"
+        );
+    }
+
+    /// A roster at the setup cap refuses further minting.
+    #[tokio::test]
+    async fn add_agent_refuses_once_the_roster_reaches_the_setup_cap() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        for i in 0..crate::company::setup::MAX_AGENTS {
+            let result = tool
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .unwrap();
+            assert!(!result.is_error);
+        }
+        let result = tool
+            .execute(json!({ "name": "One too many", "role": "Generalist" }))
+            .await
+            .unwrap();
+        assert!(
+            result.is_error,
+            "a roster already at the setup cap must refuse further minting"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_agent_does_not_count_retired_teammates_toward_the_roster_cap() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"designer\"\nrole = \"Designer\"\n",
+        )
+        .expect("valid manifest");
+        record.overlay_retired_agents.push("designer".to_string());
+        let store = Arc::new(MemStore::seeded(record));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        for i in 0..crate::company::setup::MAX_AGENTS {
+            let result = tool
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .expect("execute");
+            assert!(!result.is_error, "{}", result.text());
+        }
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            crate::company::setup::MAX_AGENTS
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_add_agent_calls_cannot_exceed_the_roster_cap() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(YieldingStore {
+            record: StdMutex::new(Some(seeded_record(&company))),
+        });
+        let first = unscoped_add_agent(company.clone(), store.clone());
+        let second = unscoped_add_agent(company.clone(), store.clone());
+        for i in 1..crate::company::setup::MAX_AGENTS {
+            let result = first
+                .execute(json!({ "name": format!("Teammate {i}"), "role": "Generalist" }))
+                .await
+                .expect("execute");
+            assert!(!result.is_error, "{}", result.text());
+        }
+
+        let (a, b) = tokio::join!(
+            first.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+            second.execute(json!({ "name": "Alex", "role": "Support Lead" })),
+        );
+        let (a, b) = (a.expect("execute"), b.expect("execute"));
+        assert_eq!([a, b].iter().filter(|result| result.is_error).count(), 1);
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            crate::company::setup::MAX_AGENTS
+        );
+    }
+
+    /// A store that yields between reading a record and writing it back, so two
+    /// concurrent `add_agent` calls genuinely interleave their load → push →
+    /// save cycle rather than each running to completion uncontended.
+    struct YieldingStore {
+        record: StdMutex<Option<CompanyRecord>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CompanyStore for YieldingStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            let snapshot = self.record.lock().expect("record").clone();
+            tokio::task::yield_now().await;
+            Ok(snapshot)
+        }
+        async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+            tokio::task::yield_now().await;
+            *self.record.lock().expect("record") = Some(record.clone());
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// FAIL-axis (HT-079, the concurrency half): `add_agent` is a read-modify-
+    /// write over the whole record — load, push onto `overlay_agents`, save —
+    /// with awaits on both ends. `company_write_lock` is what stops two of them
+    /// interleaving; without it the second save writes a record built from a
+    /// snapshot taken before the first landed, and one minted teammate simply
+    /// disappears while its caller is told it was added.
+    #[tokio::test]
+    async fn concurrent_add_agent_calls_cannot_lose_a_mint_to_the_load_push_save_race() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(YieldingStore {
+            record: StdMutex::new(Some(seeded_record(&company))),
+        });
+        let first = unscoped_add_agent(company.clone(), store.clone());
+        let second = unscoped_add_agent(company.clone(), store.clone());
+
+        let (a, b) = tokio::join!(
+            first.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+            second.execute(json!({ "name": "Alex", "role": "Support Lead" })),
+        );
+        assert!(!a.expect("execute").is_error);
+        assert!(!b.expect("execute").is_error);
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        let names: Vec<&str> = record
+            .overlay_agents
+            .iter()
+            .map(|agent| agent.name.as_str())
+            .collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "both mints were acknowledged, so both must survive the race: {names:?}"
+        );
+        assert!(
+            names.contains(&"Jamie") && names.contains(&"Alex"),
+            "{names:?}"
+        );
+    }
+
+    /// The other half of the same window: the duplicate-name guard reads
+    /// `overlay_agents` from a snapshot and pushes onto it, so two concurrent
+    /// mints of the SAME name are exactly the check-then-act the write lock has
+    /// to serialise. One must be refused, and the roster must hold one entry.
+    #[tokio::test]
+    async fn concurrent_add_agent_calls_for_one_name_mint_it_once() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(YieldingStore {
+            record: StdMutex::new(Some(seeded_record(&company))),
+        });
+        let first = unscoped_add_agent(company.clone(), store.clone());
+        let second = unscoped_add_agent(company.clone(), store.clone());
+
+        let (a, b) = tokio::join!(
+            first.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+            second.execute(json!({ "name": "Jamie", "role": "Growth Lead" })),
+        );
+        let (a, b) = (a.expect("execute"), b.expect("execute"));
+        assert_eq!(
+            [&a, &b].iter().filter(|r| r.is_error).count(),
+            1,
+            "exactly one of two identical mints must be refused.\nfirst: {}\nsecond: {}",
+            a.text(),
+            b.text()
+        );
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents.len(),
+            1,
+            "the duplicate guard must leave exactly one teammate: {:?}",
+            record
+                .overlay_agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>()
         );
     }
 }

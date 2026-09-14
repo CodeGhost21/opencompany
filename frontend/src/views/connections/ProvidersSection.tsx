@@ -180,7 +180,7 @@ export function ProvidersSection({
                 <AlertTriangle className="mt-px size-3 shrink-0" />
                 <span>
                   These accounts are connected, but this company does not grant the{" "}
-                  <span className="font-mono">composio</span> tool namespace, so its teammates will
+                  <span className="font-mono">composio</span> tool namespace, so its agents will
                   not receive their tools yet.
                 </span>
               </span>
@@ -212,7 +212,7 @@ export function ProvidersSection({
               <AlertTriangle className="mt-px size-3 shrink-0" />
               <span>
                 Couldn&apos;t check whether this company grants the{" "}
-                <span className="font-mono">composio</span> tool namespace, so whether teammates
+                <span className="font-mono">composio</span> tool namespace, so whether agents
                 receive these tools is unknown.
               </span>
             </p>
@@ -329,7 +329,7 @@ export function ProvidersSection({
             // (issue #1478) — that is unknown, not empty.
             <p className="py-2 text-xs text-muted-foreground" data-testid="providers-empty">
               This host has no providers to offer yet. They come from Composio,
-              which runs the sign-in and turns the result into tools your teammates
+              which runs the sign-in and turns the result into tools your agents
               actually receive
               {canManage
                 ? " — set the company's credential above to see its catalog here."

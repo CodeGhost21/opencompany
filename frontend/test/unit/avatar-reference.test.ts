@@ -92,7 +92,7 @@ describe("avatarRef", () => {
     expect(avatarRef("   ", "agent_ada")).toBe(`tiny:${hashedFlavour("agent_ada")}`);
   });
 
-  it("keeps a teammate's default face stable across reloads", () => {
+  it("keeps an agent's default face stable across reloads", () => {
     // The whole reason the default is a hash and not a draw: nothing is stored
     // for it, so it has to be recomputable to the same answer forever.
     for (let i = 0; i < 20; i++) {

@@ -1529,7 +1529,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
         title="Workspace"
         count={headerNoteCount(noteCount, treeKnown)}
         /*
-          Not "every note this company's teammates can read and write", which
+          Not "every note this company's agents can read and write", which
           the tree contradicts in two places: `secrets/` is the one folder the
           agents cannot list, read, search or write (`SECRETS_REASON`, #1465),
           and `derived/` is written by a ledger and re-derived over any edit
@@ -1606,7 +1606,7 @@ export function WorkspaceView({ client, company, event, refreshTick = 0, initial
               two mines in it (issue #1378). */}
           <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 self-center bg-border" />
           {/* Issue #700. A company provisioned before the tree went lazy carries
-              one empty folder per teammate, and nothing else will ever remove
+              one empty folder per agent, and nothing else will ever remove
               them. Deliberately a button rather than something boot does: the
               operator's click is the opt-in, and the dialog names every folder
               before any of them goes. */}
@@ -2230,7 +2230,7 @@ function Breadcrumb({
             <button
               type="button"
               onClick={() => onOpenFolder(crumb.id)}
-              className="truncate rounded-sm hover:text-foreground hover:underline"
+              className="truncate rounded-sm hover:text-foreground"
             >
               {crumb.name}
             </button>
@@ -2583,7 +2583,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
               opening each note. Only the agent case — badging the operator's
               own notes back at them says nothing.
 
-              The pill reads the teammate's NAME, through the same
+              The pill reads the agent's NAME, through the same
               `rosterDisplayName` the row label one line up already goes through
               (issue #1723). It used to print the raw roster handle —
               `seo_specialist` beside a row already labelled "SEO Specialist" —
@@ -2595,7 +2595,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
             <Badge
               variant="outline"
               className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
-              title={`Created by teammate ${agentBadge.id}`}
+              title={`Created by agent ${agentBadge.id}`}
               data-testid="workspace-tree-agent-badge"
             >
               {agentBadge.name}
@@ -2840,7 +2840,7 @@ function NoteMarkdown({
                   className={cn(
                     "rounded px-0.5 font-medium no-underline",
                     exists
-                      ? "text-primary hover:underline"
+                      ? "text-primary transition-opacity hover:opacity-80"
                       : "text-muted-foreground underline decoration-dashed underline-offset-2",
                   )}
                 >
@@ -2989,7 +2989,7 @@ function EmptyNote({
             <div className="max-w-md space-y-2">
               <p className="font-medium">Your company&rsquo;s shared notes</p>
               <p className="text-sm text-muted-foreground">
-                Everyone here reads this tree — your teammates and the
+                Everyone here reads this tree — your agents and the
                 company&rsquo;s agents alike. What you write is what they work
                 from on their next turn, and the notes they write show up here
                 beside yours.
@@ -3566,7 +3566,7 @@ function SweepDialog({
                 {folder.display}
               </span>
               {/* An id the roster cannot resolve is the clearest case of all
-                  for sweeping: that teammate is no longer on the roster. Said
+                  for sweeping: that agent is no longer on the roster. Said
                   plainly rather than left as a bare ULID the operator is asked
                   to recognise. */}
               {!folder.resolved && (

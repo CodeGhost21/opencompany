@@ -25,8 +25,8 @@ run_launcher() {
 }
 
 up_output=$(run_launcher marketing up)
-printf '%s\n' "$up_output" | grep -F "company=agentic_marketing_agency" >/dev/null
-printf '%s\n' "$up_output" | grep -F -- "--project-name opencompany-agentic-marketing-agency" >/dev/null
+printf '%s\n' "$up_output" | grep -F "company=marketing_agency" >/dev/null
+printf '%s\n' "$up_output" | grep -F -- "--project-name opencompany-marketing-agency" >/dev/null
 printf '%s\n' "$up_output" | grep -F -- "--file ${REPO_ROOT}/docker-compose.dev.yml" >/dev/null
 printf '%s\n' "$up_output" | grep -F "up --build" >/dev/null
 if printf '%s\n' "$up_output" | grep -F -- " -d" >/dev/null; then
@@ -34,7 +34,7 @@ if printf '%s\n' "$up_output" | grep -F -- " -d" >/dev/null; then
     exit 1
 fi
 
-compose_output=$(OPENCOMPANY_COMPANY=agentic_marketing_agency docker compose \
+compose_output=$(OPENCOMPANY_COMPANY=marketing_agency docker compose \
     --file "${REPO_ROOT}/docker-compose.yml" \
     --file "${REPO_ROOT}/docker-compose.dev.yml" \
     config)
@@ -44,8 +44,8 @@ if printf '%s\n' "$compose_output" | grep -A1 -F -- "- --poll" | grep -F -- '- "
     exit 1
 fi
 
-down_output=$(run_launcher agentic_software_company down)
-printf '%s\n' "$down_output" | grep -F "company=agentic_software_company" >/dev/null
+down_output=$(run_launcher software_company down)
+printf '%s\n' "$down_output" | grep -F "company=software_company" >/dev/null
 printf '%s\n' "$down_output" | grep -F "down --remove-orphans" >/dev/null
 if printf '%s\n' "$down_output" | grep -F -- "--volumes" >/dev/null; then
     echo "launch-demo test: plain down unexpectedly removes volumes" >&2
@@ -71,11 +71,11 @@ if run_launcher marketing up -v >/dev/null 2>&1; then
 fi
 
 backend_output=$(PATH="${TMP_DIR}:$PATH" \
-    OPENCOMPANY_COMPANY=agentic_marketing_agency \
+    OPENCOMPANY_COMPANY=marketing_agency \
     OPENCOMPANY_FEATURES="sqlite tiny" \
     "${SCRIPT_DIR}/run-demo-backend.sh")
 printf '%s\n' "$backend_output" | grep -F \
-    "cargo_args=run --bin opencompany --features sqlite tiny -- serve --company companies/agentic_marketing_agency" \
+    "cargo_args=run -p opencompany-core --bin opencompany --features sqlite tiny -- serve --company companies/marketing_agency" \
     >/dev/null
 
 echo "launch-demo tests passed"

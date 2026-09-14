@@ -30,6 +30,11 @@ pub mod artifact_mirror;
 pub mod avatar;
 pub mod company_key;
 pub mod composio;
+/// Classifying a Composio credential check, so a probe that failed for a proxy,
+/// a WAF or a rate limit never deletes a working key (issue #2275). Pure and
+/// always compiled — the decision is a function over a string, and the route
+/// that consumes it answers in every build. See [`composio_probe`].
+pub mod composio_probe;
 #[cfg(test)]
 mod content_test;
 // Which workspace documents each role is told to reason from
@@ -173,6 +178,7 @@ use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
 pub use ledger_file::{LEDGERS_DIR, has_ledger_files, load_dir_ledgers};
+pub(crate) use manifest::hive_problems;
 /// The roster-id grammar check, shared with the runtime id minter so a slug and
 /// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
 /// outside the crate the validator speaks through `CompanyManifest::validate`.
@@ -193,8 +199,9 @@ pub use types::{
     PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
     TOOL_PROVIDERS, Tools, creation_default_grants, grants_chargebee_explicit,
     grants_composio_explicit, grants_confer_native, grants_files_or_docs, grants_hosting_explicit,
-    grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, native_capability_namespaces, orchestrator_id,
+    grants_mcp_registry_explicit, grants_media_explicit, grants_paypal_explicit,
+    grants_search_explicit, grants_workspace_write_explicit, native_capability_namespaces,
+    orchestrator_id,
 };
 pub use workflow_file::{
     STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,
@@ -209,7 +216,8 @@ pub use workflow_file::{
 // `parse_workflow` above for validation before writing to disk.
 pub(crate) use workflow_file::{
     RawEdge, RawNode, RawWorkflow, channel_destination_missing_target_message,
-    raw_workflow_from_toml, render_workflow, required_config_problems,
+    list_workflows_with_global_baseline, raw_workflow_from_toml, render_workflow,
+    required_config_problems,
 };
 // Issue #661 (M7): the read half of the agent workflow-admin surface — a stored
 // graph projected onto the narrow agent authoring schema, plus the policy

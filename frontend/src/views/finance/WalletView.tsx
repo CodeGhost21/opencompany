@@ -190,7 +190,7 @@ export function WalletView({ client, company }: Props) {
   const header = (
     <PageHeader
       title="Wallet"
-      width="5xl"
+      width="full"
       description={
         <>
           What is in the company&rsquo;s PayPal account, and what has moved through it.
@@ -218,7 +218,7 @@ export function WalletView({ client, company }: Props) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {header}
-        <div className="mx-auto w-full max-w-5xl px-4 py-6">
+        <div className="w-full px-4 py-6">
           <Alert variant="destructive" data-testid="wallet-status-error">
             <AlertDescription>Could not load the PayPal connection: {statusError}</AlertDescription>
           </Alert>
@@ -243,7 +243,7 @@ export function WalletView({ client, company }: Props) {
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="wallet-view">
       {header}
-      <div className="mx-auto min-h-0 w-full max-w-5xl flex-1 space-y-6 overflow-y-auto px-4 py-6">
+      <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
 
         <ConnectionPanel
           title="PayPal"

@@ -1523,8 +1523,8 @@ export function previewCron(
  * maintaining another list that can drift.
  */
 export const NODE_KINDS: readonly { value: string; label: string }[] = [
-  { value: "trigger", label: "Trigger — starts the workflow" },
-  { value: "agent", label: "Agent — a teammate performs a step" },
+  { value: "trigger", label: "Trigger — starts the automation" },
+  { value: "agent", label: "Agent — an agent performs a step" },
   { value: "condition", label: "Condition — branches on something" },
   { value: "merge", label: "Merge — combines several inputs into one" },
   { value: "transform", label: "Transform — reshapes the data" },
@@ -1534,7 +1534,7 @@ export const NODE_KINDS: readonly { value: string; label: string }[] = [
   { value: "switch", label: "Switch — routes to a labeled branch" },
   { value: "split_out", label: "Split out — sends each item down the next step" },
   { value: "output_parser", label: "Output parser — coerces to a schema" },
-  { value: "sub_workflow", label: "Sub-workflow — runs another workflow" },
+  { value: "sub_workflow", label: "Sub-automation — runs another automation" },
 ];
 
 /**

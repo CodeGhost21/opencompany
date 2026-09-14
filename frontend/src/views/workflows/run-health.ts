@@ -507,11 +507,11 @@ export function settledRunNotice(verdict: WorkflowRunVerdict | undefined): {
       // reading `VERDICT_TONE` gives it.
       return { tone: "info", message: "Run stopped." };
     case "failed":
-      return { tone: "error", message: "The workflow run failed." };
+      return { tone: "error", message: "The automation run failed." };
     case "undelivered":
       return {
         tone: "error",
-        message: "The workflow ran, but a report did not go out.",
+        message: "The automation ran, but a report did not go out.",
       };
     case "blocked":
     case "awaiting-approval":
@@ -531,17 +531,17 @@ export function settledRunNotice(verdict: WorkflowRunVerdict | undefined): {
         message: "The run stopped for an approval that is no longer in the queue.",
       };
     case "degraded":
-      return { tone: "info", message: "The workflow ran, with a step in error." };
+      return { tone: "info", message: "The automation ran, with a step in error." };
     case "running":
       // Reachable only from a host that settled a body while still calling the
       // run live. Say the true half rather than either terminal claim.
-      return { tone: "info", message: "The workflow is still running." };
+      return { tone: "info", message: "The automation is still running." };
     case "ok":
     case undefined:
       // `undefined` is a host predating issue #981: it sends nothing to read,
       // and the old sentence is the only honest one for it. `"ok"` is a real,
       // checked success.
-      return { tone: "success", message: "Workflow ran." };
+      return { tone: "success", message: "Automation ran." };
     default:
       // CodeRabbit review (PR #2053): a word this console has never heard of.
       // Unreachable through the closed `WorkflowRunVerdict` type above, but
@@ -549,7 +549,7 @@ export function settledRunNotice(verdict: WorkflowRunVerdict | undefined): {
       // word this build predates, the same case `verdictOf`'s own `in
       // VERDICT_TONE` check exists to catch. Never paint an unrecognised word
       // green; say only that the run is done, not that it went well.
-      return { tone: "info", message: "Workflow ran." };
+      return { tone: "info", message: "Automation ran." };
   }
 }
 

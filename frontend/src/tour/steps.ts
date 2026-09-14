@@ -61,13 +61,13 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="sidebar"]',
     placement: "right",
     title: "Welcome to your company",
-    body: "Four places: the Room you talk in, your Company, what it's Connected to, and the Flows it repeats. Open one and what's inside it appears underneath.",
+    body: "Four places: the Room you talk in, your Company, what it's Connected to, and the Automations it repeats. Open one and what's inside it appears underneath.",
   },
   {
     // `sub` is not optional here, and neither composer stop below may drop it.
     //
     // A bare `setView("chat")` restores whichever channel the operator was last
-    // on — `app-shell`'s `lastSubByViewRef`, and `ChatView`'s own
+    // on — `app-shell`'s `lastSubByViewRef`, and `RoomView`'s own
     // `readLastChannel` for a cold start. That can be the read-only `#Operator`
     // feed, which renders no composer at all since PR #1984. The stop would then
     // wait out `targetWaitTimeout` and be **skipped** — silently, because a
@@ -78,7 +78,7 @@ export const TOUR: TourStop[] = [
     // `main` is the built-in company-wide channel, present in every company from
     // first boot (issue #1743) and always writable. A blueprint that
     // grandfathers a desk onto that line renders it under the desk's own id
-    // instead; `ChatView` folds every General spelling onto whichever channel
+    // instead; `RoomView` folds every General spelling onto whichever channel
     // actually holds the line (`generalChannelId`), so this address resolves
     // either way rather than raising issue #370's unknown-channel notice.
     view: "chat",
@@ -86,14 +86,14 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="chat-composer"]',
     placement: "top",
     title: "Talk to your company",
-    body: "Ask for an update or hand off a task in plain language — like messaging a teammate.",
+    body: "Ask for an update or hand off a task in plain language — like messaging an agent.",
   },
   {
     view: "chat",
     target: '[data-tour="nav-chat"]',
     placement: "right",
     title: "Your AI staff",
-    body: "Every channel and direct message is listed here while you're in the Room. The teammates that do the work each have one.",
+    body: "Every channel and direct message is listed here while you're in the Room. The agents that do the work each have one.",
   },
   {
     view: "company",
@@ -106,8 +106,8 @@ export const TOUR: TourStop[] = [
     view: "workflows",
     target: '[data-tour="nav-workflows"]',
     placement: "right",
-    title: "Flows",
-    body: "Turn recurring work into a repeatable flow — a graph of steps your teammates run end to end.",
+    title: "Automations",
+    body: "Turn recurring work into a repeatable flow — a graph of steps your agents run end to end.",
   },
   {
     // The accounts page is `#/connections/apps` since it left the settings
@@ -117,7 +117,7 @@ export const TOUR: TourStop[] = [
     target: '[data-tour="nav-connections"]',
     placement: "right",
     title: "Connect your tools",
-    body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your teammates can act for real.",
+    body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your agents can act for real.",
   },
   {
     // Addressed, for the reason the first composer stop above gives at length.

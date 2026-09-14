@@ -60,7 +60,7 @@ const PRIORITIES = ["low", "medium", "high"] as const;
 /** The once-vs-workflow options, in review order (issue #580). */
 const DELIVERABLES: { value: TaskDeliverable; label: string }[] = [
   { value: "once", label: "Do it once" },
-  { value: "workflow", label: "Build me the workflow" },
+  { value: "workflow", label: "Build me the automation" },
 ];
 
 /**
@@ -399,7 +399,7 @@ export function TaskEditDialog({
             </Select>
             {!deliverableEditable(task) && (
               <p className="text-2xs text-muted-foreground">
-                Locked once work starts — the workflow is built when a card enters In progress, so
+                Locked once work starts — the automation is built when a card enters In progress, so
                 this can only be changed while it&apos;s still in To-do or Planning.
               </p>
             )}

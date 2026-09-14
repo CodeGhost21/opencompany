@@ -7,28 +7,29 @@ import {
   type CompanyStatus,
   type GrantScope,
   type NotificationDto,
-  type TurnStep,
   type Verdict,
 } from "@/api/types";
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarInset,
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AgentProfileProvider } from "@/components/agent-profile-sheet";
-import { ApprovalsButton } from "@/components/approvals-button";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { NotificationsButton } from "@/components/notifications-button";
 import { OverviewButton } from "@/components/overview-button";
+import { TitleBarSearch } from "@/components/title-bar-search";
+import { TitleBarUtilities } from "@/components/title-bar-utilities";
 import { RouteLoading } from "@/components/route-loading";
 import { WINDOW_TITLE_BAR_HEIGHT } from "@/components/window-chrome";
-import { WindowTitleBar } from "@/components/window-title-bar";
-import { SidebarCollapseButton, SidebarUtilityBar } from "@/components/sidebar-controls";
+import { TITLE_BAR_ICON_BUTTON, WindowTitleBar } from "@/components/window-title-bar";
+import { cn } from "@/lib/utils";
+import { SidebarCollapseButton } from "@/components/sidebar-controls";
 import { SectionContentRail } from "@/components/section-rail";
 import { SidebarNavigation } from "@/components/sidebar-navigation";
 import { RoomRailSlotProvider } from "@/components/room-rail";
@@ -41,7 +42,16 @@ import {
 import { TourController } from "@/tour/TourController";
 import { OnboardingGate } from "@/onboarding/OnboardingGate";
 import { useActivationGate } from "@/onboarding/useActivationGate";
-import { clearGateSkipped, gateSkippedThisSession, markGateSkipped } from "@/onboarding/state";
+import {
+  clearGateSkipped,
+  clearGateStepWaiver,
+  clearGateStepWaivers,
+  type GateStepId,
+  gateSkippedThisSession,
+  markGateSkipped,
+  markGateStepWaived,
+  waivedGateSteps,
+} from "@/onboarding/state";
 import {
   resolveGateAdminCheckError,
   shouldHoldShellPending,
@@ -62,10 +72,10 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { withReadTimeout } from "@/lib/read-timeout";
 import {
   hasOtherOpenTurns,
+  isDuplicateLiveReply,
   mergeOpenTurns,
   openTurnsFromRuns,
   PendingSyncPosts,
-  type OpenTurn,
 } from "@/lib/live-reply";
 import {
   type AgentReplyEvent,
@@ -81,11 +91,8 @@ import {
   threadsToReReadForMentions,
 } from "@/lib/mention-badge";
 import {
-  flushPendingAcknowledgements,
   operationalNotificationSeverity,
   operationalNotificationsToAnnounce,
-  scheduleAcknowledgement,
-  type PendingAcknowledgement,
 } from "@/lib/operational-notifications";
 import { usePresence } from "@/hooks/use-presence";
 import { useAutonomy } from "@/hooks/use-autonomy";
@@ -94,6 +101,7 @@ import { useTyping } from "@/hooks/use-typing";
 import { typersIn } from "@/lib/awareness";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
+import { formatConsolePath, parseConsolePath } from "@/lib/console-paths";
 import { LEDGER_VIEW_PARAM, readLedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { BOARD_LEDGER } from "@/lib/board-columns";
 import { DEFAULT_VIEW, isNavigationActive, VIEWS, type View } from "@/lib/console-routes";
@@ -135,8 +143,8 @@ import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
 import { readLastChannel } from "@/lib/last-channel";
-import { ChatView } from "@/views/ChatView";
-import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";
+import { RoomView } from "@/views/RoomView";
+import { shouldClearReceipt } from "@/views/room/ChatLiveReceipt";
 import {
   channelForThread,
   channelIdForThread,
@@ -146,12 +154,10 @@ import {
   HISTORY_UNSTARTED,
   isOperatorChannelDto,
   type DecidedApproval,
-  type HistoryHydration,
   type HistoryStatus,
-  type Transcripts,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 import { TeamView } from "@/views/TeamView";
-import { ApprovalsView } from "@/views/ApprovalsView";
+import { NotificationsView } from "@/views/NotificationsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
@@ -160,6 +166,8 @@ import { UnknownRouteView } from "@/views/UnknownRouteView";
 import { ConnectionsSection } from "@/views/connections/ConnectionsSection";
 import { SettingsSection } from "@/views/SettingsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import * as room from "@/room/store";
+import type { LocalScope } from "@/connections/types";
 import { forgetSession } from "@/connections/registry";
 import { offersCompanyCreation } from "@/components/create-company-dialog";
 
@@ -449,6 +457,13 @@ interface Props {
 }
 
 /** The dashboard shell: sidebar navigation and content around one company's views. */
+/**
+ * How the console spells an address. See `lib/console-paths.ts` — the prefix
+ * that files Company's pages under `#/company/…`, and the parse that leaves
+ * every other address to the router's ordinary rules.
+ */
+const CONSOLE_PATH = { parse: parseConsolePath, format: formatConsolePath };
+
 export function AppShell({
   client,
   company,
@@ -461,10 +476,36 @@ export function AppShell({
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
+  // Point the Room store at this scope, and clear it when that is a change.
+  //
+  // Called in the render body rather than an effect, and that is load-bearing:
+  // the store is read by `useSyncExternalStore` further down *this same render*,
+  // so a scope set in an effect would let one frame paint with the previous
+  // company's transcript. It is safe to call here because `enterScope` is
+  // idempotent and derives purely from props — re-entering the scope you are
+  // already in is a no-op, so a re-render cannot wipe a live conversation.
+  //
+  // This is the reset `AppShell`'s own `key` used to do for free: the shell is
+  // mounted as `key={connectionId:company}`, so every `useState` below used to
+  // be discarded on a switch. Module state has no such luck, and without this
+  // line a company switch would paint the previous company's conversation onto
+  // an identically named channel — the exact mixing bug `connections/registry`
+  // opens by warning about.
+  const roomScopeKey = `${scope.connection}::${scope.company ?? "single"}`;
+  room.enterScope(roomScopeKey);
   // Room is where the console opens. An empty hash, a bare `#/`, a bookmark
   // whose view was retired — all of them land in the room the operator talks
   // to their company in, rather than on a dashboard about it.
-  const [view, sub, navigate] = useHashView<View>(VIEWS, DEFAULT_VIEW, REWRITE_RETIRED);
+  // `CONSOLE_PATH` is what files Company's surfaces under `#/company/…`. It is
+  // a module constant rather than an inline object so the router's `resolve`,
+  // `canonicalize` and `navigate` keep a stable dependency — an object literal
+  // here would be a new identity every render and re-arm all three.
+  const [view, sub, navigate] = useHashView<View>(
+    VIEWS,
+    DEFAULT_VIEW,
+    REWRITE_RETIRED,
+    CONSOLE_PATH,
+  );
   const legacyConnectParamsRef = useRef(legacyConnectParams());
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
@@ -611,39 +652,36 @@ export function AppShell({
     setSetupCompleted(true);
     clearSetupHandoff();
   }, [scope.connection, company]);
-  // The shell owns every channel's transcript, not `ChatView` — the shell
-  // mounts and unmounts `ChatView` per route, so component-local state there
+  // The shell owns every channel's transcript, not `RoomView` — the shell
+  // mounts and unmounts `RoomView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
-  const [transcripts, setTranscripts] = useState<Transcripts>({});
-  // The latest transcripts, readable from the stable `refreshMentions`
-  // callback without rebuilding it on every channel that lands a line (the
-  // same reason `mentionFeedRef` and `chatChannelByThreadRef` exist).
-  const transcriptsRef = useRef(transcripts);
-  useEffect(() => {
-    transcriptsRef.current = transcripts;
-  }, [transcripts]);
+  const transcripts = room.useTranscripts();
+  const scopedRoomWriters = room.writersForScope(roomScopeKey);
+  const setTranscripts = scopedRoomWriters.setTranscripts;
   // How far each channel's history rehydration has got. Kept beside
   // `transcripts` rather than inside it because an empty transcript is a
   // legitimate final answer, and the timeline has to tell that apart from not
   // having asked yet before it prints "this is the start of…" (issue #934).
-  const [hydration, setHydration] = useState<HistoryHydration>(HISTORY_UNSTARTED);
+  const hydration = room.useHydration();
+  const setHydration = scopedRoomWriters.setHydration;
   // Host thread id → chat channel id, for every channel this company has.
   // Resolved by the desks/roster effect below, which already works the pairing
   // out to hydrate each channel and used to throw it away — leaving the shell
   // unable to say which channel an incoming event belongs to (issue #367).
-  const [chatChannelByThread, setChatChannelByThread] = useState<Record<string, string>>({});
-  // This company's first desk channel — the same channel `ChatView` lands on
+  const chatChannelByThread = room.useChatChannelByThread();
+  const setChatChannelByThread = scopedRoomWriters.setChatChannelByThread;
+  // This company's first desk channel — the same channel `RoomView` lands on
   // when the hash names none, and so where a line with nowhere else to go is
   // still somewhere the operator will find it.
   const [firstDeskChannelId, setFirstDeskChannelId] = useState<string | null>(null);
   // The chat channel the operator last had on screen. A ref, not state,
-  // because it outlives `ChatView`: it is what an unaddressed system line is
+  // because it outlives `RoomView`: it is what an unaddressed system line is
   // addressed to after the operator has walked off to Approvals (issue #368).
   const activeChatChannelRef = useRef<string | null>(null);
-  // Whether `ChatView`'s transcript is actually rendered right now, as opposed
+  // Whether `RoomView`'s transcript is actually rendered right now, as opposed
   // to `activeChatChannelRef` merely still *naming* the channel last shown
   // before the operator dropped to the mobile channel rail. Starts `true` to
-  // match `ChatView`'s own initial pane state; kept out of `activeChatChannelRef`
+  // match `RoomView`'s own initial pane state; kept out of `activeChatChannelRef`
   // because that ref has a second job — addressing an unaddressed system line
   // after a walk to Approvals — that must keep using the last channel even
   // while the rail is what's on screen (#1768 codex review).
@@ -651,7 +689,7 @@ export function AppShell({
   /**
    * The chat segment, remembered across a trip to another section (#2130).
    *
-   * `ChatView` is mounted on every route now, and `sub` is whatever the CURRENT
+   * `RoomView` is mounted on every route now, and `sub` is whatever the CURRENT
    * view's second segment is — `mcp` on `#/connections/mcp`, `goals` on
    * `#/ledgers/goals`. Handing that straight to chat would have it resolve
    * `mcp` as a channel id and raise the unknown-channel notice for a segment
@@ -694,8 +732,10 @@ export function AppShell({
   // looked at. Together with `transcripts` these *derive* the unread counts
   // below — nothing increments a counter, so a message that turns out to be a
   // duplicate cannot leave a badge behind for a line that was never added.
-  const [lastViewedChannel, setLastViewedChannel] = useState<Record<string, number>>({});
-  const [unreadSince, setUnreadSince] = useState(() => Date.now());
+  const lastViewedChannel = room.useLastViewedChannel();
+  const setLastViewedChannel = scopedRoomWriters.setLastViewedChannel;
+  const unreadSince = room.useUnreadSince();
+  const setUnreadSince = scopedRoomWriters.setUnreadSince;
   // A monotonic nonce bumped on every task-lifecycle SSE event, so the
   // company-chat in-flight steer strip (issue #111) and the board itself
   // (issue #464) refetch live.
@@ -707,7 +747,7 @@ export function AppShell({
   const [taskEventTick, setTaskEventTick] = useState(0);
   /**
    * Board-card state for chat's durable background-work indicator (#1758).
-   * Owned here because ChatView unmounts on navigation while the task keeps
+   * Owned here because RoomView unmounts on navigation while the task keeps
    * running, and because the task SSE tick already terminates in this shell.
    */
   const [taskStatusByTaskId, setTaskStatusByTaskId] = useState<
@@ -825,9 +865,7 @@ export function AppShell({
   // folded steps — lands. `toolCallId` is a transient key for the running→done
   // in-place flip; it is structurally a superset of `TurnStep`, so these render
   // through the same `StepTimeline` as the final steps.
-  const [liveStepsByThread, setLiveStepsByThread] = useState<
-    Record<string, (TurnStep & { toolCallId?: string })[]>
-  >({});
+  const setLiveStepsByThread = scopedRoomWriters.setLiveStepsByThread;
   // The same timeline, per **query** rather than per thread, for a frame that
   // says which operator message its turn answers (`messageSeq`). Keyed by that
   // message's console id, so a running turn's rows render under the question
@@ -845,9 +883,7 @@ export function AppShell({
   //
   // Not a replacement: a frame with no `messageSeq` still keys by thread, which
   // is every turn answering no journaled message and every older host.
-  const [liveStepsByMessage, setLiveStepsByMessage] = useState<
-    Record<string, (TurnStep & { toolCallId?: string })[]>
-  >({});
+  const setLiveStepsByMessage = scopedRoomWriters.setLiveStepsByMessage;
   /**
    * Retires the live rows of every message that now has durable steps of its
    * own, and of every message named in `alsoDrop`.
@@ -887,7 +923,7 @@ export function AppShell({
   // outcome the POST reaches. Its lifecycle mirrors `liveStepsByThread`'s: the
   // reply landing on `onSendEnd` is what clears it, exactly as the reply bubble
   // is appended, so the two swap with no empty frame between them.
-  const [receiptByThread, setReceiptByThread] = useState<Record<string, ChatReceipt>>({});
+  const setReceiptByThread = scopedRoomWriters.setReceiptByThread;
   // Roster agent id → display name, so the receipt names the teammate rather
   // than rendering a raw id (issue #1934). Populated by the desks/roster read
   // below, which already fetches the roster this is derived from.
@@ -933,8 +969,9 @@ export function AppShell({
    */
   // Per thread, in acceptance order — a thread can hold a running turn and a
   // queued one behind it, and the poll watches them all (issue #1000). The
-  // working row is the head; `ChatView` and `Conversation` read `[0]`.
-  const [openTurns, setOpenTurns] = useState<Record<string, OpenTurn[]>>({});
+  // working row is the head; `RoomView` and `Conversation` read `[0]`.
+  const openTurns = room.useOpenTurns();
+  const setOpenTurns = scopedRoomWriters.setOpenTurns;
   // Approval ids THIS console is deciding right now, or just decided a moment
   // ago (issue #1211) — so the generic SSE echo of `approval_resolved` can be
   // suppressed for exactly the decision this tab made, the same way
@@ -964,6 +1001,49 @@ export function AppShell({
     markGateSkipped(scope);
     setGateSkipped(true);
   }, [scope]);
+
+  /**
+   * Steps the founder has durably waived (bugs B-001/B-020) — held in state for
+   * the same reason `gateSkipped` is: waiving has to re-render past the gate
+   * without a reload, and `localStorage` alone would need one.
+   */
+  const [gateWaived, setGateWaived] = useState<GateStepId[]>(() => waivedGateSteps(scope));
+  useEffect(() => {
+    setGateWaived(waivedGateSteps(scope));
+  }, [scope]);
+  // The `storage`-event cross-tab listener lives further down, right after
+  // `activationGate` is declared — a REMOVAL it observes has to trigger a
+  // fresh activation read on THIS tab before it is safe to apply, so it
+  // needs `activationGate.refresh` in scope. See that effect's own doc.
+  const waiveGateStep = useCallback(
+    (step: GateStepId) => {
+      markGateStepWaived(scope, step);
+      setGateWaived(waivedGateSteps(scope));
+    },
+    [scope],
+  );
+
+  /**
+   * Leaves the gate for a console route (bug B-006).
+   *
+   * The session skip is what actually stands the gate down — the founder asked
+   * to be somewhere else, and a gate that re-renders over the page they asked
+   * for is the defect. It is deliberately the *session* marker rather than a
+   * durable waiver: following a link is not an answer to the step, so the gate
+   * is still owed on the next fresh tab.
+   *
+   * Order matters. The hash is set first so the router has the destination
+   * before this render swaps the gate out for the shell; setting it afterwards
+   * renders the shell on the old route for a frame and then moves it.
+   */
+  const leaveGateFor = useCallback(
+    (route: string) => {
+      window.location.hash = route;
+      markGateSkipped(scope);
+      setGateSkipped(true);
+    },
+    [scope],
+  );
 
   /**
    * Whether the signed-in user is this company's admin (PR #1875 review
@@ -1049,13 +1129,137 @@ export function AppShell({
   // the company is actually activated; nothing here needs to.
   const activationGate = useActivationGate(client, company, shouldPollActivationForRole(isGateAdmin));
 
+  // CodeRabbit review, PR #2046: which scope `activationGate.status` actually
+  // describes, read during THIS effect before it is overwritten below.
+  //
+  // `useActivationGate` resets `status` to `null` for the new company only
+  // from its OWN effect, which runs in the same commit as this one but is not
+  // guaranteed to run first, and even when it does the reset does not take
+  // effect until the next render. So the very first commit after switching
+  // companies can still pair the FORMER company's `isActivated: true` with the
+  // NEW `scope` — and without this guard the branch below would read that
+  // combination and wipe the new company's just-loaded waiver before its own
+  // activation read has ever landed. Comparing against the scope this effect
+  // itself saw last time closes that one-render race; a bare
+  // `[activationGate.status?.isActivated, scope]` dependency list cannot, since
+  // both can appear to "agree" on exactly the commit where they do not.
+  const lastGateWaiverScopeRef = useRef<LocalScope | null>(null);
   // PR #1875 review finding, round 4: a skip marker from before the funnel
   // completed cannot matter once `isActivated` is true (`shouldShowOnboardingGate`
   // already stops gating on it either way), but leaving it in `sessionStorage`
   // is still a leak worth cleaning up — see `clearGateSkipped`'s own doc.
   useEffect(() => {
-    if (activationGate.status?.isActivated) clearGateSkipped(scope);
-  }, [activationGate.status?.isActivated, scope]);
+    const previous = lastGateWaiverScopeRef.current;
+    const scopeJustChanged =
+      previous === null || previous.connection !== scope.connection || previous.company !== scope.company;
+    lastGateWaiverScopeRef.current = scope;
+    if (scopeJustChanged) return;
+    const status = activationGate.status;
+    if (!status) return;
+    if (status.isActivated) {
+      clearGateSkipped(scope);
+      // Same housekeeping, one step down: a waiver cannot matter once the funnel
+      // has actually completed, and leaving one behind would let it speak for a
+      // later incomplete funnel the founder never answered (see
+      // `clearGateStepWaivers`).
+      clearGateStepWaivers(scope);
+      setGateWaived([]);
+      return;
+    }
+    // Codex review, PR #2046, round 3: the same housekeeping PER STEP, because
+    // waiting for the whole funnel leaves a window where a stale waiver does
+    // real harm. Waive `integration`; the integration then genuinely connects
+    // while some other step is still outstanding, so `isActivated` never
+    // latches and the branch above never runs; the connection is later revoked
+    // or expires. The waiver — an answer to a step that could not be finished —
+    // silently comes back into force against a step a credential now makes
+    // ordinarily completable, and this browser stops showing a gate the host
+    // still considers owed.
+    //
+    // `outstandingGateSteps`' own doc already claims this rule ("a stale
+    // waiver must never be able to mask a step going incomplete again later");
+    // ignoring the waiver while the step reads done was only half of it.
+    const done: Record<GateStepId, boolean> = {
+      name: status.nameConfirmed,
+      integration: status.integrationConnected,
+      workflow: status.workflowRunSucceeded,
+    };
+    for (const step of waivedGateSteps(scope)) {
+      if (done[step]) clearGateStepWaiver(scope, step);
+    }
+    // Codex review, PR #2046, round 4: and THIS is where a deferred cross-tab
+    // removal is finally applied.
+    //
+    // The `storage` listener below refuses to act on another tab's removal on
+    // that tab's word alone — it asks for a refresh and keeps what it has. Its
+    // round-2 reasoning still holds, but it assumed every removal meant "some
+    // tab saw `isActivated`", which is monotonic on the host and so always
+    // arrives here eventually. The per-step clearing above broke that
+    // assumption: a removal can now mean "some tab saw THIS STEP complete",
+    // and step completion is not monotonic — an integration can be revoked.
+    // So the deferral had no end condition any more. `gateWaived` kept a step
+    // whose `localStorage` key was already gone, and went on masking it for
+    // the life of the tab.
+    //
+    // Reading storage back here ends it. This line only runs when THIS tab's
+    // own `status` has just changed, which only happens on a read that
+    // actually succeeded — so an outage still defers indefinitely, which is
+    // the half of the round-2 protection that was always the real one. What
+    // it no longer does is defer forever against a first-hand answer.
+    setGateWaived((previous) => {
+      const stored = waivedGateSteps(scope);
+      const same =
+        previous.length === stored.length && stored.every((step, i) => previous[i] === step);
+      return same ? previous : stored;
+    });
+  }, [activationGate.status, scope]);
+
+  // Codex review, PR #2046: a waiver is durably scoped and meant to survive a
+  // FRESH tab (see `markGateStepWaived`'s own doc) — but a tab that was
+  // already open when a DIFFERENT tab wrote one never noticed, because
+  // `gateWaived` only re-read when `scope` itself changed. The `storage`
+  // event is the browser's own cross-tab signal for exactly this: it fires
+  // in every OTHER same-origin tab (never the one that wrote), so listening
+  // for it and re-reading closes the gap without polling.
+  //
+  // Codex review, round 2: an ADDITION and a REMOVAL are not safe to trust
+  // the same way. `clearGateStepWaivers` above fires from ANOTHER tab too,
+  // the moment THAT tab's own poll confirms `isActivated` — and every
+  // `removeItem` it makes is a deletion `storage` event here. Applying that
+  // removal immediately would drop this tab's waiver against a `status` this
+  // tab has not yet refreshed itself: `outstandingGateSteps` would count the
+  // step as outstanding again, and the gate would reopen until this tab's
+  // own poll independently catches up — or, through an outage, stay open
+  // for as long as that poll keeps failing. An addition has no such failure
+  // mode (it can only shorten `outstandingGateSteps`, never lengthen it), so
+  // only a removal needs the extra caution: ask `activationGate` to refresh
+  // right now instead of trusting the other tab's word, and let THIS tab's
+  // own cleanup effect above — gated on ITS OWN confirmed `isActivated` —
+  // be what actually drops the waiver once it lands.
+  useEffect(() => {
+    const onStorage = () => {
+      setGateWaived((previous) => {
+        const next = waivedGateSteps(scope);
+        const isRemoval = previous.some((step) => !next.includes(step));
+        if (isRemoval) {
+          void activationGate.refresh();
+          return previous;
+        }
+        return next;
+      });
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+    // `activationGate.refresh` (not the whole `activationGate` object) is the
+    // dependency: `useActivationGate` returns a fresh object literal every
+    // render, so depending on the object itself would tear down and re-add
+    // this listener on every AppShell render regardless of whether anything
+    // it actually reads (`scope`, `refresh`) changed — the same reason the
+    // cleanup effect above depends on `activationGate.status?.isActivated`
+    // rather than `activationGate.status`. `refresh` (`load`) is itself
+    // `useCallback`-memoized on `[client, company]`, so this is stable across
+    // ordinary renders.
+  }, [scope, activationGate.refresh]);
 
   const refreshTaskStatuses = useCallback(async () => {
     const read = ++taskStatusRead.current;
@@ -1093,7 +1297,7 @@ export function AppShell({
     void refreshTaskStatuses();
   }, [feed.now, taskEventTick, refreshTaskStatuses]);
   // Issue #379: the inline approval cards' console-local state, owned here
-  // rather than in `ChatView` for the same reason `transcripts` is — the shell
+  // rather than in `RoomView` for the same reason `transcripts` is — the shell
   // mounts and unmounts that view per route, and an operator who approves in a
   // channel then steps over to Approvals must not come back to a card that has
   // forgotten what they did.
@@ -1298,7 +1502,7 @@ export function AppShell({
     // `transcripts` is keyed by channel id while history is addressed by thread
     // id: a desk's channel id *is* its thread id, and a DM's channel id is the
     // console-local `dmChannelId` while its thread id is the roster agent id
-    // (see `ChatView`'s `send`). Fetching per unique thread means a thread
+    // (see `RoomView`'s `send`). Fetching per unique thread means a thread
     // rendered by more than one channel is read once, not twice, on every tick
     // (issue #1690).
     const hydrateThread = (threadId: string, channels: readonly { channelId: string }[]) => {
@@ -1374,9 +1578,9 @@ export function AppShell({
       // the route) rather than sinking the whole pass: a company can still
       // rehydrate its real desks/DMs without the pinned Operator row.
       //
-      // One retry (issue #1781 review, Codex P2): `ChatView` fetches this
+      // One retry (issue #1781 review, Codex P2): `RoomView` fetches this
       // same identity independently for rendering the pinned row, so a
-      // single dropped request here — while `ChatView`'s own, later call
+      // single dropped request here — while `RoomView`'s own, later call
       // succeeds — used to render the row but permanently omit its id from
       // this pass's rehydration targets and five-second polling, since this
       // pass had already given up. A bounded retry closes the common
@@ -1432,7 +1636,7 @@ export function AppShell({
           ...channelMap(chatDesks, roster),
           ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
         });
-        // The channel `ChatView` lands on when the hash names none, which since
+        // The channel `RoomView` lands on when the hash names none, which since
         // issue #1743 is the built-in `#general` rather than the first desk —
         // the two must agree, or a line with nowhere else to go lands in a
         // channel the operator is not looking at. Resolved rather than
@@ -1443,7 +1647,7 @@ export function AppShell({
         // Fold the Operator feed's id into the same rehydration pass, keyed on
         // its own id both as channel and thread (its channel id *is* its
         // thread id — `chat/history?desk=<id>` reads it through the ordinary
-        // path). Without this, `ChatView`'s pinned row would sit on a channel
+        // path). Without this, `RoomView`'s pinned row would sit on a channel
         // id `historyReady` never sees a status for until `discovered` alone
         // resolves it, and `transcripts[operatorChannel.id]` would never fill
         // in — the spinner-forever failure mode this pass exists to avoid.
@@ -1603,10 +1807,6 @@ export function AppShell({
    * ignored it would delete the rows of a turn that is still running, on the
    * wide window a history round trip opens (PR #1904 review).
    */
-  const openTurnsRef = useRef(openTurns);
-  useEffect(() => {
-    openTurnsRef.current = openTurns;
-  }, [openTurns]);
   // The latest full browser scope, so async completions cannot cross either a
   // company switch or an in-place connection reconfiguration. `client` is part
   // of the scope: `reseat` edits a host address by swapping the client while
@@ -1665,7 +1865,7 @@ export function AppShell({
       // `threadId` is the **desk** — what `chat/history`, the `threads` fold and
       // `channelForThread` are addressed by. `liveKey` is the **open-turn state
       // key**, which is what `openTurns`, `liveStepsByThread` and
-      // `receiptByThread` are keyed by, because `ChatView` hands `onSendStart`
+      // `receiptByThread` are keyed by, because `RoomView` hands `onSendStart`
       // its `stateKey` and that key is `engineering#41` for a threaded send.
       //
       // Conflating them breaks one side or the other: reading the desk out of
@@ -1707,7 +1907,7 @@ export function AppShell({
           // whenever its frames arrived while this history read was in flight,
           // which on a round trip is a wide window. The newer turn's own
           // settle clears them when it gets there.
-          if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {
+          if (!hasOtherOpenTurns(room.readRoom().openTurns, liveKey, settledTurnId)) {
             setLiveStepsByThread((prev) =>
               prev[liveKey]?.length ? { ...prev, [liveKey]: [] } : prev,
             );
@@ -1918,7 +2118,7 @@ export function AppShell({
   }, [transcripts, lastViewedChannel, unreadSince]);
 
   /**
-   * `ChatView` reporting which channel is on screen — on every switch, and
+   * `RoomView` reporting which channel is on screen — on every switch, and
    * again as the open channel's transcript grows so a line read as it lands
    * doesn't leave a badge behind.
    */
@@ -1942,17 +2142,25 @@ export function AppShell({
   // fails (offline) is retried by the next reload rather than hammered.
   const mentionReReadSubjectsRef = useRef<Set<string>>(new Set());
   // Ids of non-mention (`dispatch_failed` / `approval_expired` /
-  // `workflow_run_*`) rows this session has already toasted. These rows come
-  // back on every poll until marked read server-side, so this local guard is
-  // what keeps a single dispatch failure from toasting once per interval
-  // instead of once — see `@/lib/operational-notifications`.
+  // `workflow_run_*`) rows this console has already announced, or decided not
+  // to. These rows come back on every poll until somebody dismisses them, so
+  // this guard is what keeps a single dispatch failure from toasting once per
+  // interval instead of once — see `@/lib/operational-notifications`.
   const operationalAnnouncedRef = useRef<Set<string>>(new Set());
-  // Toasted operational ids waiting for the tab to become visible before the
-  // server-side ack fires (Codex #1883 P2). See
-  // `scheduleAcknowledgement`/`flushPendingAcknowledgements`.
-  const pendingAckRef = useRef<PendingAcknowledgement[]>([]);
+  // Whether the first poll of the current scope has landed. Until it has,
+  // every operational row it returns is **backlog**: it happened before this
+  // console was open, so it is seeded into the set above rather than toasted.
+  //
+  // A toast is how a failure reaches somebody who is looking at something else
+  // — it is not a summary of what was already waiting. That is the Activity
+  // tab's job, and the bell carries the count. Toasting the backlog on arrival
+  // put a full-width warning over the bottom of a 390px page on *every* load
+  // (it covered a Settings card's button in `sidebar-toggle-reachable`), and it
+  // would do that once per reload for as long as a row went undismissed.
+  const operationalSeededRef = useRef(false);
   const refreshMentions = useCallback(() => {
     const requestCompany = company;
+    const requestClient = client;
     const revision = ++mentionFeedRevision.current;
     void client
       .notifications(requestCompany)
@@ -1963,9 +2171,13 @@ export function AppShell({
       // the whole app, not just the badge. The badge is the least important
       // thing on the screen and must fail like it.
       .then((feed) => {
+        // `requestClient` as well as the company: a host switch can keep the
+        // company slug and swap only the client, and this answer came from
+        // whichever host the request was made against (CodeRabbit).
         if (
           revision !== mentionFeedRevision.current ||
-          requestCompany !== scopeRef.current.company
+          requestCompany !== scopeRef.current.company ||
+          requestClient !== scopeRef.current.client
         )
           return;
         const next = Array.isArray(feed?.notifications) ? feed.notifications : [];
@@ -1979,7 +2191,7 @@ export function AppShell({
         // nothing to show and the `loadedMessageIds` gate unable to clear it
         // (Codex). Re-read the host thread so the mentioned message lands.
         const loadedByChannel: Record<string, ReadonlySet<string>> = {};
-        for (const [channelId, rows] of Object.entries(transcriptsRef.current)) {
+        for (const [channelId, rows] of Object.entries(room.readRoom().transcripts)) {
           loadedByChannel[channelId] = new Set(rows.map((m) => m.id));
         }
         const { threadIds, subjects } = threadsToReReadForMentions(
@@ -1997,50 +2209,55 @@ export function AppShell({
           threadIds.forEach((threadId) => reReadSettledThread(threadId));
         }
         // `dispatch_failed` / `approval_expired` / `workflow_run_*` rows go
-        // through this same durable feed but are not mentions, so nothing
-        // above ever renders or acknowledges them — they would sit "unread"
+        // through this same durable feed but are not mentions, so none of the
+        // mention consumers above renders them — they would sit "unread"
         // forever despite coming back on every poll (Codex #1883 P1). A toast
-        // is this feed's minimal rendering. The row is marked read once the
-        // toast has actually been SEEN, not the instant it is enqueued
-        // (Codex #1883 P2 fallout): sonner still renders a toast raised in a
-        // hidden tab (only `toast-lifetime.ts`'s auto-dismiss clock pauses for
-        // one), so an immediate ack survived even a tab closed/reloaded before
-        // the operator ever returned to see it — the row reads as handled and
-        // nobody saw it, defeating the point of this consumer.
+        // is how one of them reaches somebody looking at something else.
+        //
+        // **The toast does not mark the row read.** It used to, and
+        // `@/lib/operational-notifications` said why in its own header: these
+        // rows had "no badge, no rendered item anywhere, and no path back to
+        // the server to mark them read", so acking on announcement was the only
+        // way to close the loop at all. That premise expired with the
+        // Notifications page — the Activity tab renders exactly these rows and
+        // carries Dismiss and Dismiss all, which is the path back.
+        //
+        // Acking here now defeats that surface outright. `list()` in
+        // `src/server/ops/notifications.rs` serialises unread rows only, so a
+        // row marked read the instant its toast was raised is one the Activity
+        // tab can never show: the page would be empty of precisely the events it
+        // exists to make recoverable after a toast (Codex #2256 P1).
+        //
+        // So a row stays unread until somebody dismisses it — and that makes
+        // *when* to toast a separate question from whether to keep the row.
+        //
+        // An unread row is no longer evidence that nobody has seen it; it is
+        // only evidence that nobody has dismissed it. Announcing the whole
+        // unread set on arrival therefore re-announces the backlog on every
+        // load, which is both wrong and loud: a full-width warning toast landed
+        // over the bottom of a 390px Settings page and covered the button
+        // `sidebar-toggle-reachable` hit-tests, on a row an earlier page load
+        // had already toasted.
+        //
+        // The first poll of a scope **seeds** instead of announcing. Rows that
+        // were already waiting when the console opened belong to the Activity
+        // tab and the bell's count, which is where a person goes to look; the
+        // toast is reserved for what happens while they are here, looking at
+        // something else. That is the sentence this consumer was written around
+        // and the only one a transient announcement can honestly make.
+        const seeding = !operationalSeededRef.current;
+        operationalSeededRef.current = true;
         const toAnnounce = operationalNotificationsToAnnounce(
           next,
           operationalAnnouncedRef.current,
         );
-        if (toAnnounce.length > 0) {
-          const ids = toAnnounce.map((n) => n.id);
-          // Added the instant a row is toasted, hidden tab or not — this is
-          // what stops a still-unacknowledged row from being re-toasted on
-          // the next poll, independent of when (or whether) the server-side
-          // ack below fires.
-          ids.forEach((id) => operationalAnnouncedRef.current.add(id));
+        // Marked announced either way: a seeded row must not toast on the
+        // second poll instead of the first.
+        toAnnounce.forEach((n) => operationalAnnouncedRef.current.add(n.id));
+        if (!seeding) {
           for (const n of toAnnounce) {
             if (operationalNotificationSeverity(n) === "error") toast.error(n.title);
             else toast.warning(n.title);
-          }
-          setMentionFeed((current) =>
-            current.map((n) => (ids.includes(n.id) ? { ...n, readAt: Date.now() } : n)),
-          );
-          const { ackNow, pending } = scheduleAcknowledgement(
-            ids,
-            requestCompany,
-            document.hidden,
-            pendingAckRef.current,
-          );
-          pendingAckRef.current = pending;
-          if (ackNow.length > 0) {
-            void client.markNotificationsRead(ackNow, requestCompany).catch(() => {
-              // A failed mark-read leaves the row unread server-side; the next
-              // poll re-fetches it, finds it still in `readAt: undefined`, but
-              // `operationalAnnouncedRef` has already seen its id, so it is not
-              // re-toasted. The row itself is not lost — it is still durable
-              // and still returned — only the toast is best-effort, matching
-              // how mention marking already treats offline/older-host failure.
-            });
           }
         }
       })
@@ -2054,6 +2271,12 @@ export function AppShell({
   useEffect(() => {
     mentionFeedRevision.current++;
     mentionReReadSubjectsRef.current = new Set();
+    // A new company (or a reseated client) is a new backlog: its first poll
+    // seeds rather than announcing, exactly as the first poll of the session
+    // does. Switching company must not toast everything that company has been
+    // sitting on.
+    operationalSeededRef.current = false;
+    operationalAnnouncedRef.current = new Set();
     setMentionFeed([]);
     refreshMentions();
     const onFocus = () => refreshMentions();
@@ -2066,31 +2289,61 @@ export function AppShell({
     refreshMentions();
   }, [feed.now, refreshMentions]);
 
-  // The other half of the deferred ack above: flush whatever was toasted
-  // while the tab was hidden the moment it is actually seen (Codex #1883
-  // P2). `scopeRef.current.company`, not the `company` prop, so this effect
-  // does not need to resubscribe on every company switch — it only needs the
-  // value at the instant visibility flips.
-  useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.visibilityState !== "visible") return;
-      const { ackNow, pending } = flushPendingAcknowledgements(
-        scopeRef.current.company,
-        pendingAckRef.current,
+  /**
+   * Mark notification rows read on behalf of the Notifications page.
+   *
+   * **`ids` absent means everything this person can see**, which is what the
+   * host does with no `ids` field and what "Dismiss all" means. An explicitly
+   * empty array marks *nothing* and is honoured as that instruction — so this
+   * never passes `[]` in place of "all", and the page never calls it with one.
+   *
+   * Optimistic, then reconciled by the next poll: the row leaves the list at
+   * the click, and a write that failed (offline, older host) brings it back
+   * rather than leaving the list permanently wrong. Exactly the shape the
+   * mention clear above already uses.
+   */
+  const markNotificationsRead = useCallback(
+    (ids?: readonly string[]): Promise<void> => {
+      const readAt = Date.now();
+      setMentionFeed((current) =>
+        current.map((n) =>
+          ids === undefined || ids.includes(n.id) ? { ...n, readAt } : n,
+        ),
       );
-      pendingAckRef.current = pending;
-      if (ackNow.length > 0) {
-        void client.markNotificationsRead(ackNow, scopeRef.current.company).catch(() => {
-          // Same best-effort contract as the immediate path above — a failed
-          // flush leaves the rows unread server-side, re-fetched (but not
-          // re-toasted, `operationalAnnouncedRef` already has their ids) on
-          // the next poll.
-        });
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
-  }, [client]);
+      // Returned, not fired and forgotten: `ActivityTab` hides a row it has
+      // asked to dismiss and needs to know when that request is over, or a
+      // failed write leaves the row hidden locally and unread on the host —
+      // visible to nobody (CodeRabbit). The rejection stays swallowed here
+      // rather than being re-thrown at the caller, because the caller does not
+      // need the outcome: on success the optimistic `readAt` above already
+      // hides the row, and on failure the refresh restores it unread. Settling
+      // is the signal; which way it settled is not.
+      return client
+        .markNotificationsRead(ids ? [...ids] : undefined, company)
+        .catch(() => {
+          // Older host, or offline. The refresh below restores the true state.
+        })
+        .finally(() => {
+          // The scope this write started under may have been reseated while it
+          // was in flight — a host switch keeps `company` and swaps `client`.
+          // Refreshing on the captured callback then re-fetches on the old
+          // client and, because it bumps the feed revision on its way out,
+          // lands that answer *after* the new scope's own refresh. Same guard
+          // the read-side and reconnect paths already use above.
+          if (
+            scopeRef.current.connection === scope.connection &&
+            scopeRef.current.company === company &&
+            scopeRef.current.client === client
+          ) {
+            refreshMentions();
+          }
+        })
+        // The host's own response body is not this callback's answer — the
+        // caller only needs to know the write is over.
+        .then(() => undefined);
+    },
+    [client, company, scope.connection, refreshMentions],
+  );
 
   const mentionCounts = useMemo(() => {
     // `main` may be undefined while the desks/roster effect has not resolved —
@@ -2109,7 +2362,7 @@ export function AppShell({
    * The same feed, readable from a callback that must not be rebuilt when it
    * changes.
    *
-   * `onChannelViewed` is handed to `ChatView` and is deliberately stable — it
+   * `onChannelViewed` is handed to `RoomView` and is deliberately stable — it
    * is called on every channel view and on every transcript growth, and adding
    * the feed to its dependencies would rebuild it on every poll. But it also
    * has to clear *this* channel's mentions, which means reading the current
@@ -2127,7 +2380,7 @@ export function AppShell({
       advanceChannelRead = true,
     ) => {
       activeChatChannelRef.current = channelId;
-      // #1890 B. `ChatView` re-reports on every open/close (its effect lists
+      // #1890 B. `RoomView` re-reports on every open/close (its effect lists
       // `openThreadId`), so this ref tracks the panel rather than lagging it.
       openThreadRootRef.current = openThreadId ?? null;
       if (mentionFeedRevision === undefined) return;
@@ -2205,7 +2458,7 @@ export function AppShell({
   /**
    * Approval decisions and other unaddressed lines land in a transcript rather
    * than vanishing: Chat appends the line to a channel. The shell owns
-   * `transcripts`, not `ChatView`, so the write survives that view unmounting —
+   * `transcripts`, not `RoomView`, so the write survives that view unmounting —
    * which it always has, because these lines are written from Approvals.
    *
    * The channel is resolved, not assumed (issue #368). This used to append to
@@ -2216,7 +2469,7 @@ export function AppShell({
    *
    * In order: the channel the operator last had open, which survives the walk
    * over to Approvals and is where they will look first; else this company's
-   * first desk channel, the same first-match `ChatView` lands on when the hash
+   * first desk channel, the same first-match `RoomView` lands on when the hash
    * names none (issue #366); else there is genuinely no channel to write to, so
    * the line stays out of `transcripts` and the toast `ApprovalsView` raises
    * alongside this call is what surfaces the decision. Never a dead bucket.
@@ -2266,6 +2519,14 @@ export function AppShell({
   // resolves, instead of the shell needing a second copy of this logic.
   const renderAgentReply = useCallback(
     (event: AgentReplyEvent) => {
+      // `replyVoice`, not a literal: a live frame attributed to the runtime
+      // itself — `SYSTEM_AUTHOR` on the Rust side, which covers both B-101's
+      // mention-ambiguity note and the iteration-cap pause notice (issue
+      // #2068) — renders as the centred system pill `fromHistory` already
+      // gives it on reload, never as a named teammate's bubble with an
+      // avatar and reply/reaction controls, which is what unconditionally
+      // passing `"company"` here used to produce (Codex review, PR #2052).
+      const from = replyVoice(event.agentId);
       // The event names a thread; `chatChannelByThread` is the only thing that
       // knows which channel renders it. An id no channel owns is a no-op:
       // better silent than in the wrong place.
@@ -2305,20 +2566,32 @@ export function AppShell({
         // history's own order rather than appending to the recent tail this
         // scans. Live-then-hydrate was the one route neither guard covered,
         // and it doubled every reply that arrived while its channel was closed.
-        const dup = existing
-          .slice(-8)
-          .some((m) => m.from === "company" && m.text === event.text);
+        //
+        // **The content check alone is too broad** (Codex review, PR #2052):
+        // two genuinely different events can carry identical text — an
+        // operator repeating the same ambiguous `@name` produces two
+        // B-101 notices with the same wording — and content matching then
+        // suppressed the second one outright, not merely deduped it.
+        // `isDuplicateLiveReply` checks this event's own durable identity
+        // first (`event.seq`) and only falls back to content for a row that
+        // has not yet been reconciled to a durable id — see its own doc for
+        // why that scoping is what keeps two same-text-but-different events
+        // from being conflated. Named and extracted for the same reason
+        // every rule in `live-reply.ts` is: this is exactly the kind of
+        // regression that shows up nowhere but a repeated-mention screenshot.
+        const dup = isDuplicateLiveReply(existing.slice(-8), event, from);
         if (dup) return t;
         return {
           ...t,
           [channelId]: [
             ...existing,
-            // `replyVoice`, not a literal: a host-authored line (the
-            // iteration-cap pause) is projected with `agentId: "system"` and
-            // must render as the same centred row `fromHistory` gives it, or
-            // whoever watched the turn live keeps an agent-style bubble that
-            // hydration will never correct.
-            makeMessage(replyVoice(event.agentId), event.text, {
+            // `from` is `replyVoice(event.agentId)`, computed once above and
+            // reused by the `dup` check too — a host-authored line (B-101's
+            // ambiguity note, the iteration-cap pause notice) must render as
+            // the same centred row `fromHistory` gives it, or whoever watched
+            // the turn live keeps an agent-style bubble hydration never
+            // corrects.
+            makeMessage(from, event.text, {
               channel: event.agentId,
               taskId: event.taskId,
               mentions: event.mentions,
@@ -2355,7 +2628,20 @@ export function AppShell({
       // still be listed. That only defers the clear to its own settle, which
       // then runs the re-read above — the conservative direction, and the one
       // that never erases a running turn's rows.
-      if (!hasOtherOpenTurns(openTurnsRef.current, event.chatId)) {
+      //
+      // Also guarded on `from !== "system"` (Codex review, PR #2052). A
+      // system-attributed frame — B-101's mention-ambiguity note among them —
+      // is emitted mid-turn, before the cycle that answers has even run, and
+      // is never itself the turn's completion. `onSendFailed` can release such
+      // a frame (held while the POST was in flight) before its own async
+      // `/runs` lookup below has had a chance to install the still-running
+      // turn into the Room store — so at the instant this runs, `openTurns`
+      // legitimately knows nothing about it yet, `hasOtherOpenTurns` reads
+      // `false`, and treating the advisory as "the end of that turn" would
+      // erase the live tool trace of a turn that is, per the very lookup
+      // racing it, still running. Only the actual reply — never an advisory
+      // interleaved before it — is a completion signal.
+      if (from !== "system" && !hasOtherOpenTurns(room.readRoom().openTurns, event.chatId)) {
         setLiveStepsByThread((prev) =>
           prev[event.chatId]?.length ? { ...prev, [event.chatId]: [] } : prev,
         );
@@ -2489,8 +2775,15 @@ export function AppShell({
     return gen;
   }, []);
   const onSendEnd = useCallback(
-    (threadId: string, gen?: number) => {
-      pendingPostThreadsRef.current.ended(threadId);
+    (threadId: string, gen?: number, responseTexts?: readonly string[]) => {
+      // `ended` hands back any held system-attributed frame the settled
+      // response did NOT already carry (issue #101 review, PR #2052) — B-101's
+      // mention-ambiguity note, never returned in the response body by design.
+      // Rendered here rather than discarded: see `ended`'s own doc for why the
+      // response's own text, only available at this call site, is what makes
+      // this safe without double-rendering the frames the response DOES carry.
+      const released = pendingPostThreadsRef.current.ended(threadId, responseTexts);
+      released.forEach((frame) => renderAgentReply(frame));
       if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
       setLiveStepsByThread((prev) => {
         if (!prev[threadId]?.length) return prev;
@@ -2498,7 +2791,7 @@ export function AppShell({
       });
       clearReceipt(threadId, gen);
     },
-    [clearReceipt],
+    [clearReceipt, renderAgentReply],
   );
   /**
    * A chat POST that resolved for a company the operator has since left
@@ -2783,7 +3076,7 @@ export function AppShell({
   /**
    * Who to name in the typing line for a given channel (and, when a thread
    * is open, that thread) — a resolver rather than one precomputed array,
-   * because `ChatView` needs two independent lines: the main composer's
+   * because `RoomView` needs two independent lines: the main composer's
    * (`parentId` unset) and the open thread panel's (`parentId` set to the
    * parent message's id). A single array could only ever answer one of them,
    * which is why thread typing indicators never worked before this: the wire
@@ -2989,7 +3282,7 @@ export function AppShell({
           blockerDecidedLine(blocker.verdict, undefined, answer.settledIds),
         );
       } else if (verdict === "deny") {
-        noteInChannel(approval.thread, "Declined — the teammate will not take that action.");
+        noteInChannel(approval.thread, "Declined — the agent will not take that action.");
       }
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "something went wrong";
@@ -3244,6 +3537,7 @@ export function AppShell({
       skippedThisSession: gateSkipped,
       isAdmin: isGateAdmin,
       retrying: activationGate.retrying,
+      waived: gateWaived,
     })
   ) {
     // A durable read failure must not read as a hang. `stuck` means three
@@ -3310,6 +3604,7 @@ export function AppShell({
       setupOpen,
       skippedThisSession: gateSkipped,
       isAdmin: isGateAdmin,
+      waived: gateWaived,
     }) &&
     // Narrows `status` for the render below — `shouldShowOnboardingGate`
     // already guarantees this is non-null whenever it returns `true`, but
@@ -3324,8 +3619,11 @@ export function AppShell({
           company={company}
           status={activationGate.status}
           currentName={feed.status.name}
+          waived={gateWaived}
           onRefresh={activationGate.refresh}
           onSkip={skipGate}
+          onLeave={leaveGateFor}
+          onWaiveStep={waiveGateStep}
         />
       </ConsoleProvider>
     );
@@ -3349,7 +3647,7 @@ export function AppShell({
           control, which is inside this context — so the direction is flipped
           here rather than by wrapping the provider in another element. */}
       <SidebarProvider className="h-svh flex-col overflow-hidden">
-      {/* Room's channel list is rendered by `ChatView`, in the content column,
+      {/* Room's channel list is rendered by `RoomView`, in the content column,
           and painted in the sidebar column. This provider is the slot the two
           agree on; `room-rail.tsx` explains why it is a portal rather than the
           whole chat model lifted up here. Inside `SidebarProvider` because it
@@ -3395,6 +3693,41 @@ export function AppShell({
             canCreateCompany={offersCompanyCreation(client)}
           />
         }
+        sidebarToggle={
+          // Two controls, one slot, exact complements — so the way to the
+          // navigation is in the same corner at every width and is never in
+          // both places or neither.
+          //
+          // `md` and up is the column, which collapses: `SidebarCollapseButton`
+          // says "Collapse"/"Expand", and `md` is the width `useIsMobile` flips
+          // at, so its own mobile guard and this gate agree by construction.
+          //
+          // Below `md` the sidebar is a sheet, which opens: those two labels are
+          // both wrong for one, so the sheet's own trigger takes the slot. It
+          // used to be a reserved row at the FOOT of the inset (issue #1265,
+          // which was about a `fixed` trigger floating over the content and
+          // winning every hit-test in the bottom-left corner). A row of its own
+          // solved that and put the way back to navigation at the bottom of the
+          // screen, furthest from the header it belongs to. In the title row it
+          // is neither floating nor buried.
+          <>
+            <span className="hidden md:inline-flex">
+              <SidebarCollapseButton />
+            </span>
+            <SidebarTrigger
+              aria-label="Toggle sidebar"
+              // The row's shared glyph shape, so it sits with its neighbours
+              // rather than reading as a `ghost` Button that wandered in.
+              className={cn(TITLE_BAR_ICON_BUTTON, "md:hidden")}
+            />
+          </>
+        }
+        search={<TitleBarSearch client={client} company={company} />}
+        utilities={
+          // The three that were the sidebar's footer, beside Overview in the
+          // same group: all four are about the console rather than the page.
+          <TitleBarUtilities view={view} onNavigate={setView} />
+        }
         overview={
           // The console's front page, as a glyph. `NAV` still carries the
           // labelled row and will until the sidebar restructure removes it; in a
@@ -3407,33 +3740,24 @@ export function AppShell({
           />
         }
         approvals={
-          // What is waiting on you, from every page in every sidebar state.
-          // `pending` is `feed.status.pending_approvals` passed straight
-          // through — the same single value the sidebar badge and the collapsed
-          // rail dot both used before this row took the signal off them.
-          <ApprovalsButton
+          // The bell, beside Overview and Settings in the same group: all
+          // three are about the console rather than about the page. It is a
+          // page now rather than a bare queue — Approvals and the activity
+          // feed, as two tabs — which is what answers the objection that sent
+          // the old shield glyph back to the sidebar (one unlabelled square
+          // could not say it was a destination; a bell says exactly what this
+          // one is). The count it carries is `pending_approvals`, unchanged,
+          // and the sidebar draws no second copy of it any more.
+          <NotificationsButton
             pending={pending}
-            active={isNavigationActive("approvals", view)}
-            onNavigate={() => setView("approvals")}
+            active={view === "notifications" || view === "approvals"}
+            onNavigate={() => setView("notifications")}
           />
         }
-        autonomy={
-          // What the agents in this company are allowed to do without asking.
-          // Renders nothing until the host has said, rather than guessing a
-          // tier — see `useAutonomy`.
-          //
-          // `canManage` is the role this shell already knows. Both write
-          // routes behind the pill call `require_admin`
-          // (`src/server/ops/policy.rs:309,427`), so without it a member was
-          // offered a menu whose every selection ends in a 403. The pill still
-          // STATES the tier for them — standing policy is a fact about what
-          // the agents around you may do, not an admin setting — it simply
-          // stops pretending to be a control. `null` while `fetchMe` is in
-          // flight reads as read-only, which is the safe direction: it hides
-          // an affordance for one round trip rather than offering one that
-          // cannot work.
-          <AutonomyPill status={autonomy} canManage={isGateAdmin} />
-        }
+        // No `autonomy` slot. The tier is a control on the composer's
+        // toolbar row now (`views/chat/MessageComposer.tsx`): it is a fact
+        // about what happens when you press Send, so it belongs beside Send
+        // rather than in the band that holds facts about the console.
         profile={
           // Who you are signed in as, and nothing else. It renders nothing
           // where there is nobody to name — a host with no sign-in, or a
@@ -3475,9 +3799,13 @@ export function AppShell({
             the company, so they belong after the list of places you can go —
             and the header they used to occupy is gone entirely now that the
             switcher lives in the window's title row. */}
-        <SidebarFooter>
-          <SidebarUtilityBar view={view} onNavigate={setView} />
-        </SidebarFooter>
+        {/* No footer. Settings, Feedback and Discord are glyphs in the
+            window's title row now (`title-bar-utilities.tsx`): none of the
+            three is a place inside this company, which is the one thing this
+            column enumerates. The Overview row that sat with them, drawn
+            `md:hidden` as the complement of the title row's `hidden
+            md:inline-flex`, went with them — the glyph up there is on at every
+            width now, so the destination is still on screen exactly once. */}
         </nav>
         <SidebarRail />
       </Sidebar>
@@ -3491,52 +3819,20 @@ export function AppShell({
           strip held the "Done" column, which is why a card could not be dragged
           into it (issue #334); every view was losing the same strip. */}
       <SidebarInset id={MAIN_CONTENT_ID} tabIndex={-1} className="min-h-0 min-w-0">
-          {/* Show/hide the sidebar, on the corner it acts on.
-
-              It used to sit in the sidebar's own header, which put the control
-              that *hides* a panel inside the panel it hides — collapsing the
-              column took the button with it. On the inset's leading corner it
-              stays put through both states and points at the edge that moves.
-
-              Here rather than inside `ContentSurface`: this control needs
-              `useSidebar`, and that card is deliberately free of sidebar
-              context — every page renders it, including ones with no sidebar at
-              all. Centred ON the card's leading border, not inside it:
-              `left-(--frame-inset)` puts it at the edge and `-translate-x-1/2`
-              straddles it. Inside the card it sat over the page's own heading
-              and read as part of the content; on the seam it reads as chrome
-              belonging to the boundary it moves. Absolutely positioned, so it
-              costs the page no layout and no view makes room for it.
-
-              `hidden md:block` — desktop only, and the breakpoint is not an
-              approximation. `useIsMobile` flips at exactly 768px, which is
-              Tailwind's `md`, so this gate is the precise complement of the
-              `!isMobile` that `SidebarCollapseButton` already reasons about:
-              the two agree by construction rather than by coincidence.
-
-              Below it the sidebar is a sheet, not a column, and it already has
-              a control — the `md:hidden` "Toggle sidebar" bar at the foot of
-              this inset. Leaving this one on made that two controls for one
-              job on one viewport, and the second one was wrong in both of its
-              halves: `SidebarCollapseButton` deliberately treats mobile as
-              not-collapsed, so with the sheet closed it read "Collapse
-              sidebar" and showed the close icon while pressing it OPENED the
-              sheet. Teaching it `openMobile` and retiring the bar was the
-              other way out and is the worse one — this button is absolutely
-              positioned over the content, and issue #1265 moved the mobile
-              trigger into a reserved row precisely to stop a floating control
-              winning the hit-test in that corner. */}
-          <div className="pointer-events-none absolute top-4 left-(--frame-inset) z-20 hidden -translate-x-1/2 md:block">
-            <div className="pointer-events-auto">
-              <SidebarCollapseButton />
-            </div>
-          </div>
+          {/* The sidebar toggle was here — absolutely positioned over this
+              inset, straddling the content card's leading edge. It is a glyph
+              in the window's title row now, beside the switcher whose column it
+              acts on: no `pointer-events` dance, no z-index over the page, and
+              a shape it shares with the four controls next to it. The `md`
+              gate travelled with it, unchanged and for the unchanged reason —
+              below that width the sidebar is a sheet with its own trigger in
+              this inset, and both of this button's labels are wrong for one. */}
         {/* The card half of the two-layer shell: the one opaque sheet in the
             console, floating on the chrome the shell root paints (issue
             #1178). A `div`, not `main` — `SidebarInset` above is already the
             console's one `<main>` landmark, and a second nested one gave every
             page two identical "skip to content" destinations (issue #1221). */}
-        {/* Every teammate's face in here is a way into who they are (issue
+        {/* Every agent's face in here is a way into who they are (issue
             #1653): the panel is mounted once around the whole surface so a
             click on an avatar in a transcript, a member list or a channel
             header opens the same summary, over the page rather than instead of
@@ -3615,7 +3911,7 @@ export function AppShell({
               What that costs, said plainly: ~2,400 lines of chat model stay
               mounted while the operator is on Company or Flows. The data was
               always resident — this shell owns `transcripts`, the mention feed
-              and the unread map precisely *because* `ChatView` used to unmount
+              and the unread map precisely *because* `RoomView` used to unmount
               — so what is newly kept is the view's own state and its
               desks/roster reads, not the polling. The return is a channel list
               that is never a round trip away, and a trip back to Room that
@@ -3623,12 +3919,26 @@ export function AppShell({
 
               The alternative, lifting the rail model up into this shell, was
               rejected when the rail shipped and is worse now: it would put an
-              effect in `ChatView` writing state up here and re-render the whole
+              effect in `RoomView` writing state up here and re-render the whole
               console on every unread tick from every section, rather than only
               from Room. */}
-          <ChatView
+          <RoomView
               client={client}
               company={company}
+              // What the agents in this company are allowed to do without
+              // asking, rendered on the composer's toolbar row. Nothing renders
+              // until the host has said what the tier is, rather than guessing
+              // one — see `useAutonomy`.
+              //
+              // `canManage` is the role this shell already knows. Both write
+              // routes behind the pill call `require_admin`
+              // (`src/server/ops/policy.rs:309,427`), so without it a member was
+              // offered a menu whose every selection ends in a 403. The pill
+              // still STATES the tier for them — standing policy is a fact about
+              // what the agents around you may do, not an admin setting — it
+              // simply stops pretending to be a control. `null` while `fetchMe`
+              // is in flight reads as read-only, which is the safe direction.
+              autonomy={<AutonomyPill status={autonomy} canManage={isGateAdmin} />}
               // The chat segment, not the current view's — see `chatSub`.
               sub={view === "chat" ? sub : chatSub}
               routeOpen={view === "chat"}
@@ -3654,10 +3964,6 @@ export function AppShell({
               onSendFailed={onSendFailed}
               onSendStale={onSendStale}
           scopeRef={scopeRef}
-              openTurns={openTurns}
-              liveStepsByThread={liveStepsByThread}
-              liveStepsByMessage={liveStepsByMessage}
-              receiptByThread={receiptByThread}
               agentNames={agentNames}
               unread={unread}
               onChannelViewed={onChannelViewed}
@@ -3665,7 +3971,6 @@ export function AppShell({
               mentionFeedRevision={mentionFeedVersion}
               mentions={mentionCounts}
               approvals={feed.approvals}
-              chatChannelByThread={chatChannelByThread}
               taskStatusByTaskId={taskStatusByTaskId}
               inflightRuns={inflightRuns}
               onInflightSteered={refreshTaskStatuses}
@@ -3865,11 +4170,19 @@ export function AppShell({
           )}
           {view === "brain" && (
             <Suspense fallback={<RouteLoading title="Brain" label="Loading what your company remembers…" />}>
-              <MemoryView client={client} company={company} />
+              {/* `#/company/brain/<page>` — Overview, Upload or Settings.
+                  Unvalidated here, as every sub-dispatching route is: only the
+                  view knows which of its pages exist. */}
+              <MemoryView client={client} company={company} sub={sub} />
             </Suspense>
           )}
-          {view === "approvals" && (
-            <ApprovalsView
+          {/* Two heads, one page. `#/notifications` is the address and `?tab=`
+              picks the half; `#/approvals` and `#/approvals/<taskId>` still
+              answer, land on the queue and keep their second segment, because
+              `REWRITE_RETIRED` has no query channel to have carried a task id
+              across (see `lib/console-routes.ts`). */}
+          {(view === "notifications" || view === "approvals") && (
+            <NotificationsView
               client={client}
               company={company}
               feed={feed}
@@ -3877,9 +4190,20 @@ export function AppShell({
               // card, so "Review" on a blocked card lands on its approvals
               // rather than on a page the operator has to search. Same
               // unvalidated second segment every other sub-page gets — only
-              // this view knows whether the id matches anything parked, so it
+              // the queue knows whether the id matches anything parked, so it
               // does that check itself and says so when it does not.
               sub={sub}
+              forceApprovalsTab={view === "approvals"}
+              // The feed the shell already polls, not a second poller: one
+              // request, one answer, so the bell and this list cannot disagree
+              // for a poll interval. The same `Array.isArray` guard that
+              // built it applies — `mentionFeed` is never anything else.
+              notifications={mentionFeed}
+              channels={{
+                rendered: new Set(Object.values(chatChannelByThread)),
+                mainChannelId: firstDeskChannelId ?? undefined,
+              }}
+              onNotificationsRead={markNotificationsRead}
               chatChannelByThread={chatChannelByThread}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}
@@ -3921,7 +4245,7 @@ export function AppShell({
                 // see (persisted client-side, not carried by the route) — see
                 // `RouteLoading`'s own doc for why a guess here would be worse
                 // than no bar.
-                <RouteLoading title="Workflows" label="Loading canvas…" />
+                <RouteLoading title="Automations" label="Loading canvas…" />
               }
             >
               <WorkflowsView
@@ -3995,6 +4319,10 @@ export function AppShell({
               company={company}
               feed={feed}
               sub={sub}
+              // The same tick the `#/observatory/<runId>` route below is given:
+              // the run index renders on this section's rail now, and it watches
+              // the same two signals.
+              eventTick={workflowRunTick + backgroundTurnTick}
               onFlag={() => setFeedbackOpen(true)}
               onResetCompany={onResetCompany}
             />
@@ -4005,22 +4333,14 @@ export function AppShell({
         </ContentSurface>
         </AgentProfileProvider>
 
-        {/* Mobile only: dedicated chrome for the way back to navigation, not an
-            overlay on top of it. A `fixed` trigger here used to float over
-            whatever content happened to scroll into the bottom-left corner and
-            win every hit-test in that region (issue #1265) — this bar reserves
-            its own row in SidebarInset's flex column instead, so the content
-            wrapper's flex-1 height (and every view's own overflow-y-auto
-            within it) already stops short of it. No view needs to know this
-            control exists. */}
-        {/* `p-3` on all four sides, matching `--frame-inset`, so this control
-            lines up with the card's own margin instead of hanging off a
-            different number. The card already supplies the gap above it through
-            that bottom margin — every page is framed now, so there is no longer
-            a flush-to-the-edge case for this row to compensate for. */}
-        <div className="flex shrink-0 items-center bg-transparent p-3 md:hidden">
-          <SidebarTrigger aria-label="Toggle sidebar" />
-        </div>
+        {/* The mobile "Toggle sidebar" row was here, at the foot of the inset.
+            It reserved its own row rather than floating, which is what issue
+            #1265 asked for after a `fixed` trigger kept winning the hit-test in
+            the bottom-left corner — but it left the way back to navigation at
+            the bottom of the screen, furthest from the header it belongs to.
+            The trigger is in the title row now, in the same slot the desktop's
+            collapse glyph uses and as its exact complement. It floats over
+            nothing, so #1265 stays answered. */}
       </SidebarInset>
       </div>
 

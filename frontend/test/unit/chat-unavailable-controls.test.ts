@@ -4,8 +4,8 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ChannelRail } from "@/views/chat/ChannelRail";
-import { MessageComposer } from "@/views/chat/MessageComposer";
+import { ChannelRail } from "@/views/room/ChannelRail";
+import { MessageComposer } from "@/views/room/MessageComposer";
 
 let container: HTMLDivElement;
 let root: Root;

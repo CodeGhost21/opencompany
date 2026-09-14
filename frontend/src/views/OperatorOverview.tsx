@@ -5,6 +5,7 @@ import type { OpenCompanyClient } from "@/api/client";
 import { listRuns, RUN_STATUS_LABEL, type RunSummary } from "@/api/runs";
 import type { LocalScope } from "@/connections/types";
 import type { CompanyFeed } from "@/hooks/use-company";
+import { consoleHref } from "@/lib/console-paths";
 import { commitOverviewVisit, openOverviewVisit } from "@/lib/overview-visit";
 import { chatHref } from "@/lib/run-source";
 import { PageHeader } from "@/components/page-header";
@@ -240,14 +241,14 @@ export function OperatorOverview({
       <PageHeader
         gutter="px-5 sm:px-8"
         title="Overview"
-        width="5xl"
+        width="full"
         actions={
           <a href="#/chat" className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
             <MessageSquare className="size-4" aria-hidden /> Start a conversation
           </a>
         }
       />
-      <div className="mx-auto flex w-full min-h-0 max-w-5xl flex-1 flex-col gap-6 overflow-auto p-5 sm:p-8">
+      <div className="flex w-full min-h-0 flex-1 flex-col gap-6 overflow-auto p-5 sm:p-8">
 
       <section aria-labelledby="overview-attention" className="rounded-xl border bg-card p-5 shadow-sm">
         <div className="flex items-start justify-between gap-4">
@@ -302,7 +303,7 @@ export function OperatorOverview({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Looking for the company&apos;s structure? <a className="underline-offset-2 hover:underline" href="#/company/graph">Open the knowledge graph</a>.
+        Looking for the company&apos;s structure? <a className="transition-opacity hover:opacity-80" href="#/company/graph">Open the knowledge graph</a>.
       </p>
       </div>
     </div>
@@ -319,7 +320,7 @@ function ApprovalSummary({ feed }: { feed: Pick<CompanyFeed, "approvals" | "queu
   return (
     <div className="mt-5 flex items-center justify-between gap-3">
       <p className="text-sm font-medium">{count === 1 ? "1 decision is waiting" : `${count} decisions are waiting`}</p>
-      <a href="#/approvals" className="inline-flex shrink-0 items-center gap-1 text-sm font-medium underline-offset-2 hover:underline">Review approvals <ArrowRight className="size-4" aria-hidden /></a>
+      <a href="#/approvals" className="inline-flex shrink-0 items-center gap-1 text-sm font-medium transition-opacity hover:opacity-80">Review approvals <ArrowRight className="size-4" aria-hidden /></a>
     </div>
   );
 }
@@ -349,13 +350,13 @@ function RunRows({
             <p className="text-xs text-muted-foreground">{RUN_STATUS_LABEL[run.status]}{run.error ? ` — ${run.error}` : ""}</p>
           </div>
           {run.taskId ? (
-            <a href={`#/tasks/${encodeURIComponent(run.taskId)}?run=${encodeURIComponent(run.id)}`} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
+            <a href={`${consoleHref("tasks", run.taskId)}?run=${encodeURIComponent(run.id)}`} className="shrink-0 text-sm font-medium transition-opacity hover:opacity-80">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
           ) : run.chatId ? (
             // A paused or failed operator-chat turn is investigated from the
             // thread it was raised in — the icon alone hid it (issue #1643).
             // The desk/DM form is the run-source rule: a known desk addresses
             // by id, anything else is a roster member's DM.
-            <a href={chatHref(run.chatId, !deskIds?.has(run.chatId))} className="shrink-0 text-sm font-medium underline-offset-2 hover:underline">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
+            <a href={chatHref(run.chatId, !deskIds?.has(run.chatId))} className="shrink-0 text-sm font-medium transition-opacity hover:opacity-80">Open <ArrowRight className="inline size-3.5" aria-hidden /></a>
           ) : (
             <CircleAlert className="size-4 shrink-0 text-muted-foreground" aria-label="No task or conversation is attached to this attempt" />
           )}

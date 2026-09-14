@@ -227,6 +227,22 @@ fn one_byte_over_the_cap_is_stored_as_bytes() {
     );
 }
 
+/// `capture_body` stats before it reads: a file over `MAX_CAPTURED_FILE_BYTES`
+/// is refused before `std::fs::read` ever runs, so nothing this far past any
+/// sane size for a single in-memory `Vec<u8>` allocation is ever buffered
+/// whole just to be classified.
+#[test]
+fn capture_body_refuses_a_file_far_past_any_sane_single_read() {
+    const UNREASONABLE_FOR_ONE_READ: usize = 64 * 1024 * 1024; // 64 MiB
+    let body = vec![b'x'; UNREASONABLE_FOR_ONE_READ];
+    let dir = workspace(&[("huge.bin", &body)]);
+    let result = capture_body(&dir.path().join("huge.bin"), "huge.bin", ArtifactKind::File);
+    assert!(
+        result.is_err(),
+        "a file this large must be refused before being read whole into memory"
+    );
+}
+
 #[test]
 fn a_non_utf8_file_is_stored_as_bytes_whatever_its_size() {
     let png = [0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe];

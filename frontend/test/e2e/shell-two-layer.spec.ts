@@ -148,7 +148,7 @@ for (const theme of ["light", "dark"] as const) {
     expect(s.sidebarBorderRight).toBe(0);
   });
 
-  test(`the content card is framed on three sides, clear of the title row on the fourth (${theme})`, async ({ page }) => {
+  test(`the content card is framed clear of the sidebar's own gutter and the title row (${theme})`, async ({ page }) => {
     await open(page, theme, "/#/settings");
     const s = await shell(page);
 
@@ -157,38 +157,42 @@ for (const theme of ["light", "dark"] as const) {
     expect(frame).not.toBeNull();
     expect(card).not.toBeNull();
 
-    // A frame, not a sliver, and an EVEN one on the three sides that face the
-    // window: they come from a single `--frame-inset`, so they are equal by
-    // construction rather than by three numbers that happen to agree. The
-    // closed first attempt at this issue inset three sides and left the fourth
-    // flush, which is what produced a sliver instead of a frame.
+    // Right and bottom face the window and share one `--frame-inset`, equal by
+    // construction. The leading (left) edge carries none of its own —
+    // `content-surface.tsx`'s own doc argues why: the sidebar's groups already
+    // carry a gutter, and a `--frame-inset` on the card too would double it,
+    // 24px against 12px on every other side. One gutter, not two.
     const insets = {
-      left: card!.left - frame!.left,
       right: frame!.right - card!.right,
       bottom: frame!.bottom - card!.bottom,
     };
     for (const [side, gap] of Object.entries(insets)) {
       expect(gap, `${side} inset`).toBeGreaterThanOrEqual(8);
-      expect(gap, `${side} inset matches the left`).toBeCloseTo(insets.left, 0);
+      expect(gap, `${side} inset matches bottom`).toBeCloseTo(insets.bottom, 0);
     }
+    const left = card!.left - frame!.left;
+    expect(
+      left,
+      "the leading edge carries no inset of its own — the sidebar's own gutter is the only one",
+    ).toBe(0);
 
     // The top is the one side that does NOT face the window, and it is held to
     // a different rule on purpose. A full `--frame-inset` there stacks on top of
     // the space the title row's own controls are already centred in, and the
-    // sum reads as a gap half again as large as the other three edges. So the
-    // card takes a thin margin (`mt-0.5`) and the row above supplies the rest.
+    // sum reads as a gap half again as large as the other edges. So the card
+    // takes a thin margin (`mt-0.5`) and the row above supplies the rest.
     //
     // Two quantities are still pinned, and between them they fence both ways it
     // can go wrong. `mt-0` — the card welded to the underside of the row — is
-    // caught by the first. A restored even frame, which is what someone reading
-    // only the three assertions above would "fix" this to, is caught by the
-    // second.
+    // caught by the first. A restored full-size top inset, which is what
+    // someone reading only the first assertion above would "fix" this to, is
+    // caught by the second.
     const top = card!.top - frame!.top;
     expect(top, "the card is not flush with the row above it").toBeGreaterThan(0);
     expect(
       top,
       "…and does not repeat the whole frame under a row that already spaces it",
-    ).toBeLessThan(insets.left);
+    ).toBeLessThan(insets.bottom);
 
     // And the row is chrome standing clear above the card, never over it: it is
     // outside the scrolling card by construction, and nothing it carries may
@@ -262,7 +266,7 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
-test("the workflow canvas fills the card and keeps its minimap inside it", async ({ page }) => {
+test("the automation canvas fills the card and keeps its minimap inside it", async ({ page }) => {
   await open(page, "light", "/#/workflows");
   await openFirstWorkflow(page);
 

@@ -1138,14 +1138,23 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, String, u64)>> {
             WorkspaceStore::read_capped(&*self.0, company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            WorkspaceStore::write(&*self.0, company, id, content, author).await
+            WorkspaceStore::write_with_revision(
+                &*self.0,
+                company,
+                id,
+                content,
+                author,
+                expected_updated_at,
+            )
+            .await
         }
         async fn create(
             &self,
@@ -1256,14 +1265,23 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, String, u64)>> {
             WorkspaceStore::read_capped(&*self.0, company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            WorkspaceStore::write(&*self.0, company, id, content, author).await
+            WorkspaceStore::write_with_revision(
+                &*self.0,
+                company,
+                id,
+                content,
+                author,
+                expected_updated_at,
+            )
+            .await
         }
         async fn create(
             &self,
@@ -1683,14 +1701,23 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, String, u64)>> {
             WorkspaceStore::read_capped(&*self.0, company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            WorkspaceStore::write(&*self.0, company, id, content, author).await
+            WorkspaceStore::write_with_revision(
+                &*self.0,
+                company,
+                id,
+                content,
+                author,
+                expected_updated_at,
+            )
+            .await
         }
         async fn create(
             &self,
@@ -1981,14 +2008,23 @@ mod test {
         ) -> Result<Option<(WorkspaceNode, String, u64)>> {
             WorkspaceStore::read_capped(&*self.inner, company, id, max_bytes).await
         }
-        async fn write(
+        async fn write_with_revision(
             &self,
             company: &CompanyId,
             id: &str,
             content: &str,
             author: WorkspaceOrigin,
+            expected_updated_at: Option<u64>,
         ) -> Result<WorkspaceNode> {
-            WorkspaceStore::write(&*self.inner, company, id, content, author).await
+            WorkspaceStore::write_with_revision(
+                &*self.inner,
+                company,
+                id,
+                content,
+                author,
+                expected_updated_at,
+            )
+            .await
         }
         async fn create(
             &self,

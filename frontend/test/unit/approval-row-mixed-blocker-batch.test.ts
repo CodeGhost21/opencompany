@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
 
 /**
  * A batch mixing an ordinary gated call with an ungrouped blocker — reachable

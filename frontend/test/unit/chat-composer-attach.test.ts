@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AttachmentDto } from "@/api/types";
-import { MessageComposer } from "@/views/chat/MessageComposer";
+import { MessageComposer } from "@/views/room/MessageComposer";
 
 /**
  * Issue #1682: the composer's paperclip, wired at last.
@@ -221,7 +221,7 @@ describe("composer paperclip (issue #1682)", () => {
     });
 
     // Codex review, round 4: `false` and "unknown" are not the same thing.
-    // `ChatView.send` returns `undefined` on a thrown request — a network
+    // `RoomView.send` returns `undefined` on a thrown request — a network
     // drop, a timeout — because `accept_chat_turn` journals the message
     // before the turn's cycle is spawned onto its own task, so a failure
     // from deep inside that task reaches the same `catch` a pre-journal
@@ -279,7 +279,7 @@ describe("composer paperclip (issue #1682)", () => {
       expect(del).toHaveBeenCalledExactlyOnceWith("node-1");
     });
 
-    // Codex review finding: `deleteAttachment` is re-bound by ChatView when
+    // Codex review finding: `deleteAttachment` is re-bound by RoomView when
     // the company or connection changes while this composer stays mounted, and
     // the unmount-only cleanup captured the FIRST callback. A staged node must
     // therefore be freed through the callback bound to the company that owns
@@ -289,7 +289,7 @@ describe("composer paperclip (issue #1682)", () => {
       function renderAsCompanySwitch() {
         // Re-render the same composer element with the NEW scope's callbacks —
         // no key change, so React reconciles in place rather than remounting,
-        // exactly as ChatView behaves when the shell rebinds these props.
+        // exactly as RoomView behaves when the shell rebinds these props.
         return act(async () => {
           root.render(
             createElement(MessageComposer, {

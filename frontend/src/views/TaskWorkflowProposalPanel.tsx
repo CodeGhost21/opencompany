@@ -96,7 +96,7 @@ export function TaskWorkflowProposalPanel({
     try {
       await applyWorkflowProposal(client, company, task.id);
       await onReload();
-      toast.success("Workflow created — the card is done.");
+      toast.success("Automation created — the card is done.");
     } catch (e) {
       // The host's refusal, verbatim: a name taken since the pass ran, a
       // teammate no longer on the roster. The card stays In Review with its
@@ -106,7 +106,7 @@ export function TaskWorkflowProposalPanel({
           ? e.message
           : e instanceof Error
             ? e.message
-            : "The workflow could not be created.",
+            : "The automation could not be created.",
       );
       setProblems(workflowRefusalProblems(e));
     } finally {
@@ -153,7 +153,7 @@ export function TaskWorkflowProposalPanel({
           <AlertDescription className="text-2xs leading-snug">
             <span className="font-medium text-foreground">Apply withheld.</span>{" "}
             {(result as { reason: string }).reason} You can still reject it to send the card back to
-            To-do and have the workflow built again.
+            To-do and have the automation built again.
           </AlertDescription>
         </Alert>
       ) : (

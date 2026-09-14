@@ -110,7 +110,7 @@ const EFFECT_LABELS = {
   // projection — but without a glossary entry it fell through to "Do something
   // that needs your sign-off", which tells an operator nothing about what they
   // are about to restart. The payload names the workflow and the step.
-  "workflow.approve": "Continue a paused workflow",
+  "workflow.approve": "Continue a paused automation",
 };
 
 export function effectAction(kind: string): string {
@@ -150,7 +150,7 @@ const EFFECT_DONE_LABELS = {
   mcp_registry_tool_call: "Used a connected tool",
   media_generate_image: "Generated an image",
   media_generate_video: "Generated a video",
-  "workflow.approve": "Continued a paused workflow",
+  "workflow.approve": "Continued a paused automation",
 } satisfies Record<keyof typeof EFFECT_LABELS, string>;
 
 /**
@@ -269,12 +269,12 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // thing that hands a finished file over. A card that says "publicly" over a
   // hand-off to the operator is the misleading-label failure this issue refused
   // to risk, so the label states what is true under either reading.
-  run_workflow: "Run one of its saved workflows",
+  run_workflow: "Run one of its saved automations",
   // Issue #661 (M7). Only the delete of the three parks — `read_workflow` and
   // `update_workflow` are `Reach::Nothing` — so only the delete needs words
   // here, and "permanently" is the load-bearing one: an update keeps the prior
   // version in the workflow's history, while this takes that history with it.
-  delete_workflow: "Permanently delete one of its saved workflows",
+  delete_workflow: "Permanently delete one of its saved automations",
   // The four tools an operator may grant standing on (#444). They are not in the
   // catch-all `Other` group by accident — they are the low-consequence writes
   // the standing-grant feature exists to apply to, which means they are the
@@ -441,8 +441,7 @@ export function decisionLabel(
 function payloadLead(a: ApprovalSummary): string | null {
   // Withheld contents have nothing to lead with, but the button still has to
   // say *why*: two hidden cards must not read as ordinary no-argument
-  // approvals (issue #618), and the resolve route accepts any member, not just
-  // admins — so the name has to tell the reader the payload is gone rather
+  // approvals — so the name has to tell the reader the payload is gone rather
   // than pretend it was never there.
   if (a.contents_hidden) return "details hidden by your role";
 
@@ -911,14 +910,8 @@ export function blockerVerdictLabel(verdict: BlockerVerdict): string {
  * rest on its label alone. Every arm says its consequence, so the two that
  * matter are not the only two that look explained.
  *
- * **Worded by step kind, not by one shared assumption.** A paused board card
- * and a stopped workflow-run node do different things on `skip` and `cancel`:
- * a card redispatches on skip (there is no card-level skip yet) and returns
- * to To-do on cancel, while a node produces nothing on skip and stops the run
- * on cancel. Describing the node's behaviour on a card's controls tells an
- * operator their click will do one thing when it does another. `stepKind`
- * absent — no step behind the blocker, or a host that predates the field —
- * falls back to wording that makes no claim either path would contradict.
+ * Task and node blockers have different skip and cancel outcomes. When the
+ * step kind is absent, use wording that is valid for either path.
  */
 export function blockerVerdictConsequence(
   verdict: BlockerVerdict,
@@ -931,7 +924,7 @@ export function blockerVerdictConsequence(
       case "amend":
         return "Puts the card back in progress and runs it again with what you write.";
       case "skip":
-        return "Puts the card back in progress and runs it again — there is no separate skip for a card yet.";
+        return "Moves the card to In review without running it again. No output is produced.";
       case "cancel":
         return "Moves the card back to To-do without running it. It can be picked up again later.";
     }

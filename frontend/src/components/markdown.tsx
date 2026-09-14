@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { cn } from "@/lib/utils";
-import { mentionRegex } from "@/views/chat/mentions";
+import { mentionRegex } from "@/views/room/mentions";
 
 /** One mention span this document should chip, as `chat/history` returns it. */
 export interface MentionSpan {

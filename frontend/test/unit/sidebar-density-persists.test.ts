@@ -10,7 +10,7 @@ import { SidebarProvider, useSidebar } from "@/components/ui/sidebar";
  * The sidebar's density survives a reload — and therefore so does the channel
  * list's, now that the two are the same setting.
  *
- * `ChatView` used to persist its own `collapsed` flag per scope in
+ * `RoomView` used to persist its own `collapsed` flag per scope in
  * `localStorage` (`lib/chat-rail.ts`). The four-row restructure deleted that
  * helper and its test on the grounds that the channel list is a section of the
  * app sidebar now, so "the sidebar's state IS the rail's state — one control,

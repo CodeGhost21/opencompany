@@ -1,6 +1,6 @@
 import type { TaskApproval } from "@/api/tasks";
 import type { ApprovalSummary, Verdict } from "@/api/types";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 
 /**
  * What the task card says about approvals (issue #468).

@@ -22,7 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../", rel), "utf8");
 
 const appShell = read("src/components/app-shell.tsx");
-const messageTimeline = read("src/views/chat/MessageTimeline.tsx");
+const messageTimeline = read("src/views/room/MessageTimeline.tsx");
 
 /** Slice a `const <name> = useCallback(` body up to its dependency array. */
 function callbackBody(source: string, name: string, depsMarker: string): string {
@@ -76,8 +76,14 @@ describe("the poll's terminal settle clears the receipt under the open-turns gua
     // same callback's `threadId` is the desk `chat/history` is asked for — so
     // the guard and its clears take the key and only the host call takes the
     // desk (Codex review on #2044).
+    // Located by text, so the string tracks the source. The guard read
+    // `openTurnsRef.current` while the shell mirrored its own state into a ref;
+    // that state moved to `room/store.ts` and the mirror went with it, so the
+    // read is now the store's synchronous one. Same guard, and strictly fresher:
+    // the ref was written in an effect and so lagged a commit behind, which is
+    // the direction that MISSES a turn just added.
     const guardAt = appShell.indexOf(
-      "if (!hasOtherOpenTurns(openTurnsRef.current, liveKey, settledTurnId)) {",
+      "if (!hasOtherOpenTurns(room.readRoom().openTurns, liveKey, settledTurnId)) {",
     );
     expect(guardAt, "the settle guard must be present").toBeGreaterThan(-1);
     const block = appShell.slice(guardAt, guardAt + 900);

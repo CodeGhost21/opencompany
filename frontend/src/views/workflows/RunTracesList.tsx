@@ -236,7 +236,7 @@ export function RunTracesList({
           </div>
         ) : runs.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No workflow runs yet. Runs appear here once a workflow fires —
+            No automation runs yet. Runs appear here once an automation fires —
             including scheduled ones that run while you're away.
           </p>
         ) : sorted.length === 0 ? (
@@ -273,7 +273,7 @@ export function RunTracesList({
               <p className="mt-2 text-2xs text-muted-foreground">
                 Showing the most recent {COMPANY_RUN_PAGE_LIMIT} runs across all
                 workflows{activeFilterCount > 0 ? " before filtering" : ""}. Open
-                a workflow's own history for its full trail.
+                an automation's own history for its full trail.
               </p>
             )}
           </>
@@ -450,7 +450,7 @@ function RunTraceFilters({
           }
         >
           <ListFilter className="size-3.5" />
-          Workflow
+          Automation
           {workflowFilter.size > 0 && (
             <Badge variant="secondary" className="h-4 px-1 text-3xs font-normal">
               {workflowFilter.size}
@@ -459,7 +459,7 @@ function RunTraceFilters({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
           <DropdownMenuGroup>
-            <DropdownMenuLabel>Workflow</DropdownMenuLabel>
+            <DropdownMenuLabel>Automation</DropdownMenuLabel>
             {workflowOptions.length === 0 ? (
               <DropdownMenuItem disabled>No runs yet</DropdownMenuItem>
             ) : (

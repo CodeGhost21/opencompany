@@ -1,9 +1,18 @@
 version: 2
 updates:
+  # Patch bumps are deliberately not proposed (see the `ignore` blocks below).
+  # A patch release moves a pin by a digit and buys us nothing we can review:
+  # the churn crowds out the minor and major bumps that do carry behaviour
+  # worth reading. Minor and major updates still open PRs, and Dependabot
+  # security alerts are unaffected by these rules for the advisories it raises
+  # itself. If a patch release ever matters, bump it by hand.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
   # Issue #590. This entry predates the SHA pinning sweep, and it is now load
   # bearing rather than routine: every `uses:` in `.github/workflows/` names a
   # full commit SHA, and a pin nobody bumps is a frozen, eventually-unpatched
@@ -21,3 +30,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]

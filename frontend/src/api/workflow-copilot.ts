@@ -286,16 +286,16 @@ export function composeCopilotMessage(
 
   lines.push(
     ``,
-    `### Roster — the teammate ids an \`agent\` step may name`,
-    `An \`agent\` node names its teammate with the top-level \`agent\` field (a roster id below), NOT inside \`config\`.`,
+    `### Roster — the agent ids an \`agent\` step may name`,
+    `An \`agent\` node names its agent with the top-level \`agent\` field (a roster id below), NOT inside \`config\`.`,
   );
   if (roster === undefined) {
     lines.push(
-      `(The roster could not be listed here. Do not invent teammate ids.)`,
+      `(The roster could not be listed here. Do not invent agent ids.)`,
     );
   } else if (roster.length === 0) {
     lines.push(
-      `(This company has no roster teammates, so do not propose an \`agent\` step.)`,
+      `(This company has no roster agents, so do not propose an \`agent\` step.)`,
     );
   } else {
     for (const member of roster) {
@@ -355,7 +355,7 @@ export function composeCopilotMessage(
     ``,
     `## What you can and cannot do`,
     `You can explain this workflow, diagnose why its runs failed, and describe in words what should change.`,
-    `You CANNOT reach anything else in the company: no tools, no board, no teammates, no other workflow, no files. The host enforces this, so a call would be refused rather than answered.`,
+    `You CANNOT reach anything else in the company: no tools, no board, no agents, no other workflow, no files. The host enforces this, so a call would be refused rather than answered.`,
     // Issue #415. The proposal is DATA IN THE REPLY, not a capability: it is
     // the operator's console that writes, through the same versioned
     // `updateWorkflow` the editor uses, only after they have read the diff. So
@@ -386,9 +386,9 @@ export function composeCopilotMessage(
       // and referenced nodes/tools/teammates that didn't exist.
       `### A step's kind and its config`,
       `\`kind\` must be exactly one of: ${WORKFLOW_NODE_KINDS.join(", ")}. Pick the right one:`,
-      `- \`agent\` — a teammate does the work. Name them in the top-level \`agent\` field (a roster id above).`,
+      `- \`agent\` — an agent does the work. Name them in the top-level \`agent\` field (a roster id above).`,
       `- \`tool_call\` — run one wired tool. Name it in \`config.slug\` (a tool slug above).`,
-      `- \`output\` — report the result back. No tool and no teammate.`,
+      `- \`output\` — report the result back. No tool and no agent.`,
       `- \`condition\` / \`switch\` — branch. \`http_request\` — call a URL. \`sub_workflow\` — run another saved workflow.`,
       ``,
       `Kind-specific keys go INSIDE a \`config\` object on the node — NEVER as top-level fields. The top-level node fields are only: id, kind, name, summary, agent, schedule, config, onError, retry, requiresApproval, destination. Everything else (slug, url, args, method, field, expression, workflow_id, schema, …) lives in \`config\`. For example a tool call is:`,
@@ -401,7 +401,7 @@ export function composeCopilotMessage(
       `- To reference an EXISTING step (updateNode, removeNode, and the from/to of addEdge/removeEdge), use only an id listed under ## Graph above — never one that is not there.`,
       `- An addNode mints a NEW id that is deliberately not yet in the graph: make it short, lower-case and unique. That is the only place a not-yet-present id is allowed.`,
       `- Never rename an id (that is a remove plus an add).`,
-      `- Only name a teammate from the roster above, and only a tool slug from the tools above.`,
+      `- Only name an agent from the roster above, and only a tool slug from the tools above.`,
       `- Propose the smallest change that answers the question, and say in your prose what it does and why.`,
       `- If you are not confident enough to propose, say so and describe the change instead — a wrong proposal costs the operator more than no proposal.`,
     );

@@ -7,11 +7,22 @@
  * way `WorkflowsView`'s `readWorkflowHash` does for `?run=`.
  *
  * ```
- * #/observatory                        every run
- * #/observatory?tab=analytics          cross-run analytics
+ * #/settings/observatory               every run — the index, on the Settings rail
+ * #/settings/observatory?tab=analytics cross-run analytics
  * #/observatory/<runId>                one run
  * #/observatory/<runId>?agent=theorist&turn=<agentRunId>&step=7
  * ```
+ *
+ * **Two heads, on purpose.** The index is a page of the Settings section and
+ * renders inside its rail, because asking what the company's agents actually
+ * did is a question *about* the company rather than a place you work out of —
+ * which is why it has a row there and no row in the sidebar.
+ *
+ * A single run stays top level, and cannot move: `useHashView` carries exactly
+ * two segments, so `#/settings/observatory/<runId>` is not an address it can
+ * express — and workflow rows, approval cards and chat all link straight to one
+ * run, so burying it would break every link that names one. The index is
+ * therefore the half that moved and the run detail is the half that did not.
  *
  * Every write goes through {@link writeObservatoryQuery}, which preserves the
  * `host` scope. That is not defensive tidiness: a `replaceState` fires no
@@ -77,11 +88,17 @@ function readStep(raw: string | null): number | null {
  */
 export function readObservatoryHash(): ObservatoryHash {
   const [path = "", query = ""] = window.location.hash.replace(/^#\/?/, "").split("?");
-  const [head, runId] = path.split("/").filter(Boolean);
+  const [head, second] = path.split("/").filter(Boolean);
   const params = new URLSearchParams(query);
+  // The index is `#/settings/observatory`; a run is `#/observatory/<runId>`.
+  // Both answer to this view, and only the second has a run in its second
+  // segment — under `settings` that segment IS the word "observatory", and
+  // reading it as a run id would send the index looking for a run by that name.
+  const onSettingsIndex = head === "settings" && second === "observatory";
+  const onRunPath = head === "observatory";
   return {
-    onObservatory: head === "observatory",
-    runId: runId ? safeDecode(runId) : null,
+    onObservatory: onRunPath || onSettingsIndex,
+    runId: onRunPath && second ? safeDecode(second) : null,
     tab: params.get("tab") === "analytics" ? "analytics" : "runs",
     agent: params.get("agent"),
     turn: params.get("turn"),
@@ -120,7 +137,9 @@ export function observatoryHref(
   ).get(HOST_PARAM);
   if (host) params.set(HOST_PARAM, host);
   writeQuery(params, patch);
-  const path = runId ? `observatory/${encodeURIComponent(runId)}` : "observatory";
+  // A run keeps the top-level address every link to one already uses; the
+  // index is the Settings page it now renders in. See the header.
+  const path = runId ? `observatory/${encodeURIComponent(runId)}` : "settings/observatory";
   const query = params.toString();
   return `#/${path}${query ? `?${query}` : ""}`;
 }
@@ -139,7 +158,10 @@ export function observatoryHref(
  */
 export function writeObservatoryQuery(patch: Partial<ObservatoryQuery>): void {
   const [path = "", query = ""] = window.location.hash.replace(/^#/, "").split("?");
-  if (!path.replace(/^\/?/, "").startsWith("observatory")) return;
+  // Silent unless the address still names this view, under either of its two
+  // heads — a write racing a company switch must not drag the operator back.
+  const bare = path.replace(/^\/?/, "");
+  if (!bare.startsWith("observatory") && !bare.startsWith("settings/observatory")) return;
   const params = new URLSearchParams(query);
   writeQuery(params, patch);
   const next = params.toString();

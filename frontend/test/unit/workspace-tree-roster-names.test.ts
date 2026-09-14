@@ -78,7 +78,7 @@ async function render(host: OpenCompanyClient) {
 }
 
 describe("the workspace tree", () => {
-  it("names a teammate's agents/ folder instead of its raw roster id", async () => {
+  it("names an agent's agents/ folder instead of its raw roster id", async () => {
     const tree = [
       node({ id: "agents-root", name: "Agents", kind: "folder" }),
       node({ id: "n-zeta", name: "zeta-id", kind: "folder", parentId: "agents-root" }),
@@ -134,7 +134,7 @@ describe("the workspace tree", () => {
     expect(text.indexOf("Alex")).toBeGreaterThan(text.indexOf("Zoe"));
   });
 
-  it("names an artifacts/ folder by its teammate too", async () => {
+  it("names an artifacts/ folder by its agent too", async () => {
     // `artifacts/` files every published deliverable under the agent that
     // published it, so its direct children are roster ids exactly as
     // `agents/`'s are. A resolver scoped to one root would print raw ids on the

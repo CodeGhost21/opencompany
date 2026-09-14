@@ -4,10 +4,10 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MessageComposer } from "@/views/chat/MessageComposer";
-import { MessageTimeline } from "@/views/chat/MessageTimeline";
+import { MessageComposer } from "@/views/room/MessageComposer";
+import { MessageTimeline } from "@/views/room/MessageTimeline";
 import type { MessageIntent } from "@/api/tasks";
-import type { Channel } from "@/views/chat/model";
+import type { Channel } from "@/views/room/model";
 
 /**
  * First-run chat has one job: get an operator to make a request.
@@ -89,7 +89,7 @@ afterEach(() => {
 });
 
 describe("the empty-channel first brief", () => {
-  it("offers a brief instead of teammate creation and starts the composer action", () => {
+  it("offers a brief instead of agent creation and starts the composer action", () => {
     const onStartBrief = vi.fn();
     renderTimeline(onStartBrief);
 
@@ -97,13 +97,13 @@ describe("the empty-channel first brief", () => {
       button.textContent?.includes("Give the team a brief"),
     );
     expect(brief).toBeDefined();
-    expect(container.textContent).not.toContain("Create teammate");
+    expect(container.textContent).not.toContain("Create agent");
 
     act(() => brief!.click());
     expect(onStartBrief).toHaveBeenCalledOnce();
   });
 
-  it("uses every new prefill revision, then explains each message mode", () => {
+  it("uses every new prefill revision", () => {
     renderComposer({ text: "Plan our first week.", revision: 1 });
     const textarea = container.querySelector("textarea");
     expect(textarea?.value).toBe("Plan our first week.");
@@ -112,37 +112,28 @@ describe("the empty-channel first brief", () => {
     renderComposer({ text: "Plan our first month.", revision: 2 });
     expect(textarea?.value).toBe("Plan our first month.");
 
-    expect(
-      container
-        .querySelector('[data-testid="composer-deliverable-chat"]')
-        ?.getAttribute("title"),
-    ).toBe("Chat without automatically creating a task.");
-    expect(
-      container
-        .querySelector('[data-testid="composer-deliverable-once"]')
-        ?.getAttribute("title"),
-    ).toBe("Ask the team to do this once.");
-    expect(
-      container
-        .querySelector('[data-testid="composer-deliverable-workflow"]')
-        ?.getAttribute("title"),
-    ).toBe("Turn this into a repeating workflow.");
+    // The three mode chips explained themselves through their `title`s. They
+    // are behind `COMPOSER_INTENT_HIDDEN` now, so there is nothing to explain
+    // and the prefill revision above is the whole of what this test covers.
+    for (const intent of ["chat", "once", "workflow"]) {
+      expect(
+        container.querySelector(`[data-testid="composer-deliverable-${intent}"]`),
+      ).toBeNull();
+    }
   });
 
-  it("resets a stale mode when the brief replaces the draft", () => {
+  it("sends the brief as a one-off task, whatever the draft held before", () => {
     const onSend = vi.fn();
     renderComposerForSend(onSend);
 
-    // The operator had picked "Just chatting" for the previous draft...
-    act(() => {
-      (
-        container.querySelector(
-          '[data-testid="composer-deliverable-chat"]',
-        ) as HTMLButtonElement
-      ).click();
-    });
-
-    // ...then the first-brief action replaces the draft wholesale.
+    // This used to pick "Just chatting" first and assert the brief cleared it:
+    // a stale mode would have withheld the brief's own request. The chips are
+    // behind `COMPOSER_INTENT_HIDDEN`, so there is no way to set a mode and no
+    // stale one to clear — the half that survives is the outcome, which is that
+    // the brief goes out as `once` on its own account rather than by default.
+    //
+    // Kept rather than retired with the chips: `once` is what makes the brief a
+    // task the team acts on, and nothing else in the suite pins it.
     act(() => {
       root.render(
         createElement(MessageComposer, {

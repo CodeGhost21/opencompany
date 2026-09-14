@@ -51,6 +51,7 @@ import type { DecideApproval, Verdict } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { withHostParam } from "@/hooks/use-host-route";
+import { consoleHref } from "@/lib/console-paths";
 import { PRIORITY_STYLES } from "@/lib/board-columns";
 import { formatUsdCost } from "@/lib/cost";
 import {
@@ -60,8 +61,8 @@ import {
 } from "@/lib/task-approvals";
 import { extraOutputCount, primaryLink, type TaskLink } from "@/lib/task-output";
 import { cn } from "@/lib/utils";
-import { ApprovalRow } from "@/views/chat/ApprovalRow";
-import { approvalBatchKey } from "@/views/chat/model";
+import { ApprovalRow } from "@/views/room/ApprovalRow";
+import { approvalBatchKey } from "@/views/room/model";
 import { tallyPrerequisites } from "./TaskPlanBrief";
 
 function priorityStyle(priority: string): string {
@@ -209,7 +210,7 @@ export function TaskItem({
         <button
           type="button"
           onClick={onOpen}
-          className="-m-1 min-w-0 rounded-sm p-1 text-left text-sm font-medium leading-snug hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="-m-1 min-w-0 rounded-sm p-1 text-left text-sm font-medium leading-snug focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-opacity hover:opacity-80"
           data-testid="task-card-open"
         >
           {task.title}
@@ -251,7 +252,7 @@ export function TaskItem({
       {task.deliverable === "workflow" && (
         <div className="mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-2xs text-muted-foreground">
           <ListTree className="size-3 shrink-0" />
-          Workflow
+          Automation
         </div>
       )}
       {/* Issue #1865 (Codex review): the task API converts a stored `todo`
@@ -510,16 +511,16 @@ function OutputLinkRow({ task }: { task: Task }) {
       <a
         href={link.href}
         title={link.hint}
-        className="flex min-w-0 items-center gap-1.5 text-muted-foreground hover:text-foreground hover:underline"
+        className="flex min-w-0 items-center gap-1.5 text-muted-foreground hover:text-foreground"
       >
         <LinkIcon kind={link.kind} />
         <span className="truncate">{link.label}</span>
       </a>
       {extra > 0 && (
         <a
-          href={`#/tasks/${encodeURIComponent(task.id)}`}
+          href={consoleHref("tasks", task.id)}
           title="Open the task to see everything it produced."
-          className="shrink-0 text-muted-foreground hover:text-foreground hover:underline"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
         >
           +{extra} more
         </a>

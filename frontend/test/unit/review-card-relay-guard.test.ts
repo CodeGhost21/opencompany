@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { reviewCardIdForThread } from "@/views/chat/model";
+import { reviewCardIdForThread } from "@/views/room/model";
 import type { ChatMessage } from "@/lib/chat";
 import type { TaskStatus } from "@/api/tasks";
 

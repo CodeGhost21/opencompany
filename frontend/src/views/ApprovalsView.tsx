@@ -25,7 +25,6 @@ import {
   useAskerNames,
   useApprovalThreadLinks,
 } from "@/components/approval-card";
-import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useApprovalDeadline } from "@/hooks/use-approval-deadline";
@@ -373,7 +372,7 @@ export function ApprovalsView({
       if (mayHaveLanded(err, Date.now() - startedAt)) {
         const line =
           verdict === "approve"
-            ? "Approved — the host didn't answer in time, but your decision was recorded. The teammate may still be working; no need to approve again."
+            ? "Approved — the host didn't answer in time, but your decision was recorded. The agent may still be working; no need to approve again."
             : "Declined — the host didn't answer in time, but your decision was recorded. No need to decline again.";
         onResolved(line);
         // Neither a success nor an error: the verdict is durable, the
@@ -464,7 +463,7 @@ export function ApprovalsView({
     const n = bulkRows.length;
     const question =
       verdict === "approve"
-        ? `Approve ${n} ${n === 1 ? "request" : "requests"}? Each approval resumes the teammate, so this may start several tasks at once.`
+        ? `Approve ${n} ${n === 1 ? "request" : "requests"}? Each approval resumes the agent, so this may start several tasks at once.`
         : `Decline ${n} ${n === 1 ? "request" : "requests"}? This is final; the work behind them moves on without them.`;
     if (!window.confirm(question)) return;
     setBulkInFlight(true);
@@ -480,11 +479,16 @@ export function ApprovalsView({
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl px-4 py-6">
-        {/* The queue's own count heading below only renders once loaded, so
-            it can't be the page's one `h1` — this stays present through
-            loading, error and empty states alike (issue #1221). */}
-        <PageHeader hidden title="Approvals" />
+      <div className="w-full px-4 py-6">
+        {/* No `PageHeader` of its own any more. This used to draw a `hidden`
+            one titled "Approvals", because the queue's own count heading below
+            only renders once loaded and the page needed an `h1` present
+            through loading, error and empty alike (issue #1221).
+            That requirement is now met one level up and unconditionally:
+            `NotificationsView` draws the page's visible header before it mounts
+            either tab, so a second `sr-only` `h1` here would be two headings for
+            one page rather than a fallback for a missing one. This view is only
+            ever mounted inside that page — `#/approvals` renders it too. */}
         {/* Issue #883: the filter says so, and offers the way out of itself.
             A narrowed queue that looked identical to the whole one would make a
             decided-elsewhere approval look like it had vanished. */}
@@ -495,7 +499,7 @@ export function ApprovalsView({
             </span>
             <a
               href="#/approvals"
-              className="shrink-0 font-medium underline-offset-2 hover:underline"
+              className="shrink-0 font-medium transition-opacity hover:opacity-80"
             >
               Show all
             </a>
@@ -568,7 +572,9 @@ export function ApprovalsView({
                       ? "1 thing needs your approval"
                       : `${rows.length} things need your approval`}
                   </h2>
-                  {bulkRows.length > 1 && (
+                  {/* Withheld on the same basis as a single card's footer: a
+                      bulk resolve is the same admin-scoped route, once per row. */}
+                  {bulkRows.length > 1 && bulkRows.every((a) => !a.contents_hidden) && (
                     <div className="flex shrink-0 items-center gap-2 self-center">
                       <Button
                         variant="outline"
@@ -829,10 +835,10 @@ export function StandingPermissions({
                   size="sm"
                   /* The subject, not just the grant: two teammates holding the
                      same tool and scope read identically in grantHeadline — and
-                     a workflow grant carries no agent at all — so button-only
+                     an automation grant carries no agent at all — so button-only
                      navigation would hear identical "Remove" buttons and could
                      take back the wrong one (#1411). `grantSubject` resolves
-                     the workflow subject for that second kind. The accessible
+                     the automation subject for that second kind. The accessible
                      name leads with the visible "Remove" verb so speech-input
                      users can say the control's label (WCAG 2.5.3 label in
                      name). */
@@ -987,7 +993,14 @@ export function ApprovalCard({
 
         <ApprovalPayload approval={a} />
 
-        {!blocker && (
+        {/* `contents_hidden` and the decide route's own admin check are the
+            same `may_administer` predicate on the host, so a card whose
+            contents this viewer cannot read is exactly a card this viewer
+            cannot resolve. Gating the scope controls and the footer below on
+            it, rather than on a separate role read, keeps a member's card at
+            one refusal — the one `ApprovalPayload` already stated — instead of
+            a second one repeating it in different words. */}
+        {!blocker && !a.contents_hidden && (
           <>
             <ApprovalScopeControl
               approval={a}
@@ -1017,7 +1030,7 @@ export function ApprovalCard({
           status={
             deciding
               ? deciding === "approve"
-                ? "Waiting for the teammate…"
+                ? "Waiting for the agent…"
                 : "Recording…"
               : batchTotal > 1
                 ? // Deliberately a count and not a link: the row is decided
@@ -1032,7 +1045,13 @@ export function ApprovalCard({
         {/* The decide footer (#1406) — deliberately the LAST thing in the card,
             after the scope control it depends on. Disabled on THIS card's own
             state only; a decision in flight on another card leaves these live,
-            which is the whole of #373's first cause. */}
+            which is the whole of #373's first cause.
+
+            Omitted entirely, not disabled, when this viewer may not resolve
+            it: `ApprovalPayload` above already told them why, and a greyed-out
+            Approve/Decline/Extend row underneath would only invite the click
+            that ends in a 403 toast. */}
+        {!a.contents_hidden && (
         <div
           data-testid="approval-decide"
           className="flex flex-wrap justify-end gap-2 border-t border-border pt-3"
@@ -1104,7 +1123,7 @@ export function ApprovalCard({
             aria-label={`Approve: ${decisionLabel(a, askerNames, now)} — ${
               scope.kind === "tool"
                 ? `let this ${
-                    a.workflow_id ? "workflow" : "teammate"
+                    a.workflow_id ? "automation" : "agent"
                   } use this tool for ${grantDurationLabel(scope.expiresInMillis)}`
                 : "just this once"
             }${a.contents_hidden ? "" : ` — request ${a.at_millis}`}${
@@ -1123,6 +1142,7 @@ export function ApprovalCard({
             </>
           )}
         </div>
+        )}
       </CardContent>
     </Card>
   );

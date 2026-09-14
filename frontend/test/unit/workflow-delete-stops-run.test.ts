@@ -148,7 +148,7 @@ function openDeleteConfirm() {
   button("Delete").click();
 }
 
-describe("deleting a workflow with a run in flight", () => {
+describe("deleting an automation with a run in flight", () => {
   it("warns about the run in the confirmation, stops it, and says so in the toast", async () => {
     // The host's sweep actually stops one run — the toast now reads THIS,
     // not the pre-request `activeRunId` guess (CodeRabbit review, PR #2053).
@@ -166,14 +166,14 @@ describe("deleting a workflow with a run in flight", () => {
       openDeleteConfirm();
     });
     const consequence = document.querySelector('[data-testid="workflow-delete-consequence"]');
-    expect(consequence?.textContent).toContain("A run of this workflow is going right now");
+    expect(consequence?.textContent).toContain("A run of this automation is going right now");
     // Codex review (PR #2053): "every run … still going", not "that run" —
     // several manual/scheduled runs of the same workflow can overlap, and
     // the sweep stops all of them, not just the one this view is watching.
     expect(consequence?.textContent).toContain("stops every run of it still going");
 
     await act(async () => {
-      button("Delete workflow", document.body).click();
+      button("Delete automation", document.body).click();
     });
 
     expect(deletes).toEqual(["digest"]);
@@ -199,7 +199,7 @@ describe("deleting a workflow with a run in flight", () => {
       openDeleteConfirm();
     });
     await act(async () => {
-      button("Delete workflow", document.body).click();
+      button("Delete automation", document.body).click();
     });
 
     expect(toasts.success).toHaveBeenCalledWith(
@@ -208,7 +208,7 @@ describe("deleting a workflow with a run in flight", () => {
   });
 });
 
-describe("deleting a workflow with no run in flight", () => {
+describe("deleting an automation with no run in flight", () => {
   it("keeps the plain warning and the plain toast", async () => {
     const { client, deletes } = fakeClient();
     await mount(client);
@@ -218,13 +218,13 @@ describe("deleting a workflow with no run in flight", () => {
     });
     const consequence = document.querySelector('[data-testid="workflow-delete-consequence"]');
     expect(consequence?.textContent).toBe(
-      "This removes the workflow, stops it running on its schedule, and stops any run of it " +
+      "This removes the automation, stops it running on its schedule, and stops any run of it " +
         "still going that hasn't shown up here yet. Past runs stay in the run history. This " +
         "can't be undone.",
     );
 
     await act(async () => {
-      button("Delete workflow", document.body).click();
+      button("Delete automation", document.body).click();
     });
 
     expect(deletes).toEqual(["digest"]);
@@ -257,10 +257,10 @@ describe("the confirmation's guess and the toast's truth can disagree", () => {
     // The dialog still warns — it can only ever go on what it knew before asking.
     expect(
       document.querySelector('[data-testid="workflow-delete-consequence"]')?.textContent,
-    ).toContain("A run of this workflow is going right now");
+    ).toContain("A run of this automation is going right now");
 
     await act(async () => {
-      button("Delete workflow", document.body).click();
+      button("Delete automation", document.body).click();
     });
 
     expect(deletes).toEqual(["digest"]);

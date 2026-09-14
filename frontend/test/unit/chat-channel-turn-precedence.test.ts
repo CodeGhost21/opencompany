@@ -15,12 +15,12 @@ import { describe, expect, it } from "vitest";
  * the queued thread first and the channel rendered "Queued…" over live work.
  *
  * Asserted against the source because the value is computed inline in
- * `ChatView`'s render from three pieces of shell state; the alternative is
+ * `RoomView`'s render from three pieces of shell state; the alternative is
  * mounting the view with a hand-built `openTurns` map, which tests React's
  * wiring rather than the precedence rule.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const chatView = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatView = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
 describe("the channel's working row prefers a running turn", () => {
   it("selects a non-queued turn before falling back to a queued one", () => {

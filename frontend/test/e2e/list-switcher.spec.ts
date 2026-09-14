@@ -14,7 +14,7 @@ import { expect, test, type Page } from "@playwright/test";
  *
  * This spec covers: opening the menu, selecting a list, the address
  * updating, a deep link straight to a non-default list, the back button, and
- * that `#/tasks/<id>` (the card detail page) still resolves untouched. Plus a
+ * that `#/company/tasks/<id>` (the card detail page) still resolves untouched. Plus a
  * round of fixes from real usage: "New list" opens the wizard in place
  * (rather than silently navigating to Manage Lists, which is what its
  * `onClick` handler collided with `onManageLists` into doing), the browser
@@ -70,9 +70,9 @@ test("Work is one nav row, landing on Tasks by default with the title as the swi
 
   await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
   // The bare `#/ledgers` address resolves to Tasks and the URL follows —
-  // consistent with `#/tasks` itself already rewriting to `#/ledgers/tasks`
+  // consistent with `#/tasks` itself already rewriting to `#/company/work/tasks`
   // (issue #1140) — rather than staying bare while the page shows Tasks.
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/tasks");
   await expect(switcherTrigger(page)).toHaveText(/Tasks/);
   await expect(page.getByTestId("ledger-board")).toBeVisible({ timeout: 15_000 });
 });
@@ -100,7 +100,7 @@ test("selecting a list from the switcher swaps the page and updates the address"
   await switcherTrigger(page).click();
   await switcherItem(page, "goals").click();
 
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/goals");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/goals");
   await expect(switcherTrigger(page)).toHaveText(/Goals/);
   await expect(page.getByRole("heading", { name: "Goals" })).toBeVisible({ timeout: 15_000 });
 });
@@ -108,21 +108,21 @@ test("selecting a list from the switcher swaps the page and updates the address"
 test("a deep link to a non-default list opens that list directly, and the back button returns", async ({
   page,
 }) => {
-  await page.goto("/#/ledgers/decisions");
+  await page.goto("/#/company/work/decisions");
   await dismissTour(page);
 
   await expect(switcherTrigger(page)).toHaveText(/Decisions/);
 
   await switcherTrigger(page).click();
   await switcherItem(page, "goals").click();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/goals");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/goals");
 
   await page.goBack();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/decisions");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/decisions");
   await expect(switcherTrigger(page)).toHaveText(/Decisions/);
 });
 
-test("#/tasks/<id> still opens the card detail page, untouched by the switcher", async ({
+test("#/company/tasks/<id> still opens the card detail page, untouched by the switcher", async ({
   page,
   request,
 }) => {
@@ -131,11 +131,11 @@ test("#/tasks/<id> still opens the card detail page, untouched by the switcher",
   expect(seeded.ok()).toBeTruthy();
   const id = (await seeded.json()).id as string;
 
-  await page.goto(`/#/tasks/${id}`);
+  await page.goto(`/#/company/tasks/${id}`);
   await dismissTour(page);
 
   await expect(page.getByRole("heading", { name: title })).toBeVisible({ timeout: 15_000 });
-  expect(new URL(page.url()).hash).toBe(`#/tasks/${id}`);
+  expect(new URL(page.url()).hash).toBe(`#/company/tasks/${id}`);
 });
 
 test("List is a navigable view that survives a task-detail round trip", async ({
@@ -147,19 +147,19 @@ test("List is a navigable view that survives a task-detail round trip", async ({
   expect(seeded.ok()).toBeTruthy();
   const id = (await seeded.json()).id as string;
 
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/company/work/tasks");
   await dismissTour(page);
 
   await page.getByRole("button", { name: "List", exact: true }).click();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks?view=list");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/tasks?view=list");
 
-  const detailLink = page.locator(`a[href="#/tasks/${id}?view=list"]`);
+  const detailLink = page.locator(`a[href="#/company/tasks/${id}?view=list"]`);
   await expect(detailLink).toHaveText(title);
   await detailLink.click();
-  await expect.poll(() => new URL(page.url()).hash).toBe(`#/tasks/${id}?view=list`);
+  await expect.poll(() => new URL(page.url()).hash).toBe(`#/company/tasks/${id}?view=list`);
 
   await page.goBack();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks?view=list");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/tasks?view=list");
   await expect(page.getByRole("button", { name: "Board" })).toBeVisible();
 });
 
@@ -168,13 +168,13 @@ test("Back after choosing List returns to Board before leaving Work", async ({ p
   await dismissTour(page);
 
   await page.locator('[data-tour="nav-ledgers"]').getByRole("button").click();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/tasks");
 
   await page.getByRole("button", { name: "List", exact: true }).click();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks?view=list");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/tasks?view=list");
 
   await page.goBack();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/tasks");
   await expect(page.getByRole("button", { name: "List", exact: true })).toBeVisible();
 });
 
@@ -184,7 +184,7 @@ test("Manage lists opens from the switcher, in Work — not Company", async ({ p
 
   await switcherTrigger(page).click();
   await page.getByTestId("list-switcher-manage").click();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/manage");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/manage");
   await expect(page.getByRole("heading", { name: "Manage lists" })).toBeVisible({
     timeout: 15_000,
   });
@@ -197,7 +197,7 @@ test("Manage lists opens from the switcher, in Work — not Company", async ({ p
 });
 
 test("New list opens the declare wizard in place, over the current list", async ({ page }) => {
-  await page.goto("/#/ledgers/goals");
+  await page.goto("/#/company/work/goals");
   await dismissTour(page);
 
   await switcherTrigger(page).click();
@@ -206,14 +206,14 @@ test("New list opens the declare wizard in place, over the current list", async 
 
   // "In place" means literally that: the address still names Goals, the
   // wizard is layered over it, not a navigation to Manage Lists.
-  expect(new URL(page.url()).hash).toContain("#/ledgers/goals");
+  expect(new URL(page.url()).hash).toContain("#/company/work/goals");
   await expect(page.getByRole("heading", { name: "Manage lists" })).toHaveCount(0);
 });
 
 test("the browser Back button closes the in-place wizard rather than skipping past it", async ({
   page,
 }) => {
-  await page.goto("/#/ledgers/goals");
+  await page.goto("/#/company/work/goals");
   await dismissTour(page);
 
   await switcherTrigger(page).click();
@@ -226,7 +226,7 @@ test("the browser Back button closes the in-place wizard rather than skipping pa
   // Lists or Tasks the way local-only dialog state would let Back do.
   await expect(page.getByRole("heading", { name: "New list" })).toHaveCount(0);
   await expect(switcherTrigger(page)).toHaveText(/Goals/);
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/goals");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/goals");
 });
 
 test("counts show zero, not nothing, so a zero never reads as missing information", async ({
@@ -244,7 +244,7 @@ test("counts show zero, not nothing, so a zero never reads as missing informatio
 test("an unknown or retired list's address recovers through the same switcher", async ({
   page,
 }) => {
-  await page.goto("/#/ledgers/this-slug-does-not-exist");
+  await page.goto("/#/company/work/this-slug-does-not-exist");
   await dismissTour(page);
 
   await expect(switcherTrigger(page)).toHaveText(/Not found/);
@@ -253,6 +253,6 @@ test("an unknown or retired list's address recovers through the same switcher", 
   // The switcher itself is still the way back — no dead end.
   await switcherTrigger(page).click();
   await switcherItem(page, "tasks").click();
-  await expect.poll(() => new URL(page.url()).hash).toBe("#/ledgers/tasks");
+  await expect.poll(() => new URL(page.url()).hash).toBe("#/company/work/tasks");
   await expect(switcherTrigger(page)).toHaveText(/Tasks/);
 });

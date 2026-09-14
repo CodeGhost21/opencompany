@@ -5,15 +5,15 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
- * What pinning the Room rail costs `ChatView`, and the three things that pay it
+ * What pinning the Room rail costs `RoomView`, and the three things that pay it
  * (issue #2130).
  *
  * The rail is painted in the sidebar on every section now, and it is portalled
- * out of `ChatView` — so the shell keeps that view mounted on every route and
+ * out of `RoomView` — so the shell keeps that view mounted on every route and
  * hands it `routeOpen`. Three consequences follow, and each one was found the
  * hard way or is one edit from being lost:
  *
- *   1. **A mounted view must not steer the route.** `ChatView` restores the
+ *   1. **A mounted view must not steer the route.** `RoomView` restores the
  *      remembered channel into the hash whenever the hash names no channel.
  *      Mounted everywhere, that fires on `#/workflows` and `#/connections` too
  *      — which name no second segment — and navigates the operator straight
@@ -39,13 +39,20 @@ import { describe, expect, it } from "vitest";
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(here, "../../src", rel), "utf8");
 
-describe("ChatView, mounted off its own route", () => {
-  const chatView = read("views/ChatView.tsx");
+describe("RoomView, mounted off its own route", () => {
+  const chatView = read("views/RoomView.tsx");
 
   it("refuses to restore the remembered channel while another section is open", () => {
+    // Anchored on the effect's own body rather than on `const restoredFor =
+    // useRef`: since B-096 the ref is declared with the other long-lived refs,
+    // well above the three early returns, while the effect that reads it moved
+    // below `channel` — so slicing from the declaration now runs through other
+    // hooks and finds their dependency arrays first.
+    const body = chatView.indexOf("restoredFor.current = undefined;");
+    expect(body).toBeGreaterThan(-1);
+    const effect = chatView.slice(chatView.lastIndexOf("useEffect(() => {", body));
     // The guard, and that it is the FIRST thing the effect does — after the
     // `if (sub)` line it is already too late for a bare `#/workflows`.
-    const effect = chatView.slice(chatView.indexOf("const restoredFor = useRef"));
     const guard = effect.indexOf("if (!routeOpen) return;");
     const subCheck = effect.indexOf("if (sub) {");
     expect(guard).toBeGreaterThan(-1);
@@ -54,8 +61,14 @@ describe("ChatView, mounted off its own route", () => {
     // And it is a dependency, so arriving on Room re-runs the restore rather
     // than skipping it for the life of the mount.
     expect(effect.slice(0, effect.indexOf("}, [") + 200)).toContain(
-      "[company, routeOpen, scope, sub, onNavigate]",
+      "[routeOpen, scope, sub, channel, onNavigate]",
     );
+    // B-096 made this guard matter MORE, not less. The effect it replaced only
+    // navigated when something was remembered (`if (remembered)`), so an
+    // operator who had never opened a channel was accidentally spared; this one
+    // always resolves — memory, else `channel.id` — and without the guard would
+    // bounce every such operator out of Flows on the first paint.
+    expect(effect).toContain("onNavigate(readLastChannel(scope) ?? channel.id);");
   });
 
   it("renders the transcript only on its own route", () => {
@@ -126,22 +139,23 @@ describe("ChatView, mounted off its own route", () => {
     // node itself — so it rides along with the rail rather than needing a place
     // in this tail. Asserted from the rail's side so the pairing is stated
     // somewhere rather than assumed.
-    expect(read("views/chat/ChannelRail.tsx")).toMatch(/<NewMessageDialog[\s/>]/);
+    expect(read("views/room/ChannelRail.tsx")).toMatch(/<NewMessageDialog[\s/>]/);
   });
 
   it("closes the Room-only dialogs on the way out, and only those", () => {
-    // Codex P2 on this PR. `AddMemberDialog` and `BudgetDialog` open from the
-    // members pane, which is inside the `routeOpen` gate — but every dialog in
-    // this file sits OUTSIDE that gate, because two of them have triggers
-    // painted in the sidebar. Right for those two, wrong for these: leaving Room
-    // on Back used to unmount the view, and left an "Add teammate" sheet
-    // standing over Company once it stopped doing so. `BudgetDialog` also holds
-    // the member it was opened for, so it would come back still pointing at
-    // them.
+    // Codex P2 on this PR. `AddMemberDialog` opens from the members pane, which
+    // is inside the `routeOpen` gate — but every dialog in this file sits
+    // OUTSIDE that gate, because two of them have triggers painted in the
+    // sidebar. Right for those two, wrong for this one: leaving Room on Back
+    // used to unmount the view, and left an "Add agent" sheet standing over
+    // Company once it stopped doing so.
+    //
+    // `BudgetDialog` was the second one here, and held the member it was opened
+    // for so it came back still pointing at them. Per-agent caps are gone from
+    // the console, and the dialog with them.
     const effect = chatView.slice(chatView.indexOf("if (routeOpen) return;"));
     expect(chatView).toContain("if (routeOpen) return;");
     expect(effect.slice(0, 200)).toContain("setAddOpen(false)");
-    expect(effect.slice(0, 200)).toContain("setBudgetFor(null)");
     // And NOT the two the sidebar opens — closing those on the way out is the
     // whole thing this PR had to keep working from another section.
     expect(effect.slice(0, 200)).not.toContain("setChannelCreateOpen(false)");
@@ -154,7 +168,7 @@ describe("ChatView, mounted off its own route", () => {
     // Room the rail's mark is "where Room will take you back to", which is
     // `aria-current="true"` — a current item within a set, not a current page.
     expect(chatView).toContain("currentPage={routeOpen}");
-    const rail = read("views/chat/ChannelRail.tsx");
+    const rail = read("views/room/ChannelRail.tsx");
     expect(rail).toContain('const activeAria: "page" | "true" = currentPage ? "page" : "true";');
     // Every row shape reads the resolved value, so none of the three can drift.
     expect(rail.match(/aria-current=\{active \? activeAria : undefined\}/g) ?? []).toHaveLength(3);
@@ -227,9 +241,9 @@ describe("ChatView, mounted off its own route", () => {
 
   it("is mounted by the shell unconditionally, with routeOpen as the only gate", () => {
     const shell = read("components/app-shell.tsx");
-    // The regression this replaces: `{view === "chat" && <ChatView …/>}`, which
+    // The regression this replaces: `{view === "chat" && <RoomView …/>}`, which
     // unmounted the rail's owner the moment the operator left Room.
-    expect(shell).not.toMatch(/\{view === "chat" && \(\s*<ChatView/);
+    expect(shell).not.toMatch(/\{view === "chat" && \(\s*<RoomView/);
     expect(shell).toContain('routeOpen={view === "chat"}');
     // And it is handed the CHAT segment, not the current view's. On
     // `#/connections/mcp` the live `sub` is `mcp`, which chat would resolve as

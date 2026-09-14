@@ -12,19 +12,19 @@ import { approvedByRuntimeLine, approvedLine, staleDecisionLine } from "@/lib/ap
  * these pin is that the sentence follows the host's count.
  */
 describe("the line an approve leaves behind", () => {
-  it("says the teammate is picking it up only when this decision released the turn", () => {
-    expect(approvedLine(0)).toBe("Approved — the teammate is picking it up now");
+  it("says the agent is picking it up only when this decision released the turn", () => {
+    expect(approvedLine(0)).toBe("Approved — the agent is picking it up now");
     expect(approvedLine(0, "send an email")).toBe(
-      "Approved — the teammate is picking it up now: send an email",
+      "Approved — the agent is picking it up now: send an email",
     );
   });
 
   it("names what is still owed when the turn is still blocked", () => {
     expect(approvedLine(1)).toBe(
-      "Approved — waiting on 1 more sign-off before the teammate continues",
+      "Approved — waiting on 1 more sign-off before the agent continues",
     );
     expect(approvedLine(3)).toBe(
-      "Approved — waiting on 3 more sign-offs before the teammate continues",
+      "Approved — waiting on 3 more sign-offs before the agent continues",
     );
   });
 
@@ -37,7 +37,7 @@ describe("the line an approve leaves behind", () => {
     );
   });
 
-  it("never says 'the teammate' for work the runtime performs itself", () => {
+  it("never says 'the agent' for work the runtime performs itself", () => {
     // Issue #395: a paused workflow gate or a cold-recipient report has no
     // teammate to re-dispatch, and naming one is the same small lie.
     for (const line of [
@@ -45,7 +45,7 @@ describe("the line an approve leaves behind", () => {
       approvedByRuntimeLine(2),
       approvedByRuntimeLine(undefined),
     ]) {
-      expect(line).not.toContain("teammate");
+      expect(line).not.toContain("agent");
     }
     expect(approvedByRuntimeLine(0)).toBe("Approved — carrying it out now");
     expect(approvedByRuntimeLine(2)).toBe(

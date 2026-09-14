@@ -41,14 +41,12 @@ import {
 } from "@/components/ui/card";
 import { DomainSettings } from "@/components/domain-settings";
 import { ExternalHarnesses } from "@/components/external-harnesses";
-import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
-import { ThemeToggle } from "@/components/theme-toggle";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { withHostParam } from "@/hooks/use-host-route";
 import { restartTour } from "@/tour/state";
 import { preloadTour } from "@/tour/TourController";
-import { useCanManage, useCanManagePolicy } from "@/hooks/use-can-manage";
+import { useCanManage } from "@/hooks/use-can-manage";
 import { useLocalScope } from "@/connections/ConnectionContext";
 import { forgetSession } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
@@ -91,7 +89,6 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
   // here would make this page lie in the other direction — the missing guard is
   // the host's to add, and this gate should follow it rather than lead it.
   const canManage = useCanManage(client, company);
-  const canManagePolicy = useCanManagePolicy(client, company);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -113,15 +110,18 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
             business now — the desktop app holds its session the same way the
             browser does — so there is no machine for this page to pair. */}
 
-        {/* Every coding engine a teammate can be bound to, joined against
+        {/* Every coding engine an agent can be bound to, joined against
             whether it can actually run on this machine (issue #1245). Works in
             a browser; the installed-here half only fills in on the desktop. */}
         <ExternalHarnesses client={client} company={company} />
 
-        {/* Approvals: the autonomy tier and the always-ask list (issue #562).
-            High in the page on purpose — an operator who comes to settings
-            because they are drowning in approval cards is here for this. */}
-        <PolicySettings client={client} company={company} canManage={canManagePolicy} />
+        {/* Approvals was here — the autonomy tier and the always-ask list
+            (issue #562), kept high in the page because an operator who comes to
+            settings while drowning in approval cards is here for this. That is
+            now an argument for a rail row rather than for a scroll position:
+            `#/settings/approvals`, `views/settings/ApprovalsSettingsView.tsx`.
+            It is also the only policy this page carried; everything left is a
+            fact about how the company is set up. */}
 
         {/* Connection */}
         <Card>
@@ -210,22 +210,10 @@ export function SettingsView({ client, company, feed, onFlag, onResetCompany }: 
           canManage={canManage}
         />
 
-        {/* Appearance.
-
-            The trailing control goes in `CardAction`, not a bare child:
-            `CardHeader` is a grid, so `flex-row justify-between` on it is inert
-            and the control drops onto a row of its own below the description.
-            `CardAction` is what switches the header to `grid-cols-[1fr_auto]`
-            and parks the control at the top right. */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Appearance</CardTitle>
-            <CardDescription>Switch between light, dark, and system themes.</CardDescription>
-            <CardAction>
-              <ThemeToggle />
-            </CardAction>
-          </CardHeader>
-        </Card>
+        {/* Appearance was here. It is `#/settings/appearance` now
+            (`views/settings/AppearanceView.tsx`): everything else on this page
+            is a fact about the company and the same for everyone who signs in,
+            while the theme is a fact about this browser alone. */}
 
         {/* Product tour */}
         <Card>
@@ -423,8 +411,9 @@ export function LifecycleControls({
           <Alert data-testid="lifecycle-admin-only">
             <TriangleAlert className="size-4" />
             <AlertDescription>
-              Pausing and resuming a company need admin authority here — ask one of this
-              company&rsquo;s admins, since a member&rsquo;s session cannot reach these controls.
+              Pausing and resuming a company now take admin authority. A member&rsquo;s session
+              reaches these routes but the host refuses them, so the controls are left out here
+              rather than shown failing — ask a company admin.
             </AlertDescription>
           </Alert>
         )}

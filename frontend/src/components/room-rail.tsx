@@ -4,35 +4,35 @@ import { useSidebar } from "@/components/ui/sidebar";
 
 /**
  * The seam that lets Room's channel list live in the app sidebar while its
- * data keeps living in `ChatView`.
+ * data keeps living in `RoomView`.
  *
  * The sidebar and the content pane are siblings under `SidebarProvider`, so the
- * sidebar cannot reach into `ChatView`'s state and `ChatView` cannot render into
+ * sidebar cannot reach into `RoomView`'s state and `RoomView` cannot render into
  * the sidebar's tree. Two ways out of that: lift the whole rail model — sections,
  * unread, mentions, the roster, the fold set, the two dialogs it opens — up into
  * the shell, or leave it exactly where it is and portal the rendered rail into a
  * slot the sidebar owns.
  *
- * This is the second. `ChatView` stays the one owner of the chat model (it is
+ * This is the second. `RoomView` stays the one owner of the chat model (it is
  * 2,400 lines of it), the rail keeps rendering from that state on the same
  * render pass, and `NewMessageDialog` and `ChannelCreateDialog` keep opening
- * from inside `ChatView`'s React tree even though their triggers are painted in
+ * from inside `RoomView`'s React tree even though their triggers are painted in
  * the sidebar — a portal moves the DOM node, not the component tree, so context,
  * events and focus management all still resolve against Chat.
  *
- * Lifting the state instead would have meant an effect in `ChatView` writing the
+ * Lifting the state instead would have meant an effect in `RoomView` writing the
  * model up to the shell and a second render of the whole console every time an
  * unread count changed.
  *
- * ## The rail is permanent, so `ChatView` is mounted permanently (issue #2130)
+ * ## The rail is permanent, so `RoomView` is mounted permanently (issue #2130)
  *
  * The slot used to be `null` whenever Room was not the open section, and
- * `ChatView` rendered no rail at all then — the intended behaviour, while the
+ * `RoomView` rendered no rail at all then — the intended behaviour, while the
  * sidebar's middle region belonged to whichever section you were in. It belongs
  * to the channel list now, on every section, so that gap had to close, and there
  * were the same two ways out as before.
  *
- * It closed the same way, for the same reason: the shell keeps `ChatView`
+ * It closed the same way, for the same reason: the shell keeps `RoomView`
  * mounted on every route and hands it `routeOpen`, which is false off Room. The
  * rail portals as it always did; the transcript, the header and the members pane
  * render only when `routeOpen`. Lifting the model into the shell was rejected
@@ -43,7 +43,7 @@ import { useSidebar } from "@/components/ui/sidebar";
  * What it costs is honest and worth stating: ~2,400 lines of chat model stay
  * mounted while an operator is on Company or Flows, with its polls and its SSE
  * subscriptions live. That was always true *of the data* — the shell owns the
- * transcripts, the mention feed and the unread map precisely because `ChatView`
+ * transcripts, the mention feed and the unread map precisely because `RoomView`
  * used to unmount — so what is newly resident is the view's own state and its
  * desks/roster reads, not the traffic. In exchange the channel list is never a
  * round trip away, and returning to Room no longer refetches what it just had.
@@ -54,10 +54,10 @@ import { useSidebar } from "@/components/ui/sidebar";
  * sheet must not.
  *
  * The slot is still `null` in one case: the mobile sheet is closed and has
- * unmounted its contents. `ChatView` renders no rail then, which remains the
+ * unmounted its contents. `RoomView` renders no rail then, which remains the
  * intended behaviour rather than a fallback.
  *
- * The sidebar's own density travels the same way. `ChatView` used to keep a
+ * The sidebar's own density travels the same way. `RoomView` used to keep a
  * `collapsed` flag of its own in `localStorage` (`lib/chat-rail.ts`), because the
  * rail was its own column and nothing else governed it. It is a section of the
  * app sidebar now, so the sidebar's state IS the rail's state — one control, one
@@ -78,7 +78,7 @@ interface RoomRailSlot {
   expand: () => void;
   /**
    * Whether the rail is currently covering the transcript — true only on a
-   * phone, where the sidebar is a sheet over the whole screen. `ChatView` gates
+   * phone, where the sidebar is a sheet over the whole screen. `RoomView` gates
    * mention-clearing on it: a mention that lands while the operator is looking
    * at the channel list must not be marked read behind their back.
    */
@@ -131,10 +131,10 @@ export function RoomRailSlotProvider({ children }: { children: ReactNode }) {
 }
 
 /**
- * The Room slot, for the sidebar (which sets it) and for `ChatView` (which
+ * The Room slot, for the sidebar (which sets it) and for `RoomView` (which
  * portals into it).
  *
- * Returns a nulled slot outside the provider so a standalone `ChatView` — the
+ * Returns a nulled slot outside the provider so a standalone `RoomView` — the
  * unit tests, a future embed — renders no rail rather than throwing.
  */
 export function useRoomRailSlot(): RoomRailSlot {

@@ -5,8 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TeamMember } from "@/lib/team";
-import { ThreadPanel } from "@/views/chat/ThreadPanel";
-import { operatorChannelFrom } from "@/views/chat/model";
+import { ThreadPanel } from "@/views/room/ThreadPanel";
+import { operatorChannelFrom } from "@/views/room/model";
 
 /**
  * Issue #1757 follow-up (codex + CodeRabbit review on the Operator channel
@@ -20,7 +20,7 @@ import { operatorChannelFrom } from "@/views/chat/model";
  * Issue #1757 rework: the Operator channel is its own surface now (`GET
  * {scope}/operator-channel`), not an entry `list_desks` returns, so the
  * fixture channel is built through `operatorChannelFrom` — the same
- * projection `ChatView` uses — rather than a hand-rolled literal.
+ * projection `RoomView` uses — rather than a hand-rolled literal.
  *
  * # The read-only answer changed: no composer, not a disabled one
  *
@@ -42,7 +42,7 @@ import { operatorChannelFrom } from "@/views/chat/model";
 const CHANNEL = operatorChannelFrom({
   id: "operator",
   name: "Operator",
-  description: "Workflow reports and notifications",
+  description: "Automation reports and notifications",
 });
 
 const MEMBERS: TeamMember[] = [];

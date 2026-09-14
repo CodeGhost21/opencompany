@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import type { WorkflowRunResult } from "@/api/workflows";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 import { approvalsForRun, runApprovals } from "@/views/workflows/run-approvals";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
 

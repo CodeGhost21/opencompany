@@ -116,7 +116,7 @@ describe("ring 1 is the company's desks", () => {
     expect(dept.id).toBe(`desk:${UNPLACED}`);
   });
 
-  it("seats a teammate by their desk, not by their job title", () => {
+  it("seats an agent by their desk, not by their job title", () => {
     // The whole point: hedy is a Designer on the Engineering desk. The old
     // keyword table put her in Design on the strength of the word "Designer".
     const { agents, departments } = adapt({ ...BASE, members: ROSTER, desks: DESKS });
@@ -128,7 +128,7 @@ describe("ring 1 is the company's desks", () => {
     expect(ada.departmentId).toBe("desk:front-of-house");
   });
 
-  it("gives a teammate on several desks the first one, and never two", () => {
+  it("gives an agent on several desks the first one, and never two", () => {
     const both: DeskDto = { id: "both", name: "Both", members: ["hedy"] };
     // Host order decides: engineering is served first, so engineering wins.
     expect(deskOfMember("hedy", [ENGINEERING, both])).toBe("desk:engineering");
@@ -143,7 +143,7 @@ describe("ring 1 is the company's desks", () => {
 });
 
 describe("nobody is given a position the company did not declare", () => {
-  it("leaves a teammate on no desk unplaced rather than in Operations", () => {
+  it("leaves an agent on no desk unplaced rather than in Operations", () => {
     // grace is on neither desk. The old code read "Growth Marketer" and filed
     // her under Growth; a role matching nothing at all fell back to Operations.
     const { agents, departments } = adapt({ ...BASE, members: ROSTER, desks: DESKS });
@@ -164,7 +164,7 @@ describe("nobody is given a position the company did not declare", () => {
     for (const p of people) expect(p.departmentId).toBe(UNPLACED);
   });
 
-  it("drops an unplaced teammate's card rather than parking it on a desk", () => {
+  it("drops an unplaced agent's card rather than parking it on a desk", () => {
     const card: Task = {
       id: "t1",
       title: "Write the launch post",
@@ -195,7 +195,7 @@ describe("nobody is given a position the company did not declare", () => {
   });
 });
 
-describe("the workflow ring survives desks replacing the hardcoded departments", () => {
+describe("the automation ring survives desks replacing the hardcoded departments", () => {
   // This case used to assert "hangs one routine off every drawn desk": one
   // templated routine was dealt to each desk by position, so the count of flows
   // was the count of desks and every flow carried an `agentIds` list. Issue #601
@@ -205,7 +205,7 @@ describe("the workflow ring survives desks replacing the hardcoded departments",
   //
   // The concern the case was written for still holds and is what is checked
   // here: when ring 1 changed under it, the flow ring must not silently empty.
-  it("hangs a saved flow off the desk of the teammate it runs through", () => {
+  it("hangs a saved flow off the desk of the agent it runs through", () => {
     const { workflows, departments } = adapt({
       ...BASE,
       members: ROSTER,

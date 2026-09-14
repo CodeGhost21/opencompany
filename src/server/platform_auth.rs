@@ -123,7 +123,7 @@ impl StaticPlatformVerifier {
 
 impl PlatformVerifier for StaticPlatformVerifier {
     fn verify(&self, bearer: &str) -> crate::Result<PlatformClaims> {
-        if bearer == self.platform_secret {
+        if constant_time_eq(bearer, &self.platform_secret) {
             return Ok(PlatformClaims {
                 tenant: "tenant:platform".to_string(),
                 scopes: HashSet::from([SCOPE_PLATFORM.to_string(), "operator".to_string()]),
@@ -134,6 +134,31 @@ impl PlatformVerifier for StaticPlatformVerifier {
             "unrecognized token".to_string(),
         ))
     }
+}
+
+/// Compares two strings without the short-circuit a plain `==` on `&str`
+/// takes at the first differing byte.
+///
+/// [`StaticPlatformVerifier::verify`] is the whole authentication mechanism
+/// for the shared platform secret: knowledge of the exact value is what grants
+/// a full platform-scope token. A short-circuiting byte compare turns "how
+/// long did verification take" into a per-byte oracle over that secret, which
+/// is exactly the shape a timing attack walks a guess forward one correct byte
+/// at a time. This still runs in time proportional to the **longer** input
+/// (so a caller can still learn there was a length mismatch from timing alone,
+/// same as `subtle::ConstantTimeEq` and every other implementation of this
+/// pattern) — what it removes is the byte-position leak `==` has once lengths
+/// already match, which is the exploitable half against a fixed-length secret.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// The signed-JWT verifier (HS256) for tenant-scoped machine tokens. The claim
@@ -717,6 +742,29 @@ mod test {
         assert!(JwtPlatformVerifier::new(secret).verify(&token).is_err());
     }
 
+    /// Pins down a documented, deliberately-deferred limit (this module's own
+    /// doc comment: "A signed token carrying no `exp` never expires... \
+    /// Changing that is a separate policy call") rather than changing it. A
+    /// token with no `exp` claim at all is accepted, and stays accepted
+    /// however long from now this runs — there is no lever in this verifier
+    /// that would ever refuse it on staleness alone. If a future change adds
+    /// a mandatory-expiry policy, this test is the one that should start
+    /// failing and prompt updating it, rather than the behavior silently
+    /// drifting either direction unnoticed.
+    #[cfg(feature = "platform-jwt")]
+    #[test]
+    fn jwt_verifier_accepts_a_token_with_no_exp_claim_at_all() {
+        let secret = "signing-secret";
+        let token = sign(
+            secret,
+            &json!({"tenant": "tenant:acme", "scopes": ["operator"]}),
+        );
+        let claims = JwtPlatformVerifier::new(secret)
+            .verify(&token)
+            .expect("a token with no exp claim is currently accepted unconditionally");
+        assert_eq!(claims.tenant, "tenant:acme");
+    }
+
     #[cfg(feature = "platform-jwt")]
     #[test]
     fn jwt_verifier_refuses_a_tampered_payload() {
@@ -770,6 +818,28 @@ mod test {
 
         let signed = sign(secret, &claims);
         assert!(JwtPlatformVerifier::new(secret).verify(&signed).is_ok());
+    }
+
+    /// [`constant_time_eq`] must agree with `==` on every outcome — the
+    /// property it changes is timing, never which strings compare equal.
+    #[test]
+    fn constant_time_eq_matches_ordinary_string_equality() {
+        assert!(constant_time_eq("", ""));
+        assert!(constant_time_eq("top-secret", "top-secret"));
+        assert!(!constant_time_eq("top-secret", ""));
+        assert!(!constant_time_eq("", "top-secret"));
+        // Differing length, shorter and longer than the reference.
+        assert!(!constant_time_eq("top-secret", "top-secre"));
+        assert!(!constant_time_eq("top-secret", "top-secrets"));
+        // Same length, differing at the first byte, the last byte, and the
+        // middle — a short-circuiting compare returns at different points for
+        // each of these, so a constant-time one must not accidentally special
+        // case any of them.
+        assert!(!constant_time_eq("top-secret", "xop-secret"));
+        assert!(!constant_time_eq("top-secret", "top-secreX"));
+        assert!(!constant_time_eq("top-secret", "top-Xecret"));
+        // Every byte differs.
+        assert!(!constant_time_eq("aaaa", "zzzz"));
     }
 
     #[test]
@@ -897,6 +967,106 @@ mod test {
         claims.companies = Some(HashSet::from(["acme".to_string()]));
         assert!(claims.may_address(&CompanyId::new("acme")));
         assert!(!claims.may_address(&CompanyId::new("globex")));
+    }
+
+    /// [`CompanyAuth`] only authenticates: it resolves *a* principal, not
+    /// whether that principal may reach the addressed company.
+    /// [`authorize_address`] is the separate call every real handler makes
+    /// right after — this is the one place that pairing is proven directly
+    /// against the function itself, rather than only through whichever route
+    /// handler happens to call it. A tenant token that owns a *different*
+    /// company must be refused `403`, not let through because it merely
+    /// verified.
+    #[test]
+    fn authorize_address_denies_a_platform_token_for_a_company_it_does_not_own() {
+        use crate::app::AppConfig;
+
+        let state = crate::AppState::new(AppConfig::default());
+        state.set_owner(CompanyId::new("globex"), "tenant:globex-corp");
+
+        let auth = GqlAuth::Platform(tenant_claims("tenant:acme-corp", &["operator"]));
+        let resp = authorize_address(&state, &auth, &CompanyId::new("globex"))
+            .expect("a tenant that does not own the addressed company must be refused");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// The positive control for the test above: the same shape, but the
+    /// tenant actually owns the company, so `authorize_address` must let it
+    /// through (`None`). Without this, the denial test could pass for the
+    /// wrong reason (e.g. every call refused).
+    #[test]
+    fn authorize_address_allows_a_platform_token_for_a_company_it_owns() {
+        use crate::app::AppConfig;
+
+        let state = crate::AppState::new(AppConfig::default());
+        state.set_owner(CompanyId::new("acme"), "tenant:acme-corp");
+
+        let auth = GqlAuth::Platform(tenant_claims("tenant:acme-corp", &["operator"]));
+        assert!(authorize_address(&state, &auth, &CompanyId::new("acme")).is_none());
+    }
+
+    /// The `platform` scope is not tenant-owned at all — it is the hosting
+    /// layer's own credential and may address any company, including one no
+    /// tenant owns yet (e.g. mid-provisioning). Distinct from the allow-list
+    /// check: platform scope bypasses ownership entirely.
+    #[test]
+    fn authorize_address_platform_scope_bypasses_ownership() {
+        use crate::app::AppConfig;
+
+        let state = crate::AppState::new(AppConfig::default());
+        // Deliberately unowned.
+        let auth = GqlAuth::Platform(tenant_claims("tenant:platform", &[SCOPE_PLATFORM]));
+        assert!(authorize_address(&state, &auth, &CompanyId::new("unowned")).is_none());
+    }
+
+    /// Ownership alone is not enough: a tenant token whose own claims carry an
+    /// allow-list that excludes the company must still be refused, even
+    /// though the ownership map says the tenant owns it. Two independent
+    /// checks — [`AppState::owner_of`] and [`PlatformClaims::may_address`] —
+    /// both have to say yes.
+    #[test]
+    fn authorize_address_honors_the_claims_allow_list_even_when_the_tenant_owns_the_company() {
+        use crate::app::AppConfig;
+
+        let state = crate::AppState::new(AppConfig::default());
+        state.set_owner(CompanyId::new("acme"), "tenant:acme-corp");
+
+        let mut claims = tenant_claims("tenant:acme-corp", &["operator"]);
+        claims.companies = Some(HashSet::from(["some-other-company".to_string()]));
+        let auth = GqlAuth::Platform(claims);
+
+        let resp = authorize_address(&state, &auth, &CompanyId::new("acme"))
+            .expect("an allow-list that excludes the company must refuse even the owning tenant");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A user session is scoped to exactly one company by construction
+    /// ([`UserPrincipal::company`]); `authorize_address` refuses any other.
+    /// There is no ownership map involved on this arm at all — a session
+    /// minted for one company must never authorize a request against
+    /// another, however the ids happen to be spelled.
+    #[test]
+    fn authorize_address_denies_a_user_session_addressing_a_different_company() {
+        use crate::app::AppConfig;
+        use crate::ports::SessionKind;
+        use crate::ports::users::UserRole;
+        use crate::server::graphql::auth::UserPrincipal;
+
+        let state = crate::AppState::new(AppConfig::default());
+        let auth = GqlAuth::User(UserPrincipal {
+            company: CompanyId::new("acme"),
+            user_id: "u1".to_string(),
+            email: "a@example.test".to_string(),
+            role: UserRole::Admin,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: SessionKind::Browser,
+        });
+
+        let resp = authorize_address(&state, &auth, &CompanyId::new("globex"))
+            .expect("a session minted for one company must not authorize another");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(authorize_address(&state, &auth, &CompanyId::new("acme")).is_none());
     }
 
     #[cfg(feature = "platform-jwt")]

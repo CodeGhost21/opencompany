@@ -8,7 +8,7 @@
 //
 // This is the same fact, written somewhere it survives a reload. It is a
 // *hint*, never authority: the hash still decides which channel renders (see
-// `ChatView`), so a deep link outranks it and a remembered channel that no
+// `RoomView`), so a deep link outranks it and a remembered channel that no
 // longer exists falls through to the same unknown-channel notice as any other
 // stale id (issue #370).
 

@@ -8,7 +8,7 @@ import { openTurnsFromRuns, turnStateKey, type OpenRunRow } from "@/lib/live-rep
  * A channel has held many threads since #1890, and every run row names only its
  * channel (`chatId`). Keying the shell's open-turn / live-step / receipt maps on
  * that meant two concurrent turns in one channel shared a slot, and — because
- * the console could not then tell whose turn was running — `ChatView` gave up
+ * the console could not then tell whose turn was running — `RoomView` gave up
  * and suppressed the working indicator for the whole channel whenever any
  * thread was open.
  *

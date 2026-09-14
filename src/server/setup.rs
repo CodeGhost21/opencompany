@@ -121,7 +121,7 @@ pub struct FieldDto {
 /// A company template an instance can be seeded from.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct TemplateDto {
-    /// The stable preset slug, e.g. `agentic_marketing_agency`.
+    /// The stable preset slug, e.g. `marketing_agency`.
     pub id: &'static str,
     /// The human-readable name.
     pub name: &'static str,
@@ -222,9 +222,11 @@ pub struct InferenceReadyDto {
     /// The provider slug behind it, for the picker's initial value. Always
     /// `managed` today: the injected path is the platform's own endpoint.
     pub provider: Option<&'static str>,
-    /// The endpoint it resolves to. Shown, not secret — it is a URL, and seeing
-    /// which one a test is about to hit is the difference between a green tick
-    /// and a green tick you can trust.
+    /// The endpoint it resolves to, with any embedded credential redacted.
+    /// Seeing which endpoint a test is about to hit is the difference between a
+    /// green tick and a green tick you can trust — but a URL is not
+    /// automatically safe to show, because it can carry userinfo. See
+    /// [`redact_endpoint`](crate::company::inference::catalogue::redact_endpoint).
     pub base_url: Option<String>,
 }
 
@@ -239,7 +241,12 @@ pub struct InferenceReadyDto {
 /// The credential itself never leaves this function.
 #[cfg(feature = "openhuman")]
 fn house_credential(env: &dyn EnvSource) -> Option<String> {
-    crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| config.base_url)
+    crate::harness::provider::harness_inference_from_env(env)
+        // Redacted, because "it is a URL" is not the same as "it is not a
+        // secret": `OPENCOMPANY_INFERENCE_URL` can carry userinfo, and this
+        // one is the deployer's own endpoint rather than a tenant's, so no
+        // input rule this workload holds can have kept it out.
+        .map(|(config, _)| crate::company::inference::catalogue::redact_endpoint(&config.base_url))
 }
 
 /// Without the harness there is no inference path at all, so the host holds
@@ -727,6 +734,20 @@ async fn apply(
         .map_err(|e| ApiError::from(e).into_response().into())
 }
 
+/// Serializes the whole first-run apply, process-wide.
+///
+/// Without this, two `POST /api/v1/setup` requests that both land before
+/// either has inserted into the registry can both read
+/// `state.registry().is_empty()` as `true` and both seed a starter company —
+/// exactly the "a re-run must never hand the operator a second starter
+/// company" case this module documents, just reached by two concurrent
+/// first runs instead of one re-run. Held for the whole of [`apply_inner`],
+/// not just the seed check, so a second caller only ever starts once the
+/// first has fully landed (or failed) — including the `config.toml` write,
+/// which is not otherwise safe against a torn concurrent write either.
+static APPLY_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// `+ Sync` so the returned future is `Send`, which axum requires of a handler:
 /// a `&T` is `Send` only when `T` is `Sync`, and the bare trait object is not.
 async fn apply_inner(
@@ -734,6 +755,7 @@ async fn apply_inner(
     req: SetupRequest,
     env: &(dyn EnvSource + Sync),
 ) -> Result<AppliedDto, OpenCompanyError> {
+    let _apply_guard = APPLY_LOCK.lock().await;
     // See `snapshot`'s comment: this must be the same root startup reads
     // `config.toml` from, which is not always `state.home()`.
     let dir = state.config_root().to_path_buf();
@@ -1098,6 +1120,16 @@ pub struct SetupRosterRequest {
     inference_provider: Option<String>,
     inference_base_url: Option<String>,
     inference_model: Option<String>,
+    /// The operator answered the model step with "no model", and means it.
+    ///
+    /// Distinct from *sending no credential*, which this route reads as "use
+    /// whatever the host already has" — and a host usually has something:
+    /// `RosterBuilder::for_setup` falls through to `harness_inference_from_env`,
+    /// so a hosted tenant with an injected credential would design a roster
+    /// with a model the operator had just declined. The screen promises a
+    /// standard team for their industry; this is what makes that true rather
+    /// than true-unless-the-host-happens-to-have-a-key.
+    force_curated: bool,
 }
 
 /// One proposed teammate, shaped for the wizard's review step.
@@ -1222,6 +1254,23 @@ async fn probe_inference<E: EnvSource + Sync>(
         });
     let normalized_base_url =
         crate::company::inference::normalize_setup_base_url(&req.provider, req.base_url.as_deref());
+    // **Refused before anything is sent.** The catalogue read below and the
+    // probe after it would both put a URL's userinfo on the wire as basic auth,
+    // this response echoes the endpoint to the browser, and a failure is
+    // logged — so a credential typed into the URL would reach all three before
+    // the setup apply's own validation could refuse it (Codex review on #2281).
+    if let Some(typed) = normalized_base_url.as_deref()
+        && crate::company::inference::catalogue::endpoint_has_credentials(typed)
+    {
+        return InferenceTestDto {
+            ok: false,
+            base_url: crate::company::inference::catalogue::redact_endpoint(typed),
+            model: None,
+            error: Some(
+                crate::company::inference::catalogue::ENDPOINT_CREDENTIAL_REFUSAL.to_string(),
+            ),
+        };
+    }
     let mut decl = crate::company::inference::decl_for_probe(
         &req.provider,
         normalized_base_url.as_deref(),
@@ -1233,7 +1282,18 @@ async fn probe_inference<E: EnvSource + Sync>(
         "ollama" | "openai_compatible"
     ) {
         let bearer = decl.bearer().await.ok().flatten();
-        crate::server::inference_models::discover_models(&decl.base_url, bearer.as_deref())
+        // The provider the operator just chose, through the same catalogue
+        // lookup every other caller uses — **not** a hardcoded bearer. A wizard
+        // that always probes with `Authorization: Bearer` breaks Anthropic
+        // during setup in exactly the way it broke the model picker, and the
+        // first thing a new operator would see is a 400 on a good key.
+        //
+        // This branch only runs for `ollama` and `openai_compatible` today, both
+        // of which are bearer-or-nothing, so the lookup changes no behaviour
+        // now. It is here so that widening the branch cannot silently
+        // reintroduce the bug.
+        let auth = crate::company::inference::catalogue::auth_style_for(&req.provider);
+        crate::server::inference_models::discover_models(&decl.base_url, bearer.as_deref(), auth)
             .await
             .ok()
             .and_then(|models| models.into_iter().next())
@@ -1246,7 +1306,11 @@ async fn probe_inference<E: EnvSource + Sync>(
             decl.models.insert((*tier).to_string(), model.clone());
         }
     }
-    let base_url = decl.base_url.clone();
+    // What is *said* about the endpoint — in this response and in the log below.
+    // Redacted, because an endpoint that reached here without being typed (an
+    // `OPENCOMPANY_INFERENCE_URL` this host does not own) can still carry
+    // userinfo. The probe itself goes to `decl.base_url`, untouched.
+    let base_url = crate::company::inference::catalogue::redact_endpoint(&decl.base_url);
 
     // `openai_compatible` has no default endpoint, so a blank URL resolves to
     // an empty string. Reported here rather than left to produce a confusing
@@ -1297,9 +1361,8 @@ async fn probe_inference<E: EnvSource + Sync>(
 ) -> InferenceTestDto {
     InferenceTestDto {
         ok: false,
-        base_url: crate::company::inference::effective_base_url(
-            &req.provider,
-            req.base_url.as_deref(),
+        base_url: crate::company::inference::catalogue::redact_endpoint(
+            &crate::company::inference::effective_base_url(&req.provider, req.base_url.as_deref()),
         ),
         model: None,
         error: Some(
@@ -1406,14 +1469,22 @@ async fn propose_roster(
         team_hint: req.team_hint,
         automate: req.automate,
     };
-    let proposal = propose_for_setup(
-        &answers,
-        req.inference_provider.as_deref(),
-        req.inference_base_url.as_deref(),
-        req.inference_key.as_deref(),
-        req.inference_model.as_deref(),
-    )
-    .await;
+    let proposal = if req.force_curated {
+        // Asked for and answered: no model runs, whatever this host holds.
+        crate::company::setup::template_proposal(
+            &answers,
+            crate::company::setup::FallbackReason::NoModel,
+        )
+    } else {
+        propose_for_setup(
+            &answers,
+            req.inference_provider.as_deref(),
+            req.inference_base_url.as_deref(),
+            req.inference_key.as_deref(),
+            req.inference_model.as_deref(),
+        )
+        .await
+    };
 
     // A picked template outranks the matched one when no model designed
     // anything.

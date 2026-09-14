@@ -33,7 +33,7 @@ const SCOPE = "/api/v1/companies/acme";
 /** The controls that must NOT exist on the one-box dialog. */
 const NAME_INPUT = 'input[placeholder="e.g. Campaign pipeline"]';
 const ID_INPUT = 'input[placeholder="e.g. campaign_pipeline"]';
-const DESCRIPTION_BOX = 'textarea[placeholder="What does this workflow do?"]';
+const DESCRIPTION_BOX = 'textarea[placeholder="What does this automation do?"]';
 
 /** A drafted graph the host would answer with. */
 const DRAFTED: WorkflowGraph = {
@@ -158,7 +158,7 @@ function describeBox(): HTMLTextAreaElement | null {
 function perNodeRefusal(): ApiError {
   const err = new ApiError(400, "workflow_invalid", "the graph was refused", true);
   err.problems = [
-    { node_id: "write", field: "config.agent", message: "no such teammate" },
+    { node_id: "write", field: "config.agent", message: "no such agent" },
   ];
   return err;
 }
@@ -245,13 +245,13 @@ afterEach(() => {
   container.remove();
 });
 
-describe("the New-workflow dialog when the copilot can draft", () => {
+describe("the New-automation dialog when the copilot can draft", () => {
   it("is one description box — no Name, ID, Description, Nodes or Connections", async () => {
     await open(stubClient({ cognition: "hosted" }));
 
     expect(describeBox(), "the description box is the whole dialog").toBeTruthy();
     expect(inDialog(NAME_INPUT), "Name must not render").toBeNull();
-    expect(inDialog(ID_INPUT), "Workflow ID must not render").toBeNull();
+    expect(inDialog(ID_INPUT), "Automation ID must not render").toBeNull();
     expect(inDialog(DESCRIPTION_BOX), "the second Description box must not render").toBeNull();
     // The section headings, not just their controls: a heading with no rows
     // under it is the same clutter the redesign removes.
@@ -272,7 +272,7 @@ describe("the New-workflow dialog when the copilot can draft", () => {
     await act(async () => {
       submitButton().click();
     });
-    expect(dialogText()).not.toContain("Give the workflow an id.");
+    expect(dialogText()).not.toContain("Give the automation an id.");
     expect(inDialog('[data-testid="create-error"]')).toBeNull();
   });
 
@@ -286,7 +286,7 @@ describe("the New-workflow dialog when the copilot can draft", () => {
             automatable: true,
             summary: "a weekly digest",
             workflow: DRAFTED,
-            notes: ["Matched “the writer” to teammate `writer`.", "   "],
+            notes: ["Matched “the writer” to agent `writer`.", "   "],
           }),
         create: (body) => {
           posted.push(body);
@@ -313,7 +313,7 @@ describe("the New-workflow dialog when the copilot can draft", () => {
     expect(onCreated).toHaveBeenCalledTimes(1);
     expect(onCreated.mock.calls[0]![0].version).toBe("v1");
     expect(onCreated.mock.calls[0]![1]).toEqual([
-      "Matched “the writer” to teammate `writer`.",
+      "Matched “the writer” to agent `writer`.",
     ]);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
@@ -385,7 +385,7 @@ describe("the New-workflow dialog when the copilot can draft", () => {
             new ApiError(
               409,
               "conflict",
-              "A workflow with id `weekly-digest` already exists. Pick a different id.",
+              "An automation with id `weekly-digest` already exists. Pick a different id.",
               // The host's own envelope. A 409 the client synthesised from a
               // proxy's status line is not an instruction and must not hand
               // over the form — see the `writeRefusalHandsOverForm` unit tests.
@@ -468,7 +468,7 @@ describe("the New-workflow dialog when the copilot can draft", () => {
   });
 });
 
-describe("the New-workflow dialog on a company with no model configured", () => {
+describe("the New-automation dialog on a company with no model configured", () => {
   it("is the same one box — the graph form does not come back for `echo`", async () => {
     await open(stubClient({ cognition: "echo" }));
 
@@ -477,10 +477,20 @@ describe("the New-workflow dialog on a company with no model configured", () => 
     // company with no model is the LAST one to hand a graph editor to.
     expect(describeBox(), "the description box is the whole dialog").toBeTruthy();
     expect(inDialog(NAME_INPUT), "Name must not render").toBeNull();
-    expect(inDialog(ID_INPUT), "Workflow ID must not render").toBeNull();
+    expect(inDialog(ID_INPUT), "Automation ID must not render").toBeNull();
     expect(inDialog(DESCRIPTION_BOX), "the second Description box must not render").toBeNull();
     expect(dialogText()).not.toContain("Nodes");
-    expect(dialogText()).not.toContain("Connections");
+    // Read with the no-model notice taken out first. That notice says
+    // "Connections → Inference" — the section the model lives in since it left
+    // the settings rail — and a bare `not.toContain("Connections")` over the
+    // whole dialog cannot tell the graph editor's section heading from a
+    // direction to go and wire a model. The heading is what must not come
+    // back; the direction is the point of this state.
+    const withoutNotice = dialogText().replace(
+      inDialog('[data-testid="workflow-draft-unavailable"]')?.textContent ?? "",
+      "",
+    );
+    expect(withoutNotice).not.toContain("Connections");
     expect(dialogText()).not.toContain("Add node");
     expect(dialogText()).not.toContain("Add edge");
     expect(inDialog('[data-testid="workflow-copilot-draft"]')).toBeNull();
@@ -492,7 +502,7 @@ describe("the New-workflow dialog on a company with no model configured", () => 
     const notice = inDialog('[data-testid="workflow-draft-unavailable"]');
     expect(notice, "an operator must not be promised a draft that cannot happen").toBeTruthy();
     expect(notice!.textContent).toContain("no model configured");
-    expect(notice!.textContent).toContain("Settings → Inference");
+    expect(notice!.textContent).toContain("Connections → Inference");
     expect(notice!.textContent).toContain("empty canvas");
     // NOT the copy this path used to carry, which pointed at a form that is no
     // longer under it.
@@ -569,12 +579,12 @@ describe("the New-workflow dialog on a company with no model configured", () => 
     expect(inDialog<HTMLInputElement>(NAME_INPUT)!.value).toBe("");
     expect(inDialog<HTMLInputElement>(ID_INPUT)!.value).toBe("");
     expect(inDialog('[data-testid="create-error"]')!.textContent).toContain(
-      "Give this workflow a name",
+      "Give this automation a name",
     );
   });
 });
 
-describe("the New-workflow dialog when the write itself fails", () => {
+describe("the New-automation dialog when the write itself fails", () => {
   /**
    * The hand-over is a **one-way door**: it retires the box for the rest of the
    * open. So it has to fire on a refusal the operator can act on, and only on
@@ -656,7 +666,7 @@ describe("the New-workflow dialog when the write itself fails", () => {
   });
 });
 
-describe("the New-workflow dialog when the copilot declines", () => {
+describe("the New-automation dialog when the copilot declines", () => {
   /**
    * `automatable: false` covers two different events, and only one of them is
    * advice. A failed draft used to arrive as advice **verbatim**, which meant
@@ -672,8 +682,8 @@ describe("the New-workflow dialog when the copilot declines", () => {
           Promise.resolve({
             automatable: false,
             reason:
-              "the described workflow could not be drafted into one that would be accepted: " +
-              "invalid request: a workflow needs exactly one `trigger` node to say what " +
+              "the described automation could not be drafted into one that would be accepted: " +
+              "invalid request: an automation needs exactly one `trigger` node to say what " +
               "starts it (found 0).",
           }),
       }),
@@ -693,7 +703,7 @@ describe("the New-workflow dialog when the copilot declines", () => {
     expect(declined!.textContent).not.toContain("trigger");
     expect(declined!.textContent).not.toContain("invalid request");
     // What is said instead is true, and says what to do next.
-    expect(declined!.textContent).toContain("could not turn that into a workflow");
+    expect(declined!.textContent).toContain("could not turn that into an automation");
     expect(declined!.textContent).toContain("start it on the canvas");
     // And the action offered is the canvas, not the overruling of an opinion.
     const action = inDialog<HTMLButtonElement>('[data-testid="workflow-create-anyway"]');
@@ -742,7 +752,7 @@ describe("the New-workflow dialog when the copilot declines", () => {
  * `weekly-digest-2` — a permanent duplicate, plus a second billed model call,
  * from an operator who pressed the same button twice on the same sentence.
  */
-describe("the New-workflow dialog after a write that may have landed", () => {
+describe("the New-automation dialog after a write that may have landed", () => {
   /** The graph the host would answer a reconcile read with. */
   const SAVED: WorkflowGraph = { ...DRAFTED, version: "v1" };
 
@@ -756,7 +766,7 @@ describe("the New-workflow dialog after a write that may have landed", () => {
     };
   }
 
-  it("reads the id back and lands on the workflow that already exists", async () => {
+  it("reads the id back and lands on the automation that already exists", async () => {
     const posted: unknown[] = [];
     const drafts = { count: 0 };
     const reads = { count: 0 };
@@ -772,7 +782,7 @@ describe("the New-workflow dialog after a write that may have landed", () => {
             automatable: true,
             summary: "a digest",
             workflow: DRAFTED,
-            notes: ["Matched “the writer” to teammate `writer`."],
+            notes: ["Matched “the writer” to agent `writer`."],
           }),
         create: failFirstCreate(posted),
       }),
@@ -806,7 +816,7 @@ describe("the New-workflow dialog after a write that may have landed", () => {
     expect(onCreated.mock.calls[0]![0].id).toBe("weekly-digest");
     expect(onCreated.mock.calls[0]![0].version).toBe("v1");
     expect(onCreated.mock.calls[0]![1]).toEqual([
-      "Matched “the writer” to teammate `writer`.",
+      "Matched “the writer” to agent `writer`.",
     ]);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
@@ -887,7 +897,7 @@ describe("the New-workflow dialog after a write that may have landed", () => {
         reads,
         create: () =>
           Promise.reject(
-            new ApiError(409, "conflict", "A workflow with id `x` already exists.", true),
+            new ApiError(409, "conflict", "An automation with id `x` already exists.", true),
           ),
       }),
     );
@@ -914,7 +924,7 @@ describe("the New-workflow dialog after a write that may have landed", () => {
  * fallback, building an empty canvas from a sentence the copilot was never asked
  * about, on a host that could draft perfectly well.
  */
-describe("the New-workflow dialog when a draft rejects late", () => {
+describe("the New-automation dialog when a draft rejects late", () => {
   it("does not retire drafting on the dialog that replaced it", async () => {
     let rejectDraft: (e: unknown) => void = () => {};
     const drafts = { count: 0 };
@@ -974,7 +984,7 @@ describe("the New-workflow dialog when a draft rejects late", () => {
  * `createAnyway()` reads the CURRENT box. One click created B unexamined, on a
  * justification that was only ever about A.
  */
-describe("the New-workflow dialog after the sentence changes", () => {
+describe("the New-automation dialog after the sentence changes", () => {
   it("clears a decline the new sentence never earned", async () => {
     await open(
       stubClient({
@@ -1072,8 +1082,8 @@ describe("the New-workflow dialog after the sentence changes", () => {
  * the one route where the operator has least context — a refusal, a form they
  * did not ask for — the saved graph had corrections nobody was ever shown.
  */
-describe("the New-workflow dialog's corrections across a refusal", () => {
-  const NOTE = "Matched “the writer” to teammate `writer`.";
+describe("the New-automation dialog's corrections across a refusal", () => {
+  const NOTE = "Matched “the writer” to agent `writer`.";
 
   it("shows them on the handed-over form and carries them to the canvas", async () => {
     const posted: unknown[] = [];
@@ -1094,7 +1104,7 @@ describe("the New-workflow dialog's corrections across a refusal", () => {
                 new ApiError(
                   409,
                   "conflict",
-                  "A workflow with id `weekly-digest` already exists. Pick a different id.",
+                  "An automation with id `weekly-digest` already exists. Pick a different id.",
                   true,
                 ),
               )
@@ -1178,7 +1188,7 @@ describe("the New-workflow dialog's corrections across a refusal", () => {
  * takes the operator to a workflow they did not create, closes the dialog as if
  * they had, and pins this draft's corrections to it.
  */
-describe("the New-workflow dialog reconciling against a stranger's id", () => {
+describe("the New-automation dialog reconciling against a stranger's id", () => {
   /** A workflow that owns `weekly-digest` and has nothing to do with us. */
   const STRANGER: WorkflowGraph = {
     id: "weekly-digest",
@@ -1198,7 +1208,7 @@ describe("the New-workflow dialog reconciling against a stranger's id", () => {
     };
   }
 
-  it("hands over the form rather than adopting a workflow it did not write", async () => {
+  it("hands over the form rather than adopting an automation it did not write", async () => {
     const posted: unknown[] = [];
     await open(
       stubClient({
@@ -1220,7 +1230,7 @@ describe("the New-workflow dialog reconciling against a stranger's id", () => {
     });
 
     // Nothing was adopted and nothing was created…
-    expect(onCreated, "a stranger's workflow is not this operator's create").not.toHaveBeenCalled();
+    expect(onCreated, "a stranger's automation is not this operator's create").not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
     // …and the refusal the mangled answer actually was is raised, with the id
     // field the message asks the operator to use.
@@ -1263,7 +1273,7 @@ describe("the New-workflow dialog reconciling against a stranger's id", () => {
       submitButton().click();
     });
 
-    expect(onCreated, "a different schedule and a different agent is a different workflow")
+    expect(onCreated, "a different schedule and a different agent is a different automation")
       .not.toHaveBeenCalled();
     expect(inDialog(ID_INPUT), "the id field must come back").toBeTruthy();
     expect(inDialog('[data-testid="create-error"]')!.textContent).toContain(
@@ -1316,7 +1326,7 @@ describe("the New-workflow dialog reconciling against a stranger's id", () => {
  * how a second copy of an already-created workflow gets made, which is the one
  * outcome this whole reconcile exists to prevent.
  */
-describe("the New-workflow dialog when the reconcile read cannot be made", () => {
+describe("the New-automation dialog when the reconcile read cannot be made", () => {
   it("keeps the graph and asks again, rather than writing blind", async () => {
     const posted: unknown[] = [];
     const reads = { count: 0 };
@@ -1393,7 +1403,7 @@ describe("the New-workflow dialog when the reconcile read cannot be made", () =>
     expect(inDialog(ID_INPUT)).toBeNull();
   });
 
-  it("still writes when the HOST says the workflow is not there", async () => {
+  it("still writes when the HOST says the automation is not there", async () => {
     // The complement: a real 404 from the host is a real answer, and the write
     // must go out — otherwise a genuine failure could never be retried at all.
     const posted: unknown[] = [];
@@ -1420,7 +1430,7 @@ describe("the New-workflow dialog when the reconcile read cannot be made", () =>
       submitButton().click();
     });
 
-    expect(posted, "an absent workflow must be written").toHaveLength(2);
+    expect(posted, "an absent automation must be written").toHaveLength(2);
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
 });
@@ -1434,8 +1444,8 @@ describe("the New-workflow dialog when the reconcile read cannot be made", () =>
  * the form then instructs them to pick a different one. Obeying that is how an
  * operator ends up with two copies of a workflow they created exactly once.
  */
-describe("the New-workflow dialog's sentence-only fallback after a lost answer", () => {
-  it("lands on the workflow it already wrote, without a second confirm", async () => {
+describe("the New-automation dialog's sentence-only fallback after a lost answer", () => {
+  it("lands on the automation it already wrote, without a second confirm", async () => {
     const posted: WorkflowGraph[] = [];
     const reads = { count: 0 };
     // The host's own store, filled by the write that commits — so this models

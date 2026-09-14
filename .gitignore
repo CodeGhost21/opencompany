@@ -4,7 +4,7 @@ target/
 # committed copy is churn that conflicts on every branch. The
 # `frontend/src-tauri/` path is kept because older branches still write there;
 # that app is gone from this one.
-src-tauri/gen/
+crates/opencompany-app/gen/
 frontend/src-tauri/gen/
 *.profraw
 *.profdata
@@ -64,3 +64,12 @@ test-results/
 # committed copy is both noise and wrong for the next reader's Python.
 __pycache__/
 *.pyc
+
+# A local `serve` data root inside the checkout. `OPENCOMPANY_DATA_DIR` is the
+# only knob that isolates two local `serve` processes from each other
+# (`docs/spec/runtime/storage.md`), so pointing it at a directory beside the
+# source is the ordinary way to run a second instance — and everything the
+# instance then writes is runtime state: the event log, the agent journal, the
+# derived ledgers, and `secrets/`, which holds the inference key in the clear.
+# None of it is source, and the last of it must never reach a remote.
+.local-data/

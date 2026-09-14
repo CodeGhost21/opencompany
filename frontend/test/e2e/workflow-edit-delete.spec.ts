@@ -104,8 +104,8 @@ async function createWorkflow(
   });
   expect(res.ok(), `create ${id}: ${res.status()} ${await res.text()}`).toBeTruthy();
   const body = await res.json();
-  expect(body.editable, "a console-created workflow must be editable").toBe(true);
-  expect(body.version, "a console-created workflow must carry a version token").toBeTruthy();
+  expect(body.editable, "a console-created automation must be editable").toBe(true);
+  expect(body.version, "a console-created automation must carry a version token").toBeTruthy();
   return body.version as string;
 }
 
@@ -143,7 +143,7 @@ async function selectWorkflow(page: Page, name: string) {
   await openWorkflow(page, name);
   await expect(
     page.getByTestId("workflow-detail-toolbar").getByRole("combobox"),
-    "the detail toolbar no longer offers the workflow you are already in",
+    "the detail toolbar no longer offers the automation you are already in",
   ).toHaveCount(0);
 }
 
@@ -164,7 +164,7 @@ const SUBMIT = "workflow-dialog-submit";
  */
 async function openEditDialog(page: Page, name: string) {
   const button = page.getByTestId(EDIT);
-  await expect(button, "an overlay-backed workflow must be editable").toBeEnabled();
+  await expect(button, "an overlay-backed automation must be editable").toBeEnabled();
   await button.click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText(`Edit “${name}”`, { exact: true })).toBeVisible();
@@ -188,7 +188,7 @@ async function readWorkflow(request: APIRequestContext, id: string) {
   return res.json();
 }
 
-test("a source-defined workflow cannot be deleted, and the console says why", async ({
+test("a source-defined automation cannot be deleted, and the console says why", async ({
   page,
 }) => {
   await page.goto("/#/workflows");
@@ -198,7 +198,7 @@ test("a source-defined workflow cannot be deleted, and the console says why", as
 
   const button = page.getByTestId(DELETE);
   await expect(button).toBeVisible();
-  await expect(button, "a seed-backed workflow must not be deletable").toBeDisabled();
+  await expect(button, "a seed-backed automation must not be deletable").toBeDisabled();
 
   // The explanation lives on the wrapper (a disabled button swallows hover), and
   // it must name the actual remedy, not just refuse.
@@ -221,7 +221,7 @@ test("deleting is confirm-gated, and the confirmation says what goes and what st
     await selectWorkflow(page, name);
 
     const button = page.getByTestId(DELETE);
-    await expect(button, "an overlay-backed workflow must be deletable").toBeEnabled();
+    await expect(button, "an overlay-backed automation must be deletable").toBeEnabled();
     await button.click();
 
     const dialog = page.getByRole("alertdialog");
@@ -352,7 +352,7 @@ test("a version conflict surfaces distinctly with a way out, and deletes nothing
 // Edit mode (issue #259, the remainder after #279)
 // ---------------------------------------------------------------------------
 
-test("a source-defined workflow offers no Edit, with the same explanation Delete gives", async ({
+test("a source-defined automation offers no Edit, with the same explanation Delete gives", async ({
   page,
 }) => {
   await page.goto("/#/workflows");
@@ -362,7 +362,7 @@ test("a source-defined workflow offers no Edit, with the same explanation Delete
 
   const button = page.getByTestId(EDIT);
   await expect(button).toBeVisible();
-  await expect(button, "a seed-backed workflow must not be editable").toBeDisabled();
+  await expect(button, "a seed-backed automation must not be editable").toBeDisabled();
 
   // One refusal, one explanation: the host answers 409 to a PUT and a DELETE
   // for the same reason, so the console must not tell two stories about it.
@@ -372,7 +372,7 @@ test("a source-defined workflow offers no Edit, with the same explanation Delete
   await expect(explanation).toHaveAttribute("title", /workflows\/committed\.toml/);
 });
 
-test("an author can change a saved workflow's schedule, and the id is read-only", async ({
+test("an author can change a saved automation's schedule, and the id is read-only", async ({
   page,
   request,
 }) => {
@@ -397,14 +397,14 @@ test("an author can change a saved workflow's schedule, and the id is read-only"
     const dialog = await openEditDialog(page, name);
 
     // Hydrated from the saved graph, not blank — the whole point of edit mode.
-    await expect(dialog.getByLabel("Workflow ID", { exact: true })).toHaveValue(id);
+    await expect(dialog.getByLabel("Automation ID", { exact: true })).toHaveValue(id);
     await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name);
     await expect(dialog.getByRole("textbox", { name: "Node id" }).first()).toHaveValue("start");
 
     // The id may not change through a PUT — the host answers 400 — so the field
     // states that by being unwritable rather than by refusing after the click.
     await expect(
-      dialog.getByLabel("Workflow ID", { exact: true }),
+      dialog.getByLabel("Automation ID", { exact: true }),
       "an id field that accepts a rename can only ever 400",
     ).toHaveJSProperty("readOnly", true);
 

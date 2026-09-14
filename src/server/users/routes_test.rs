@@ -75,6 +75,7 @@ async fn state_from(
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),
@@ -868,6 +869,7 @@ async fn a_https_deployment_marks_the_cookie_secure() {
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             id: id.clone(),

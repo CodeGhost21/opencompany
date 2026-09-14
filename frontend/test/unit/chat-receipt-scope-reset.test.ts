@@ -71,8 +71,14 @@ describe("company-switch reset wires receiptByThread and agentNames", () => {
 
 describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
   it("routes every clear through shouldClearReceipt rather than deleting unconditionally", () => {
-    expect(appShell).toContain(
-      'import { shouldClearReceipt, type ChatReceipt } from "@/views/chat/ChatLiveReceipt";',
+    // The guard is that clears route through `shouldClearReceipt` — assert the
+    // helper is imported, not the exact shape of the statement importing it.
+    // `ChatReceipt` used to ride the same line because the shell held
+    // `useState<Record<string, ChatReceipt>>`; that state moved to
+    // `room/store.ts`, and pinning the old statement text would have made this
+    // spec fail for a change it has no opinion about.
+    expect(appShell).toMatch(
+      /import \{[^}]*\bshouldClearReceipt\b[^}]*\} from "@\/views\/room\/ChatLiveReceipt";/,
     );
     // The old body deleted whenever `prev[threadId]` was truthy, with no
     // generation check at all — this is the shape that let a stale
@@ -85,7 +91,17 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     // The three callbacks that still clear the receipt keep the #1935 guard:
     // they take the generation their own `onSendStart` returned and hand it to
     // `clearReceipt`, so a stale cross-company clear is a no-op.
-    expect(appShell).toMatch(/const onSendEnd = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
+    //
+    // `onSendEnd` also gained a third, unrelated parameter (issue #101 review,
+    // PR #2052) — the settled response's own reply text(s), which `ended`
+    // needs to tell a held system frame the response duplicates from one it
+    // never will. The regex tolerates it (`(?:, responseTexts\?: readonly
+    // string\[\])?`) rather than pinning its exact name: this test's whole
+    // job is the generation guard, and a future rename of that third param
+    // should not have to touch this file.
+    expect(appShell).toMatch(
+      /const onSendEnd = useCallback\(\s*\n\s*\(threadId: string, gen\?: number(?:, responseTexts\?: readonly string\[\])?\) =>/,
+    );
     expect(appShell).toMatch(/const onSendStale = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
     expect(appShell).toMatch(/const onSendFailed = useCallback\(\s*\n\s*\(threadId: string, gen\?: number\) =>/);
   });
@@ -111,30 +127,30 @@ describe("clearReceipt is generation-guarded (issue #1935 review)", () => {
     expect(appShell).toContain("const receiptGenRef = useRef(0);");
     expect(appShell).toMatch(/const gen = \+\+receiptGenRef\.current;/);
     // Stamped onto the receipt it arms, and handed back to the caller so
-    // `ChatView.send` can thread it through whichever terminal outcome fires.
+    // `RoomView.send` can thread it through whichever terminal outcome fires.
     expect(appShell).toMatch(/\[threadId\]: \{ startedAt: now, lastFrameAt: now, gen \},/);
     expect(appShell).toMatch(/return gen;\s*\n\s*\}, \[\]\);/);
   });
 });
 
 /**
- * `ChatView`'s send surface (issue #1935 review, codex 3892702774).
+ * `RoomView`'s send surface (issue #1935 review, codex 3892702774).
  *
- * `AppShell` owns `receiptByThread` and hands `ChatView` the
+ * `AppShell` owns `receiptByThread` and hands `RoomView` the
  * `onSendStart`/`onSendEnd`/`onSendDetached`/`onSendFailed` callbacks that
- * write it. The send itself lives in `ChatView`'s `send` callback, which —
+ * write it. The send itself lives in `RoomView`'s `send` callback, which —
  * like `AppShell` — sits inside a large host component this suite declines to
  * mount for a wiring assertion.
  *
  * `shouldClearReceipt`'s own suite in `chat-live-receipt.test.ts` proves the
- * *semantics* directly. What this block locks down is that `ChatView` actually
+ * *semantics* directly. What this block locks down is that `RoomView` actually
  * *wires* into them: captures `onSendStart`'s return value and forwards it to
  * every terminal call, so a settle arriving after a company switch is refused
  * by generation rather than deleting the new company's receipt.
  */
-const chatViewTsx = readFileSync(resolve(here, "../../src/views/ChatView.tsx"), "utf8");
+const chatViewTsx = readFileSync(resolve(here, "../../src/views/RoomView.tsx"), "utf8");
 
-describe("ChatView's send surface generation-tags its receipt clears", () => {
+describe("RoomView's send surface generation-tags its receipt clears", () => {
   it("captures onSendStart's return value instead of discarding it", () => {
     // The pre-fix shape was a bare `onSendStart?.(stateKey);` statement — the
     // call happened, but nothing captured what it returned, so every terminal
@@ -148,10 +164,12 @@ describe("ChatView's send surface generation-tags its receipt clears", () => {
 
   it("forwards that generation to all three terminal outcomes", () => {
     // `gen` pinned by position, with the argument list left open: #2044 added
-    // a fourth (`chatId`) and the generation being third is the whole of what
-    // this asserts. Its own contract is `appShell`'s signature check above.
+    // a fourth (`chatId`) to `onSendDetached`, and `onSendEnd` gained a third
+    // of its own (`responseTexts`, issue #101 review, PR #2052 — see the
+    // `appShell` signature check above for why). The generation being second
+    // is the whole of what this asserts.
     expect(chatViewTsx).toMatch(/onSendDetached\?\.\(stateKey, answer\.turnId, gen[,)]/);
-    expect(chatViewTsx).toMatch(/onSendEnd\?\.\(stateKey, gen\);/);
+    expect(chatViewTsx).toMatch(/onSendEnd\?\.\(stateKey, gen(?:, responseTexts)?\);/);
     expect(chatViewTsx).toMatch(/onSendFailed\?\.\(stateKey, gen\);/);
   });
 

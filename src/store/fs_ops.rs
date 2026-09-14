@@ -110,6 +110,30 @@ impl TaskStore for FsOps {
         write_atomic(&path, &serde_json::to_string(&tasks)?).await
     }
 
+    async fn update_if_column(
+        &self,
+        company: &CompanyId,
+        task: &TaskRecord,
+        observed: &TaskRecord,
+        expected_column: &str,
+    ) -> Result<bool> {
+        if observed.id != task.id || observed.column != expected_column {
+            return Ok(false);
+        }
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.tasks_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut tasks = load_json_vec::<TaskRecord>(&path).await?;
+        let Some(existing) = tasks.iter_mut().find(|existing| *existing == observed) else {
+            return Ok(false);
+        };
+        *existing = task.clone();
+        write_atomic(&path, &serde_json::to_string(&tasks)?).await?;
+        Ok(true)
+    }
+
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).tasks_json();
         let lock = path_lock(&path);
@@ -1663,12 +1687,13 @@ impl WorkspaceStore for FsOps {
         Ok(Some((node, content, len)))
     }
 
-    async fn write(
+    async fn write_with_revision(
         &self,
         company: &CompanyId,
         id: &str,
         content: &str,
         author: WorkspaceOrigin,
+        expected_updated_at: Option<u64>,
     ) -> Result<WorkspaceNode> {
         let path = self.bundle(company).workspace_index_json();
         let lock = path_lock(&path);
@@ -1687,9 +1712,10 @@ impl WorkspaceStore for FsOps {
                 crate::ports::workspace::binary_write_refusal(&node.name, &mime),
             ));
         }
-        node.updated_at_millis = now_millis();
-        // Authorship rides the same stamp as the timestamp: "when the body last
-        // changed" and "who changed it" are one fact and must never drift apart.
+        node.updated_at_millis = crate::ports::workspace::next_write_revision(
+            node.updated_at_millis,
+            expected_updated_at,
+        )?;
         node.updated_by = author;
         let node = node.clone();
         let file = self.physical_path(company, &index, id)?;
@@ -1980,7 +2006,8 @@ impl WorkspaceStore for FsOps {
             if let Some(parent) = parent {
                 node.parent_id = parent.map(str::to_string);
             }
-            node.updated_at_millis = now_millis();
+            node.updated_at_millis =
+                crate::ports::workspace::next_write_revision(node.updated_at_millis, None)?;
         }
         let node = index.get(id).cloned().expect("node present");
         let new_physical = self.physical_path(company, &index, id)?;
@@ -2061,7 +2088,8 @@ impl WorkspaceStore for FsOps {
         let staged_physical = self.physical_path(company, &index, replacement_id)?;
         let mut promoted = replacement;
         promoted.name = name.to_string();
-        promoted.updated_at_millis = now_millis();
+        promoted.updated_at_millis =
+            crate::ports::workspace::next_write_revision(promoted.updated_at_millis, None)?;
 
         // Where the staged payload lands differs by mode. Replacing, it is the
         // superseded node's own path — that rename IS the swap boundary, which
@@ -2893,6 +2921,26 @@ mod test {
         conformance::assert_workspace_store(Arc::new(FsOps::new(&root))).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_conditional_write() {
+        let root = tmp_root();
+        conformance::assert_workspace_conditional_write(
+            Arc::new(FsOps::new(root.path())),
+            Arc::new(FsOps::new(root.path())),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conformance_workspace_revision_mutations() {
+        let root = tmp_root();
+        conformance::assert_workspace_revision_mutations(
+            Arc::new(FsOps::new(root.path())),
+            Arc::new(FsOps::new(root.path())),
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn conformance_workspace_binary_store() {
         let root_dir = tmp_root();
@@ -2912,6 +2960,16 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_workspace_folder_claims(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_create_rejects_an_absent_or_foreign_parent() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_create_rejects_an_absent_or_foreign_parent(Arc::new(
+            FsOps::new(&root),
+        ))
+        .await;
     }
 
     #[tokio::test]

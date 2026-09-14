@@ -393,6 +393,83 @@ mod tests {
         );
     }
 
+    /// The gate is `cost_usd == 0.0` on a value openhuman derives, not a
+    /// token-count threshold — so the smallest representable positive `f64`
+    /// still posts a ledger entry, however invisible its rendered amount
+    /// would be, and there is no rounding tolerance between "exactly zero"
+    /// and "not".
+    #[test]
+    fn the_smallest_representable_positive_cost_still_posts_a_ledger_entry() {
+        // The smallest positive `f64` there is: the least subnormal, which is
+        // smaller than `MIN_POSITIVE` (the smallest *normal*). Nothing positive
+        // can sit closer to the gate than this.
+        let smallest = f64::from_bits(1);
+        assert!(smallest.is_subnormal() && smallest > 0.0);
+        let turn = TurnUsage {
+            input_tokens: 3,
+            output_tokens: 1,
+            cached_input_tokens: 0,
+            cost_usd: smallest,
+        };
+        let entry = ledger_entry_for(&turn, "ceo").expect(
+            "a nonzero cost, however small, still posts — the gate is exact equality to zero",
+        );
+        assert_eq!(entry.amount_usd, -smallest);
+
+        let exactly_zero = TurnUsage {
+            cost_usd: 0.0,
+            ..turn
+        };
+        assert!(
+            ledger_entry_for(&exactly_zero, "ceo").is_none(),
+            "and exactly zero is still the one value that does not post"
+        );
+    }
+
+    /// A session that only ever runs managed-passthrough turns has real cost
+    /// (openhuman billed backend-side) this seam can never see — `cost_usd`
+    /// arrives `0.0` on every turn. The acknowledged limit is that Finances
+    /// stays silent about it forever, not just on one turn: repeated turns
+    /// keep producing zero ledger entries while their tokens keep
+    /// accumulating on the Usage surface, so the two surfaces drift apart by
+    /// design rather than by omission.
+    #[tokio::test]
+    async fn a_session_of_only_zero_cost_turns_never_posts_a_ledger_entry() {
+        let store = RecordingStore::default();
+        let meter = RecordingMeter::default();
+        let turn = TurnUsage {
+            input_tokens: 500,
+            output_tokens: 120,
+            cached_input_tokens: 0,
+            cost_usd: 0.0,
+        };
+        for _ in 0..5 {
+            record_turn_cost(
+                &turn,
+                "ceo",
+                "managed",
+                None,
+                &CompanyId::new("acme"),
+                &store,
+                Some(&meter),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(
+            store.ledger.lock().unwrap().is_empty(),
+            "five real turns, still zero ledger entries — this seam has no visibility into \
+             managed-passthrough spend at any scale"
+        );
+        assert_eq!(
+            meter.samples.lock().unwrap().len(),
+            5,
+            "but every turn's tokens still land on the Usage surface"
+        );
+    }
+
     #[tokio::test]
     async fn record_turn_cost_is_a_noop_for_zero_usage() {
         let store = RecordingStore::default();

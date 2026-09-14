@@ -95,7 +95,7 @@ export function starterGraph(id: string, name: string) {
   return {
     id,
     name,
-    description: "Created by the workflow-dialog e2e specs.",
+    description: "Created by the automation-dialog e2e specs.",
     nodes: [{ id: "start", kind: "trigger", name: "Start" }],
     edges: [],
   };
@@ -151,7 +151,7 @@ export async function openEditForm(
   await dismissTour(page);
   await openWorkflow(page, name);
   const edit = page.getByTestId("workflow-edit");
-  await expect(edit, "a console-created workflow must be editable").toBeEnabled();
+  await expect(edit, "a console-created automation must be editable").toBeEnabled();
   await edit.click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText(`Edit “${name}”`, { exact: true })).toBeVisible();
@@ -254,7 +254,7 @@ export async function stubCreateFailure(
 export async function openOneBox(page: Page): Promise<Locator> {
   await page.goto("/#/workflows");
   await dismissTour(page);
-  await page.getByRole("button", { name: "New workflow" }).click();
+  await page.getByRole("button", { name: "New automation" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByTestId("workflow-describe-box")).toBeVisible();
   return dialog;
@@ -289,7 +289,7 @@ export async function openRefusedCreateForm(
   await dialog.getByTestId("workflow-dialog-submit").click();
 
   await expect(
-    dialog.getByLabel("Workflow ID", { exact: true }),
+    dialog.getByLabel("Automation ID", { exact: true }),
     "a refusal naming an id must hand over the field that obeys it",
   ).toBeVisible({ timeout: 30_000 });
   return dialog;

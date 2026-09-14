@@ -69,6 +69,21 @@ export const DESKS_SEGMENT = "desks";
  */
 export const GRAPH_SEGMENT = "graph";
 
+/**
+ * The roster's own segment — `#/company/agents`.
+ *
+ * The roster is what a bare `#/company` has always rendered, and it still is:
+ * this names the same page so the sidebar's "Agents" row can point at an
+ * address that says what it opens. `#/company` said "company" and drew the
+ * agents, which is the mismatch the `/company` prefix work set out to remove
+ * everywhere else.
+ *
+ * Reserved exactly like {@link DESKS_SEGMENT} and {@link GRAPH_SEGMENT}, with
+ * the same accepted collision: a desk declared with the literal id `agents`
+ * cannot be focused through its own link.
+ */
+export const AGENTS_SEGMENT = "agents";
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -127,7 +142,7 @@ export function CompanyView({
     return <Overview client={client} company={company} companyName={companyName} />;
   }
 
-  if (sub) {
+  if (sub && sub !== AGENTS_SEGMENT) {
     return (
       <OrgChartView
         client={client}

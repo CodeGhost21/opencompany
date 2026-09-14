@@ -63,7 +63,7 @@ describe("hasOperatorContent", () => {
     ).toBe(true);
   });
 
-  it("does not count a teammate's own Agents/<id>/ folder, which the host mints", () => {
+  it("does not count an agent's own Agents/<id>/ folder, which the host mints", () => {
     expect(
       hasOperatorContent([
         ...SCAFFOLD,
@@ -77,7 +77,7 @@ describe("hasOperatorContent", () => {
     ).toBe(false);
   });
 
-  it("counts a note filed inside a teammate's folder, which a person did choose", () => {
+  it("counts a note filed inside an agent's folder, which a person did choose", () => {
     expect(
       hasOperatorContent([
         ...SCAFFOLD,

@@ -28,7 +28,7 @@
 
 import type { ApprovalSummary, Verdict } from "@/api/types";
 import type { WorkflowRunApprovalRow } from "@/api/workflows";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 
 /** One approval the run on screen is held on, and what has become of it. */
 export interface RunApproval {

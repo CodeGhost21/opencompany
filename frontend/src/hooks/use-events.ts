@@ -331,6 +331,53 @@ export type CompanyStreamEvent =
   // and the display name, with **no graph body** — the host omits it on purpose
   // (see `project_event`). A console reacts to this frame by re-reading
   // `GET …/workflows`, so the picker's content keeps exactly one source.
+  /**
+   * The company's own shape changed: a teammate or desk was created, a seat
+   * moved, or a desk's move grammar was installed or restored.
+   *
+   * Thin on purpose, like the workflow frames beside them — ids and enough
+   * identity to act on, never a configuration body. A consumer reacts by
+   * **re-reading** `GET …/team` and `GET …/desks` rather than merging the frame,
+   * which is the same discipline the Observatory documents and the reason the
+   * activity graph can poll instead of subscribing.
+   *
+   * Declared here because the host sends them; the `default` arm below already
+   * ignored them harmlessly, and typing them is what lets a consumer opt in.
+   */
+  | {
+      type: "teammate_added";
+      seq: number;
+      atMillis: number;
+      agentId: string;
+      role: string;
+      /** The teammate that created it, when an agent did rather than a person. */
+      byAgentId?: string;
+    }
+  | {
+      type: "desk_created";
+      seq: number;
+      atMillis: number;
+      deskId: string;
+      name: string;
+      members: string[];
+    }
+  | { type: "desk_deleted"; seq: number; atMillis: number; deskId: string }
+  | {
+      type: "desk_members_changed";
+      seq: number;
+      atMillis: number;
+      deskId: string;
+      added: string[];
+      removed: string[];
+    }
+  | {
+      type: "desk_hive_configured";
+      seq: number;
+      atMillis: number;
+      deskId: string;
+      /** True when the override was dropped and the manifest restored. */
+      reset: boolean;
+    }
   | {
       type:
         | "workflow_created"
@@ -1283,7 +1330,7 @@ export function handleEvent(
     case "workflow_run_finished": {
       onWorkflowRunEvent?.(event);
       if (event.error) {
-        toast.error("A workflow run failed", {
+        toast.error("An automation run failed", {
           description: `${event.workflowId} — ${event.error}`,
         });
         break;
@@ -1294,7 +1341,7 @@ export function handleEvent(
       // operator who pressed Cancel that the run completed. Checked BEFORE the
       // delivery scan because a cancelled run has no deliveries to scan.
       if (event.cancelled) {
-        toast.info("A workflow run was stopped", {
+        toast.info("An automation run was stopped", {
           description: `${event.workflowId} — stopped by an operator. Steps that finished are in the run history.`,
         });
         break;

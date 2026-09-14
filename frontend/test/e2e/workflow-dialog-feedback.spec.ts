@@ -498,13 +498,13 @@ test("a refused create hands over the fields, carrying the graph the host refuse
 
   // The fields are back, hydrated with what was refused — so the instruction in
   // the message ("pick a different id") is one the operator can actually follow.
-  await expect(dialog.getByLabel("Workflow ID", { exact: true })).toHaveValue(graph.id);
+  await expect(dialog.getByLabel("Automation ID", { exact: true })).toHaveValue(graph.id);
   await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(graph.name);
   await expect(dialog.getByLabel("Node id").first()).toHaveValue("start");
   await expect(dialog.getByLabel("Node id").nth(1)).toHaveValue("report");
 
   // …and the id is writable, because this is still a create.
-  await expect(dialog.getByLabel("Workflow ID", { exact: true })).toHaveJSProperty(
+  await expect(dialog.getByLabel("Automation ID", { exact: true })).toHaveJSProperty(
     "readOnly",
     false,
   );
@@ -516,7 +516,7 @@ test("a refused create hands over the fields, carrying the graph the host refuse
   await expect(dialog.getByTestId("workflow-describe-box")).toHaveCount(0);
 });
 
-test("a new scheduled workflow discloses that it starts paused (#813)", async ({
+test("a new scheduled automation discloses that it starts paused (#813)", async ({
   page,
 }) => {
   // #813 defect 7: the #276 disarm rule creates a scheduled workflow paused,
@@ -533,7 +533,7 @@ test("a new scheduled workflow discloses that it starts paused (#813)", async ({
       { id: "report", kind: "output", name: "Report" },
     ],
   });
-  const paused = dialog.getByText(/scheduled workflow is created paused/i);
+  const paused = dialog.getByText(/scheduled automation is created paused/i);
 
   // No schedule set yet — there is nothing to disclose.
   await expect(paused).toHaveCount(0);
@@ -560,10 +560,10 @@ test("submitting with an empty id surfaces the validation message on-screen (#81
     draftedGraph("e2e-emptyid", "Empty id probe"),
   );
 
-  await dialog.getByLabel("Workflow ID", { exact: true }).fill("");
+  await dialog.getByLabel("Automation ID", { exact: true }).fill("");
   await dialog.getByTestId(SUBMIT).click();
 
-  const banner = dialog.getByText("Give the workflow an id.");
+  const banner = dialog.getByText("Give the automation an id.");
   await expect(banner).toBeVisible();
   await expect(banner).toBeInViewport();
 
@@ -571,5 +571,5 @@ test("submitting with an empty id surfaces the validation message on-screen (#81
   // the reason the write did nothing rather than left at the pressed button.
   const bannerBox = dialog.getByTestId("create-error");
   await expect(bannerBox).toBeFocused();
-  await expect(bannerBox).toContainText("Give the workflow an id.");
+  await expect(bannerBox).toContainText("Give the automation an id.");
 });

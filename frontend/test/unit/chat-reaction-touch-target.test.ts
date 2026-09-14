@@ -4,8 +4,8 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { MessageRow } from "@/views/chat/MessageRow";
-import type { TimelineEntry } from "@/views/chat/model";
+import { MessageRow } from "@/views/room/MessageRow";
+import type { TimelineEntry } from "@/views/room/model";
 
 /** Issue #1396: adjacent reaction chips need a 24px target on touch layouts. */
 

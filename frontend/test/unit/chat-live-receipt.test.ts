@@ -12,8 +12,8 @@ import {
   shouldClearReceipt,
   RECEIPT_STALL_AFTER_MS,
   type ChatReceipt,
-} from "@/views/chat/ChatLiveReceipt";
-import type { Channel } from "@/views/chat/model";
+} from "@/views/room/ChatLiveReceipt";
+import type { Channel } from "@/views/room/model";
 
 /**
  * Coverage for the chat live receipt (issue #1934) — the row that fills the gap
@@ -99,7 +99,7 @@ describe("ChatLiveReceipt", () => {
     expect(text()).not.toContain("Picked up by");
   });
 
-  it("names the teammate once an agent id resolves", async () => {
+  it("names the agent once an agent id resolves", async () => {
     await render({
       receipt: { startedAt: BASE, lastFrameAt: BASE, agentId: "a-ada" },
       agentNames: { "a-ada": "Ada" },

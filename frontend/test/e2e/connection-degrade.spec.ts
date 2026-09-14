@@ -95,11 +95,11 @@ async function seedSecondHost(page: Page) {
  */
 
 test("the number row goes with the roster it selected from", async ({ page }) => {
-  // It used to switch hosts: the listener is installed on `window` by the hosts
-  // provider, not by the menu, so hiding the roster does not remove it. Left
-  // live it would swallow the browser's own Cmd-2 and put an unreachable host
-  // on screen with nothing naming it — the roster row that used to explain the
-  // switch is gone.
+  // `HOSTS_HIDDEN` (`product-scope.ts`) is false again — the roster and its
+  // `Cmd+N` shortcut are live, not swallowed — so switching to the dead host
+  // is expected to do exactly what its own row promises: put that host's own
+  // failure on screen, contained to it, not a whole-app outage and not a
+  // silently-ignored keystroke.
   await seedSecondHost(page);
   await page.goto("/#/tasks");
   await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1, {
@@ -108,12 +108,13 @@ test("the number row goes with the roster it selected from", async ({ page }) =>
 
   const mod = process.platform === "darwin" ? "Meta" : "Control";
 
-  // The dead host is seeded and reachable by the old shortcut. Nothing happens.
+  // Cmd+2 selects the dead host; its own failure appears, not a global one.
   await page.keyboard.press(`${mod}+2`);
-  await expect(page.getByTestId("connection-error")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1);
+  await expect(page.getByTestId("connection-error")).toBeVisible({ timeout: 30_000 });
 
+  // And it's contained: switching back to the primary host clears the error
+  // and the working board reappears exactly as it was.
   await page.keyboard.press(`${mod}+1`);
-  await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1);
   await expect(page.getByTestId("connection-error")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1);
 });

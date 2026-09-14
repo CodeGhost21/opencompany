@@ -8,7 +8,7 @@ Content, not code. Two gaps:
    `web-research` and `weekly-report` — the console's install registry needs
    a real catalog.
 2. Of the 19 company templates under `companies/`, only
-   `agentic_marketing_agency` ships the full directory (skills, workflows,
+   `marketing_agency` ships the full directory (skills, workflows,
    workspace). The other 18 have just `company.toml` + `README.md`, so their
    consoles boot empty.
 
@@ -48,7 +48,7 @@ clearly stated output.
 
 ### Per-company starters (18 companies)
 
-For each bare company, using `agentic_marketing_agency` as the template:
+For each bare company, using `marketing_agency` as the template:
 
 - **2–4 skills** specific to the business (law firm: `contract-review`,
   `client-intake`; VC: `deal-memo`, `diligence-checklist`; support:

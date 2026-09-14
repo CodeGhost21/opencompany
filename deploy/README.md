@@ -2,7 +2,7 @@
 
 One image runs the host; a second serves the operator console. **Which company
 runs is a single switch — `OPENCOMPANY_COMPANY`** — an example directory name
-(`agentic_venture_capital`, `agentic_marketing_agency`, …) or an alias (`fund`,
+(`venture_capital`, `marketing_agency`, …) or an alias (`fund`,
 `marketing`, `software`, `studio`, `law`, `accelerator`, `signals`, …).
 
 The same two images deploy everywhere below; only the wiring differs.

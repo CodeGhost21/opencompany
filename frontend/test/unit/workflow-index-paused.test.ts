@@ -185,7 +185,7 @@ async function createThroughDialog() {
   });
 }
 
-describe("the workflows index shows a disarmed schedule", () => {
+describe("the automations index shows a disarmed schedule", () => {
   it("badges the paused card, and only the paused card", async () => {
     await mountIndex(makeClient());
 
@@ -224,7 +224,7 @@ describe("the workflows index shows a disarmed schedule", () => {
     );
     await createThroughDialog();
 
-    expect(toasts.success).not.toHaveBeenCalledWith("Workflow created.");
+    expect(toasts.success).not.toHaveBeenCalledWith("Automation created.");
     expect(toasts.warning).toHaveBeenCalledTimes(1);
     const [text, options] = toasts.warning.mock.calls[0] as [string, { action?: { label: string } }];
     expect(text).toContain("Created, and paused");
@@ -247,7 +247,7 @@ describe("the workflows index shows a disarmed schedule", () => {
     );
     await createThroughDialog();
 
-    expect(toasts.success).toHaveBeenCalledWith("Workflow created.");
+    expect(toasts.success).toHaveBeenCalledWith("Automation created.");
     expect(toasts.warning).not.toHaveBeenCalled();
   });
 });

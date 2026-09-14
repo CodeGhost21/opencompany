@@ -305,14 +305,14 @@ describe("the status dot defines the run's verdict on hover", () => {
   // should go looking at the deployment, not at their nodes"). Telling that
   // operator to correct the workflow sends them to fix something that was
   // never broken.
-  it("does not unconditionally tell the operator to correct the workflow", async () => {
+  it("does not unconditionally tell the operator to correct the automation", async () => {
     await renderHistory(failedRun());
     const dot = container.querySelector(
       '[data-testid="workflow-run-status-dot"]',
     );
     const title = dot?.getAttribute("title") ?? "";
     expect(title).toContain("failed");
-    expect(title).not.toContain("correct the workflow, and run it again");
+    expect(title).not.toContain("correct the automation, and run it again");
     // The hedge names a case where the failure isn't the workflow's fault.
     expect(title).toContain("host restart");
   });
@@ -343,13 +343,13 @@ describe("the status dot defines the run's verdict on hover", () => {
   // wired"). The frontend has no field naming which one happened, so telling
   // the operator this "needs a workflow or policy change" is only true for
   // one of the two causes and misdirects them for the other.
-  it("does not unconditionally prescribe a workflow change for a call that could not be queued", async () => {
+  it("does not unconditionally prescribe an automation change for a call that could not be queued", async () => {
     await renderHistory(blockedUnparkableRun());
     const dot = container.querySelector(
       '[data-testid="workflow-run-status-dot"]',
     );
     const title = dot?.getAttribute("title") ?? "";
-    expect(title).not.toContain("that case needs a workflow or policy change");
+    expect(title).not.toContain("that case needs an automation or policy change");
     // The hedge names the infra cause a workflow edit can't fix.
     expect(title).toContain("approvals queue itself can refuse the write");
   });
@@ -520,11 +520,11 @@ function failedAtNodeRun(): WorkflowRunOutcome {
 }
 
 describe("the failed-run remedy matches whether a node was actually at fault", () => {
-  it("still tells the operator to correct the workflow when a node errored", async () => {
+  it("still tells the operator to correct the automation when a node errored", async () => {
     await renderHistory(failedAtNodeRun());
     const row = container.querySelector('[data-testid="workflow-run-row"]');
     expect(row?.textContent).toContain(
-      "Review the error details, then correct the workflow and run it again.",
+      "Review the error details, then correct the automation and run it again.",
     );
   });
 
@@ -542,11 +542,11 @@ describe("the failed-run remedy matches whether a node was actually at fault", (
   // tenth-pass fix already established for the `nodes.length > 0` sibling
   // arm). The assertion below on the removed phrase is the regression proof:
   // it fails against the pre-fix string, which asserted exactly that.
-  it("does not tell the operator to correct the workflow, and does not claim nothing ran, when no node was at fault", async () => {
+  it("does not tell the operator to correct the automation, and does not claim nothing ran, when no node was at fault", async () => {
     await renderHistory(failedRun());
     const row = container.querySelector('[data-testid="workflow-run-row"]');
     expect(row?.textContent).not.toContain(
-      "correct the workflow and run it again",
+      "correct the automation and run it again",
     );
     expect(row?.textContent).not.toContain(
       "nothing in the graph got the chance to run",

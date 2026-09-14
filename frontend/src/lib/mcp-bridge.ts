@@ -56,8 +56,8 @@ export function mcpBridgeState(status: CapabilityStatusDto | null | undefined): 
  */
 export function mcpAddedMessage(name: string, bridge: McpBridgeState): string {
   return bridge === "absent"
-    ? `Added ${name}. It is stored, but no teammate can call it until this deployment is rebuilt with the MCP bridge.`
-    : `Added ${name}. Teammates pick it up on their next turn.`;
+    ? `Added ${name}. It is stored, but no agent can call it until this deployment is rebuilt with the MCP bridge.`
+    : `Added ${name}. Agents pick it up on their next turn.`;
 }
 
 /**

@@ -198,11 +198,11 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
   sub_workflow: [
     {
       key: "workflow_id",
-      label: "Workflow to run",
+      label: "Automation to run",
       control: "workflow-ref",
       required: true,
-      placeholder: "another workflow's id",
-      hint: "The id of the workflow to run. It can't be this workflow's own id.",
+      placeholder: "another automation's id",
+      hint: "The id of the automation to run. It can't be this automation's own id.",
     },
   ],
   transform: [
@@ -411,7 +411,7 @@ function requiredMessage(kind: string, spec: ConfigFieldSpec): string {
     return "An HTTP request needs a URL.";
   }
   if (kind === "sub_workflow" && spec.key === "workflow_id") {
-    return "A sub-workflow needs the id of the workflow to run.";
+    return "A sub-automation needs the id of the automation to run.";
   }
   return `${spec.label} is required.`;
 }
@@ -454,7 +454,7 @@ export function configDraftProblem(
   if (kind === "sub_workflow") {
     const wid = (draft.workflow_id ?? "").trim();
     if (wid && selfId.trim() && wid === selfId.trim()) {
-      return "A sub-workflow can't call itself — point it at a different workflow's id.";
+      return "A sub-automation can't call itself — point it at a different automation's id.";
     }
   }
   return null;
@@ -510,7 +510,7 @@ export function nodeKindConfigProblem(node: {
       // take the whole validation down instead of refusing the one node).
       return typeof node.agent === "string" && node.agent.trim()
         ? null
-        : "An agent step names no teammate — set its `agent` field to a roster teammate (not inside `config`).";
+        : "An agent step names no agent — set its `agent` field to a roster agent (not inside `config`).";
     case "tool_call":
       return nonEmpty("slug")
         ? null
@@ -533,7 +533,7 @@ export function nodeKindConfigProblem(node: {
     case "sub_workflow":
       return nonEmpty("workflow_id")
         ? null
-        : "A sub_workflow step sets no `config.workflow_id` — name the workflow to run inside `config`.";
+        : "A sub_workflow step sets no `config.workflow_id` — name the automation to run inside `config`.";
     default:
       return null;
   }

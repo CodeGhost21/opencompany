@@ -227,7 +227,7 @@ describe("validateProposal", () => {
   });
 
   /** …and an `agent` step that names no teammate, the roster half of the rule. */
-  it("refuses an agent step that names no teammate", () => {
+  it("refuses an agent step that names no agent", () => {
     const out = validateProposal(
       {
         summary: "s",

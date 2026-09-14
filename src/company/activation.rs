@@ -18,8 +18,8 @@
 //!      all (per
 //!      [`grants_composio_explicit`](crate::company::grants_composio_explicit))
 //!      — several bundled companies drop `composio` on purpose
-//!      (`companies/agentic_math_lab`, `companies/agentic_product_team`,
-//!      `companies/agentic_research_lab`, `companies/openhuman_demo`,
+//!      (`companies/math_lab`, `companies/product_team`,
+//!      `companies/research_lab`, `companies/openhuman_demo`,
 //!      `companies/signals_opportunity_studio`) — issue #1850 review, finding 1.
 //!
 //!    Requiring a connection no build or no agent could ever produce would
@@ -432,6 +432,7 @@ mod test {
 
     fn record(id: &CompanyId, allow: &[&str]) -> CompanyRecord {
         CompanyRecord {
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: manifest(allow),
             ledger: Vec::new(),
@@ -484,8 +485,8 @@ mod test {
     #[test]
     fn no_composio_grant_at_all_waives_the_integration_step() {
         // Issue #1850 review: several bundled companies deliberately never
-        // grant `composio` at all (`companies/agentic_math_lab`,
-        // `companies/agentic_product_team`, `companies/agentic_research_lab`,
+        // grant `composio` at all (`companies/math_lab`,
+        // `companies/product_team`, `companies/research_lab`,
         // `companies/openhuman_demo`, `companies/signals_opportunity_studio`)
         // — requiring a connection nobody in those companies could ever make
         // would permanently block activation for every one of them. When the
@@ -633,7 +634,7 @@ mod test {
 
     /// The end-to-end shape of the issue #1850 review finding: a company
     /// whose manifest never grants `composio` at all (the
-    /// `agentic_math_lab`/`agentic_product_team` pattern) must still be able
+    /// `math_lab`/`product_team` pattern) must still be able
     /// to latch activation once its other two steps are true — the waived
     /// integration step must not block `compute_and_latch` from ever
     /// stamping the record for these company types.

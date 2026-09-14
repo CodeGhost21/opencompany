@@ -1,21 +1,21 @@
 #!/bin/sh
 # Selects which example company this container runs, from $OPENCOMPANY_COMPANY.
-# The value may be an example directory name (e.g. agentic_venture_capital) or a
+# The value may be an example directory name (e.g. venture_capital) or a
 # friendly alias (e.g. fund). This is the "which module spins up" switch.
 set -eu
 
-COMPANY="${OPENCOMPANY_COMPANY:-agentic_marketing_agency}"
+COMPANY="${OPENCOMPANY_COMPANY:-marketing_agency}"
 
 # Friendly aliases → example directory names.
 case "$COMPANY" in
-  fund | vc | venture-capital)     COMPANY="agentic_venture_capital" ;;
-  marketing | agency)              COMPANY="agentic_marketing_agency" ;;
-  software | saas | dev)           COMPANY="agentic_software_company" ;;
-  studio | venture-studio)         COMPANY="agentic_venture_studio" ;;
+  fund | vc | venture-capital)     COMPANY="venture_capital" ;;
+  marketing | agency)              COMPANY="marketing_agency" ;;
+  software | saas | dev)           COMPANY="software_company" ;;
+  studio | venture-studio)         COMPANY="venture_studio" ;;
   accelerator)                     COMPANY="startup_accelerator" ;;
-  law | legal)                     COMPANY="agentic_law_firm" ;;
-  accounting | finance)            COMPANY="agentic_accounting_firm" ;;
-  support)                         COMPANY="agentic_customer_support" ;;
+  law | legal)                     COMPANY="law_firm" ;;
+  accounting | finance)            COMPANY="accounting_firm" ;;
+  support)                         COMPANY="customer_support" ;;
   signals | opportunity)           COMPANY="signals_opportunity_studio" ;;
 esac
 

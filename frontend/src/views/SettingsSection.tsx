@@ -4,11 +4,10 @@ import type { OpenCompanyClient } from "@/api/client";
 import { RouteLoading } from "@/components/route-loading";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
-import { InferenceView } from "@/views/InferenceView";
-import { HostingView } from "@/views/HostingView";
-import { SearchView } from "@/views/SearchView";
+import { FeedbackView } from "@/views/FeedbackView";
 import { PeopleView } from "@/views/PeopleView";
-import { SkillsView } from "@/views/SkillsView";
+import { AppearanceView } from "@/views/settings/AppearanceView";
+import { ApprovalsSettingsView } from "@/views/settings/ApprovalsSettingsView";
 import { SettingsView } from "@/views/SettingsView";
 import {
   SETTINGS_PAGE_GROUPS,
@@ -24,12 +23,30 @@ export { SETTINGS_PAGES, type SettingsPage };
 // Recharts is heavy and only used here — load the usage dashboard on demand.
 const UsageView = lazy(() => import("@/views/UsageView").then((m) => ({ default: m.UsageView })));
 
+// Same rule, same reason: the Observatory pulls its own charting and DAG code,
+// and an operator who never opens it should not pay for it. `app-shell.tsx`
+// lazies the same module for the run-detail route; two `lazy()` calls over one
+// import share a chunk, so this costs nothing beyond the second boundary.
+const ObservatoryView = lazy(() =>
+  import("@/views/observatory/ObservatoryView").then((m) => ({ default: m.ObservatoryView })),
+);
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
   feed: CompanyFeed;
   /** The hash's second segment, e.g. `people` in `#/settings/people`. */
   sub: string | null;
+  /**
+   * The shell's re-read tick, forwarded to the Observatory index.
+   *
+   * The same value `app-shell.tsx` hands the run-detail route: one counter for
+   * both signals a re-read should follow — a workflow run moved, or a workflow
+   * node started or settled. Passed through rather than defaulted to a constant
+   * because a constant is an index that never refreshes, which on the one page
+   * built to watch runs in flight is the whole feature.
+   */
+  eventTick: number;
   onFlag: () => void;
   /** Start the reset (archive + start clean) flow for the active company (#1807). */
   onResetCompany?: (id: string, name: string) => void;
@@ -39,17 +56,27 @@ interface Props {
  * Settings, as a section rather than a page.
  *
  * Everything that configures the company rather than running it lives here,
- * behind a sub-sidebar: the connection and lifecycle controls, who can sign in,
- * which model teammates think with, where its sites deploy and where it
- * searches. Each is its own route (`#/settings/people`), so a sub-page is
- * linkable and survives a refresh exactly as a top-level view does.
+ * behind a sub-sidebar: the connection and lifecycle controls, who can sign
+ * in, what its teammates actually did, and what it spends. Each is its own
+ * route (`#/settings/people`), so a sub-page is linkable and survives a
+ * refresh exactly as a top-level view does.
  *
- * Which third-party accounts are linked and which tool servers are installed
- * used to be here too. They are the Connections section now — see
- * `views/connections/ConnectionsSection.tsx` for why, and note that the three
- * credential forms still on this rail stayed on purpose.
+ * Everything with an outside service at the other end of it used to be here
+ * too — apps, tool servers, the model, skills, hosting, search. All six are
+ * the Connections section now; `views/connection-pages.ts` argues why, and
+ * `console-route-rewrites.ts` keeps their old `#/settings/…` addresses
+ * resolving. A new row that names an outside service belongs there, not
+ * here.
  */
-export function SettingsSection({ client, company, feed, sub, onFlag, onResetCompany }: Props) {
+export function SettingsSection({
+  client,
+  company,
+  feed,
+  sub,
+  eventTick,
+  onFlag,
+  onResetCompany,
+}: Props) {
   const page = resolveSettingsPage(sub);
   const activePage = SETTINGS_PAGES.find((item) => item.id === page)!;
 
@@ -59,14 +86,14 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
         aria-label="Settings"
         className="hidden w-60 shrink-0 flex-col gap-0.5 overflow-y-auto border-r p-3 lg:flex"
       >
-        {/* A visual caption for the rail, not a heading. The `nav` is already
-            named by its `aria-label`, so an `h2` here added nothing for a screen
-            reader and broke the document outline: the rail renders before the
-            sub-page, so heading navigation met a section-level heading ahead of
-            the page's own `h1` (issue #1392). */}
-        <div className="px-2 pb-2 pt-1 text-xs font-medium text-muted-foreground">
-          Settings
-        </div>
+        {/* No "Settings" caption. It was a visual label for a rail that is
+            already unmistakable: you arrive here from the Settings row in the
+            sidebar footer, the page beside it says "General settings", and
+            every group below carries its own heading. A word repeated three
+            times on one screen is furniture. Nothing is lost for a screen
+            reader either — the caption was deliberately a `div` rather than an
+            `h2` (issue #1392), so it was never in the document outline, and
+            the `nav`'s own `aria-label` still names this landmark. */}
         {SETTINGS_PAGE_GROUPS.map((group) => (
           <section key={group.id} aria-labelledby={`settings-group-${group.id}`}>
             {/* Named by `aria-labelledby`, which resolves against any element,
@@ -162,31 +189,48 @@ export function SettingsSection({ client, company, feed, sub, onFlag, onResetCom
           />
         )}
         {page === "people" && <PeopleView client={client} company={company} />}
-        {/* OAuth and MCP Servers were here. They are the Connections section
-            now (`#/connections/apps`, `#/connections/mcp`) — what the company
-            can act through is read repeatedly, and a settings rail is where an
-            operator changes configuration once. Both old addresses still
-            resolve, rewritten by `console-route-rewrites.ts`. Inference stayed:
-            a credential form belongs beside the one thing it unlocks. */}
-        {page === "inference" && <InferenceView client={client} company={company} />}
+        {/* Both were cards on General. See their own files for why each left. */}
+        {page === "approvals" && <ApprovalsSettingsView client={client} company={company} />}
+        {page === "appearance" && <AppearanceView />}
+        {/* The same page `#/feedback` renders, re-parented rather than
+            rewritten. That top-level address still resolves — the flag dialog
+            and the board's own links point at it — so nothing that names it
+            breaks; this is where the rail reaches it from. */}
+        {page === "feedback" && <FeedbackView client={client} company={company} />}
+        {/* The run index, rendered here rather than bounced to `#/observatory`.
+            The row on this rail used to be a doorway — the address was rewritten
+            away before this dispatch ever saw it — because the view reads its
+            own query keys off the hash and they were keyed on the head being
+            `observatory`. `readObservatoryHash` answers to both heads now, so
+            `?tab=analytics` is addressable from here.
+
+            `runId={null}` always: a single run is `#/observatory/<runId>`, a
+            top-level route `app-shell.tsx` still owns, because `useHashView`
+            carries two segments and this page is already using the second.
+            `eventTick` is the same counter that route is handed, so the index
+            re-reads on a run moving whichever of the two addresses is open. */}
+        {page === "observatory" && (
+          <Suspense fallback={<RouteLoading title="Observatory" label="Loading observatory…" />}>
+            <ObservatoryView
+              client={client}
+              company={company}
+              runId={null}
+              eventTick={eventTick}
+            />
+          </Suspense>
+        )}
+        {/* OAuth, MCP Servers, Inference and Skills were all here. They are the
+            Connections section now (`#/connections/apps`, `/mcp`, `/inference`,
+            `/skills`) — each is read repeatedly and changes as the company's
+            work does, and a settings rail is where an operator changes
+            configuration once. Every one of those addresses still resolves,
+            rewritten by `console-route-rewrites.ts`. Hosting and Search went
+            with them, which emptied the Integrations group and retired it —
+            `connection-pages.ts` carries the argument. */}
         {/* Billing was here. It moved to Finance → Invoicing and Finance → Wallet
             (docs/spec/runtime/finance-console.md): a credential form belongs
             beside the data it unlocks, and "Billing" read as *what OpenCompany
-            charges me* — which is Usage, two rows down.
-            Same `key` remount as the providers in FinanceSection: it keeps one
-            company's typed-but-unsaved token out of another's Save. */}
-        {page === "hosting" && (
-          <HostingView key={company ?? "self"} client={client} company={company} />
-        )}
-        {/* Same remount rule, same reason: a search key typed for one company
-            must never ride into another company's Save. */}
-        {page === "search" && (
-          <SearchView key={company ?? "self"} client={client} company={company} />
-        )}
-        {/* Same remount rule, same reason: canManage (and the Add dialog's
-            draft) must not carry an admin's authority from one company into
-            another's still-resolving read (codeRabbit review). */}
-        {page === "skills" && <SkillsView key={company ?? "self"} client={client} company={company} />}
+            charges me* — which is Usage, two rows down. */}
         {/* Observatory has a row on this rail but renders nothing here: the row
             is a doorway, and `#/settings/observatory` is rewritten onto
             `#/observatory` before it ever reaches this dispatch.

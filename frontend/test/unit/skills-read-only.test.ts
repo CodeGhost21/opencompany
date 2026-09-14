@@ -19,18 +19,18 @@ import { SKILLS_READ_ONLY_NOTE, skillReachLabel } from "@/lib/skills";
  */
 
 describe("SKILLS_READ_ONLY_NOTE", () => {
-  it("says teammates read skills", () => {
+  it("says agents read skills", () => {
     expect(SKILLS_READ_ONLY_NOTE).toMatch(/\bread\b/i);
   });
 
-  it("names the orchestrator as what executes a workflow", () => {
+  it("names the orchestrator as what executes an automation", () => {
     expect(SKILLS_READ_ONLY_NOTE).toMatch(/orchestrator/i);
   });
 
-  it("never promises that enabling a skill makes a teammate run it", () => {
+  it("never promises that enabling a skill makes an agent run it", () => {
     // The exact shape of the old implication: enabling/installing framed as
     // handing a teammate something it will carry out.
-    expect(SKILLS_READ_ONLY_NOTE).not.toMatch(/teammates? (can|will) (run|execute|use)/i);
+    expect(SKILLS_READ_ONLY_NOTE).not.toMatch(/agents? (can|will) (run|execute|use)/i);
     expect(SKILLS_READ_ONLY_NOTE).not.toMatch(/agents? (can|will) (run|execute)/i);
   });
 });
@@ -42,7 +42,7 @@ describe("skillReachLabel", () => {
     expect(label).not.toMatch(/run|execute/i);
   });
 
-  it("describes a disabled skill as out of a teammate's sight", () => {
+  it("describes a disabled skill as out of an agent's sight", () => {
     expect(skillReachLabel(false)).toMatch(/hidden/i);
   });
 

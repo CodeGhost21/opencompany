@@ -1,26 +1,23 @@
 import { expect, test } from "@playwright/test";
 
-import { expectHostMenuGone } from "./host-switcher";
-
 /**
- * The "Manage hosts" page, and why this file no longer drives it.
+ * The "Manage hosts" page, and how much of this file's original coverage is
+ * reachable again.
  *
  * It used to cover the wiring that page is: the menu item that opens it, the
- * roster it draws from context, renaming a host, re-addressing one that moved,
- * refusing an address with no scheme, refusing a move onto a host this console
- * already holds, and forgetting a host — including the property underneath all
- * of it, that a connection id is the namespace every browser-local key hangs
- * off (`scopedKey`), so "this host moved" must be expressible without minting a
- * new one.
+ * roster it draws from context, renaming a host, re-addressing one that
+ * moved, refusing an address with no scheme, refusing a move onto a host
+ * this console already holds, and forgetting a host — including the property
+ * underneath all of it, that a connection id is the namespace every
+ * browser-local key hangs off (`scopedKey`), so "this host moved" must be
+ * expressible without minting a new one.
  *
- * None of that is reachable now. While the product is scoped to one company per
- * install (`src/product-scope.ts`, `HOSTS_HIDDEN`) the switcher opens nothing,
- * and its menu was the only entry point to that page — the page component is
- * still mounted, so turning the flag off restores both it and the cases above.
- *
- * Retired rather than deleted or skipped: what is left is the one assertion
- * that still has a subject, which is the absence of the way in. A skipped spec
- * would report green while covering nothing.
+ * `HOSTS_HIDDEN` (`product-scope.ts`) is `false` again — the switcher's menu
+ * opens on any host at all (`hostSwitcherMenu`'s own doc), and "Manage hosts"
+ * is one of its two standing items — so the entry point this file used to
+ * assert was gone is back. This is the one case restored so far: opening the
+ * page. The deeper roster/rename/re-address/refuse/forget cases above are
+ * restorable the same way and are a follow-up, not reconstructed here.
  */
 
 test.beforeEach(async ({ page }) => {
@@ -32,9 +29,13 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("the console offers no way into host management", async ({ page }) => {
+test("the host switcher's Manage hosts item opens the manage-hosts page", async ({ page }) => {
   await page.goto("/#/company");
 
-  await expectHostMenuGone(page);
-  await expect(page.getByTestId("manage-hosts-page")).toHaveCount(0);
+  const trigger = page.getByTestId("host-switcher");
+  await expect(trigger).toBeVisible({ timeout: 30_000 });
+  await trigger.click();
+
+  await page.getByTestId("host-switcher-manage").click();
+  await expect(page.getByTestId("manage-hosts")).toBeVisible();
 });

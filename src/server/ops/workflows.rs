@@ -1610,6 +1610,14 @@ async fn run_workflow(
     // Refused with the same `LifecycleConflict` chat answers, so one pause reads
     // identically wherever it is met, rather than a second rule with a second
     // error shape.
+    //
+    // Emergency-stop checked first, ahead of the ordinary pause: it is a
+    // separate switch from `lifecycle` (a stopped company still reports
+    // `running`), so `ensure_running` alone would miss it — this was the one
+    // manual workflow-run door `CompanyRuntime::ensure_not_emergency_stopped`'s
+    // three doorways did not cover, because it never reaches `run_cycle`,
+    // `spawn_follow_up`, or the boot reconciler at all.
+    company.runtime.ensure_not_emergency_stopped()?;
     company.runtime.ensure_running().await?;
 
     // No runner wired. THREE very different causes look identical from here —
@@ -4962,6 +4970,95 @@ mod tests {
         assert_eq!(ids, vec!["demo"]);
     }
 
+    /// FAIL-axis: unlike the list route above (which skips a broken graph and
+    /// carries on), addressing the broken one directly is a single-resource
+    /// read on a body that cannot be used, and `OpenCompanyError::DataParse`
+    /// is centrally mapped to `400` (`server/error.rs`). This is the
+    /// single-workflow `GET` driven all the way through the router, not just
+    /// the loader function, so the mapping is proven at the seam the console
+    /// actually calls.
+    #[tokio::test]
+    async fn getting_a_malformed_workflow_by_id_answers_400_data_parse() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        use crate::company::CompanyManifest;
+        use crate::ports::CompanyStore;
+        use crate::ports::types::{CompanyId, CompanyRecord};
+        use crate::runtime::RuntimeBuilder;
+        use crate::server::router;
+        use crate::store::FsCompanyStore;
+        use crate::{AppConfig, AppState};
+
+        let dir = seed_demo();
+        std::fs::write(
+            dir.path().join("workflows").join("broken.toml"),
+            "id = \"broken\"\nname = \n[[node]] oops",
+        )
+        .unwrap();
+
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+        let store = FsCompanyStore::new(dir.path().to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(dir.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_seed_dir(dir.path().to_path_buf())
+            .build()
+            .await
+            .unwrap();
+        assert!(
+            runtime.source_dir().is_some(),
+            "test setup must give the company a real source tree to read `broken.toml` from"
+        );
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/company/workflows/broken")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["code"], "data_parse",
+            "the stable error code must name a parse failure, not a generic 500: {body}"
+        );
+    }
+
     // HTTP-level: a hosted tenant has no source directory to scan, so these
     // exercise the manifest-enabled union path end to end via the router.
     mod hosted_mode {
@@ -5017,6 +5114,7 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -5152,6 +5250,7 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -5479,6 +5578,7 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     id: id.clone(),
                     manifest: empty_manifest(),
                     ledger: Vec::new(),
@@ -5703,6 +5803,7 @@ mod tests {
             let id = CompanyId::new("acme");
             store
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -5883,7 +5984,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             let message = json_body(response).await.to_string();
             assert!(
-                message.contains("is not a workflow delivery channel"),
+                message.contains("is not an automation delivery channel"),
                 "{message}"
             );
             assert!(message.contains("engineering"), "{message}");
@@ -5918,7 +6019,7 @@ mod tests {
                 body["problems"][0]["message"]
                     .as_str()
                     .unwrap_or_default()
-                    .contains("is not a workflow delivery channel"),
+                    .contains("is not an automation delivery channel"),
                 "{body}"
             );
         }
@@ -6003,7 +6104,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             let message = json_body(response).await.to_string();
             assert!(
-                message.contains("is not a workflow delivery channel"),
+                message.contains("is not an automation delivery channel"),
                 "{message}"
             );
         }
@@ -6030,7 +6131,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             let message = json_body(response).await.to_string();
             assert!(
-                message.contains("is not a workflow delivery channel"),
+                message.contains("is not an automation delivery channel"),
                 "{message}"
             );
             assert!(message.contains("operator"), "{message}");
@@ -6712,6 +6813,7 @@ mod tests {
             let store = FsCompanyStore::new(home.clone());
             store
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -7040,6 +7142,7 @@ mod tests {
             .unwrap();
             store
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -8750,6 +8853,7 @@ mod tests {
             let id = CompanyId::new("acme");
             FsCompanyStore::new(home.clone())
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -10026,6 +10130,81 @@ mod tests {
             assert_eq!(graph["description"], "Say hi, every morning.");
         }
 
+        /// CONC-axis: restore inherits `PUT`'s optimistic-concurrency check —
+        /// the doc on [`restore_workflow_revision`] says so — but only `PUT`'s
+        /// own stale-token 409 was ever driven end to end. This drives
+        /// restore's own conflict path: two consoles racing a restore of the
+        /// same revision with the token each read, the second losing.
+        #[tokio::test]
+        async fn a_stale_expected_version_is_a_conflict_on_restore() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            let stale = create_then_edit_greeter(&state).await;
+
+            let list = json_body(
+                router(state.clone())
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/greeter/revisions",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let rev_id = list["revisions"][0]["id"].as_str().unwrap().to_string();
+            let before = list["revisions"].as_array().unwrap().len();
+
+            // Console A restores first, carrying the token it read.
+            let first = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
+                    Some(serde_json::json!({ "expectedVersion": stale })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::OK);
+
+            // Console B restores the SAME revision with the SAME token A already
+            // spent — it named the graph before A's write, not after it.
+            let second = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
+                    Some(serde_json::json!({ "expectedVersion": stale })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(second.status(), StatusCode::CONFLICT);
+            let body = json_body(second).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(message.contains("reload"), "unhelpful 409: {body}");
+
+            // The refused restore must not have captured a second snapshot —
+            // restoring the same revision twice would otherwise look identical
+            // on the live graph (it is the same snapshot both times), so the
+            // history length is what actually distinguishes "refused" from
+            // "silently ran again".
+            let list = json_body(
+                router(state)
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/greeter/revisions",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                list["revisions"].as_array().unwrap().len(),
+                before + 1,
+                "only the first restore may have run: {list}"
+            );
+        }
+
         /// **The silent-clobber guard, at the front door (issue #1013).** Omitting
         /// the token used to be an unconditional write; a stale editor could then
         /// overwrite a concurrent save without ever seeing a `409`. A tokenless
@@ -10374,6 +10553,7 @@ mod tests {
             manifest.workflows.enabled.push("legacy".to_string());
             store
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -10675,6 +10855,7 @@ label = "ok"
             let id = CompanyId::new("acme");
             FsCompanyStore::new(home.to_path_buf())
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),
@@ -10965,6 +11146,45 @@ label = "ok"
                 "the synchronous response must not carry the detach discriminator: {body}"
             );
             assert!(body["runId"].as_str().is_some(), "{body}");
+        }
+
+        /// Codex review finding on PR #2140 (`3952230576`): the emergency stop
+        /// is a separate switch from `lifecycle` (a stopped company still
+        /// reports `running`), so `ensure_running` alone missed it here. This
+        /// POST was the one manual admission door
+        /// `CompanyRuntime::ensure_not_emergency_stopped`'s own doc did not
+        /// enumerate, because a workflow run never reaches `run_cycle`,
+        /// `spawn_follow_up`, or the boot reconciler.
+        #[tokio::test]
+        async fn an_emergency_stopped_company_refuses_a_manual_run() {
+            let home_dir = home();
+            let c = stalled_company(home_dir.path()).await;
+            c.runtime
+                .emergency_pause(
+                    crate::ports::types::Actor {
+                        kind: crate::ports::types::ActorKind::Operator,
+                        id: "owner".into(),
+                    },
+                    None,
+                )
+                .await
+                .expect("pause");
+
+            let response = c
+                .app
+                .clone()
+                .oneshot(run_request(serde_json::json!({ "input": {} })))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "a stopped company must refuse a manual run exactly as it refuses chat"
+            );
+            assert!(
+                !c.completed.load(Ordering::SeqCst),
+                "the refusal must return before the runner ever ran, let alone finished"
+            );
         }
 
         /// Cancel a live run: `200`, and it settles as cancelled rather than as
@@ -11474,7 +11694,7 @@ label = "ok"
                         kind: "channel".to_string(),
                         target: Some("operator".to_string()),
                         status: crate::ports::DeliveryStatus::Failed,
-                        detail: "`operator` is not a workflow delivery channel".to_string(),
+                        detail: "`operator` is not an automation delivery channel".to_string(),
                         reason: crate::ports::DeliveryReason::ChannelNotWired,
                     }],
                     cancelled: false,
@@ -11509,6 +11729,7 @@ label = "ok"
             let id = CompanyId::new("acme");
             FsCompanyStore::new(home.to_path_buf())
                 .save(&CompanyRecord {
+                    overlay_desk_hive: Vec::new(),
                     overlay_retired_agents: Vec::new(),
                     overlay_agent_edits: Vec::new(),
                     id: id.clone(),

@@ -5,13 +5,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ChatMessage } from "@/lib/chat";
-import { MessageTimeline } from "@/views/chat/MessageTimeline";
+import { MessageTimeline } from "@/views/room/MessageTimeline";
 import {
   buildTimeline,
   buildTimelineItems,
   type Channel,
   type TimelineItem,
-} from "@/views/chat/model";
+} from "@/views/room/model";
 
 /**
  * Where a channel opens, and what is allowed to move it (issue #757).

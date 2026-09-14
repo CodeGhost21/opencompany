@@ -91,22 +91,24 @@ pub const HUB_PROVIDERS: &[HubProvider] = &[
 /// unescaped it would end at the console origin's own `?` and the hub would
 /// read the console's `company=` as one of its own parameters.
 ///
-/// ## The hosted blocker
+/// ## Which origins the hub accepts
 ///
-/// The hub accepts `redirectUri` only when it passes an RFC 8252 **loopback**
-/// check (`http://` on `127.0.0.1`, `localhost`, or `[::1]`). A console on
-/// `127.0.0.1:<port>` satisfies that today, which is why the whole flow can be
-/// built and demonstrated locally against the route exactly as it ships.
+/// The hub decides, and it is the only party that can: `isAllowedFrontendRedirectUri`
+/// admits a loopback `http://` URI **or** an origin that resolves to a
+/// provisioned tenant in its own registry (`<slug>.<base-domain>`, or a
+/// verified custom domain). A registry lookup is not something this crate can
+/// mirror, and a de-provisioned tenant stops being accepted there with no
+/// redeploy here.
 ///
-/// A hosted console on an `https://<slug>.<domain>` origin satisfies neither
-/// that check nor the named `redirect ∈ {app,dashboard,admin}` targets, so the
-/// hub will answer `400` until it learns to allowlist tenant console origins.
-/// Nothing here needs to change when it does: the origin this builds on comes
-/// from [`AppConfig::host_base_url`](crate::AppConfig::host_base_url), so
-/// hosted is `OPENCOMPANY_PUBLIC_URL=https://…` and no code edit.
+/// So this builds the URL and lets the hub answer. The origin comes from
+/// [`AppConfig::host_base_url`](crate::AppConfig::host_base_url), which means a
+/// hosted console is `OPENCOMPANY_PUBLIC_URL=https://…` and no code change.
 ///
-/// Until then, [`hub_accepts_redirect_uri`] is what keeps a console from
-/// offering a button that lands on that `400`.
+/// This once carried a local `hub_accepts_redirect_uri` copy of the hub's
+/// then-loopback-only rule, so a console would not render a button that could
+/// only 400 (issue #512). `tinyhumansai/backend#1243` has since landed and the
+/// copy went with it — it had become the thing hiding the buttons on every
+/// hosted console, which is the failure it existed to prevent, one level up.
 pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> String {
     format!(
         "{}/auth/{}/login?redirectUri={}",
@@ -116,85 +118,44 @@ pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> Str
     )
 }
 
-/// Whether the hub will accept `redirect_uri` as a sign-in return target.
+/// Builds the hub URL that starts a **key grant** and comes back to `callback_url`.
 ///
-/// A copy of somebody else's rule, held here for one reason: so a console can
-/// decline to render a button that cannot complete. That is the same judgement
-/// `hub_providers` already makes for a host with no exchange at all — the
-/// difference between a console that says "sign in with a link" and one that
-/// sends someone to Google and back into a bare `400`.
+/// The sign-in flow above proves who someone is. This one asks the hub to mint
+/// this company a key, and it is deliberately a different exchange rather than a
+/// reuse of the sign-in token.
 ///
-/// Mirrors the platform backend's RFC 8252 check (`isLoopbackHttpUri`, in
-/// `src/utils/deepLinkRedirect.ts`): `http://` on `127.0.0.1`, `localhost`, or
-/// `[::1]`, port and path irrelevant. Every hosted `https://<slug>.<domain>`
-/// origin fails it, which is the whole of issue #512.
+/// The difference is what the tenant ends up holding. A sign-in hands this
+/// tenant a platform JWT carrying the person's whole ecosystem account, used for
+/// one request and dropped ([`HubIdentityExchange::identify`]). A key grant
+/// hands it a one-time code that redeems to exactly one scoped API key, and the
+/// secret that unlocks the code (`verifier`) never leaves this host — only its
+/// SHA-256 goes out, as `challenge`. So a code captured anywhere along the
+/// browser's path — history, a `Referer`, a shoulder — redeems nothing.
 ///
-/// ## Delete this when the gate moves
-///
-/// `tinyhumansai/backend#1243` teaches that gate to accept provisioned tenant
-/// origins. When it lands, this function and its single call site in
-/// `server::users::routes::hub_providers` both go, and hosted consoles start
-/// offering the buttons with no other change. Nothing else calls it, and it
-/// deliberately owns no configuration — a knob to turn it off would outlive the
-/// condition it exists for.
-///
-/// Divergence is one-directional by construction: this is stricter than the
-/// hub, never laxer. It refuses the IPv4 shorthands `URL` normalizes
-/// (`http://127.1/`, `http://2130706433/` are both `127.0.0.1` there), which
-/// costs a hidden button on a console configured that way — and never a click
-/// that 400s.
-pub fn hub_accepts_redirect_uri(redirect_uri: &str) -> bool {
-    let Some((scheme, rest)) = redirect_uri.split_once("://") else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("http") {
-        return false;
-    }
-    // The authority is everything before the path, query, or fragment.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let Some(host) = authority_host(authority) else {
-        return false;
-    };
-    // `URL` lowercases a hostname, so `LOCALHOST` is a loopback host there too.
-    host.eq_ignore_ascii_case("127.0.0.1")
-        || host.eq_ignore_ascii_case("localhost")
-        || host.eq_ignore_ascii_case("::1")
+/// Shaped after OpenRouter's PKCE key exchange, which solves the same problem:
+/// give an application a key without a human copying one between two sites.
+pub fn key_grant_url(api_url: &str, callback_url: &str, challenge: &str, name: &str) -> String {
+    format!(
+        "{}/auth/key?{}",
+        api_url.trim_end_matches('/'),
+        key_grant_query(callback_url, challenge, name),
+    )
 }
 
-/// The host of an authority, or `None` when it is not one `URL` would parse.
+/// The grant parameters as one query string, without the endpoint.
 ///
-/// Being strict is the whole job. A malformed authority this waved through and
-/// the hub rejects is the one direction that costs something: the console
-/// renders a button, and the click lands on the very `400` this guard exists to
-/// keep people away from.
-fn authority_host(authority: &str) -> Option<&str> {
-    // Userinfo is discarded, as `new URL(…).hostname` discards it — the host of
-    // `http://127.0.0.1@evil.example/` is `evil.example`.
-    let host_port = match authority.rsplit_once('@') {
-        Some((_, after)) => after,
-        None => authority,
-    };
-    let (host, port) = match host_port.strip_prefix('[') {
-        // An IPv6 literal must close its bracket, and nothing but a port may
-        // follow it: `[::1` and `[::1]junk` are parse errors, not hosts.
-        Some(tail) => tail.split_once(']')?,
-        // Otherwise the first colon begins the port — which is what makes a
-        // bare `::1` fall out here as a bad port rather than a host. To be one
-        // it has to be bracketed.
-        None => match host_port.find(':') {
-            Some(at) => (&host_port[..at], &host_port[at..]),
-            None => (host_port, ""),
-        },
-    };
-    if !port.is_empty() {
-        // A colon then digits, or nothing at all. An empty port
-        // (`http://127.0.0.1:/`) means the default, which `URL` also accepts.
-        let digits = port.strip_prefix(':')?;
-        if !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-    }
-    Some(host)
+/// Split out because the same parameters are read by two pages: the API's
+/// `GET /auth/key`, which acts on them, and the site's `/connect`, which shows
+/// a person who is asking and lets them pick a provider before handing off to
+/// exactly that endpoint ([`hub_account::connect_url`](crate::server::hub_account::connect_url)).
+/// Building them once means the challenge cannot differ between the two.
+pub fn key_grant_query(callback_url: &str, challenge: &str, name: &str) -> String {
+    format!(
+        "callback_url={}&code_challenge={}&code_challenge_method=S256&name={}",
+        percent_encode(callback_url),
+        percent_encode(challenge),
+        percent_encode(name),
+    )
 }
 
 /// Percent-encodes `value` for use as a single query-string value.
@@ -234,6 +195,54 @@ pub trait HubIdentityExchange: Send + Sync {
     /// never store it, and never include it in an error. It is the caller's
     /// only proof of identity and would be replayable by anyone who read it.
     async fn identify(&self, token: &str) -> Result<HubIdentity>;
+
+    /// Trades a one-time grant `code` and its `verifier` for a TinyHumans key.
+    ///
+    /// The other half of [`key_grant_url`]. Returns the plaintext key, which the
+    /// hub emits exactly once and cannot reissue — so a caller that drops it has
+    /// to send the person through the flow again, and must store it before doing
+    /// anything else that can fail.
+    ///
+    /// Implementations must treat both arguments and the returned key as live
+    /// credentials: never log them, never echo them into an error.
+    async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String>;
+
+    /// Reads the billing standing of the account a **key** belongs to.
+    ///
+    /// The one call in this trait that presents the company's own credential
+    /// rather than a person's: it answers "how much is left, and on what plan",
+    /// which is a property of the account the key spends from. It is a read and
+    /// nothing else — topping up and changing a plan move money and stay on the
+    /// hub's dashboard behind that person's own sign-in, which is why this has
+    /// no counterpart that writes.
+    ///
+    /// Implementations must treat `key` as a live credential: never log it,
+    /// never echo it into an error.
+    async fn billing_summary(&self, key: &str) -> Result<BillingSummary>;
+}
+
+/// What an account's money is doing, as the console renders it.
+///
+/// A flattened copy of the hub's `GET /payments/summary` rather than a passthrough
+/// of its JSON: the console is a different product on a different release
+/// cadence, and a shape it merely forwards is one that changes under it without
+/// anybody choosing to. Every field here is one the card actually draws.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingSummary {
+    /// Everything spendable, promotional credit and top-up together, in USD.
+    pub balance_usd: f64,
+    /// The plan slug the account is on (`free`, `pro`, …).
+    pub plan: String,
+    /// Whether a paid subscription is live right now.
+    pub active_subscription: bool,
+    /// When the current plan lapses, as the hub stated it. `None` on a plan
+    /// that does not expire.
+    pub plan_expiry: Option<String>,
+    /// Where a person tops the account up, on the hub that issued the key.
+    pub top_up_url: Option<String>,
+    /// Where a person changes the plan.
+    pub manage_url: Option<String>,
 }
 
 /// An in-memory [`HubIdentityExchange`] for offline tests and local demos.
@@ -245,8 +254,16 @@ pub trait HubIdentityExchange: Send + Sync {
 #[derive(Debug, Default)]
 pub struct MockHubIdentityExchange {
     tokens: StdMutex<HashMap<String, String>>,
+    /// Grant codes and the `(verifier, key)` each redeems to.
+    ///
+    /// Single-use, unlike [`Self::tokens`]: a grant code really is spent on
+    /// redemption at the hub, and a mock that let one be redeemed twice would
+    /// make the route look safe to retry when it is not.
+    grants: StdMutex<HashMap<String, (String, String)>>,
     /// A forced transport failure, standing in for "the hub is not answering".
     unreachable: bool,
+    /// What [`HubIdentityExchange::billing_summary`] answers, per key.
+    billing: StdMutex<HashMap<String, BillingSummary>>,
 }
 
 impl MockHubIdentityExchange {
@@ -261,6 +278,24 @@ impl MockHubIdentityExchange {
             .lock()
             .expect("mock poisoned")
             .insert(token.to_string(), email.to_string());
+        self
+    }
+
+    /// Seeds the billing standing one key reads back.
+    pub fn with_billing(self, key: &str, summary: BillingSummary) -> Self {
+        self.billing
+            .lock()
+            .expect("mock poisoned")
+            .insert(key.to_string(), summary);
+        self
+    }
+
+    /// Seeds one grant code, the verifier that unlocks it, and the key it mints.
+    pub fn with_grant(self, code: &str, verifier: &str, key: &str) -> Self {
+        self.grants
+            .lock()
+            .expect("mock poisoned")
+            .insert(code.to_string(), (verifier.to_string(), key.to_string()));
         self
     }
 
@@ -308,6 +343,39 @@ impl HubIdentityExchange for MockHubIdentityExchange {
             })
             .ok_or_else(rejected)
     }
+
+    async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String> {
+        if self.unreachable {
+            return Err(crate::error::OpenCompanyError::TinyHumans {
+                code: "unreachable".to_string(),
+                message: "connection refused".to_string(),
+            });
+        }
+        // Removed before the verifier is checked, mirroring the hub: a wrong
+        // verifier spends the code rather than leaving it up for another guess.
+        let entry = self.grants.lock().expect("mock poisoned").remove(code);
+        match entry {
+            Some((expected, key)) if expected == verifier => Ok(key),
+            _ => Err(rejected()),
+        }
+    }
+
+    async fn billing_summary(&self, key: &str) -> Result<BillingSummary> {
+        if self.unreachable {
+            return Err(crate::error::OpenCompanyError::TinyHumans {
+                code: "unreachable".to_string(),
+                message: "connection refused".to_string(),
+            });
+        }
+        // Non-destructive, like `identify` and unlike a grant code: reading a
+        // balance twice is the same read twice.
+        self.billing
+            .lock()
+            .expect("mock poisoned")
+            .get(key)
+            .cloned()
+            .ok_or_else(rejected)
+    }
 }
 
 #[cfg(test)]
@@ -336,97 +404,6 @@ mod test {
              ?redirectUri=https%3A%2F%2Fsmoke1.example.com%2F%3Fcompany%3Dsmoke1"
         );
     }
-
-    #[test]
-    fn a_local_console_is_a_loopback_uri_the_hub_accepts() {
-        // Every shape RFC 8252 allows, since the bind is operator-chosen.
-        assert!(hub_accepts_redirect_uri(
-            "http://127.0.0.1:8080/?company=acme"
-        ));
-        assert!(hub_accepts_redirect_uri(
-            "http://localhost:3000/?company=acme"
-        ));
-        assert!(hub_accepts_redirect_uri("http://[::1]:8080/?company=acme"));
-        assert!(hub_accepts_redirect_uri("http://127.0.0.1/"));
-        assert!(hub_accepts_redirect_uri("HTTP://127.0.0.1:8080/"));
-        // `URL` lowercases the host, so these are loopback at the hub too.
-        // Rejecting them would hide a button that works.
-        assert!(hub_accepts_redirect_uri(
-            "http://LOCALHOST:8080/?company=acme"
-        ));
-        assert!(hub_accepts_redirect_uri("http://LocalHost/"));
-        assert!(hub_accepts_redirect_uri("http://[::1]/"));
-        // An empty port is legal and means the default.
-        assert!(hub_accepts_redirect_uri("http://127.0.0.1:/"));
-    }
-
-    /// An authority the hub's `new URL` throws on must be refused here too.
-    ///
-    /// This is the direction that costs something. Accepting a shape the hub
-    /// rejects renders a button whose click ends on the bare `400` this guard
-    /// exists to prevent, so each of these is a live regression rather than a
-    /// tidiness rule.
-    #[test]
-    fn a_malformed_authority_is_refused_as_the_hub_refuses_it() {
-        // An unclosed IPv6 bracket.
-        assert!(!hub_accepts_redirect_uri("http://[::1/?company=acme"));
-        assert!(!hub_accepts_redirect_uri("http://[::1"));
-        // Closed, but with something other than a port trailing it.
-        assert!(!hub_accepts_redirect_uri("http://[::1]junk/?company=acme"));
-        assert!(!hub_accepts_redirect_uri("http://[::1]:80junk/"));
-        // A port that is not a number.
-        assert!(!hub_accepts_redirect_uri(
-            "http://127.0.0.1:abc/?company=acme"
-        ));
-        assert!(!hub_accepts_redirect_uri("http://127.0.0.1:80:90/"));
-        // An IPv6 address has to be bracketed to be a host at all.
-        assert!(!hub_accepts_redirect_uri("http://::1/"));
-    }
-
-    /// Where this is knowingly stricter than the hub.
-    ///
-    /// `URL` normalizes both of these to `127.0.0.1`, so the hub would take
-    /// them. Pinned deliberately: the cost is a hidden button on a console
-    /// nobody configures this way, and the alternative is reimplementing
-    /// WHATWG's IPv4 parser inside a guard that gets deleted when
-    /// `tinyhumansai/backend#1243` lands.
-    #[test]
-    fn ipv4_shorthand_is_refused_though_the_hub_would_take_it() {
-        assert!(!hub_accepts_redirect_uri("http://127.1:8080/"));
-        assert!(!hub_accepts_redirect_uri("http://2130706433/"));
-    }
-
-    #[test]
-    fn a_hosted_origin_is_not_one_the_hub_accepts() {
-        // The whole of issue #512: `https` fails the check on scheme alone, so
-        // no hosted tenant can pass it whatever its hostname.
-        assert!(!hub_accepts_redirect_uri(
-            "https://smoke1.example.com/?company=smoke1"
-        ));
-        assert!(!hub_accepts_redirect_uri("https://127.0.0.1:8080/"));
-    }
-
-    #[test]
-    fn a_host_that_merely_looks_loopback_is_not_accepted() {
-        // The near misses a substring or prefix test would wave through. Each is
-        // a public hostname that anyone can point at an address they control.
-        assert!(!hub_accepts_redirect_uri("http://127.0.0.1.example.com/"));
-        assert!(!hub_accepts_redirect_uri("http://localhost.example.com/"));
-        assert!(!hub_accepts_redirect_uri("http://evil.com/127.0.0.1"));
-        assert!(!hub_accepts_redirect_uri("http://evil.com/?x=localhost"));
-        // Userinfo is the classic one: the host here is `evil.com`, and both
-        // this and `new URL(…).hostname` say so.
-        assert!(!hub_accepts_redirect_uri("http://127.0.0.1@evil.com/"));
-        // Not the loopback *address*, just inside its /8.
-        assert!(!hub_accepts_redirect_uri("http://127.0.0.2:8080/"));
-    }
-
-    #[test]
-    fn something_that_is_not_a_url_is_not_accepted() {
-        assert!(!hub_accepts_redirect_uri(""));
-        assert!(!hub_accepts_redirect_uri("127.0.0.1:8080"));
-        assert!(!hub_accepts_redirect_uri("http://"));
-    }
 }
 
 /// The real HTTP exchange, compiled only under the `tinyhumans` feature.
@@ -435,7 +412,7 @@ pub use http::HttpHubIdentityExchange;
 
 #[cfg(feature = "tinyhumans")]
 mod http {
-    use super::{HubIdentity, HubIdentityExchange};
+    use super::{BillingSummary, HubIdentity, HubIdentityExchange};
     use crate::Result;
     use crate::error::OpenCompanyError;
     use async_trait::async_trait;
@@ -450,6 +427,58 @@ mod http {
     #[derive(Debug, Deserialize)]
     struct MeData {
         email: String,
+    }
+
+    /// The hub's envelope for `POST /auth/keys`.
+    #[derive(Debug, Deserialize)]
+    struct KeyResponse {
+        data: KeyData,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct KeyData {
+        /// The plaintext key. The hub emits it exactly once.
+        key: String,
+    }
+
+    /// The hub's envelope for `GET /payments/summary`.
+    #[derive(Debug, Deserialize)]
+    struct SummaryResponse {
+        data: SummaryData,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SummaryData {
+        #[serde(default)]
+        credits: SummaryCredits,
+        #[serde(default)]
+        plan: SummaryPlan,
+        #[serde(default)]
+        links: SummaryLinks,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryCredits {
+        #[serde(rename = "totalUsd", default)]
+        total_usd: f64,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryPlan {
+        #[serde(default)]
+        plan: Option<String>,
+        #[serde(rename = "hasActiveSubscription", default)]
+        has_active_subscription: bool,
+        #[serde(rename = "planExpiry", default)]
+        plan_expiry: Option<String>,
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    struct SummaryLinks {
+        #[serde(rename = "topUpUrl", default)]
+        top_up_url: Option<String>,
+        #[serde(rename = "manageUrl", default)]
+        manage_url: Option<String>,
     }
 
     /// A [`HubIdentityExchange`] backed by `GET {api_url}/auth/me`.
@@ -518,6 +547,79 @@ mod http {
             let parsed: MeResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
             Ok(HubIdentity {
                 email: parsed.data.email,
+            })
+        }
+
+        async fn redeem_key_grant(&self, code: &str, verifier: &str) -> Result<String> {
+            let url = format!("{}/auth/keys", self.api_url);
+            let (product_header_name, product_header_value) =
+                crate::product::product_identity_header();
+            // No bearer: the hub's redemption route is unauthenticated, and the
+            // verifier is what authenticates it. That is the whole point of the
+            // exchange — this host never holds a credential belonging to the
+            // person who approved the grant.
+            let resp = self
+                .http
+                .post(&url)
+                .header(product_header_name, product_header_value)
+                .json(&serde_json::json!({ "code": code, "code_verifier": verifier }))
+                .send()
+                .await
+                .map_err(|e| Self::err("unreachable", e))?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                // The hub's message describes the code's standing ("invalid or
+                // expired", "verifier does not match"), never the key. Neither
+                // argument is echoed: both are live secrets, and the response
+                // body is the hub's own words about its own flow.
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(Self::err(
+                    &format!("http_{}", status.as_u16()),
+                    truncate(&detail, 200),
+                ));
+            }
+
+            let parsed: KeyResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
+            Ok(parsed.data.key)
+        }
+
+        async fn billing_summary(&self, key: &str) -> Result<BillingSummary> {
+            let url = format!("{}/payments/summary", self.api_url);
+            let (product_header_name, product_header_value) =
+                crate::product::product_identity_header();
+            let resp = self
+                .http
+                .get(&url)
+                .bearer_auth(key)
+                .header(product_header_name, product_header_value)
+                .send()
+                .await
+                .map_err(|e| Self::err("unreachable", e))?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                // The hub's words describe the key's standing — expired, revoked,
+                // wrong scope. The key is in a header, so neither the body nor
+                // `reqwest`'s Display can carry it into this error.
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(Self::err(
+                    &format!("http_{}", status.as_u16()),
+                    truncate(&detail, 200),
+                ));
+            }
+
+            let parsed: SummaryResponse = resp.json().await.map_err(|e| Self::err("decode", e))?;
+            Ok(BillingSummary {
+                balance_usd: parsed.data.credits.total_usd,
+                // A hub that names no plan is on the free one — the field is
+                // absent there rather than spelled out, and a card reading
+                // "unknown" would be a worse answer than the true one.
+                plan: parsed.data.plan.plan.unwrap_or_else(|| "free".to_string()),
+                active_subscription: parsed.data.plan.has_active_subscription,
+                plan_expiry: parsed.data.plan.plan_expiry,
+                top_up_url: parsed.data.links.top_up_url,
+                manage_url: parsed.data.links.manage_url,
             })
         }
     }

@@ -48,6 +48,7 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import { useLedgerViewMode, type LedgerViewMode } from "@/hooks/use-ledger-view-mode";
 import { withHostParam } from "@/hooks/use-host-route";
+import { formatConsolePath } from "@/lib/console-paths";
 import { DeclareListWizard } from "@/views/company/DeclareListWizard";
 import {
   AlertTriangle,
@@ -72,7 +73,7 @@ import type { ApprovalSummary, DecideApproval, Verdict } from "@/api/types";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
 import { LedgerBoard } from "@/views/LedgerBoard";
 import { useAskerNames } from "@/components/approval-card";
-import type { DecidedApproval } from "@/views/chat/model";
+import type { DecidedApproval } from "@/views/room/model";
 import { TaskItem } from "@/views/TaskCard";
 import {
   BOARD_LEDGER,
@@ -1105,9 +1106,10 @@ export function LedgersView({
                       }
                       detailHref={
                         ledger.source === "native"
-                          ? withHostParam(`tasks/${encodeURIComponent(entry.id)}`, {
-                              view: "list",
-                            })
+                          ? withHostParam(
+                              formatConsolePath("tasks", encodeURIComponent(entry.id)),
+                              { view: "list" },
+                            )
                           : undefined
                       }
                       onAmend={() =>
@@ -1206,7 +1208,7 @@ export function LedgersView({
               <DialogTitle>Delete {confirmDelete.id}?</DialogTitle>
               <DialogDescription>
                 This removes the row and everything ever recorded against it.
-                Nothing can bring it back, and no teammate can do this — they
+                Nothing can bring it back, and no agent can do this — they
                 close a row instead, which keeps the reason. Close it rather
                 than delete it unless it should never have existed.
               </DialogDescription>
@@ -1462,7 +1464,7 @@ function EntryCard({
           {onOpen ? (
             <a
               href={detailHref}
-              className="min-w-0 flex-1 text-left font-medium hover:underline"
+              className="min-w-0 flex-1 text-left font-medium transition-opacity hover:opacity-80"
               data-testid="ledger-entry-title"
             >
               {entry.title}

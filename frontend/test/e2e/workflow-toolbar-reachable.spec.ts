@@ -127,7 +127,7 @@ const DETAIL_CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> =
     // the index is the tab's front door now, so the control is the way back to
     // it. Addressed by test id for the same reason Pause is — it sits in row 1
     // with the heading rather than in the action row, and its name is prose.
-    label: "All workflows",
+    label: "All automations",
     find: (p) => p.getByTestId("workflow-back-to-index"),
   },
   {
@@ -179,12 +179,12 @@ const INDEX_CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> = 
   { label: "Cards", find: (p) => p.getByTestId("workflow-index-cards") },
   { label: "List", find: (p) => p.getByTestId("workflow-index-list") },
   {
-    label: "New workflow",
-    find: (p) => p.getByRole("button", { name: "New workflow" }),
+    label: "New automation",
+    find: (p) => p.getByRole("button", { name: "New automation" }),
   },
 ];
 
-test.describe("workflows toolbar reachability (#824)", () => {
+test.describe("automations toolbar reachability (#824)", () => {
   test.beforeEach(async ({ request }) => {
     await removeWorkflow(request);
     await createWorkflow(request);
@@ -204,7 +204,7 @@ test.describe("workflows toolbar reachability (#824)", () => {
 
       // Wait for the toolbar to mount before measuring anything.
       await expect(
-        page.getByRole("button", { name: "New workflow" }),
+        page.getByRole("button", { name: "New automation" }),
       ).toBeVisible();
       await selectWorkflow(page, WORKFLOW_NAME);
 
@@ -225,8 +225,8 @@ test.describe("workflows toolbar reachability (#824)", () => {
       // is the other half of the reachability property — a control nobody can
       // see cannot be clipped.
       await expect(
-        page.getByRole("button", { name: "New workflow" }),
-        "New workflow belongs to the index, not to one workflow",
+        page.getByRole("button", { name: "New automation" }),
+        "New automation belongs to the index, not to one automation",
       ).toHaveCount(0);
     });
 
@@ -249,7 +249,7 @@ test.describe("workflows toolbar reachability (#824)", () => {
     });
   }
 
-  test("New workflow can actually be clicked, not merely rendered", async ({
+  test("New automation can actually be clicked, not merely rendered", async ({
     page,
   }) => {
     // The defect's real cost. Every control above could be in the viewport and
@@ -265,7 +265,7 @@ test.describe("workflows toolbar reachability (#824)", () => {
     await dismissTour(page);
     await expectWorkflowIndex(page);
 
-    const newWorkflow = page.getByRole("button", { name: "New workflow" });
+    const newWorkflow = page.getByRole("button", { name: "New automation" });
     // Measured before the click, and the reason is not belt-and-braces: a
     // Playwright click scrolls its target into view first, and it manages that
     // even inside the `overflow-hidden` ancestor a person cannot scroll. So
@@ -277,6 +277,6 @@ test.describe("workflows toolbar reachability (#824)", () => {
 
     await newWorkflow.click();
     await expect(page.getByRole("dialog")).toBeVisible();
-    await expect(page.getByText("Describe the workflow")).toBeVisible();
+    await expect(page.getByText("Describe the automation")).toBeVisible();
   });
 });

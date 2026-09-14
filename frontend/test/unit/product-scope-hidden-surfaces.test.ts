@@ -6,12 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { ComposioStatus } from "@/api/composio";
-import type { InferenceStatus } from "@/api/inference";
+import { ApiError } from "@/api/types";
 import { INFERENCE_PROVIDERS, SETUP_INFERENCE_OPTIONS } from "@/api/setup";
 import { HostSwitcher, hostSwitcherMenu } from "@/components/host-switcher";
 import { canCreateCompanies, offersCompanyCreation } from "@/components/create-company-dialog";
 import { ComposioSection } from "@/views/connections/ComposioSection";
-import { InferenceSection } from "@/views/connections/InferenceSection";
 import { HostsProvider, type HostsValue } from "@/connections/HostsContext";
 import type { Connection, ConnectionId } from "@/connections/types";
 import { SidebarProvider } from "@/components/ui/sidebar";
@@ -136,27 +135,34 @@ async function openWhateverExists() {
   });
 }
 
-describe("the company switcher is a label, not a menu", () => {
-  it("opens nothing, even with two hosts and two companies to offer", async () => {
+describe("the switcher carries hosts, and only hosts", () => {
+  /**
+   * The asymmetry these pin.
+   *
+   * `HOSTS_HIDDEN` is off and `COMPANY_SWITCHING_HIDDEN` is still on, so the
+   * one control in the title row holds exactly one of its two groups. That is
+   * the arrangement most likely to be broken by accident: the switcher derives
+   * `menu` from both flags at once, so turning either one back on has to leave
+   * the other's group exactly where it was.
+   */
+  it("opens a menu, and is a real button for a keyboard to land on", async () => {
     await show(hosts([CONNECTION, SECOND]));
 
-    // The trigger still names the company — that is the whole surface now.
+    // The trigger still names the company, and now it also opens.
     expect(container.textContent).toContain("Acme");
-    // Nothing to click at all: not a disabled control, not a chevron over an
-    // empty popup, no button element for a keyboard to land on.
-    expect(container.querySelector("button")).toBeNull();
-    expect(container.querySelector("[aria-haspopup]")).toBeNull();
-    expect(container.querySelector("[aria-expanded]")).toBeNull();
+    const trigger = container.querySelector("button");
+    expect(trigger).not.toBeNull();
+    expect(trigger?.getAttribute("aria-haspopup")).toBe("menu");
   });
 
-  it("offers no host roster, no way to add one and no way to manage one", async () => {
+  it("offers the host roster, a way to add one and a way to manage one", async () => {
     await show(hosts([CONNECTION, SECOND]));
     await openWhateverExists();
 
-    expect(find("host-row-c1")).toBeNull();
-    expect(find("host-row-c2")).toBeNull();
-    expect(find("host-switcher-add")).toBeNull();
-    expect(find("host-switcher-manage")).toBeNull();
+    expect(find("host-row-c1")).not.toBeNull();
+    expect(find("host-row-c2")).not.toBeNull();
+    expect(find("host-switcher-add")).not.toBeNull();
+    expect(find("host-switcher-manage")).not.toBeNull();
   });
 
   it("offers no company switching and no way to make another company", async () => {
@@ -169,28 +175,29 @@ describe("the company switcher is a label, not a menu", () => {
     expect(container.textContent).not.toContain("All companies");
   });
 
-  it("keeps the trigger a nameplate rather than a chevron over an empty popup", async () => {
-    // The trap this guards: `hostSwitcherMenu` still answers "any host at all
-    // opens a menu", and with every group hidden that would be a chevron over a
-    // popup with nothing in it. The switcher must not consult it alone.
+  it("opens the roster on a single host, not just on two", async () => {
+    // The rule `hostSwitcherMenu` states — any host at all opens a menu —
+    // reaches the rendered tree rather than stopping at the predicate. One
+    // host is the ordinary web console, and "Manage hosts" is the only way to
+    // rename or re-address the one it has.
     expect(hostSwitcherMenu(1)).toBe(true);
 
     await show(hosts([CONNECTION]));
     await openWhateverExists();
 
-    // Nothing was openable, so nothing opened.
-    expect(document.querySelector("[role='menu']")).toBeNull();
-    expect(find("host-switcher-add")).toBeNull();
+    expect(document.querySelector("[role='menu']")).not.toBeNull();
+    expect(find("host-switcher-add")).not.toBeNull();
   });
 });
 
 /**
- * BYOK only, on both credential surfaces.
+ * Both routes, on both credential surfaces.
  *
- * The pair that matters: the managed route must not be *selectable*, and a
- * company already on it must still be *legible*. Hiding a route by deleting its
- * descriptor would satisfy the first and break the second — the label tables
- * keep every route for exactly that reason.
+ * `COMPOSIO_MANAGED_HIDDEN` and `INFERENCE_MANAGED_HIDDEN` are now both off, so
+ * these pin the *presence* of the managed route rather than its absence — and
+ * the pair that always mattered is unchanged: a route must be selectable, and a
+ * company already on one must be legible. The hide satisfied the second and
+ * broke the first; what replaced it has to do both.
  */
 
 function composioStatus(over: Partial<ComposioStatus> = {}): ComposioStatus {
@@ -234,186 +241,178 @@ async function mountComposio(status: ComposioStatus) {
   });
 }
 
-describe("Composio offers this company's own account and nothing else", () => {
-  it("offers this company's own Composio key, and no route to pick between", async () => {
-    // With one route left there is nothing to choose, so the picker goes and the
-    // credential field for that route is what the operator lands on. A picker of
-    // one is not a choice; it is a click between the operator and the task.
-    await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
+/**
+ * Type into a React-controlled input.
+ *
+ * Setting `.value` directly does not reach React: its onChange listens for an
+ * `input` event, and it tracks the last value it rendered through the native
+ * setter on the prototype. Going through that setter and then dispatching is
+ * what makes the change look like typing.
+ */
+function typeInto(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
 
-    expect(document.querySelector("#composio-api-key")).not.toBeNull();
-    expect(document.querySelectorAll('[role="radiogroup"]')).toHaveLength(0);
-    expect(find("composio-mode-managed")).toBeNull();
-  });
+describe("add anyway is earned by the key that was refused, not by the field", () => {
+  it("retires the offer the moment the key is edited", async () => {
+    // The hole this closes: a refusal of key A left `outcome` standing while
+    // the operator typed key B, so "Add anyway" stored B with the probe skipped
+    // — a key nobody had tried, handed the one escape hatch the flow reserves
+    // for a key that was.
+    const status = composioStatus({
+      mode: "byok",
+      credentialSource: "static",
+      managedCredentialSource: "attested",
+    });
+    const client = {
+      ...(composioClient(status) as unknown as Record<string, unknown>),
+      // The probe's own refusal, as the host envelope reports it.
+      put: async () => {
+        throw new ApiError(400, "invalid_request", "Composio rejected this key", true);
+      },
+    } as unknown as OpenCompanyClient;
+    await act(async () => {
+      root.render(
+        createElement(ComposioSection, {
+          client,
+          company: "acme",
+          canManage: true,
+          onChanged: () => {},
+        }),
+      );
+    });
 
-  it("cannot leave a radiogroup with nothing checked, because there is none", async () => {
-    // The a11y break this replaces: managed filtered out of the order array with
-    // a company still on it left `active` false for every tile, so the whole
-    // group reported aria-checked="false". Removing the group removes the state.
-    await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
+    await act(async () => {
+      find("composio-row-byok-replace")!.click();
+    });
+    const field = document.getElementById("composio-api-key") as HTMLInputElement | null;
+    expect(field, "the credential dialog opened").not.toBeNull();
 
-    const radios = document.querySelectorAll('[role="radio"]');
-    const checked = document.querySelectorAll('[role="radio"][aria-checked="true"]');
-    expect(radios.length === 0 || checked.length === 1).toBe(true);
-  });
+    await act(async () => {
+      typeInto(field!, "ak_not_a_real_key_A");
+    });
+    await act(async () => {
+      find("composio-form-save")!.click();
+    });
+    expect(find("composio-skip-verify"), "a probe refusal offers add anyway").not.toBeNull();
 
-  it("names nothing about the hidden route anywhere on the panel", async () => {
-    await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
-
-    expect(container.textContent).not.toContain("OpenHuman");
-    expect(container.textContent).not.toContain("TinyHumans");
-    expect(container.textContent).not.toContain("api.tinyhumans.ai");
-  });
-  it("offers a BYOK company no control that would move it off its own account", async () => {
-    // Clearing a key is not "the key goes away". The host derives the route from
-    // whether one exists, so an empty write puts the company back on the route
-    // this console no longer offers — and a company with any credential there
-    // resumes acting through it, a different account billed differently.
-    //
-    // A button here could only say that, naming the route, or not say it, which
-    // is the switch happening silently. Rotating stays; removing does not.
-    await mountComposio(composioStatus({ mode: "byok", credentialSource: "company" }));
-
-    expect(find("composio-clear-key")).toBeNull();
-    expect(container.textContent).not.toContain("Clear key");
-    expect(container.textContent).not.toContain("use OpenHuman-managed");
-    // Rotation is still reachable, so a compromised key is still replaceable.
-    expect(container.textContent).toContain("Rotate key");
+    await act(async () => {
+      typeInto(field!, "ak_not_a_real_key_B");
+    });
+    expect(
+      find("composio-skip-verify"),
+      "an edited key has not been tried, so it is not offered the escape hatch",
+    ).toBeNull();
   });
 });
 
-function inferenceClient(status: InferenceStatus) {
-  return {
-    scopeFor: (company: string | null) =>
-      company ? `/api/v1/companies/${company}` : "/api/v1/company",
-    get: async (path: string) => (path.endsWith("/inference/models") ? [] : status),
-    put: async () => ({ status, note: "" }),
-    del: async () => ({ status, note: "" }),
-    post: async () => ({ status, note: "" }),
-  } as unknown as OpenCompanyClient;
-}
+describe("Composio offers both routes, and says which one is live", () => {
+  it("offers a real choice between the two accounts", async () => {
+    // The point of the flag flip. While it was set, `MODE_ORDER` filtered
+    // `managed` out and the picker collapsed to a single credential field —
+    // there was nothing to choose because only one route was on offer.
+    await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
 
-function inferenceStatus(over: Partial<InferenceStatus> = {}): InferenceStatus {
-  return {
-    provider: "openrouter",
-    slug: "openrouter",
-    baseUrl: "https://openrouter.ai/api/v1",
-    models: {},
-    defaultTierModels: {},
-    source: "runtime",
-    keyConfigured: true,
-    cognition: "echo",
-    usageMetering: "none",
-    restartRequired: false,
-    harnessReachable: true,
-    canRebuildInPlace: true,
-    ...over,
-  };
-}
+    expect(find("composio-row-managed")).not.toBeNull();
+    expect(find("composio-row-byok")).not.toBeNull();
+    expect(document.querySelectorAll('[role="radiogroup"]')).toHaveLength(1);
+  });
 
-async function mountInference(status: InferenceStatus) {
-  await act(async () => {
-    root.render(
-      createElement(InferenceSection, {
-        client: inferenceClient(status),
-        company: "acme",
-        canManage: true,
+  it("checks exactly one route, never none", async () => {
+    // The a11y break the hide caused: managed filtered out of the order array
+    // with a company still on it left `active` false for every tile, so the
+    // whole group reported aria-checked="false" — a control claiming the
+    // company had chosen nothing, which is a different and wrong statement from
+    // "it is on a route not offered here".
+    await mountComposio(composioStatus({ mode: "managed", credentialSource: "none" }));
+
+    expect(document.querySelectorAll('[role="radio"][aria-checked="true"]')).toHaveLength(1);
+    expect(
+      find("composio-row-managed-select")!.getAttribute("aria-checked"),
+      "the company is on managed",
+    ).toBe("true");
+  });
+
+  it("names the managed route, because it is a route again", async () => {
+    await mountComposio(composioStatus({ mode: "managed", credentialSource: "company" }));
+
+    expect(container.textContent).toContain("TinyHumans-managed");
+    // ...and says which account pays, which is the decision the row exists for.
+    expect(find("composio-row-managed-subline")!.textContent).toContain(
+      "Billed to this company's TinyHumans account",
+    );
+  });
+
+  it("gives a BYOK company the route back, and still no second name for it", async () => {
+    // Clearing a BYOK key and switching to managed are ONE host call, because
+    // the host derives the route from whether a key exists. While managed was
+    // hidden, the only control that made that call could not name where it
+    // landed, so there was no honest button and the section offered none.
+    //
+    // With the route on screen the call has a name — the managed row's
+    // "Use this" — and the own-account row must NOT also offer it as a
+    // "Remove key", which would be one action wearing two labels.
+    await mountComposio(composioStatus({ mode: "byok", credentialSource: "static" }));
+
+    expect(find("composio-row-managed-select")).not.toBeNull();
+    expect(find("composio-row-managed-select")!.textContent).toContain("Use this");
+    expect(find("composio-row-byok-remove")).toBeNull();
+    // Rotation is still reachable, so a compromised key is still replaceable.
+    expect(find("composio-row-byok-replace")).not.toBeNull();
+  });
+
+  it("hides the way back when the managed chain resolves to nothing", async () => {
+    // Offering a switch into an outage is worse than offering no switch. The
+    // row still reports why, in its sub-line — which is the whole of what the
+    // operator gets here now that the company-credential card is off this page
+    // (it is on the API Key page), and is why the sub-line has to say which
+    // payer failed to resolve rather than only that one did not.
+    await mountComposio(
+      composioStatus({
+        mode: "byok",
+        credentialSource: "static",
+        managedCredentialSource: "none",
       }),
     );
-  });
-}
 
-describe("inference asks the operator to name a provider", () => {
-  it("does not offer the managed provider in the list", async () => {
-    await mountInference(inferenceStatus());
-
-    // The list is portalled and only mounts once the select is opened — asserted
-    // without this the test passes against a tree that still offers managed.
-    const trigger = document.querySelector("#inference-provider") as HTMLElement | null;
-    expect(trigger, "no provider select").toBeTruthy();
-    await act(async () => {
-      trigger!.click();
-      trigger!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-      trigger!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      trigger!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-    });
-
-    const options = Array.from(document.querySelectorAll("[role='option']")).map((o) =>
-      o.textContent?.trim(),
-    );
-    expect(options.length, "the provider list did not open").toBeGreaterThan(0);
-    expect(options).not.toContain("Managed (TinyHumans)");
-    expect(options).toContain("OpenRouter");
-  });
-
-  it("shows a value that is a real member of its own option set", async () => {
-    // The bug in one line: the trigger rendered a label out of the full
-    // descriptor table while the list was filtered, so the control displayed a
-    // provider none of its options matched.
-    await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
-
-    const trigger = document.querySelector("#inference-provider") as HTMLElement;
-    const shown = trigger.textContent ?? "";
-    expect(shown).not.toContain("Managed (TinyHumans)");
-
-    await act(async () => {
-      trigger.click();
-      trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-      trigger.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      trigger.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-    });
-
-    const options = Array.from(document.querySelectorAll("[role='option']")).map(
-      (o) => o.textContent?.trim() ?? "",
-    );
-    expect(options.length, "the list did not open").toBeGreaterThan(0);
-    expect(options).not.toContain("Managed (TinyHumans)");
-    // Whatever the trigger shows has to be one of the rows below it.
-    expect(options.some((label) => shown.includes(label))).toBe(true);
-  });
-  it("brands nothing on the card for a route it does not offer", async () => {
-    await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
-
-    expect(find("inference-current-provider")!.textContent).toBe("Not configured");
-    expect(find("inference-not-configured")).not.toBeNull();
-    // No brand, no source word naming the route, and not the platform endpoint.
-    expect(container.textContent).not.toContain("Managed (TinyHumans)");
-    expect(container.textContent).not.toContain("api.tinyhumans.ai");
-  });
-
-  it("leads an unconfigured company into a provider it can actually finish", async () => {
-    // Not an inert placeholder: the resting state has to be completable, or
-    // onboarding dead-ends on a row nobody can act on. The header still reports
-    // the company's real state, so proposing a provider in the form is an offer
-    // rather than a claim about what is configured.
-    await mountInference(inferenceStatus({ provider: "managed", slug: "managed" }));
-
-    expect(find("inference-current-provider")!.textContent).toBe("Not configured");
-    expect(document.querySelector("#inference-provider")?.textContent).toContain("OpenRouter");
-    expect(document.querySelector("#inference-key")).not.toBeNull();
-    expect((find("inference-save") as HTMLButtonElement).disabled).toBe(false);
+    expect(find("composio-row-managed-select")).toBeNull();
+    expect(find("composio-row-managed-subline")!.textContent).toContain("No credential resolves");
   });
 });
 
-describe("the wizard's model step asks the operator to name a provider too", () => {
-  it("does not offer the managed endpoint as the thing to think with", () => {
+
+// The settings half of "offer the managed route" used to be pinned by mounting
+// the single-provider form and opening its Provider select. **That control is
+// retired**: a select over a closed three-element list is what the provider list
+// replaces, and "is Managed offered" is no longer a question about a dropdown —
+// Managed is an unremovable row on the Connected list, always present and always
+// on, so it cannot be hidden by a flag.
+//
+// What the hide could still affect is the wizard, which has its own list and is
+// the first screen of a first run. That half is below and is unchanged.
+
+describe("the wizard's model step offers the managed endpoint too", () => {
+  it("offers the managed endpoint as a thing to think with", () => {
     // The wizard has its own provider list, and it is the FIRST screen of a
-    // first run — hiding the option only on the settings card would leave the
-    // managed route selectable at the one moment every operator passes through.
+    // first run. Offering the route only on the settings card would hide the
+    // one-click option at the one moment every operator passes through.
     const offered = SETUP_INFERENCE_OPTIONS.map((option) => option.id);
 
-    expect(offered).not.toContain("managed");
+    expect(offered).toContain("managed");
     expect(offered).toContain("openrouter");
-    // Still resolvable, so a host already reporting it keeps its label.
     expect(INFERENCE_PROVIDERS.find((p) => p.id === "managed")?.label).toBe("TinyHumans");
   });
 });
 
 describe("the roster's keyboard shortcuts go with the roster", () => {
-  it("does not select a host on Cmd-1 when there is no roster to see", async () => {
-    // The listener is installed on `window` by the provider, not by the menu, so
-    // hiding the switcher does not remove it. Left live it would swallow the
-    // browser's own Cmd-1 and switch hosts with nothing on screen saying so.
+  it("selects a host on Cmd-2 now that the roster is on screen", async () => {
+    // The listener is installed on `window` by the provider, not by the menu,
+    // and it is gated on the same flag as the roster it drives. The pairing is
+    // the point: a shortcut that switched hosts with no roster on screen would
+    // swallow the browser's own Cmd-2 and act invisibly, and a roster whose
+    // printed `⌘2` did nothing would be furniture.
     const picked: string[] = [];
     const value = { ...hosts([CONNECTION, SECOND]), onSelect: (id: string) => picked.push(id) };
     await show(value as HostsValue);
@@ -424,7 +423,7 @@ describe("the roster's keyboard shortcuts go with the roster", () => {
       );
     });
 
-    expect(picked).toEqual([]);
+    expect(picked).toEqual(["c2"]);
   });
 });
 

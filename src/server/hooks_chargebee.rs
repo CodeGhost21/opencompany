@@ -367,6 +367,7 @@ mod tests {
         .expect("manifest");
         FsCompanyStore::new(home.to_path_buf())
             .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
                 id: id.clone(),

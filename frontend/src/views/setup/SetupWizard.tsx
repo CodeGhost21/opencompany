@@ -24,7 +24,7 @@
 //     implies its own button performed the restart.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Check, Loader2, Lock, RotateCw } from "lucide-react";
+import { AlertTriangle, Check, ExternalLink, Loader2, Lock, RotateCw } from "lucide-react";
 
 import { requestCode } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
@@ -47,10 +47,17 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { OnboardingShell } from "@/components/onboarding-shell";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/page-header";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { useOptionalHosts } from "@/connections/HostsContext";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { TEAM_TONES, initials, toneFor } from "@/lib/team";
 import { fieldCopy, fieldPlaceholder } from "@/lib/setup-fields";
@@ -62,6 +69,7 @@ import {
   type SetupDraft,
 } from "@/lib/company-setup";
 import { isDesktopRuntime } from "@/api/transport";
+import { TINYHUMANS_API_KEYS_URL } from "@/lib/links";
 import { cn } from "@/lib/utils";
 import { HOST_SETTINGS_HIDDEN } from "@/product-scope";
 
@@ -102,6 +110,59 @@ const STEPS: readonly (Step & { fields: readonly string[] })[] = [
   { id: "advanced", label: "Advanced", fields: [] },
   { id: "review", label: "Review", fields: [] },
 ];
+
+/**
+ * Where each provider's own key is minted, for the operator who does not have
+ * one yet.
+ *
+ * A link out, not a grant: they sign in as themselves on their own dashboard,
+ * create a key there, and paste it back. That works before this instance has
+ * a company — which is the whole of when this wizard runs — where the
+ * one-click PKCE grant cannot, because the host scopes a grant to a company
+ * and there is not one yet.
+ *
+ * Absent for `openai_compatible` and `ollama`: neither has a dashboard this
+ * product could name, and guessing one is worse than saying nothing.
+ */
+const PROVIDER_KEY_SOURCE: Record<string, { label: string; url: string }> = {
+  managed: {
+    label: "TinyHumans",
+    url: TINYHUMANS_API_KEYS_URL,
+  },
+  openrouter: {
+    label: "OpenRouter",
+    url: "https://openrouter.ai/sign-in?redirect_url=https%3A%2F%2Fopenrouter.ai%2Fworkspaces%2Fdefault%2Fkeys",
+  },
+};
+
+/**
+ * "No model" — the same escape decision D3 has always offered, as a choice in
+ * the picker rather than a link under it.
+ *
+ * Shaped like a provider so the step can treat it as one: it needs neither a
+ * key nor an endpoint, which is what makes every field below the picker
+ * disappear on its own. It is **not** a provider id the host knows, and never
+ * reaches one: `tested` settles on `skipped` the moment it is chosen, and
+ * every write of `provider` downstream is gated on `tested.kind === "ok"`.
+ */
+const NO_MODEL_OPTION = {
+  id: "none",
+  label: "No model",
+  hint: "You'll get a standard team for your industry, and can add a key later.",
+  needsUrl: false,
+  needsKey: false,
+} as const;
+
+/**
+ * The base-ui `Select` wants a plain id -> label map for its `items` prop, so
+ * this is projected from {@link SETUP_INFERENCE_OPTIONS} the same way
+ * `InferenceSection`'s `PROVIDER_LABEL_ITEMS` is — `items` is what the closed
+ * trigger renders, and a filtered `SelectItem` list alone would leave a
+ * hidden option's own name showing there.
+ */
+const SETUP_PROVIDER_LABEL_ITEMS: Record<string, string> = Object.fromEntries(
+  [...SETUP_INFERENCE_OPTIONS, NO_MODEL_OPTION].map((option) => [option.id, option.label]),
+);
 
 /**
  * Advanced: the settings that already work, grouped by subject.
@@ -624,10 +685,16 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     setDesigning(true);
     setDesignError(null);
     try {
+      // A modelless run sends neither half of the design brief. The step no
+      // longer asks for them, and a draft left behind by an operator who
+      // answered and then went back to choose "No model" is not an answer to
+      // the question being asked now — it would still steer the curated pick,
+      // which scores both against the industry answer.
+      const modelless = tested.kind === "skipped";
       const proposed = await proposeSetupRoster(client, {
         industry: draft.industry,
-        teamHint: draft.teamHint,
-        automate: draft.automate,
+        teamHint: modelless ? "" : draft.teamHint,
+        automate: modelless ? "" : draft.automate,
         template: template || null,
         inferenceKey: values.tinyhumans_api_key || null,
         inferenceProvider:
@@ -635,6 +702,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         inferenceBaseUrl:
           tested.kind === "ok" && operatorConfiguredInference ? tested.baseUrl : null,
         inferenceModel: tested.kind === "ok" ? tested.model : null,
+        forceCurated: modelless,
       });
       // The host is contracted never to answer with an empty roster, so a
       // missing or empty one is a failure rather than a team of nobody — and
@@ -795,7 +863,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
                   operator never saw. */}
               Built <strong>{applied.seeded_company}</strong> with{" "}
               {roster?.agents.length ?? 0}{" "}
-              {roster?.agents.length === 1 ? "teammate" : "teammates"}.
+              {roster?.agents.length === 1 ? "agent" : "agents"}.
             </p>
           )}
           {/* The button below cannot restart the host — it only re-enters the
@@ -975,11 +1043,11 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     <OnboardingShell
       header={
         <div className="space-y-4">
-          <div className="space-y-1">
+          <div className="space-y-0.5">
             <h1 className="text-xl font-semibold tracking-tight">
               {status.complete ? "Reconfigure this instance" : "Let's build your company"}
             </h1>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-xs leading-snug text-muted-foreground">
               {status.complete
                 ? "Change what this host is configured with."
                 : "A few questions, then we'll put a team together."}
@@ -1067,6 +1135,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
             }}
             onChange={setDraft}
             onEnter={advance}
+            modelless={tested.kind === "skipped"}
           />
         )}
 
@@ -1097,8 +1166,18 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
               // A changed provider invalidates the verdict. Carrying a green
               // tick across a provider switch would be the worst kind of lie:
               // one the operator watched us earn.
-              setTested({ kind: "untested" });
+              //
+              // "No model" is the exception, and settles rather than clears:
+              // it is an answer to the step, not a connection waiting to be
+              // proved, and there is nothing it could be tested against.
+              setTested(p === NO_MODEL_OPTION.id ? { kind: "skipped" } : { kind: "untested" });
               setBaseUrl(p === status.inference.provider ? (status.inference.base_url ?? "") : "");
+              // And the roster with it. `advance` only designs when there is
+              // none, so a team designed under the old answer would otherwise
+              // survive into Review and be submitted — a model-authored roster
+              // under copy promising a standard one, for an operator who came
+              // back specifically to change this.
+              setRoster(null);
             }}
             baseUrl={baseUrl}
             onBaseUrl={(v) => {
@@ -1238,7 +1317,7 @@ function SignInStep({
       <h2 className="text-base font-medium leading-snug" data-testid="setup-question">
         How should people sign in?
       </h2>
-      <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+      <p className="text-xs leading-snug text-muted-foreground">
         This applies to every company this host serves.
       </p>
       {locked && (
@@ -1319,7 +1398,7 @@ function FieldRow({
         {copy.label}
       </Label>
       {copy.hint && (
-        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">{copy.hint}</p>
+        <p className="text-xs leading-snug text-muted-foreground">{copy.hint}</p>
       )}
       <Input
         id={field.key}
@@ -1391,7 +1470,7 @@ function AccountStep({
       >
         What&apos;s your email?
       </Label>
-      <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+      <p className="text-xs leading-snug text-muted-foreground">
         {required
           ? "This is how you sign back in, and the only address that can administer the company."
           : // Not the no-sign-in case: that host does not render this step at
@@ -1449,7 +1528,12 @@ function PowerStep({
 }) {
   const field = status.fields.find((f) => f.key === "tinyhumans_api_key");
   const locked = field !== undefined && !field.editable;
-  const spec = INFERENCE_PROVIDERS.find((p) => p.id === provider) ?? INFERENCE_PROVIDERS[0];
+  const noModel = provider === NO_MODEL_OPTION.id;
+  /** The provider's own key page, when it has one to send the operator to. */
+  const keySource = PROVIDER_KEY_SOURCE[provider];
+  const spec: { needsUrl: boolean; needsKey: boolean } = noModel
+    ? NO_MODEL_OPTION
+    : (INFERENCE_PROVIDERS.find((p) => p.id === provider) ?? INFERENCE_PROVIDERS[0]);
   /** Whether the operator asked to supply their own key over the host's. */
   const [override, setOverride] = useState(false);
   // The house already holds one, and this operator may have no way to get their
@@ -1488,25 +1572,60 @@ function PowerStep({
     (!spec.needsKey || (onTheHouse && !override) || value.trim().length > 0) &&
     (!spec.needsUrl || baseUrl.trim().length > 0);
 
+  /**
+   * The connection test, rendered beside the field it tests.
+   *
+   * One element, placed once: whichever input is the last one this provider
+   * asks for gets it on the same row, so the button sits with the value it
+   * acts on instead of below an empty gap. The host-key case has no input at
+   * all — {@link inlineTest} is false there and it falls to a row of its own.
+   */
+  const inlineTest = spec.needsKey ? !(onTheHouse && !override) : spec.needsUrl;
+
+  /**
+   * What is selected right now, readable from inside a call that started
+   * before it.
+   *
+   * A ref rather than the props themselves: `run` closes over the values from
+   * the render that created it, which are exactly the values it must not use
+   * to decide whether it is still current.
+   */
+  const providerRef = useRef({ provider, key: value.trim(), baseUrl: baseUrl.trim() });
+  providerRef.current = { provider, key: value.trim(), baseUrl: baseUrl.trim() };
+
   const run = async () => {
     // This also protects the Enter shortcut on the inputs. A disabled button
     // alone would still leave that route to a request the provider cannot
     // answer usefully.
     if (!canTest) return;
 
+    // What this call is a verdict *about*. The picker stays live while a test
+    // is in flight, so an answer can arrive after the operator has moved on —
+    // and a verdict is only ever true of the answers it was asked with. The
+    // worst of it: selecting "No model" mid-test, and having the settled
+    // `skipped` overwritten by an `ok` that would then be submitted as
+    // inference for the pseudo-provider `none`, which the host does not know.
+    const asked = { provider, key: value.trim(), baseUrl: baseUrl.trim() };
+    const stale = () =>
+      asked.provider !== providerRef.current.provider ||
+      asked.key !== providerRef.current.key ||
+      asked.baseUrl !== providerRef.current.baseUrl;
+
     onTested({ kind: "testing" });
     try {
       const result = await testInference(client, {
-        provider,
-        key: value.trim() || null,
-        baseUrl: baseUrl.trim() || null,
+        provider: asked.provider,
+        key: asked.key || null,
+        baseUrl: asked.baseUrl || null,
       });
+      if (stale()) return;
       onTested(
         result.ok
           ? { kind: "ok", baseUrl: result.baseUrl, model: result.model }
           : { kind: "failed", error: result.error ?? "Could not reach the provider." },
       );
     } catch (err: unknown) {
+      if (stale()) return;
       onTested({
         kind: "failed",
         error: err instanceof Error ? err.message : String(err),
@@ -1514,46 +1633,82 @@ function PowerStep({
     }
   };
 
+  const testButton = (
+    <Button
+      type="button"
+      variant={tested.kind === "ok" ? "outline" : "default"}
+      disabled={tested.kind === "testing" || !canTest}
+      onClick={() => void run()}
+      data-testid="setup-test-connection"
+      className="shrink-0"
+    >
+      {tested.kind === "testing" ? (
+        <>
+          <Loader2 className="size-4 animate-spin" />
+          Testing…
+        </>
+      ) : tested.kind === "ok" ? (
+        "Test again"
+      ) : (
+        "Test connection"
+      )}
+    </Button>
+  );
+
   return (
     <div className="space-y-7">
       <div>
         <Label className="text-base font-medium leading-snug" data-testid="setup-question">
           What should your team think with?
         </Label>
-        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+        <p className="text-xs leading-snug text-muted-foreground">
           {onTheHouse
             ? "This host already has a model. Test it and carry on — you don't need a key of your own."
-            : "Your teammates need a model to work. We'll check it reaches before going any further."}
+            : noModel
+              ? "Carrying on without one. Your team will be a standard one for your industry rather than designed from your answers."
+              : "Your agents need a model to work. We'll check it reaches before going any further."}
         </p>
 
-        {/* Cards, not a select. Four options with a sentence each is a choice
-            someone can make without knowing the vocabulary first — a dropdown
-            of slugs assumes they already do. */}
-        <div className="mt-3 grid gap-2" role="radiogroup" aria-label="Model provider">
-          {SETUP_INFERENCE_OPTIONS.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              role="radio"
-              aria-checked={option.id === provider}
-              data-testid={`setup-provider-${option.id}`}
-              onClick={() => onProvider(option.id)}
-              className={cn(
-                "rounded-lg border p-3 text-left transition-colors",
-                option.id === provider
-                  ? "border-primary bg-primary/5"
-                  : "hover:border-input hover:bg-muted/50",
-              )}
-            >
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium">{option.label}</span>
-                {status.inference.ready && option.id === status.inference.provider && (
-                  <Badge variant="secondary">Already set up</Badge>
-                )}
-              </div>
-              <p className="mt-0.5 text-sm leading-snug text-muted-foreground">{option.hint}</p>
-            </button>
-          ))}
+        {/* Each option carries its own sentence, inside the popup rather than
+            under the trigger: the description is what makes the choice legible
+            while it is being made, and it has nothing left to say once the
+            choice is committed. */}
+        <div className="mt-3">
+          <Select
+            value={provider}
+            onValueChange={(v) => {
+              if (v !== null) onProvider(v);
+            }}
+            items={SETUP_PROVIDER_LABEL_ITEMS}
+          >
+            <SelectTrigger id="setup-provider" className="w-full" data-testid="setup-provider-select">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {[...SETUP_INFERENCE_OPTIONS, NO_MODEL_OPTION].map((option) => (
+                <SelectItem
+                  key={option.id}
+                  value={option.id}
+                  data-testid={`setup-provider-${option.id}`}
+                  className="items-start py-2"
+                >
+                  <span className="flex flex-col gap-0.5">
+                    <span className="flex items-center gap-2 font-medium">
+                      {option.label}
+                      {status.inference.ready && option.id === status.inference.provider && (
+                        <Badge variant="secondary">Already set up</Badge>
+                      )}
+                    </span>
+                    {/* `whitespace-normal` because the item's own text wrapper
+                        is `whitespace-nowrap`, and `white-space` inherits. */}
+                    <span className="whitespace-normal text-xs leading-snug text-muted-foreground">
+                      {option.hint}
+                    </span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
@@ -1562,18 +1717,22 @@ function PowerStep({
           <Label htmlFor="setup-base-url" className="text-base font-medium leading-snug">
             Endpoint
           </Label>
-          <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+          <p className="text-xs leading-snug text-muted-foreground">
             Paste the local address as shown, for example <code>localhost:6969</code>. We&apos;ll
             add <code>http://</code> and <code>/v1</code> when needed.
           </p>
-          <Input
-            id="setup-base-url"
-            value={baseUrl}
-            placeholder={provider === "ollama" ? "http://127.0.0.1:11434/v1" : "https://…/v1"}
-            data-testid="setup-field-base-url"
-            className="mt-2.5"
-            onChange={(e) => onBaseUrl(e.target.value)}
-          />
+          <div className="mt-2.5 flex items-center gap-2">
+            <Input
+              id="setup-base-url"
+              value={baseUrl}
+              placeholder={provider === "ollama" ? "http://127.0.0.1:11434/v1" : "https://…/v1"}
+              data-testid="setup-field-base-url"
+              onChange={(e) => onBaseUrl(e.target.value)}
+            />
+            {/* Only when this is the last field asked for: a provider that
+                also wants a key gets the button beside that instead. */}
+            {!spec.needsKey && inlineTest && testButton}
+          </div>
         </div>
       )}
 
@@ -1613,7 +1772,7 @@ function PowerStep({
             </div>
           ) : (
             <>
-              <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+              <p className="text-xs leading-snug text-muted-foreground">
                 {onTheHouse
                   ? "This replaces the host's key for this company."
                   : "Used to test the connection now, and saved when you finish."}
@@ -1625,20 +1784,48 @@ function PowerStep({
                 </div>
               )}
 
-              <Input
-                id="setup-key"
-                autoFocus
-                type="password"
-                value={value}
-                disabled={locked}
-                placeholder="sk-…"
-                data-testid="setup-field-key"
-                className="mt-2.5"
-                onChange={(e) => onChange(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void run();
-                }}
-              />
+              <div className="mt-2.5 flex items-center gap-2">
+                <Input
+                  id="setup-key"
+                  autoFocus
+                  type="password"
+                  value={value}
+                  disabled={locked}
+                  placeholder="sk-…"
+                  data-testid="setup-field-key"
+                  onChange={(e) => onChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void run();
+                  }}
+                />
+                {inlineTest && testButton}
+              </div>
+
+              {/* Where the key comes from, for the two providers that mint one
+                  on a page of their own. A link out rather than a grant: the
+                  operator signs in as themselves, creates the key on their own
+                  dashboard, and brings it back to the field above. */}
+              {keySource && !locked && (
+                <div className="mt-3 rounded-lg border bg-muted/40 p-3">
+                  <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+                    or
+                  </p>
+                  <p className="mt-1 text-xs leading-snug text-muted-foreground">
+                    Sign in to {keySource.label} to create an API key, then paste it above.
+                  </p>
+                  <a
+                    href={keySource.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-testid="setup-key-signin"
+                    className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-2.5")}
+                  >
+                    Sign in with {keySource.label}
+                    <ExternalLink className="size-3.5" />
+                  </a>
+                </div>
+              )}
+
               {onTheHouse && (
                 <button
                   type="button"
@@ -1657,25 +1844,14 @@ function PowerStep({
         </div>
       )}
 
+      {/* Nothing to reach, so nothing to test: "No model" answers the step by
+          being chosen, which is why it settles `tested` on `skipped` rather
+          than leaving a button whose only honest label would be "test what". */}
+      {!noModel && (
       <div className="space-y-2">
-        <Button
-          type="button"
-          variant={tested.kind === "ok" ? "outline" : "default"}
-          disabled={tested.kind === "testing" || !canTest}
-          onClick={() => void run()}
-          data-testid="setup-test-connection"
-        >
-          {tested.kind === "testing" ? (
-            <>
-              <Loader2 className="size-4 animate-spin" />
-              Testing…
-            </>
-          ) : tested.kind === "ok" ? (
-            "Test again"
-          ) : (
-            "Test connection"
-          )}
-        </Button>
+        {/* Only where no input row could carry it — the host-key case, which
+            draws a settled chip rather than a field. */}
+        {!inlineTest && testButton}
 
         {/* The verdict names the endpoint it reached. A tick earned against the
             default endpoint, on a host where the operator meant to point
@@ -1695,26 +1871,17 @@ function PowerStep({
           </Alert>
         )}
       </div>
+      )}
 
       {/* Nobody gets stuck (decision D3). A hosted operator with no key must not
           be trapped behind a credential they cannot obtain — and the curated
-          team exists precisely for this path. Stated plainly, as a consequence
-          rather than a warning, so the choice is informed rather than scary. */}
-      {tested.kind !== "ok" && (
-        <button
-          type="button"
-          onClick={() => onTested({ kind: "skipped" })}
-          data-testid="setup-skip-model"
-          className="text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
-        >
-          Continue without a model — you&apos;ll get a standard team for your
-          industry, and can add a key later
-        </button>
-      )}
-      {tested.kind === "skipped" && (
+          team exists precisely for this path. It is the picker's last option
+          now rather than a link under the step, so the escape sits with the
+          other answers to the same question instead of below them. */}
+      {noModel && (
         <p className="text-sm leading-snug text-muted-foreground" data-testid="setup-skipped">
-          Carrying on without a model. Your team will be a standard one for your
-          industry rather than designed from your answers.
+          A model can be set later from Connections → Inference, and everything
+          else about this company works without one.
         </p>
       )}
     </div>
@@ -1821,7 +1988,7 @@ function ReviewStep({
           this and never changes it, and nothing in the product renames a
           company afterwards. It sits above the roster because it is the one
           field on this screen that cannot be revisited later, while any
-          teammate can be added, renamed or dropped from the console. */}
+          agent can be added, renamed or dropped from the console. */}
       <div className="space-y-1.5">
         <Label htmlFor="setup-company-name">What should we call it?</Label>
         <Input
@@ -1843,7 +2010,7 @@ function ReviewStep({
 
       <div>
         <h2 className="text-base font-medium leading-snug">Your team</h2>
-        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+        <p className="text-xs leading-snug text-muted-foreground">
           {roster.source === "model"
             ? "Built from what you told us. Rename or drop anyone — you can add more later."
             : roster.source === "preset"
@@ -1886,8 +2053,8 @@ function ReviewStep({
               {/* A shipped roster is read here, not edited.
                   Not a restriction for its own sake: an edited roster can only
                   be sent back as a *designed* company, and the designed path is
-                  bounded at six teammates — so renaming one row of an
-                  eight-teammate template would silently drop two of them, and
+                  bounded at six agents — so renaming one row of an
+                  eight-agent template would silently drop two of them, and
                   the operator would find out by not finding them. Every one of
                   these is renameable and removable from the console the moment
                   setup finishes, where no such bound applies. */}
@@ -1927,7 +2094,7 @@ function ReviewStep({
           <AlertTriangle />
           <AlertTitle>That&apos;s everyone gone</AlertTitle>
           <AlertDescription>
-            A company needs at least one teammate. Add one back, or start again.
+            A company needs at least one agent. Add one back, or start again.
           </AlertDescription>
         </Alert>
       )}
@@ -1973,12 +2140,12 @@ function ReviewStep({
             A roster reads as a set of capabilities: "Social Media Manager —
             owns posting and engagement" is taken to mean it can post. It
             cannot, yet, and nothing on this screen used to say so. Every
-            designed teammate starts with the workspace and nothing outward,
+            designed agent starts with the workspace and nothing outward,
             because reaching a real account needs an account connected first —
             an act only a person can perform, and one there has been no
             opportunity to perform yet.
 
-            This is the same failure as the twelve invented teammates that used
+            This is the same failure as the twelve invented agents that used
             to render here: offering something the host cannot honour. The fix
             is the sentence, not a wider tool grant. */}
         <p data-testid="setup-reach">
@@ -1999,7 +2166,7 @@ function ReviewStep({
 
       {built !== null && (
         <p className="text-sm text-muted-foreground" data-testid="setup-building">
-          Building {built} {built === 1 ? "teammate" : "teammates"}…
+          Building {built} {built === 1 ? "agent" : "agents"}…
         </p>
       )}
 
@@ -2056,7 +2223,7 @@ function AdvancedStep({
         <h2 className="text-base font-medium leading-snug" data-testid="setup-question">
           Anything you want to change?
         </h2>
-        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+        <p className="text-xs leading-snug text-muted-foreground">
           Every one of these already has a working default. Press on if none of
           it matters to you — written to{" "}
           <code className="font-mono text-xs">{status.config_path}</code>.
@@ -2070,7 +2237,7 @@ function AdvancedStep({
         <section key={group.id} className="rounded-xl border">
           <div className="border-b px-4 py-3">
             <h3 className="text-base font-medium leading-snug">{group.title}</h3>
-            <p className="mt-0.5 text-sm leading-snug text-muted-foreground">{group.hint}</p>
+            <p className="text-xs leading-snug text-muted-foreground">{group.hint}</p>
           </div>
           <div className="space-y-5 px-4 py-4">
             {fieldsFor(status, group.fields).map((f) => (
@@ -2108,6 +2275,7 @@ function BusinessStep({
   onTemplate,
   onChange,
   onEnter,
+  modelless,
 }: {
   draft: SetupDraft;
   templates: SetupStatus["templates"];
@@ -2115,6 +2283,23 @@ function BusinessStep({
   onTemplate: (id: string) => void;
   onChange: (update: (d: SetupDraft) => SetupDraft) => void;
   onEnter: () => void;
+  /**
+   * Whether this company is being built without a model, which is what the
+   * other two questions need to be worth asking.
+   *
+   * They are the design brief: `automate` becomes a numbered job list the
+   * roster is designed against and checked for coverage, and `teamHint` is a
+   * request added on top of it. Neither happens without a model — the host
+   * falls back to a curated team matched on keywords, where `automate` and
+   * `teamHint` score one point each against `industry`'s three and nothing
+   * else reads them.
+   *
+   * So they are not asked. Asking somebody to describe the work they want
+   * taken off their plate, under copy promising their team is built around
+   * it, and then staffing them from a keyword match, is a worse answer than
+   * one fewer question.
+   */
+  modelless: boolean;
 }) {
   const jobs = jobItems(draft.automate);
 
@@ -2128,7 +2313,7 @@ function BusinessStep({
         <Label htmlFor="setup-template" className="text-base font-medium leading-snug">
           What kind of company are you setting up?
         </Label>
-        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+        <p className="text-xs leading-snug text-muted-foreground">
           Pick one of the teams bundled with OpenCompany. You can tailor it below.
         </p>
         {templates.length > 0 ? (
@@ -2145,7 +2330,7 @@ function BusinessStep({
             </option>
             {templates.map((option) => (
               <option key={option.id} value={option.id}>
-                {option.name} ({option.agent_count} teammates)
+                {option.name} ({option.agent_count} agents)
               </option>
             ))}
           </select>
@@ -2178,11 +2363,14 @@ function BusinessStep({
         )}
       </div>
 
+      {/* Both questions exist to brief a model. Without one they are asked and
+          then not acted on — see `modelless`. */}
+      {!modelless && (
       <div>
         <Label htmlFor="setup-automate" className="text-base font-medium leading-snug">
           What are you trying to automate?
         </Label>
-        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+        <p className="text-xs leading-snug text-muted-foreground">
           List whatever comes to mind. This is what your team gets built around.
         </p>
         <Textarea
@@ -2204,13 +2392,15 @@ function BusinessStep({
           </p>
         )}
       </div>
+      )}
 
+      {!modelless && (
       <div>
         <Label htmlFor="setup-teamHint" className="text-base font-medium leading-snug">
           Anyone in particular you need on the team?
           <span className="ml-1.5 text-sm font-normal text-muted-foreground">Optional</span>
         </Label>
-        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
+        <p className="text-xs leading-snug text-muted-foreground">
           We&apos;ll suggest a team either way — this just adds to it.
         </p>
         <Textarea
@@ -2223,6 +2413,7 @@ function BusinessStep({
           onChange={(e) => onChange((d) => ({ ...d, teamHint: e.target.value }))}
         />
       </div>
+      )}
     </div>
   );
 }

@@ -13,8 +13,9 @@ proposal and the measurements behind it.**
 [tinymemory#128](https://github.com/tinyhumansai/tinymemory/pull/128) is
 registered, and both live suites pass against a real CortexDB. Selectable is not
 selected: `OPENCOMPANY_MEMORY` defaults exactly as it did, and choosing Cortex is
-the decision this record informs. It argues against it — with **one leg of that
-argument retracted**; see [Correction](#correction-2026-09-04) below.
+the decision this record informs. It argues against it — with one leg of that argument
+[retracted](#correction-2026-09-04) and one
+[hardened](memory-engine-cortex-evidence.md#the-scope-bypass-re-measured-2026-09-09).
 
 ## Correction (2026-09-04)
 
@@ -60,9 +61,10 @@ Understanding stays empty, and the concepts lane still reports no LLM router wit
 both routers verifiably started — the one defect here that has survived
 checking.
 
-Finding 2 is untouched, and it *forces* instance-per-tenant rather than blocking
-it: it removes the shared-instance-with-per-tenant-credentials row from the
-topology table, while instance-per-tenant needs no token scoping at all. The
+Finding 2's conclusion is untouched and its reasoning is now stronger — see
+[the re-measurement](memory-engine-cortex-evidence.md#the-scope-bypass-re-measured-2026-09-09).
+It *forces* instance-per-tenant rather than blocking it, removing the
+shared-instance-with-per-tenant-credentials row from the topology table. The
 decision taken on [#2072](https://github.com/tinyhumansai/opencompany/issues/2072)
 is to adopt at that topology.
 
@@ -77,21 +79,21 @@ question, and the recommendation follows from them.
    **closed-source**, distributed only as prebuilt artifacts (`cortexdbai/cortexdb-releases`,
    Docker Hub `cortexdb/cortexdb`). Whatever we build treats it as an opaque
    upstream binary we cannot patch.
-2. **The isolating configuration is not reachable self-hosted — and what we
-   measured is policy, not a broken boundary.** `CORTEX_V1_MINTER_ENABLE=1`
-   turns on `POST /v1/auth/tokens`, which mints correctly. A token minted *for*
-   scope A, pointed at scope B: `/v1/recall` is refused `403 POLICY_DENIED`,
-   but `GET /v1/events?scope=B` returns B's records and `POST /v1/experience`
-   into B is accepted. **That is the deployment tier behaving as configured**:
-   `GET /v1/policy/effective` lists `scope.read.holistic`, `scope.read.descend`
-   and `scope.write.about_other` among the actor's *allowed* capabilities. The
-   documented way to narrow it, `PUT /v1/policy/{tier}`, is experimental and
-   `404`s here, though the read endpoints are present. The minter is itself
-   documented as "a dev convenience, not a production issuer"; production
-   presets expect OIDC or `cortex-auth-ref`, which is in no release asset and no
-   doc page. So we cannot configure the isolation, nor test whether the
-   production path enforces it — weaker than calling it a defect, and the same
-   conclusion: nothing here may rest on Cortex's scopes.
+2. **The isolating configuration is not reachable self-hosted, and two routes
+   bypass the boundary outright.** `CORTEX_V1_MINTER_ENABLE=1` turns on
+   `POST /v1/auth/tokens`, which mints correctly. A token minted *for* scope A,
+   pointed at scope B: `/v1/recall` and `/v1/forget` are refused
+   `403 POLICY_DENIED`, but `GET /v1/events?scope=B` returns B's records and
+   `POST /v1/experience` into B is accepted and stored. The documented way to
+   narrow an actor, `PUT /v1/policy/{tier}`, is experimental and `404`s here.
+   ~~This is the deployment tier behaving as configured.~~ **It is not** —
+   re-run on v0.9.9 with narrowed tokens holding none of the capabilities that
+   would explain it, the same two routes still leak while their neighbours
+   refuse the identical request. `aud` cannot separate tenants within an
+   instance either: it is one value per *deployment*. Both are set out in
+   [the re-measurement](memory-engine-cortex-evidence.md#the-scope-bypass-re-measured-2026-09-09).
+   The conclusion is the one this record already drew, for a stronger reason:
+   nothing here may rest on Cortex's scopes.
 3. ~~**The derived fact and belief tier does not work.**~~ **Overturned — see
    [Correction](#correction-2026-09-04).** The run below had enrichment off and
    no way to report it; configured, and on a funded provider account, Facts and
@@ -118,7 +120,7 @@ removes the middle option:
 |---|---|---|
 | One shared instance, one bootstrap credential | Namespace-only — the **weak** tier | Yes |
 | **One instance per tenant**, own key and own data dir | Credential *and* storage isolation | **Yes** |
-| Shared instance, real per-tenant credentials | Strong | **No** — the production issuer and the policy-narrowing API are both unavailable in this build (finding 2) |
+| Shared instance, real per-tenant credentials | Strong | **No** — `aud` is one value per deployment, so a shared instance is a *single* Cortex tenant, and the scope boundary it falls back on is bypassed on `/v1/events` and `/v1/experience` (finding 2) |
 
 `memory-engine.md` is unambiguous about why the weak tier is not acceptable as a
 default: with a hosted engine "the namespace string is the only thing separating
@@ -342,24 +344,96 @@ unreserved id when the host declares the class, and this host declares every
 remote driver `External` with `TRUSTED`, so the class stays host-decided rather
 than self-reported.
 
-**Phase 2 — provisioning.** Per-tenant instance lifecycle through
-opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*` alongside the existing
-`OPENCOMPANY_MONGODB_URI`/`_DB` injection, health-probe, back up, destroy. Sizing
-waits on a real per-instance figure from Cortex.
+**Phase 2 — provisioning. Shipped, except backup.** Per-tenant instance
+lifecycle through opencompany-manager: create, inject `OPENCOMPANY_MEMORY_*`
+alongside the existing `OPENCOMPANY_MONGODB_URI`/`_DB` injection, health-probe,
+back up, destroy. Running on both runtimes — Kubernetes, and Firecracker on the
+Hetzner host, where the engine lives *inside* the tenant's own microVM on
+loopback rather than in a second VM.
+
+Three things landed differently from how this section anticipated them.
+
+**Sizing no longer waits.** Measured per engine: 120 MB steady and 152 MB peak
+against a 100 MB corpus at `CORTEX_VECTOR_RESIDENT_MAX=20_000`.
+
+`RESIDENT_MAX` caps resident vectors, it does not allocate them. Filled it would
+hold `20_000 x 1536 x 4 bytes` = 123 MB — more than the whole engine measured,
+which is the tell that a 100 MB corpus does not fill it. Memory scales with
+*resident* vectors up to the cap and then stops: size a large corpus on the cap,
+a small one on the measurement.
+
+**A wake costs five times a boot.** Per-tenant cgroup peaks, one tenant, one
+afternoon: cold boot (`--config-file`) 201.7 MB and 205.6 MB; wake from snapshot
+(`PUT /snapshot/load`) 1.0 GB and 1.2 GB. A boot allocates only what the guest
+touches; a restore faults in the whole saved address space, because that is what
+a snapshot is. So ~200 MB is a floor seen once, on a first boot, and any fleet
+that parks and wakes costs the ceiling. Restored pages are file-backed by
+`vm.mem` and land in page cache, so the host reports them under `buff/cache`
+rather than `used` and can reclaim the clean ones — survivable, not free.
+
+**Two limits, governing different things.** RAM bounds how many tenants can be
+awake at once. Size that on the **measured peak, not the guest ceiling**: the
+1024 MiB ceiling caps what the guest can address, but the host-side cgroup peak
+during a snapshot wake reached 1.2 GB, because the restore also charges the
+VMM's own mapping of `vm.mem`. At that peak `(63.9 GB - ~1.8 GB host) / 1.2 GB`
+is roughly **50**, and dividing by 1 GiB instead would recommend ~60 — enough to
+overcommit the box precisely during a wave of wakes.
+
+Disk bounds how many can exist: a parked tenant costs **~1.13 GB** — `vm.mem` is 1.1 GB and
+genuinely not sparse, while `data.ext4` is 1.0 GB apparent but **30 MB
+allocated** — so 828 GB of free space holds roughly **730**. A box therefore
+carries ~730 companies of which ~50 can be awake simultaneously.
+
+**Corrects an earlier revision of this section**, which said disk binds before
+RAM and put a parked tenant at ~2 GB. That read apparent size and missed that
+`data.ext4` is sparse; the two limits bound different quantities rather than one
+preceding the other.
+
+**The manager holds no provider credential at all.** This section assumed the
+control plane would inject a fleet key. It does not: it asks the platform
+backend for an `inference`-scoped key per instance
+(`POST /opencompany/instances/{slug}/inference-key`), sending only the slug. The
+backend resolves which team owns that instance, mints against it, and keeps the
+provider credential server-side. What that replaced was an OpenRouter
+*management* key held on the host — a credential able to create, re-limit and
+delete every runtime key on the account, sitting on a machine whose whole job is
+running other people's workloads. The per-tenant spend ceiling survived the move
+as a monthly cap the backend applies, across both the `inference` and
+`passthrough` buckets, since an engine calling the passthrough bills to the
+latter.
+
+**A prerequisite this section did not name:** the backend resolves the owning
+team from an instance record, so a tenant created directly against the manager
+has none and its mint answers 404. Under Firecracker a failed mint is fatal
+rather than degrading, so tenants created outside the hosted flow must be
+adopted before their first cold boot.
+
+**Backup remains the open item.** There is still no backup path on the
+Firecracker runtime; the logical export job exists elsewhere and nothing
+schedules one here.
 
 **Phase 3 — migration.** `opencompany memory migrate --to cortex` over the
 Portability family. The generic procedure in
 [`memory-engine.md`](memory-engine.md#switching-engines--the-operator-runbook)
 holds; four things are specific to Cortex and one of them is a blocker.
 
-**The target engine has to exist, and for an existing company it does not.**
-`ensure_cortex` runs inside `provision`, and `ensure_running` calls `provision`
-only when the workload's StatefulSet is *absent*. Parking scales to zero and
-keeps it. So a company created before Cortex was switched on never gets an
-engine, no matter how many times it wakes — and migration has a prerequisite
-with no path behind it. Closing that is the first task of this phase, not a
-detail of it: either provisioning learns to add an engine to a running tenant,
-or the operator re-provisions deliberately.
+**The target engine has to exist, and an existing company does not grow one by
+waking.** `ensure_cortex` runs inside `provision`, and `ensure_running` calls
+`provision` only when the workload object is *absent*. Parking keeps that
+object, so a company created before Cortex was switched on never gets an engine
+however many times it wakes. That is still true of the code.
+
+What has changed is that the operator path behind it is now proven, so this is a
+deliberate step rather than a blocker with nothing behind it. Discard the
+tenant's snapshot — `vm.snap` and `vm.mem` under Firecracker, or delete the
+StatefulSet under Kubernetes, whose PVC retention policy is `Retain` on both
+delete and scale — and the next wake takes the boot path, which re-runs
+provisioning and mints an engine. **The data disk is untouched: this is not
+delete-and-recreate.** Six tenants were migrated this way with their memory
+intact.
+
+Provisioning learning to add an engine to a running tenant would still be
+better, and is the remaining improvement here.
 
 **The driver id is `cortex`, not `cortexdb`.** They are two adapters for the
 same service and both are accepted targets; the manager injects `cortex`, so

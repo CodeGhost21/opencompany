@@ -28,6 +28,10 @@ pub struct AppConfig {
     pub openhuman_root: Option<PathBuf>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
+    /// TinyHumans **site** base URL, when this deployment states one
+    /// (`TINYHUMANS_WEB_URL`). Read through [`Self::hub_site`], which derives it
+    /// from [`Self::api_url`] when unset — the normal case.
+    pub web_url: Option<String>,
     /// An operator-set display name for this instance
     /// (`OPENCOMPANY_INSTANCE_NAME`), surfaced by `/spec` so a client holding
     /// several connections can show something friendlier than a URL. Purely
@@ -128,6 +132,7 @@ impl Default for AppConfig {
             bind: "127.0.0.1:8080".to_string(),
             openhuman_root: None,
             api_url: crate::app::config::DEFAULT_API_URL.to_string(),
+            web_url: None,
             instance_name: None,
             brain_mode: BrainMode::Hosted,
             tinyplace_api_url: crate::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
@@ -200,6 +205,23 @@ pub fn canonical_tenant(tenant: &str) -> &str {
 }
 
 impl AppConfig {
+    /// The TinyHumans **site** this deployment belongs to: the dashboard whose
+    /// API keys and balance are the ones this host's credential spends.
+    ///
+    /// [`web_url`](Self::web_url) when a deployment states one, else derived
+    /// from [`api_url`](Self::api_url) — so pointing a host at the staging hub
+    /// points its "manage keys" and "top up" links at the staging dashboard
+    /// with nothing else to set, and a host pointed at a backend the convention
+    /// does not describe gets `None` and the console renders no link rather
+    /// than a guess. See [`hub_account`](crate::server::hub_account).
+    pub fn hub_site(&self) -> Option<String> {
+        self.web_url
+            .clone()
+            .map(|url| url.trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .or_else(|| crate::server::hub_account::site_for_api(&self.api_url))
+    }
+
     /// True when hosted cognition can run: hosted brain mode plus a credential
     /// this instance can **obtain** — see [`Self::credential_available`].
     pub fn cycles_available(&self) -> bool {
@@ -439,6 +461,11 @@ pub struct AppState {
     /// self-hosted host) means the console offers no ecosystem sign-in at all,
     /// rather than offering a button that leads nowhere.
     hub_identity: Option<Arc<dyn crate::server::hub_identity::HubIdentityExchange>>,
+    /// Key-grant flows started and not yet finished, keyed by the opaque
+    /// `state` the browser carries. Holds the PKCE verifier, which is why it is
+    /// in memory and swept rather than persisted — see
+    /// [`hub_link`](crate::server::hub_link).
+    hub_links: Arc<crate::server::hub_link::HubLinks>,
     /// Cross-origin allowlist. Empty (the default) means CORS is off, which is
     /// correct for every same-origin deployment.
     cors: crate::server::cors::CorsConfig,
@@ -586,6 +613,7 @@ impl AppState {
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
             hub_identity: None,
+            hub_links: Arc::new(crate::server::hub_link::HubLinks::new()),
             cors: crate::server::cors::CorsConfig::default(),
             #[cfg(feature = "tinyplace")]
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
@@ -964,6 +992,16 @@ impl AppState {
         &self,
     ) -> Option<&Arc<dyn crate::server::hub_identity::HubIdentityExchange>> {
         self.hub_identity.as_ref()
+    }
+
+    /// The pending key-grant flows for this host.
+    ///
+    /// Always present, unlike [`Self::hub_identity`]: the map costs nothing on a
+    /// host that never starts a link, and making it optional would put a
+    /// `None` branch on a path that already refuses earlier when there is no
+    /// exchange to redeem against.
+    pub fn hub_links(&self) -> &Arc<crate::server::hub_link::HubLinks> {
+        &self.hub_links
     }
 
     /// Installs platform (multi-tenant) auth. Mirrors [`Self::with_home`].
@@ -1653,7 +1691,7 @@ mod tests {
     #[test]
     fn skill_registry_loads_the_repo_library_and_caches() {
         let state = AppState::new(AppConfig::default());
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
 
         let first = state.skill_registry(&dir).expect("registry loads");
         assert!(first.iter().any(|skill| skill.slug == "web-research"));

@@ -367,6 +367,14 @@
        surface. Not a substitute for the focus ring — an addition to it. */
     --shadow-brand: 0 2px 8px -2px color-mix(in oklab, var(--brand-500) 32%, transparent);
 
+    /* The ink of the orbiting halo behind the content card (`.content-orbit`).
+       Dark, because the effect is a drifting *shadow* rather than a light: on
+       the light chrome it reads as the card being lifted at one edge.
+       `--shadow-color` is the same hue every other shadow in this file uses, so
+       the halo belongs to the same family rather than being a second opinion
+       about what a shadow looks like here. */
+    --orbit-ink: hsl(var(--shadow-color) / 0.5);
+
     /* A soft brand glow bleeding from a card's lower-left corner, for the
        standing invitations on an otherwise empty surface — the "create a
        teammate" / "add people" pair on a channel with no transcript.
@@ -502,6 +510,12 @@
     --status-running: var(--cyan-bright);
     --status-running-text: var(--cyan-bright);
     --status-running-soft: color-mix(in oklab, var(--cyan-bright) 16%, transparent);
+
+    /* A dark halo on near-black chrome is invisible, so dark mode lifts the
+       ink rather than dropping the effect — the same inversion `--shadow-*`
+       already makes when its drop shadow becomes an inset highlight. Still
+       faint: this is a hint of a rim, not a neon edge. */
+    --orbit-ink: color-mix(in oklab, var(--foreground) 22%, transparent);
 
     --status-blocked: var(--amber-bright);
     --status-blocked-text: var(--amber-bright);
@@ -1017,6 +1031,82 @@
     --scrollbar-thumb-grab: color-mix(in oklab, var(--muted-foreground) 80%, transparent);
 }
 
+/* The content card's orbiting halo.
+ *
+ * A single soft arc of shadow that travels clockwise around the outside of the
+ * card, so the sheet reads as hovering over the chrome and being lifted from a
+ * slowly changing side — rather than sitting under one fixed drop shadow that
+ * says nothing after the first glance.
+ *
+ * ## Why the angle animates and the element does not
+ *
+ * The obvious build is a rotating box behind the card. That needs the box to be
+ * a square larger than its diagonal or a corner swings into view, which on a
+ * 1200x830 card means a very large blurred layer repainting every frame. Here
+ * the element is still and only the gradient's `from` angle moves, which is one
+ * registered custom property interpolating — no transform, no oversized layer,
+ * nothing to clip.
+ *
+ * `@property` is what makes that possible: an unregistered custom property is a
+ * token, not an angle, so it would jump 0deg → 360deg in one step instead of
+ * sweeping. Where `@property` is unsupported the `var(…, 0deg)` fallback keeps
+ * the gradient valid and the halo simply holds still — a static lift rather
+ * than a broken box.
+ *
+ * ## The shape of the arc
+ *
+ * One lobe, not a ring: transparent for most of the turn, rising to
+ * `--orbit-ink` across a ~25% window. A full ring would be a uniform glow and
+ * the movement would be invisible; the gap is what makes the travel readable.
+ *
+ * `inset: -1px` and a matching radius so the halo starts flush behind the
+ * card's own border, and `blur(18px)` spreads it outward from there. The card
+ * is opaque, so only what escapes its edge is ever seen — which is the whole
+ * effect.
+ */
+@property --orbit-angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+}
+
+@keyframes content-orbit {
+    to {
+        --orbit-angle: 360deg;
+    }
+}
+
+.content-orbit {
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
+    border-radius: calc(var(--radius-2xl, 1rem) + 1px);
+    background: conic-gradient(
+        from var(--orbit-angle, 0deg),
+        transparent 0%,
+        var(--orbit-ink) 12%,
+        transparent 26%,
+        transparent 100%
+    );
+    filter: blur(18px);
+    /* Faint. The ink already carries most of the restraint; this is the second
+       dial, kept separate so the strength can be tuned without touching the
+       colour every other shadow in the file shares. */
+    opacity: 0.55;
+    animation: content-orbit 14s linear infinite;
+    pointer-events: none;
+}
+
+/* A moving shadow is decoration, and decoration is the first thing to go when
+   somebody has asked for less motion. The lobe holds at its starting angle
+   rather than disappearing, so the card keeps the lift and loses only the
+   travel. */
+@media (prefers-reduced-motion: reduce) {
+    .content-orbit {
+        animation: none;
+    }
+}
+
 @layer base {
     /* ---- Chromium and WebKit -------------------------------------------
      * These pseudo elements only exist on boxes that actually scroll, so no
@@ -1085,6 +1175,49 @@
         }
     }
 
+    /* ---- Shown only while the region is hovered -------------------------
+     * `.scrollbar-on-hover` — the sidebar column, which is standing furniture
+     * behind every view. A bar held down its edge at all times is a vertical
+     * rule the two-layer shell spent real effort removing, and the column is
+     * scrolled by wheel and trackpad far more often than by dragging. But the
+     * whole column scrolls now rather than a band inside it, so an operator who
+     * DOES reach for the bar has to find one — and hover is where that reach
+     * begins.
+     *
+     * The thumb is made transparent rather than the bar being given zero width:
+     * a width that changes on hover would reflow the column's content sideways
+     * under the cursor. This way the gutter is always reserved and only the ink
+     * appears, so nothing moves.
+     *
+     * `:focus-within` rides along with `:hover` so a keyboard operator tabbing
+     * through the column gets the same feedback a pointer does, and
+     * `[data-scrolling]` overrides both — a bar that is actively moving must be
+     * visible whether or not the pointer happens to be over it.
+     */
+    .scrollbar-on-hover::-webkit-scrollbar-thumb {
+        background-color: transparent;
+    }
+    .scrollbar-on-hover:hover::-webkit-scrollbar-thumb,
+    .scrollbar-on-hover:focus-within::-webkit-scrollbar-thumb,
+    .scrollbar-on-hover[data-scrolling]::-webkit-scrollbar-thumb {
+        background-color: var(--scrollbar-thumb-rest);
+    }
+    /* After the rule above, so the cursor's own weights still win over it. */
+    .scrollbar-on-hover::-webkit-scrollbar-thumb:hover,
+    .scrollbar-on-hover::-webkit-scrollbar-thumb:active {
+        background-color: var(--scrollbar-thumb-grab);
+    }
+    @supports not selector(::-webkit-scrollbar) {
+        .scrollbar-on-hover {
+            scrollbar-color: transparent transparent;
+        }
+        .scrollbar-on-hover:hover,
+        .scrollbar-on-hover:focus-within,
+        .scrollbar-on-hover[data-scrolling] {
+            scrollbar-color: var(--scrollbar-thumb-rest) transparent;
+        }
+    }
+
     /* The global reduced-motion block above cannot reach a scrollbar pseudo
        element (`*` does not match one), and killing the transition alone would
        leave the bar snapping between two weights — motion by another name. So
@@ -1095,6 +1228,17 @@
         ::-webkit-scrollbar-thumb {
             background-color: var(--scrollbar-thumb-active);
             transition: none;
+        }
+        /* The hover surface keeps hiding its bar — that is a visibility rule,
+           not motion — but it stops fading between the two weights, for the
+           reason the block above gives. */
+        .scrollbar-on-hover::-webkit-scrollbar-thumb {
+            background-color: transparent;
+        }
+        .scrollbar-on-hover:hover::-webkit-scrollbar-thumb,
+        .scrollbar-on-hover:focus-within::-webkit-scrollbar-thumb,
+        .scrollbar-on-hover[data-scrolling]::-webkit-scrollbar-thumb {
+            background-color: var(--scrollbar-thumb-active);
         }
         @supports not selector(::-webkit-scrollbar) {
             html,

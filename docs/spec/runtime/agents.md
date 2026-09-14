@@ -257,7 +257,7 @@ reading a provider trace. `opencompany prompt` renders the same composition from
 a manifest alone.
 
 ```sh
-./scripts/dump-prompt.sh --company companies/agentic_product_team
+./scripts/dump-prompt.sh --company companies/product_team
 ./scripts/dump-prompt.sh --company <dir> --agent bug_triager       # one teammate
 ./scripts/dump-prompt.sh --company <dir> --agent bug_triager --raw # bytes only
 ./scripts/dump-prompt.sh --company <dir> --out /tmp/prompts        # a file each

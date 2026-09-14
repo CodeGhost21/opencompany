@@ -1750,6 +1750,12 @@ struct Meta {
     /// which leaves the manifest in charge, exactly as those companies ran.
     #[serde(default)]
     overlay_agent_edits: Vec<crate::ports::types::AgentOverride>,
+    /// The move grammars the operator has installed on desks. Absent on meta
+    /// files written before a grammar could be installed from the console, and
+    /// `#[serde(default)]` reads that absence as "the manifest still decides" —
+    /// exactly how those companies ran.
+    #[serde(default)]
+    overlay_desk_hive: Vec<crate::ports::types::DeskHiveOverride>,
     /// The ids of manifest teammates the operator has removed. Absent on meta
     /// files written before a blueprint teammate could be removed, which
     /// `#[serde(default)]` reads as "nobody was removed" — exactly how those
@@ -1834,6 +1840,7 @@ impl Default for Meta {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_policy: None,
             overlay_tool_grants: None,
@@ -1939,6 +1946,7 @@ impl FsCompanyStore {
             overlay_workflows: record.overlay_workflows.clone(),
             overlay_budgets: record.overlay_budgets.clone(),
             overlay_agent_edits: record.overlay_agent_edits.clone(),
+            overlay_desk_hive: record.overlay_desk_hive.clone(),
             overlay_retired_agents: record.overlay_retired_agents.clone(),
             overlay_policy: record.overlay_policy.clone(),
             overlay_tool_grants: record.overlay_tool_grants.clone(),
@@ -2227,6 +2235,7 @@ impl CompanyStore for FsCompanyStore {
 
         Ok(Some(CompanyRecord {
             overlay_agent_edits: meta.overlay_agent_edits,
+            overlay_desk_hive: meta.overlay_desk_hive,
             overlay_retired_agents: meta.overlay_retired_agents,
             id: id.clone(),
             manifest,
@@ -2878,6 +2887,35 @@ impl FsSecretStore {
     }
 }
 
+/// Whether an error from the **legacy** secret path means "there is no legacy
+/// file", as opposed to a real IO failure worth surfacing.
+///
+/// `NotFound` is the obvious case. `InvalidFilename` is the one that cost an
+/// incident: [`Bundle::legacy_secret`] slugs the whole key into one path
+/// component with **no length bound**, unlike the canonical `Bundle::secret`,
+/// which is digest-truncated to a fixed budget. A key long enough to overflow
+/// `NAME_MAX` — a 245-character provider name was enough — makes the kernel
+/// answer `ENAMETOOLONG` (`ErrorKind::InvalidFilename`) rather than `ENOENT`.
+///
+/// Surfacing that as a store error had two consequences. [`SecretStore::get`]
+/// turned a plain credential read into a 500 on every route that reads one.
+/// Worse, [`SecretStore::set`]'s clear path had **already written** the
+/// canonical file before it went looking for a legacy file to revoke, so a
+/// credential delete returned 500 with the key truncated to zero bytes and the
+/// provider row still listed — an inconsistent store repairable only by
+/// hand-editing the index.
+///
+/// A name too long to *be* a path component cannot name a file that exists, so
+/// the honest reading of `ENAMETOOLONG` is "absent", exactly like `ENOENT`.
+/// Every other kind still propagates: a permissions failure or a read-only
+/// mount under `secrets/` has to stay loud.
+fn legacy_secret_absent(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+    )
+}
+
 #[async_trait]
 impl SecretStore for FsSecretStore {
     async fn get(&self, company: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
@@ -2889,7 +2927,7 @@ impl SecretStore for FsSecretStore {
                 let legacy_path = bundle.legacy_secret(key);
                 match tokio::fs::read_to_string(&legacy_path).await {
                     Ok(value) => Ok(Some(SecretValue(value))),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) if legacy_secret_absent(&e) => Ok(None),
                     Err(e) => Err(io_err(&legacy_path, e)),
                 }
             }
@@ -2915,7 +2953,7 @@ impl SecretStore for FsSecretStore {
             let legacy_path = bundle.legacy_secret(key);
             match tokio::fs::remove_file(&legacy_path).await {
                 Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) if legacy_secret_absent(&e) => {}
                 Err(e) => return Err(io_err(&legacy_path, e)),
             }
         }
@@ -3667,6 +3705,72 @@ mod test {
         );
     }
 
+    /// **Cross-process safety, simulated in-process.** [`path_lock`] is
+    /// keyed on a process-wide `static`, so it serializes every writer inside
+    /// *this* process regardless of what they call through. To prove the claim
+    /// that matters for a second `opencompany` process over the same bundle —
+    /// that losing that in-process lock bounds the damage to a lost update and
+    /// never a torn file — this drives many concurrent [`write_atomic_bytes`]
+    /// calls directly, bypassing [`path_lock`] entirely, exactly as two
+    /// unsynchronised processes would.
+    ///
+    /// Each writer's payload is large and distinct, so a write that is not
+    /// truly atomic (a naive truncate-then-stream, or two renames' bytes
+    /// interleaving) would leave the file holding neither candidate in full —
+    /// short, mixed, or holding a length that names no writer. The assertion
+    /// is deliberately narrow: not "the last writer wins" (unordered
+    /// concurrent tasks have no defined last), only that whichever bytes land
+    /// are exactly one full, uncorrupted candidate.
+    #[tokio::test]
+    async fn concurrent_writers_without_the_lock_never_leave_a_torn_file() {
+        let root_dir = tmp_root();
+        let dir = root_dir.path().join("state");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("tasks.json");
+
+        const WRITERS: u8 = 12;
+        // Each candidate is a distinct byte repeated many times, so a torn or
+        // interleaved result is detectable from content alone: any byte in
+        // the final file that is not the *one* value every position holds
+        // proves a mix, and any length that is not exactly `BYTES` proves a
+        // truncation.
+        const BYTES: usize = 200 * 1024;
+        let candidates: Vec<Vec<u8>> = (0..WRITERS)
+            .map(|writer| vec![b'A' + writer; BYTES])
+            .collect();
+
+        // `spawn` alone permits the runtime to finish one writer before the
+        // next begins, and a serial schedule passes this test without ever
+        // reaching the contended path. The barrier holds every task at the
+        // instant before the write so they are released together.
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(WRITERS as usize));
+        let mut set = tokio::task::JoinSet::new();
+        for candidate in candidates.clone() {
+            let path = path.clone();
+            let gate = std::sync::Arc::clone(&gate);
+            set.spawn(async move {
+                gate.wait().await;
+                write_atomic_bytes(&path, &candidate).await
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            res.unwrap().expect("no writer observes an I/O error");
+        }
+
+        let landed = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(
+            landed.len(),
+            BYTES,
+            "a torn write left a length matching no candidate: {} bytes",
+            landed.len()
+        );
+        assert!(
+            candidates.iter().any(|c| c == &landed),
+            "the file's bytes were not a single writer's payload in full — a torn \
+             or interleaved write slipped through the lock-free path"
+        );
+    }
+
     /// A failed write still surfaces as an error rather than half-succeeding —
     /// the same direction `durable_append_reports_an_unwritable_path` pins for
     /// the append path. Here the temp create fails because the parent is a
@@ -4139,6 +4243,7 @@ mod test {
         let record = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -4205,6 +4310,7 @@ mod test {
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),
@@ -4263,6 +4369,7 @@ mod test {
         let first_save = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -4321,6 +4428,7 @@ mod test {
         let record = || CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -4404,6 +4512,7 @@ mod test {
         let record = |lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -4508,6 +4617,7 @@ mod test {
             CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest,
                 ledger: Vec::new(),
@@ -4626,6 +4736,7 @@ mod test {
         let record_named = |name: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -4728,6 +4839,7 @@ mod test {
         let record_named = |name: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -4799,6 +4911,7 @@ mod test {
         let record = |name: &str, lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -4878,6 +4991,7 @@ mod test {
         let record = |name: &str, lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -4990,6 +5104,7 @@ mod test {
         let record = |name: &str, lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -5135,6 +5250,7 @@ mod test {
         let record = |name: &str, lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -5282,6 +5398,7 @@ mod test {
         let record_named = |name: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: {
                 let mut m = sample_manifest();
@@ -5367,6 +5484,7 @@ mod test {
         let record = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -5455,6 +5573,7 @@ mod test {
         let record = CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -5534,6 +5653,7 @@ mod test {
         let record = || CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -5860,6 +5980,7 @@ mod test {
         let record = |lifecycle: &str| CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
             id: id.clone(),
             manifest: sample_manifest(),
             ledger: Vec::new(),
@@ -5933,6 +6054,7 @@ mod test {
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),
@@ -5998,6 +6120,7 @@ mod test {
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
                 overlay_agent_edits: Vec::new(),
+                overlay_desk_hive: Vec::new(),
                 id: id.clone(),
                 manifest: sample_manifest(),
                 ledger: Vec::new(),
@@ -6412,6 +6535,87 @@ mod test {
             secrets.get(&company, "key-foo").await.unwrap(),
             Some(SecretValue("value-for-key-foo".into()))
         );
+    }
+
+    /// A key whose legacy slug is far past `NAME_MAX`. 300 characters is the
+    /// length that reproduced the incident end to end; the canonical filename
+    /// is digest-truncated and unaffected, so this exercises only the legacy
+    /// fallback.
+    fn over_long_key() -> String {
+        format!("provider/{}/key", "a".repeat(300))
+    }
+
+    #[tokio::test]
+    async fn a_key_too_long_for_a_legacy_path_reads_as_absent() {
+        // `get` used to fall through to `legacy_secret`, take `ENAMETOOLONG`
+        // from the kernel, and return `Err` — 500ing every route that merely
+        // reads a credential, including the add flow's own existence check.
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let key = over_long_key();
+
+        assert_eq!(
+            secrets.get(&company, &key).await.unwrap(),
+            None,
+            "an unset over-long key must read as absent, not as a store error"
+        );
+
+        secrets
+            .set(&company, &key, SecretValue("sk-not-a-real-key".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get(&company, &key).await.unwrap(),
+            Some(SecretValue("sk-not-a-real-key".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_a_key_too_long_for_a_legacy_path_succeeds() {
+        // The P0: `set` writes the canonical file first, then removes the
+        // legacy one. With an over-long key that removal answered
+        // `ENAMETOOLONG`, so `set` returned `Err` *after* truncating the stored
+        // credential — a 500 on `DELETE` with the key already at zero bytes and
+        // the row still listed.
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let secrets = FsSecretStore::new(&root);
+        let company = CompanyId::new("company-a");
+        let key = over_long_key();
+
+        secrets
+            .set(&company, &key, SecretValue("sk-not-a-real-key".into()))
+            .await
+            .unwrap();
+        secrets
+            .set(&company, &key, SecretValue(String::new()))
+            .await
+            .expect("clearing an over-long key must not fail after the write lands");
+        // The port has no delete: a clear is a write of the empty string, which
+        // every caller reads as unset. What matters here is that the write and
+        // its result agree — the incident was a 500 over a key that was already
+        // empty on disk.
+        assert_eq!(
+            secrets.get(&company, &key).await.unwrap(),
+            Some(SecretValue(String::new()))
+        );
+    }
+
+    #[test]
+    fn only_absence_like_errors_are_read_as_a_missing_legacy_file() {
+        use std::io::{Error, ErrorKind};
+        assert!(legacy_secret_absent(&Error::from(ErrorKind::NotFound)));
+        assert!(legacy_secret_absent(&Error::from(
+            ErrorKind::InvalidFilename
+        )));
+        // Everything else stays loud: a secrets directory that cannot be read
+        // must not be mistaken for one holding nothing.
+        assert!(!legacy_secret_absent(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        assert!(!legacy_secret_absent(&Error::from(ErrorKind::Other)));
     }
 
     #[tokio::test]

@@ -31,7 +31,7 @@ function render() {
         currentTeamId: DESKS[0].teamId,
         currentDept: DESKS[0],
         toolWiki: null,
-        legendSlot: createElement("div", null, "Notes Human AI teammate Tool Workflow Stage SOP task flow placement"),
+        legendSlot: createElement("div", null, "Notes Human AI agent Tool Automation Stage SOP task flow placement"),
         onNavDept: () => {},
         onBack: () => {},
         children: createElement("svg"),

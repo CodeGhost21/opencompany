@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const composer = readFileSync(resolve(here, "../../src/views/chat/MessageComposer.tsx"), "utf8");
+const composer = readFileSync(resolve(here, "../../src/views/room/MessageComposer.tsx"), "utf8");
 
 describe("composer intent emphasis (issue #1341)", () => {
   it("uses a subtle primary tint for the selected intent instead of a solid fill", () => {

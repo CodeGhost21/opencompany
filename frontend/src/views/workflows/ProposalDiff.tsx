@@ -38,7 +38,7 @@ export function ProposalDiff({ diff }: { diff: GraphDiff }) {
       ))}
       {diff.nodes.length === 0 && diff.edges.length === 0 && (
         <li className="text-muted-foreground">
-          This would change nothing about the workflow as it stands.
+          This would change nothing about the automation as it stands.
         </li>
       )}
     </ul>
@@ -59,7 +59,7 @@ function NodeLine({ node }: { node: NodeChange }) {
         </span>
         {/* A new step's whole payload, not just its name: its kind, and any
             schedule, config or approval flag it arrives with, each of which
-            changes what the workflow does. Reviewing a name and applying a
+            changes what the automation does. Reviewing a name and applying a
             scheduled auto-approving node is the gap this closes. */}
         <span className="mt-0.5 ml-4 block space-y-0.5">
           {node.fields.map((field) => (
