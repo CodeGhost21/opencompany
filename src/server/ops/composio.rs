@@ -780,9 +780,14 @@ async fn set_api_key(
 /// either here (one `match`) or in
 /// [`composio_probe`](crate::company::composio_probe), which is pure. What this
 /// function owns is the one rule that cannot live in either: **the raw upstream
-/// reason goes to `debug` and nowhere else.** It can carry a proxy's HTML, a
-/// response header, or a key fragment, and the only string that leaves this
-/// function is the class.
+/// reason does not leave this function at all — not to the response, and not
+/// to a log.** It can carry a proxy's HTML, a response header, or a key
+/// fragment, and the only string that leaves this function is the class.
+///
+/// It used to go to `debug`, on the theory that a debug log is private. It is
+/// not: a debug stream reaches log aggregation, exporters and anyone who can
+/// read the host's logs, which is a wider audience than the admin who pasted
+/// the key. The class is what diagnosis needs, and it is still logged.
 async fn classified_probe(runtime: &CompanyRuntime, api_key: &str) -> Option<ComposioProbeClass> {
     #[cfg(test)]
     let outcome = match probe_override::get(runtime.id().as_ref()) {
@@ -799,7 +804,6 @@ async fn classified_probe(runtime: &CompanyRuntime, api_key: &str) -> Option<Com
             tracing::debug!(
                 company = %runtime.id(),
                 class = %class,
-                error = %raw,
                 "[composio] a draft API key did not check out"
             );
             Some(class)
