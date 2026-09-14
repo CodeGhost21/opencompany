@@ -4921,7 +4921,8 @@ mod tests {
         // Keys rework (#2306), slice 2b: `resolve_for_turn`'s refusal replaces
         // the old "no inference provider is configured" sentence.
         assert!(
-            err.to_string().contains("No model is chosen for this company"),
+            err.to_string()
+                .contains("No model is chosen for this company"),
             "{err}"
         );
     }
