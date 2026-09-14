@@ -28,6 +28,7 @@ import {
   type PresenceListResponse,
   type ReadStateResponse,
   type ApiErrorBody,
+  type UsedBy,
   type WorkflowProblem,
   type AppSpec,
   type ApprovalSummary,
@@ -1719,10 +1720,54 @@ function parseJson(text: string): unknown {
 function errorEnvelope(text: string): ApiErrorBody | undefined {
   const parsed = parseJson(text);
   if (typeof parsed !== "object" || parsed === null) return undefined;
-  const { error, code, problems } = parsed as Record<string, unknown>;
+  const { error, code, problems, usedBy } = parsed as Record<string, unknown>;
   if (typeof error !== "string" || typeof code !== "string") return undefined;
   const breakdown = workflowProblems(problems);
-  return breakdown ? { error, code, problems: breakdown } : { error, code };
+  const dependents = usedByFromWire(usedBy);
+  return {
+    error,
+    code,
+    ...(breakdown ? { problems: breakdown } : {}),
+    ...(dependents ? { usedBy: dependents } : {}),
+  };
+}
+
+/**
+ * The `usedBy` object off an envelope (`docs/key-reworks/in-use-guards.md`
+ * §1), or `undefined` when the value is not shaped like one.
+ *
+ * Held to the same strictness as {@link workflowProblems}: `agents` entries
+ * missing a string `id` or `name` are dropped rather than reaching the UI as
+ * `undefined`, and an object with none of the three known sub-fields present
+ * is treated as "not this shape" rather than as an empty-but-valid `UsedBy` —
+ * the host never sends one with nothing set (§1: the whole field is omitted
+ * when nothing uses the thing), so an object that manages to have neither
+ * `default`, `agents` nor `surfaces` is more likely a foreign body than a
+ * host telling us nothing depends on this.
+ */
+function usedByFromWire(value: unknown): UsedBy | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { default: isDefault, agents, surfaces } = value as Record<string, unknown>;
+  const result: UsedBy = {};
+  if (isDefault === true) result.default = true;
+  if (Array.isArray(agents)) {
+    const kept = agents.filter(
+      (a): a is { id: string; name: string } =>
+        typeof a === "object" &&
+        a !== null &&
+        typeof (a as Record<string, unknown>).id === "string" &&
+        typeof (a as Record<string, unknown>).name === "string",
+    );
+    if (kept.length) result.agents = kept;
+  }
+  if (Array.isArray(surfaces)) {
+    const kept = surfaces.filter(
+      (s): s is "llm" | "composio" | "search" =>
+        s === "llm" || s === "composio" || s === "search",
+    );
+    if (kept.length) result.surfaces = kept;
+  }
+  return result.default || result.agents || result.surfaces ? result : undefined;
 }
 
 /**
@@ -1800,6 +1845,10 @@ function httpError(res: TransportResponse, text: string): ApiError {
   // named. Carried, not rendered here — what a surface does with it is the
   // surface's call.
   if (envelope?.problems) err.problems = envelope.problems;
+  // Keys rework (#2306): carried the same way `problems` is, so a caller can
+  // show exactly what a stale confirm dialog would break without re-deriving
+  // it from `code === "in_use"` and a re-fetch.
+  if (envelope?.usedBy) err.usedBy = envelope.usedBy;
   // Not discarded, just not rendered. A proxy error page is the only clue to
   // which hop gave up, which is worth keeping for a bug report even though it
   // is worthless as prose.

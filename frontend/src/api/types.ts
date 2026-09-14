@@ -2129,16 +2129,36 @@ export interface WorkflowProblem {
 }
 
 /**
- * Error envelope shape: `{ error, code }`, plus `problems` on a refusal that
- * has them.
+ * Who depends on something a mutation is about to remove, clear, disable or
+ * switch (keys rework, issue #2306; `docs/key-reworks/in-use-guards.md` §1).
  *
- * `problems` is additive and scoped to `workflow_invalid` on the host side, so
- * it is absent from every other error and must stay optional here.
+ * Every sub-field is **omitted**, not `false` or `[]`, when there is nothing
+ * to say there — the host's own `skip_serializing_if` rule — and the whole
+ * `usedBy` field is omitted (not present, not `{}`) when nothing depends on
+ * the thing at all. `"usedBy" in dto` is therefore the in-use check.
+ */
+export interface UsedBy {
+  /** This is the company's inference default. */
+  default?: true;
+  /** Agent pairs naming this provider, in roster order. */
+  agents?: { id: string; name: string }[];
+  /** Which product surfaces still depend on this credential. */
+  surfaces?: ("llm" | "composio" | "search")[];
+}
+
+/**
+ * Error envelope shape: `{ error, code }`, plus `problems` on a refusal that
+ * has them and `usedBy` on an in-use refusal (409 `in_use`).
+ *
+ * `problems` and `usedBy` are each additive and scoped to their own refusal
+ * shape on the host side (`workflow_invalid`, `in_use` respectively), so both
+ * are absent from every other error and must stay optional here.
  */
 export interface ApiErrorBody {
   error: string;
   code: string;
   problems?: WorkflowProblem[];
+  usedBy?: UsedBy;
 }
 
 /**
@@ -2220,6 +2240,17 @@ export class ApiError extends Error {
    * "no breakdown offered" from "a breakdown with nothing in it".
    */
   problems?: WorkflowProblem[];
+
+  /**
+   * Who depends on the thing this refusal is about, when the host sent one
+   * (keys rework, issue #2306) — present exactly when {@link code} is
+   * `"in_use"`. Carried the same way {@link problems} is: the host already
+   * computed it, so a caller that wants to show what a stale confirm dialog
+   * would break re-renders this instead of re-deriving it.
+   *
+   * Absent for every error that is not an in-use refusal.
+   */
+  usedBy?: UsedBy;
 
   constructor(
     public status: number,
