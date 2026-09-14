@@ -1008,11 +1008,13 @@ impl<'a> EpisodeDriver<'a> {
                 (self.desk.id != general)
                     .then(|| (general.clone(), general.clone(), general_label)),
             )
-            .chain(bare_direct_line_is_safe.then(|| (
-                agent_id.to_string(),
-                agent_id.to_string(),
-                direct_line_label.clone(),
-            )))
+            .chain(bare_direct_line_is_safe.then(|| {
+                (
+                    agent_id.to_string(),
+                    agent_id.to_string(),
+                    direct_line_label.clone(),
+                )
+            }))
             .chain(std::iter::once((
                 format!("{}{agent_id}", crate::runtime::assignee::DM_PREFIX),
                 format!("{}{agent_id}", crate::runtime::assignee::DM_PREFIX),

@@ -444,7 +444,7 @@ pub fn credential_slug(provider_raw: &str) -> &str {
         MANAGED_SLUG
     } else {
         normalize_provider(provider_raw)
-}
+    }
 }
 
 /// OpenRouter's OpenAI-compatible base URL — used when the `openrouter`
