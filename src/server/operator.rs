@@ -9874,6 +9874,15 @@ mode = "full"
             .await
             .unwrap();
         runtime
+            .workspace()
+            .create(
+                &company,
+                &attachment_note_node("node-2", "surviving-note.md"),
+                Some("Keep this note"),
+            )
+            .await
+            .unwrap();
+        runtime
             .artifacts()
             .upsert(
                 &company,
@@ -9904,6 +9913,13 @@ mode = "full"
                             kind: crate::ports::types::ChatOutputKind::WorkspaceNode,
                             target_id: "node-1".to_string(),
                             title: "launch-note.md".to_string(),
+                            task_id: None,
+                            version: None,
+                        },
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::WorkspaceNode,
+                            target_id: "node-2".to_string(),
+                            title: "surviving-note.md".to_string(),
                             task_id: None,
                             version: None,
                         },
@@ -9948,11 +9964,12 @@ mode = "full"
             .iter()
             .find(|message| message["text"] == "I wrote both files.")
             .unwrap();
-        assert_eq!(reply["outputs"].as_array().unwrap().len(), 2);
+        assert_eq!(reply["outputs"].as_array().unwrap().len(), 3);
         assert_eq!(reply["outputs"][0]["targetId"], "node-1");
-        assert_eq!(reply["outputs"][1]["kind"], "artifact");
-        assert_eq!(reply["outputs"][1]["taskId"], "task-1");
-        assert_eq!(reply["outputs"][1]["version"], 1);
+        assert_eq!(reply["outputs"][1]["targetId"], "node-2");
+        assert_eq!(reply["outputs"][2]["kind"], "artifact");
+        assert_eq!(reply["outputs"][2]["taskId"], "task-1");
+        assert_eq!(reply["outputs"][2]["version"], 1);
 
         runtime
             .workspace()
@@ -9972,10 +9989,9 @@ mode = "full"
             .iter()
             .find(|message| message["text"] == "I wrote both files.")
             .unwrap();
-        assert!(
-            reply.get("outputs").is_none(),
-            "deleted targets must not rehydrate dead buttons: {reply}"
-        );
+        let outputs = reply["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 1, "only live targets may rehydrate: {reply}");
+        assert_eq!(outputs[0]["targetId"], "node-2");
     }
 
     /// Issue #246: a reply that opened a board card must still say so after a
