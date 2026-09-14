@@ -86,10 +86,12 @@ managed through the fallback, which is what they mean.
 | `managed` | the resolved backend URL | derived by the backend from the bearer |
 | `byok` | `https://backend.composio.dev` | `default` |
 
-The managed backend URL resolves first-non-empty from
-`OPENCOMPANY_COMPOSIO_BACKEND_URL`, then `TINYHUMANS_API_URL` (so a staging
-tenant's Composio follows staging), then the prod default. It is credential-free
-and safe on the console read plane.
+The managed backend URL resolves first-non-empty from `TINYHUMANS_API_URL` (so
+a staging tenant's Composio follows staging), then the prod default. It is
+credential-free and safe on the console read plane. The explicit per-surface
+override, `OPENCOMPANY_COMPOSIO_BACKEND_URL`, was removed in phase 6a of the
+keys rework (issue #2306): Composio now always follows the tenant's shared API
+base, the same way media and search already do.
 
 The status DTO reports `backendUrl` as the host the calls **really** reach —
 Composio's own host under BYOK. Echoing the managed backend URL after a switch to
