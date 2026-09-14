@@ -662,5 +662,5 @@ export function defaultBrokenCopy(
   const state = providerState(choice.provider, providers);
   if (state === "ok") return null;
   const label = providers.find((p) => p.slug === choice.provider)?.label ?? choice.provider;
-  return `The company default uses ${label}, which is ${state === "removed" ? "removed" : "turned off"}. Choose a new default in Connections → LLM.`;
+  return `The company default uses ${label}, which is ${state === "removed" ? "removed" : "turned off"}. Choose a new default in API Keys → LLM.`;
 }

@@ -9,11 +9,14 @@
 // every write in this rework refuses against (see
 // `docs/key-reworks/README.md`'s confirmation contract).
 //
-// Decision X14 (orchestrator, 2026-09-15): disabling or deleting the default's
-// provider never clears the stored default — it just stops resolving, and the
-// company sees a banner until an admin picks a new one. These sentences say
-// that plainly, rather than the old "moves to <provider>" claim, which is no
-// longer true.
+// Decision X14 (orchestrator, 2026-09-15, confirmed over an earlier draft of
+// `docs/key-reworks/in-use-guards.md` that carved out an exception for
+// deleting the row): the default and every agent pair are never cleared by a
+// delete, a disable, or a key clear — not even by deleting the row. Status
+// flags a default or pair left pointing at a provider that is gone or turned
+// off, and the console shows the banner. These sentences say that plainly,
+// rather than the old "moves to <provider>" claim, which is true for none of
+// the four intents.
 
 import type { UsedBy } from "@/api/types";
 import type { Provider } from "./types";
@@ -107,10 +110,10 @@ function appendUsedByLines(
   const verb = intent === "disable" ? "Switching it off" : intent === "key" ? "Clearing its key" : "Removing it";
   if (impact.usedBy?.default) {
     lines.push(
-      // Decision X14: the default is never cleared by this. It just stops
-      // resolving, and the company sees a banner until an admin picks a new
-      // one — said here so the confirmation cannot promise a fallback that
-      // does not happen.
+      // Decision X14: none of the four intents clears the default, ever. It
+      // just stops resolving, and the company sees a banner until an admin
+      // picks a new one — said here so the confirmation cannot promise a
+      // fallback that does not happen.
       `It is this company's default. ${verb} does not change the default — turns will fail until you choose a new one.`,
     );
   }

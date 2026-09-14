@@ -307,7 +307,7 @@ export function resolveAgentDefault(
   }
   return {
     kind: "none",
-    message: `No model is chosen. Choose a provider and model for ${agentName}, or set the company default in Connections → LLM.`,
+    message: `No model is chosen. Choose a provider and model for ${agentName}, or set the company default in API Keys → LLM.`,
   };
 }
 
