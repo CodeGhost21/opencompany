@@ -445,13 +445,36 @@ describe("composioRows — controls that cannot act are not offered", () => {
     // route or is on BYOK with a blank slot. Both are permanent states, so the
     // honest rendering is no control rather than one that can only fail — which
     // is the same rule every other `false` in this object follows.
+    //
+    // A current host: `managedCredentialSource` present, which is what says the
+    // check route exists (see the next test).
     for (const mode of ["managed", "byok"] as const) {
       for (const source of SOURCES) {
-        const row = byokOf({ mode, credentialSource: source });
-        expect(row.controls.test, `${mode}/${source}`).toBe(
+        const byok = row(
+          composioRows(
+            status({ mode, credentialSource: source, managedCredentialSource: "attested" }),
+          ),
+          "byok",
+        );
+        expect(byok.controls.test, `${mode}/${source}`).toBe(
           mode === "byok" && source !== "none",
         );
       }
+    }
+  });
+
+  it("does not offer Test on a host that predates the check route", () => {
+    // `POST …/composio/api-key/test` shipped in the same host commit as
+    // `managedCredentialSource`, which the DTO always serialises. A host that
+    // omits the field therefore has no such route, and a Test there could only
+    // ever answer 404 — a control that cannot act, on a row with a key stored
+    // and every other reason to offer one.
+    for (const source of SOURCES) {
+      const byok = row(
+        composioRows(status({ mode: "byok", credentialSource: source })),
+        "byok",
+      );
+      expect(byok.controls.test, source).toBe(false);
     }
   });
 

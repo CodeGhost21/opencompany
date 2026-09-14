@@ -290,7 +290,18 @@ export function composioRows(
       // route, or on this one with a blank slot, the host answers `409
       // not_configured` — a permanent state, so the honest rendering is no
       // control rather than one that can only fail.
-      test: !onManaged && byokKeyStored,
+      //
+      // And only on a host that HAS the check. `POST …/composio/api-key/test`
+      // arrived in the same host commit as `managedCredentialSource`, and the
+      // DTO serialises that field unconditionally — so its absence is an exact
+      // signal that the host predates the route, where every click would be a
+      // 404. That is the same "cannot act" rule as the 409 above, reached from
+      // an older host instead of a blank slot. An explicit capability flag
+      // would say it more directly; this says it without a wire change.
+      test:
+        !onManaged &&
+        byokKeyStored &&
+        status?.managedCredentialSource !== undefined,
     },
   };
 
