@@ -3,6 +3,8 @@
 // and the three derivations that are easy to get quietly wrong.
 
 import type { AgentDetailDto, AgentToolsDto, EditAgentInput, HarnessDto } from "@/api/types";
+import { defaultBrokenCopy, providerState } from "@/inference/connect";
+import type { DefaultChoice, Provider } from "@/inference/types";
 
 /** The fields that describe an agent, in the order both forms show them. */
 export type AgentFieldKey = "name" | "role" | "description" | "instructions";
@@ -236,6 +238,94 @@ export function harnessEdit(current: string | undefined, draft: string): string 
   const before = current ?? "";
   if (draft === before) return undefined;
   return draft === "" ? null : draft;
+}
+
+// ---- the agent pair editor (keys rework, issue #2306, slice 3b) -------------
+//
+// An agent on a `built_in` harness may pin its own `{provider, model}` pair.
+// Resolution order: the pair, else the company default, else a "choose a
+// model" refusal (D-model). No tier name is ever involved (2d) — a pair is a
+// provider plus one real model id, exactly like the company default.
+
+/**
+ * The `PATCH` value for the provider half of an agent pair, or `undefined`
+ * when the draft did not change — the sibling of {@link modelEdit}/
+ * {@link harnessEdit}. A select's value, so no trim.
+ */
+export function providerEdit(current: string | undefined, draft: string): string | null | undefined {
+  const before = current ?? "";
+  if (draft === before) return undefined;
+  return draft === "" ? null : draft;
+}
+
+/** "Company default · <provider label> · <model>", or the not-chosen form. */
+export function companyDefaultLabel(
+  choice: DefaultChoice | null | undefined,
+  providers: readonly Pick<Provider, "slug" | "label">[],
+): string {
+  if (!choice?.provider || choice.model == null) return "Company default · none chosen";
+  const label = providers.find((p) => p.slug === choice.provider)?.label ?? choice.provider;
+  return `Company default · ${label} · ${choice.model}`;
+}
+
+/** "<provider label> · <model>" for an agent pinned to its own pair. */
+export function pairLabel(
+  provider: string,
+  model: string,
+  providers: readonly Pick<Provider, "slug" | "label">[],
+): string {
+  return `${providers.find((p) => p.slug === provider)?.label ?? provider} · ${model}`;
+}
+
+/**
+ * What an agent with **no pin of its own** actually resolves to — the three
+ * states {@link companyDefaultLabel} alone cannot distinguish, using the exact
+ * sentences decision X9 fixed (orchestrator, 2026-09-15).
+ */
+export type AgentDefaultResolution =
+  | { kind: "full"; label: string }
+  | { kind: "broken"; message: string }
+  | { kind: "none"; message: string };
+
+/**
+ * Resolves what an unpinned agent's fallback line should say: the company
+ * default when it is a full, healthy `{provider, model}`; X9's "broken"
+ * sentence when it names a provider that is gone or switched off (decision
+ * X14: disabling or deleting the default's provider never clears it — this is
+ * durable, not transient); X9's "nothing resolved" sentence otherwise (unset,
+ * or a bare-slug default with no model).
+ */
+export function resolveAgentDefault(
+  choice: DefaultChoice | null | undefined,
+  providers: readonly Pick<Provider, "slug" | "label" | "enabled">[],
+  agentName: string,
+): AgentDefaultResolution {
+  const broken = defaultBrokenCopy(choice, providers);
+  if (broken) return { kind: "broken", message: broken };
+  if (choice?.provider && choice.model != null) {
+    return { kind: "full", label: companyDefaultLabel(choice, providers) };
+  }
+  return {
+    kind: "none",
+    message: `No model is chosen. Choose a provider and model for ${agentName}, or set the company default in API Keys → LLM.`,
+  };
+}
+
+/**
+ * X9: an agent's own pair naming a provider this company no longer has, or
+ * has switched off, or `null` when the pair is fine (or unset — that is
+ * {@link resolveAgentDefault}'s business).
+ */
+export function agentPairBrokenCopy(
+  agent: Pick<AgentDetailDto, "name" | "provider" | "model">,
+  providers: readonly Pick<Provider, "slug" | "label" | "enabled">[],
+): string | null {
+  if (!agent.provider || !agent.model) return null;
+  const state = providerState(agent.provider, providers);
+  if (state === "ok") return null;
+  const label = providers.find((p) => p.slug === agent.provider)?.label ?? agent.provider;
+  const name = agent.name ?? "This teammate";
+  return `${name} uses ${label}, which is ${state === "removed" ? "removed" : "turned off"}. Choose another provider and model for ${name}, or clear its model to use the company default.`;
 }
 
 /**

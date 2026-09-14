@@ -3321,10 +3321,11 @@ impl HarnessPool {
     ///
     /// Resolution prefers the company's own stored token and falls back to this
     /// instance's platform identity; with neither it yields `None` (fail closed).
-    /// Both the backend URL (from [`composio::COMPOSIO_BACKEND_URL_ENV`], then the
-    /// tenant API base [`composio::TINYHUMANS_API_URL_ENV`], then the prod
-    /// default) and the platform identity are read process-globally here, so a
-    /// live re-resolution keeps them even when nothing was stored at boot.
+    /// Both the backend URL (from the tenant API base
+    /// [`composio::TINYHUMANS_API_URL_ENV`], then the prod default — the
+    /// explicit per-surface override was removed in phase 6a, issue #2306) and
+    /// the platform identity are read process-globally here, so a live
+    /// re-resolution keeps them even when nothing was stored at boot.
     ///
     /// Re-deriving the token source every turn costs nothing — building it reads
     /// no file — and the roster that keeps it holds one instance for its whole
@@ -3342,13 +3343,11 @@ impl HarnessPool {
             Some(secrets) => {
                 use crate::app::config::EnvSource;
                 let env = crate::app::config::ProcessEnv;
-                let url = env.get(composio::COMPOSIO_BACKEND_URL_ENV);
                 let api_url = env.get(composio::TINYHUMANS_API_URL_ENV);
                 composio::TenantComposio::resolve(
                     &company.id,
                     secrets.as_ref(),
                     toolkits,
-                    url,
                     api_url,
                     crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
                 )

@@ -56,8 +56,8 @@ export const HOST_SETTINGS_HIDDEN = true;
  * It used to gate the company-credential card as well, which made it one flag
  * doing two jobs — hiding a *Composio route* and hiding the *TinyHumans key*
  * surface. Those came apart when the grant landed and the card started deciding
- * its own visibility from the host's answer; see `CompanyCredentialCard`. What
- * is left here is the route, and the route is now offered.
+ * its own visibility from the host's answer (that card has since been deleted,
+ * #2306). What is left here is the route, and the route is now offered.
  *
  * What this turns back on: `composioRows` returns a managed row that can be
  * selected rather than only reported, and `IntegrationStep` names the

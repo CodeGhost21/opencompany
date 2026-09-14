@@ -1385,13 +1385,27 @@ export interface AgentDetailDto {
    */
   harness?: string;
   /**
-   * This teammate's own model override, when it has one (issue #1245's
-   * per-agent follow-up). Meaningful only when the teammate runs on an ACP
-   * harness (an operator's own coding CLI) — the host does not tell this
-   * response which harness that is, so the console shows it as informational
-   * rather than validating it against one.
+   * This teammate's own model, in one of two unrelated meanings depending on
+   * the harness it is bound to:
+   *
+   * - on an **ACP** harness (an operator's own coding CLI), the model hint
+   *   forwarded to it (issue #1245's per-agent follow-up) — the host does not
+   *   tell this response which harness that is, so the console shows it as
+   *   informational rather than validating it against one;
+   * - on a **built-in** harness, the model half of this teammate's own
+   *   `{provider, model}` pair (keys rework, issue #2306, slice 3a), set only
+   *   together with {@link provider}. `undefined` means the teammate uses the
+   *   company default.
    */
   model?: string;
+  /**
+   * The provider half of this teammate's own `{provider, model}` pair (keys
+   * rework, issue #2306, slice 3a). Set only together with `model`, and only
+   * meaningful on a `built_in` harness — refused on `acp`, where `model` keeps
+   * its ACP meaning instead. `undefined` means the teammate uses the company
+   * default. Optional because an older host does not send it.
+   */
+  provider?: string;
   /**
    * Whether this teammate is the company's orchestrator. Resolved by the roster
    * rule (a tagged tier first, else the first declared agent), so it is NOT the
@@ -1486,15 +1500,25 @@ export interface EditAgentInput {
    */
   avatar?: string | null;
   /**
-   * The teammate's own model override (issue #1245's per-agent follow-up).
-   * Same double-option shape as `description`: absent leaves it alone, `null`
-   * clears it back to the harness's own default, and a string sets it.
+   * The teammate's own model — an ACP model hint (issue #1245), or the model
+   * half of its `{provider, model}` pair on a built-in harness (keys rework,
+   * issue #2306, slice 3a). Same double-option shape as `description`: absent
+   * leaves it alone, `null` clears it (back to the harness's own default on
+   * ACP; to the company default on built-in), and a string sets it.
    * Admin-only on the host, alongside `tools` — a member's `PATCH` carrying
    * this key gets a `403`.
    */
   model?: string | null;
   /** Which declared harness this teammate runs on. */
   harness?: string | null;
+  /**
+   * The provider half of the pair (keys rework, issue #2306, slice 3a). Same
+   * three states as `model`: absent leaves it, `null` clears it (company
+   * default), a slug sets it. Always sent together with `model` — the host
+   * refuses one without the other on a `built_in` harness, and refuses it
+   * outright on `acp`. Admin-only, like `model`.
+   */
+  provider?: string | null;
   /**
    * The teammate's own tool-grant globs, three-state since issue #1804 (like a
    * double-`Option` on the wire): `undefined` leaves the grant untouched,
@@ -2129,6 +2153,27 @@ export interface WorkflowProblem {
 }
 
 /**
+ * Who or what still depends on a thing a mutation would remove, clear, disable
+ * or switch (keys rework, issue #2306).
+ *
+ * Carried two places: on a list/status DTO row for anything else's config can
+ * point at (an inference `Provider`, and its Composio and Search siblings), and
+ * echoed back verbatim on a `409 in_use` refusal (see {@link ApiErrorBody}) so
+ * a confirm dialog reopened by a stale write can still say what it is asking
+ * the operator to override, with no second request. Empty fields are omitted
+ * rather than sent as empty arrays, so "is anything set" is a check for any key
+ * being present at all.
+ */
+export interface UsedBy {
+  /** `true` only when this row backs the company's current default choice. */
+  default?: true;
+  /** The agents whose own pinned pair names this row. */
+  agents?: { id: string; name: string }[];
+  /** Which other surfaces this same credential also backs. */
+  surfaces?: ("llm" | "composio" | "search")[];
+}
+
+/**
  * Error envelope shape: `{ error, code }`, plus `problems` on a refusal that
  * has them.
  *
@@ -2139,6 +2184,13 @@ export interface ApiErrorBody {
   error: string;
   code: string;
   problems?: WorkflowProblem[];
+  /**
+   * Present on a `409` refused with code `in_use` (keys rework, issue #2306):
+   * what the request tried to remove, clear, disable or switch is still relied
+   * on elsewhere, named here so a confirm dialog can show it and resend with
+   * `confirmInUse: true` without a round trip just to ask.
+   */
+  usedBy?: UsedBy;
 }
 
 /**
@@ -2220,6 +2272,13 @@ export class ApiError extends Error {
    * "no breakdown offered" from "a breakdown with nothing in it".
    */
   problems?: WorkflowProblem[];
+
+  /**
+   * The `usedBy` an `in_use` refusal echoed (keys rework, issue #2306) — see
+   * {@link ApiErrorBody.usedBy}. Absent for every other error, including a
+   * `409` with a different `code`.
+   */
+  usedBy?: UsedBy;
 
   constructor(
     public status: number,

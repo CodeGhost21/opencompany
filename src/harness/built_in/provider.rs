@@ -163,12 +163,11 @@ pub fn harness_inference_from_env(
     ))
 }
 
-/// Resolve the shared hosted-endpoint `(credential, base_url)` pair every hosted
-/// TinyHumans surface addresses — the **one** credential path both chat
-/// inference ([`harness_inference_from_env`]) and embeddings
-/// ([`hosted_embeddings_from_env`](crate::harness::embeddings::hosted_embeddings_from_env))
-/// resolve against, so a rotation or a per-tenant key reaches both without a
-/// second, drifting resolution.
+/// Resolve the shared hosted-endpoint `(credential, base_url)` pair that managed
+/// TinyHumans chat inference addresses — the **one** credential path both
+/// [`harness_inference_from_env`] and [`PlatformCredentialStatus::resolve`] read,
+/// so a rotation or a per-tenant key reaches both without a second, drifting
+/// resolution.
 ///
 /// Precedence mirrors the documented inference order, most specific first:
 ///
@@ -177,8 +176,8 @@ pub fn harness_inference_from_env(
 ///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`.**
 /// * url — `OPENCOMPANY_INFERENCE_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
 ///
-/// The embeddings client POSTs to `{base_url}/embeddings`, the chat client to
-/// `{base_url}/chat/completions` — the same OpenAI-compatible surface.
+/// The chat client POSTs to `{base_url}/chat/completions`, an OpenAI-compatible
+/// surface.
 pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credential, String)> {
     let credential = match env
         .get("OPENCOMPANY_INFERENCE_KEY")
@@ -291,7 +290,7 @@ pub struct PlatformCredentialStatus {
     pub platform_identity: bool,
     /// That identity is the **projected-file** tier rather than a static key.
     pub projected_tier: bool,
-    /// Managed chat inference and embeddings resolved
+    /// Managed chat inference resolved
     /// ([`hosted_endpoint_from_env`]).
     pub inference: bool,
     /// Managed web search resolved ([`search_backend_from_env`]).

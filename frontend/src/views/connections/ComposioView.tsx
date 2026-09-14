@@ -75,12 +75,12 @@ export function ComposioView({ client, company }: Props) {
           </Alert>
         )}
 
-        {/* `CompanyCredentialCard` used to sit here, above the rows: the
+        {/* The company-credential card used to sit here, above the rows: the
             general answer (one TinyHumans key authorising every brokered
             surface) over the Composio-specific one. It is gone from THIS page,
             and the Account page no longer renders it either: that page states
             the key as one row with a paste dialog behind it (#2279), so the card
-            has no caller left.
+            had no caller left and was deleted (#2306).
 
             Two surfaces for one credential is the reason. The card carried its
             own paste field and Save for the company key, and the rows below

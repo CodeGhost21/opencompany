@@ -207,10 +207,8 @@ pub(crate) fn evict_catalog_cache(runtime: &CompanyRuntime) {
 fn catalog_cache_key(runtime: &CompanyRuntime) -> String {
     use crate::app::config::EnvSource;
     let env = crate::app::config::ProcessEnv;
-    let backend_url = backend_url_or_default(
-        env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV),
-        env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
-    );
+    let backend_url =
+        backend_url_or_default(env.get(crate::company::composio::TINYHUMANS_API_URL_ENV));
     composio_toolkits::cache_key(runtime.id(), &backend_url)
 }
 
@@ -586,12 +584,9 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         None => (false, Vec::new()),
     };
     let env = crate::app::config::ProcessEnv;
-    let (env_url, api_url) = {
+    let api_url = {
         use crate::app::config::EnvSource;
-        (
-            env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV),
-            env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
-        )
+        env.get(crate::company::composio::TINYHUMANS_API_URL_ENV)
     };
     let token_source = TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new);
     let (mode, credential_source) = access_for(runtime, token_source.clone()).await?;
@@ -620,7 +615,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
     // URL is resolved and then not used, so echoing it would be misdirection.
     let backend_url = match mode {
         ComposioMode::Byok => crate::company::composio::DIRECT_BASE_URL.to_string(),
-        ComposioMode::Managed => backend_url_or_default(env_url, api_url),
+        ComposioMode::Managed => backend_url_or_default(api_url),
     };
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
@@ -1077,7 +1072,6 @@ pub(crate) async fn resolve_tenant(
         .map(|record| record.manifest.tools.composio.toolkits.clone())
         .unwrap_or_default();
     let env = crate::app::config::ProcessEnv;
-    let backend_env = env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV);
     let api_env = env.get(crate::company::composio::TINYHUMANS_API_URL_ENV);
     // Resolved here rather than through `TenantComposio::resolve` so a store
     // read failure stays distinguishable from "nothing configured". This is the
@@ -1111,7 +1105,7 @@ pub(crate) async fn resolve_tenant(
         )));
     }
     Ok(crate::harness::composio::TenantComposio::from_access(
-        backend_url_or_default(backend_env, api_env),
+        backend_url_or_default(api_env),
         access,
         toolkits,
     ))
@@ -1739,19 +1733,22 @@ mod tests {
 
     /// Serialises this test against `an_admin_is_unaffected`'s env mutation.
     ///
-    /// In composio builds that test repoints `COMPOSIO_BACKEND_URL_ENV` at a
-    /// loopback backend for its whole body. The cache-seeding tests below derive
-    /// a cache key that embeds that URL, seed the cache under it, then re-derive
-    /// the key on the request path — a process-wide override landing between the
-    /// two reads would change the key and strand the seeded entry, failing the
-    /// `catalogSource == "backend"` assertion. `EnvVarGuard` serialises guard
-    /// users against each other, so taking it here closes the race the way the
-    /// crate documents (unguarded `std::env::var` readers are otherwise fair
-    /// game). Gated to composio builds, where the mutation exists.
+    /// In composio builds that test repoints `TINYHUMANS_API_URL_ENV` at a
+    /// loopback backend for its whole body (Composio's own backend-URL override,
+    /// `OPENCOMPANY_COMPOSIO_BACKEND_URL`, was removed in phase 6a of #2306; the
+    /// tenant's shared API base is the only repoint left). The cache-seeding
+    /// tests below derive a cache key that embeds that URL, seed the cache under
+    /// it, then re-derive the key on the request path — a process-wide override
+    /// landing between the two reads would change the key and strand the seeded
+    /// entry, failing the `catalogSource == "backend"` assertion. `EnvVarGuard`
+    /// serialises guard users against each other, so taking it here closes the
+    /// race the way the crate documents (unguarded `std::env::var` readers are
+    /// otherwise fair game). Gated to composio builds, where the mutation
+    /// exists.
     #[cfg(feature = "composio")]
     fn composio_backend_env_guard() -> crate::test_support::EnvVarGuard {
         crate::test_support::EnvVarGuard::capture(&[
-            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+            crate::company::composio::TINYHUMANS_API_URL_ENV,
         ])
     }
 
@@ -3216,10 +3213,10 @@ mod tests {
         let backend = spawn_authorize_backend().await;
         #[cfg(feature = "composio")]
         let env = crate::test_support::EnvVarGuard::capture(&[
-            crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+            crate::company::composio::TINYHUMANS_API_URL_ENV,
         ]);
         #[cfg(feature = "composio")]
-        env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+        env.set(crate::company::composio::TINYHUMANS_API_URL_ENV, &backend);
 
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), GRANTED).await;
@@ -3725,9 +3722,9 @@ mod tests {
         async fn disconnect_maps_an_unknown_id_to_404_not_502() {
             let (backend, deletes) = spawn_connections_backend(false).await;
             let env = crate::test_support::EnvVarGuard::capture(&[
-                crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+                crate::company::composio::TINYHUMANS_API_URL_ENV,
             ]);
-            env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+            env.set(crate::company::composio::TINYHUMANS_API_URL_ENV, &backend);
 
             let home_dir = home();
             let state = state_with_manifest(home_dir.path(), GRANTED).await;
@@ -3762,9 +3759,9 @@ mod tests {
         async fn disconnect_maps_a_backend_failure_to_502_not_404() {
             let (backend, deletes) = spawn_connections_backend(true).await;
             let env = crate::test_support::EnvVarGuard::capture(&[
-                crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+                crate::company::composio::TINYHUMANS_API_URL_ENV,
             ]);
-            env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+            env.set(crate::company::composio::TINYHUMANS_API_URL_ENV, &backend);
 
             let home_dir = home();
             let state = state_with_manifest(home_dir.path(), GRANTED).await;
