@@ -57,6 +57,10 @@ describe("the two shapes the subscription proxy accepts", () => {
     // three-segment form and let a raw registry id through under the exemption
     // meant for ids the proxy actually accepts.
     expect(isProxyCompatible("openrouter/auto")).toBe(false);
+    // Counting alone let both of these through: three segments each, and
+    // neither an author/model pair the proxy can route.
+    expect(isProxyCompatible("openrouter//claude-sonnet-5")).toBe(false);
+    expect(isProxyCompatible("openrouter/anthropic/")).toBe(false);
     expect(isProxyCompatible("openrouter/anthropic/claude-sonnet-5")).toBe(true);
   });
 

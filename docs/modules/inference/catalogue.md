@@ -31,8 +31,8 @@ neither, and it is listed as a defect for that reason.
 | 7 | `moonshot` | Kimi (Moonshot) | bearer | `sk-...` | `https://api.moonshot.ai/v1` |
 | 8 | `groq` | Groq | bearer | `gsk_...` | `https://api.groq.com/openai/v1` |
 | 9 | `mistral` | Mistral | bearer | — | `https://api.mistral.ai/v1` |
-| 10 | `deepseek` | DeepSeek | bearer | `sk-...` | `https://api.deepseek.com/v1` |
-| 11 | `together` | Together AI | bearer | — | `https://api.together.xyz/v1` |
+| 10 | `deepseek` | DeepSeek | bearer | `sk-...` | `https://api.deepseek.com` |
+| 11 | `together` | Together AI | bearer | — | `https://api.together.ai/v1` |
 | 12 | `google` | Google Gemini | bearer | — | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | 13 | `cerebras` | Cerebras | bearer | — | `https://api.cerebras.ai/v1` |
 | 14 | `xai` | xAI | bearer | — | `https://api.x.ai/v1` |
@@ -40,7 +40,7 @@ neither, and it is listed as a defect for that reason.
 | 16 | `nvidia` | NVIDIA | bearer | — | `https://integrate.api.nvidia.com/v1` |
 | 17 | `zai` | Z.AI | bearer | — | `https://api.z.ai/api/paas/v4` |
 | 18 | `minimax` | MiniMax | bearer | — | `https://api.minimax.io/v1` |
-| 19 | `stepfun` | StepFun | bearer | — | `https://api.stepfun.ai/step_plan/v1` |
+| 19 | `stepfun` | StepFun | bearer | — | `https://api.stepfun.ai/v1` |
 | 20 | `kilocode` | Kilo Code | bearer | — | `https://api.kilo.ai/api/gateway` |
 | 21 | `deepinfra` | DeepInfra | bearer | — | `https://api.deepinfra.com/v1/openai` |
 | 22 | `novita` | Novita | bearer | — | `https://api.novita.ai/v3/openai` |
@@ -66,9 +66,13 @@ second case is deliberate.
 
 Note how varied the base URLs are — `/openai/v1`, `/inference/v1`,
 `/v1beta/openai`, `/v1/openai`, `/v3/openai`, `/api/paas/v4`, `/api/gateway`,
-`/step_plan/v1`. This is exactly why the endpoint is a per-provider preset rather
-than `https://{host}/v1`. Any attempt to derive it will be wrong for a third of
-the list.
+and DeepSeek's bare host with no version segment at all. This is exactly why the
+endpoint is a per-provider preset rather than `https://{host}/v1`. Any attempt to
+derive it will be wrong for a third of the list.
+
+It is also a limitation: a preset is one value, so a vendor serving two products
+or two regions behind different paths is reachable for at most one of them. See
+[`provider-contracts.md`](provider-contracts.md).
 
 ### Two entries carry a bug fix in their comment — keep it
 
@@ -149,7 +153,15 @@ Three, all keyed on an endpoint rather than a credential:
 |---|---|---|---|
 | `ollama` | Ollama | endpoint | default `http://localhost:11434` |
 | `lmstudio` | LM Studio | endpoint | |
-| `omlx` | OMLX | endpoint **and** key | the only local runtime that takes both |
+| `omlx` | OMLX | endpoint | no build of any candidate project requires a key |
+
+**None of the three requires a key**, and the row above used to say `omlx`
+needed one. The host enforces that value, so the entry it described could not
+be added at all. `omlx` is the one that will *accept* an optional bearer where
+the operator started it with `--api-key`, and the console offers no path to
+entering one — the same gap `lmstudio`'s opt-in server toggle has, recorded in
+`provider-contracts.md`. Requiring a credential and accepting one are separate
+questions, and only the first is modelled here.
 
 Client-side endpoint validation for this category only: parse as a URL, require
 `http:`/`https:`, and append `/v1` when the path is empty or `/`. Cloud providers

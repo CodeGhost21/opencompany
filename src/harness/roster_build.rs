@@ -370,7 +370,7 @@ impl RosterBuilder {
         let request = ModelRequest {
             messages: vec![Message::system(system_prompt()), message],
             model: Some(self.model_name.clone()),
-            temperature: Some(0.0),
+            temperature: Some(crate::company::inference::dialect::DETERMINISTIC),
             max_tokens: Some(MAX_OUTPUT_TOKENS),
             ..ModelRequest::default()
         };

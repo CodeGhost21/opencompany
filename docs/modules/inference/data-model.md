@@ -168,7 +168,9 @@ A slot cannot, so there is no rule to write down and no state to reconcile.
 `resolve::primary(providers, marked)` returns the marked provider when it exists
 and is enabled, and otherwise the first enabled one — which is what it returned
 unconditionally before, so an unmarked company is unchanged and nothing is
-backfilled. `None` means the managed brain, which is always available.
+backfilled. `None` means the managed brain — which answers only while it is
+switched on and its credential chain resolves; a company with neither has
+nothing to think with, and the resolver says so rather than inventing one.
 
 Both write paths keep the marker honest: disabling the marked provider clears
 the marker (rather than moving it to something the operator never chose), and
@@ -207,10 +209,18 @@ is additive for every running tenant.
 ```
 read providers(company, scope):
     entry0 = read("inference/config")          ← may be absent
-    if entry0:  yield Provider::from_flat(entry0, key="inference/key")
+    if entry0:  yield Provider::from_flat(entry0,
+                     key="provider/<slug>/key", legacy="inference/key")
     for slug in list("provider/*/config"):
         yield Provider::from_scoped(slug)
 ```
+
+Entry zero's credential has **one** address rule and a fallback, not an address
+of its own: a write goes to `provider/<slug>/key` and clears `inference/key`, and
+a read tries the new address and falls back to the old one. Pinning it to
+`inference/key` is the pre-convergence behaviour, and it is what would have lost
+the credential on the first save. The full chain, in order, is in
+[`credentials.md`](credentials.md).
 
 ## Boot-time brain selection
 

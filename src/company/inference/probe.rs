@@ -31,9 +31,25 @@
 //! **Proxy and gateway rejections are checked FIRST.** The phrase `407 Proxy
 //! Authentication Required` contains the word *authentication*. Check the auth
 //! branch first and a corporate proxy deletes a valid key. A WAF's bare `403
-//! Forbidden` has the same shape, which is why a 403 counts as auth only when it
-//! co-occurs with credential wording, and why the status-code tests use word
+//! Forbidden` has the same shape, which is why the status-code tests use word
 //! boundaries — so `401` and `403` do not match inside an id like `1403`.
+//!
+//! ## Only the vendor's words decide, never ours
+//!
+//! [`classify`] reads a string this module builds, so any text this module adds
+//! to it is text the rules can match against themselves. That is not theoretical:
+//! the failure string used to carry the status' own reason phrase, and the auth
+//! branch tested for `forbidden` — which `canonical_reason()` supplies on every
+//! single 403. The guard read as "a 403 counts only with credential wording" and
+//! behaved as "every 403 deletes the key", across every provider in the
+//! catalogue, for causes as ordinary as a prompt that ran past the model's
+//! context window.
+//!
+//! So [`build_failure_text`] passes the status code and the vendor's body and
+//! nothing else, and the auth rule is a **positive** list of published
+//! credential-refusal phrases ([`says_the_credential_was_refused`]) rather than a
+//! denylist of four words. A body nobody anticipated is now `Unknown`, which
+//! keeps the key.
 //!
 //! **`model` is checked BEFORE `endpoint`.** The endpoint branch matches a bare
 //! "not found", which would otherwise claim every provider that phrases a
@@ -121,6 +137,53 @@ fn contains_token(haystack: &str, needle: &str) -> bool {
     false
 }
 
+/// Whether the body says the **credential itself** was refused, as opposed to
+/// saying the credential is fine and something else about the request is not.
+///
+/// A positive list on purpose. The rule it replaces was a denylist — four words
+/// that, if absent, let a 403 delete a key — and a denylist of failure wordings
+/// cannot be complete, because it has to anticipate every phrase 29 vendors
+/// might use for a cause nobody has thought of yet. Inverting it makes the
+/// unanticipated case non-destructive: a body we do not recognise keeps the key.
+///
+/// The phrases are the ones vendors actually publish. `authentication` appears
+/// here only in compound forms, never as the bare word: it used to match on its
+/// own, so an endpoint answering *"Bearer authentication is not supported, use
+/// x-api-key"* — a 400 about our request shape, with a perfectly good key —
+/// classified as a rejected credential and deleted it. Groq's `424` for a failed
+/// downstream *"(e.g., Remote MCP authentication)"* is the same shape.
+fn says_the_credential_was_refused(haystack: &str) -> bool {
+    const REFUSALS: &[&str] = &[
+        // OpenAI, Groq and everything that copied their wording.
+        "invalid api key",
+        "invalid_api_key",
+        "incorrect api key",
+        // Fireworks publishes exactly these two and neither matches the three
+        // above, so without them its genuine bad-key 403 and 401 both read as
+        // "we could not tell" and a dead key is kept forever.
+        "api key you provided is invalid",
+        "must provide an api key",
+        // Google's compat surface, whose word order matches none of the above.
+        "api key not valid",
+        // Anthropic's and DeepSeek's typed bodies.
+        "authentication_error",
+        "authentication failed",
+        "authentication fails",
+        "invalid authentication",
+        "invalid credential",
+        "invalid_credential",
+        "bad credentials",
+        "missing api key",
+        "no api key provided",
+        // Venice's typed code, and the bare word as a body signal. Now that the
+        // reason phrase is not synthesised in, a haystack containing this word
+        // means the vendor wrote it.
+        "authentication_failed",
+        "unauthorized",
+    ];
+    REFUSALS.iter().any(|phrase| haystack.contains(phrase))
+}
+
 /// Which failure a raw provider error string represents.
 ///
 /// Ported branch for branch — including the order — from the design this work
@@ -144,22 +207,41 @@ pub fn classify(raw: &str) -> ProbeClass {
         return ProbeClass::Unknown;
     }
 
-    // A rejected credential: revoked, invalid, or without permission. A 403
-    // counts only when it co-occurs with credential wording — a bare 403 from an
-    // unidentified intermediary is not proof the key itself is bad.
-    let is_403_credential = contains_token(&haystack, "403")
-        && (haystack.contains("forbidden")
-            || haystack.contains("key")
-            || haystack.contains("credential")
-            || haystack.contains("permission"));
-    if contains_token(&haystack, "401")
-        || is_403_credential
-        || haystack.contains("invalid api key")
-        || haystack.contains("invalid_api_key")
-        || haystack.contains("incorrect api key")
-        || haystack.contains("unauthorized")
-        || haystack.contains("authentication")
-    {
+    // A rejected credential — and **only** a rejected credential, because this
+    // is the one class that deletes the operator's key.
+    //
+    // `401` is the single status that is, on its own, a statement about the
+    // credential. Every other status reaches this class through the body and
+    // nothing else, including `403`.
+    //
+    // **There is deliberately no 403 rule here.** There used to be one: a 403
+    // counted as auth when it co-occurred with `forbidden`/`key`/`credential`/
+    // `permission`. It matched every 403 ever seen, because the string this
+    // classifier reads was built with the status' own reason phrase in it —
+    // literally `Forbidden` — so the guard tested our own text rather than the
+    // vendor's. `build_failure_text` no longer synthesises it, and the rule that
+    // depended on it is gone rather than repaired, because every disjunct was
+    // wrong on its own terms:
+    //
+    // * `forbidden` is the reason phrase, which vendors also echo in the body;
+    // * `permission` is how Anthropic (`permission_error`), Google
+    //   (`PERMISSION_DENIED`), Groq, xAI and Cerebras all phrase an
+    //   **entitlement** failure by a key that is perfectly valid;
+    // * `key` matches Anthropic's *"Your API key does not have permission to use
+    //   the specified resource"* — a working key, named in its own refusal.
+    //
+    // The documented 403s across the catalogue are overwhelmingly not about the
+    // credential: Together returns one for a context-length overflow, OpenAI for
+    // geography, Fireworks for data residency, xAI for a blocked team, OpenRouter
+    // for a moderation flag. Fireworks is the one provider that genuinely 403s a
+    // bad credential, and it says so in words — *"The API key you provided is
+    // invalid"*, *"You must provide an API key"* — so it reaches this class
+    // through the body list below, like every other vendor.
+    //
+    // A 403 whose body says nothing recognisable now falls through to `Unknown`,
+    // which keeps the key. That is the safe direction: a kept key that does not
+    // work is a second attempt, and a deleted key that did work is unrecoverable.
+    if contains_token(&haystack, "401") || says_the_credential_was_refused(&haystack) {
         return ProbeClass::Auth;
     }
 
@@ -304,6 +386,8 @@ pub enum EndpointRefusal {
     LinkLocal,
     /// A private or otherwise non-routable address.
     PrivateNetwork,
+    /// `http` to somewhere other than this host, with a credential to present.
+    Cleartext,
 }
 
 impl std::fmt::Display for EndpointRefusal {
@@ -317,6 +401,12 @@ impl std::fmt::Display for EndpointRefusal {
                 write!(
                     f,
                     "a model endpoint is never on this host's private network"
+                )
+            }
+            Self::Cleartext => {
+                write!(
+                    f,
+                    "a key cannot be sent to an http endpoint off this host — use https"
                 )
             }
         }
@@ -385,6 +475,99 @@ pub fn check_endpoint(url: &str, policy: ProbePolicy) -> Result<(), EndpointRefu
         return Ok(());
     };
     check_address(ip, policy)
+}
+
+/// [`check_endpoint`], plus the rule that only applies when there is a key.
+///
+/// **A bearer over plain `http` is the key, in the clear, to everything on the
+/// path.** `http` is in the allowed set for the local-runtime category — Ollama
+/// documents `http://localhost:11434` and there is no certificate to have — so
+/// the scheme cannot simply be narrowed to `https`. The rule that separates the
+/// two is the destination, not the scheme: loopback never leaves this host, and
+/// anything else with a credential attached does.
+///
+/// Loopback by **name** as well as by literal, because `localhost` is what the
+/// vendor's own documentation prints and it is the address an operator will
+/// type. A name is not resolved here for the reason [`check_endpoint`] gives.
+///
+/// This governs what *we* send. An endpoint stored despite it is still reached
+/// by the turn path, which applies no guard of its own — recorded in
+/// `docs/modules/inference/provider-contracts.md`.
+pub fn check_endpoint_with_credential(
+    url: &str,
+    policy: ProbePolicy,
+    has_credential: bool,
+) -> Result<(), EndpointRefusal> {
+    check_endpoint(url, policy)?;
+    if !has_credential {
+        return Ok(());
+    }
+    let trimmed = url.trim();
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return Ok(());
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return Ok(());
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    let host = if let Some(after) = host_port.strip_prefix('[') {
+        after.split_once(']').map(|(h, _)| h).unwrap_or(after)
+    } else {
+        host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
+    };
+    let host = host.trim().to_ascii_lowercase();
+    let on_this_host = host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| match ip {
+                IpAddr::V4(v4) => v4.is_loopback(),
+                IpAddr::V6(v6) => {
+                    v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+                }
+            })
+            .unwrap_or(false);
+    if on_this_host {
+        return Ok(());
+    }
+    Err(EndpointRefusal::Cleartext)
+}
+
+/// Whether two URLs name the same origin — scheme, host and port.
+///
+/// **A credentialed request must not follow a redirect off its origin.** `reqwest`
+/// strips `Authorization` when the host changes, but it does **not** strip a
+/// custom header, and the one non-bearer entry in the catalogue sends the key as
+/// `x-api-key`. A provider that can answer `302` could therefore hand an
+/// operator's Anthropic key to any host it names. The check is here rather than
+/// in the redirect closure so both clients — the probe and the catalogue reader —
+/// apply the same rule.
+pub fn same_origin(a: &str, b: &str) -> bool {
+    fn origin(url: &str) -> Option<(String, String)> {
+        let (scheme, rest) = url.trim().split_once("://")?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let host_port = authority
+            .rsplit_once('@')
+            .map(|(_, host)| host)
+            .unwrap_or(authority);
+        Some((
+            scheme.to_ascii_lowercase(),
+            host_port.trim().to_ascii_lowercase(),
+        ))
+    }
+    match (origin(a), origin(b)) {
+        (Some(left), Some(right)) => left == right,
+        // Unparseable on either side is not a match. Refusing to follow costs a
+        // catalogue read; following costs the key.
+        _ => false,
+    }
 }
 
 /// The address half of [`check_endpoint`], exposed so a redirect target can be
@@ -594,8 +777,18 @@ pub async fn probe_models(
     auth: catalogue::AuthStyle,
     policy: ProbePolicy,
 ) -> Result<Vec<String>, ProbeFailure> {
-    check_endpoint(base_url, policy).map_err(ProbeFailure::refused)?;
-    let url = format!("{}/models", base_url.trim().trim_end_matches('/'));
+    check_endpoint_with_credential(
+        base_url,
+        policy,
+        credential.is_some_and(|c| !c.trim().is_empty()),
+    )
+    .map_err(ProbeFailure::refused)?;
+    let base = base_url.trim().trim_end_matches('/');
+    // No credential here to scope a catalogue *by*, but the catalogue's shape
+    // parameters apply regardless: without them OpenRouter answers text-only and
+    // caps at 500, so the picker this probe populates silently has no vision
+    // model in it. See `catalogue::catalog_query`.
+    let url = format!("{base}/models{}", catalogue::catalog_query(base));
     // What the failure text is allowed to say. `raw` reaches a host log, and a
     // log is disk — so an endpoint carrying userinfo must not be written into
     // one verbatim. The request itself still goes to `url`; only the sentence
@@ -605,8 +798,16 @@ pub async fn probe_models(
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
     // and connects on our behalf, so the only place a redirect target can be
     // inspected is here, before the next request goes out.
+    let origin = url.clone();
+    let credentialed = credential.is_some_and(|c| !c.trim().is_empty());
     let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() >= PROBE_MAX_REDIRECTS {
+            return attempt.stop();
+        }
+        // A credentialed request stays on its origin. `reqwest` drops
+        // `Authorization` across hosts but keeps a custom header, and the
+        // catalogue's one non-bearer entry sends the key as `x-api-key`.
+        if credentialed && !same_origin(&origin, attempt.url().as_str()) {
             return attempt.stop();
         }
         match check_endpoint(attempt.url().as_str(), policy) {
@@ -641,18 +842,36 @@ pub async fn probe_models(
         // there: vendors put "invalid api key" and "model not found" in the
         // body rather than the reason phrase, so classifying on the status
         // alone would read every one of them as `unknown`.
-        let reason = format!(
-            "{} {}: {}",
+        let classified = build_failure_text(status, body.trim());
+        // The reason phrase is for a human reading the log, and stays out of the
+        // text above. See `build_failure_text`.
+        let detail = format!(
+            "{named}: {} {}: {}",
             status.as_u16(),
             status.canonical_reason().unwrap_or("error"),
             body.trim()
         );
-        return Err(ProbeFailure::classified_as(
-            &reason,
-            format!("{named}: {reason}"),
-        ));
+        return Err(ProbeFailure::classified_as(&classified, detail));
     }
     Ok(parse_model_ids(&body))
+}
+
+/// The text [`classify`] reads for an HTTP failure: the status code and the
+/// vendor's body, and **nothing this module wrote itself**.
+///
+/// The reason phrase is deliberately absent. It used to be here —
+/// `"{code} {reason}: {body}"` — and it is how a guard that was written to
+/// require vendor wording came to be satisfied by our own: `canonical_reason()`
+/// for 403 is the literal string `Forbidden`, which the auth branch tested for,
+/// so every 403 from every provider classified as a rejected credential and
+/// deleted the operator's key whatever the body said. The same trap is set for
+/// any wrapper text containing `unauthorized`, `authentication` or `key`, which
+/// is why the rule is now "the vendor's words or nothing".
+///
+/// The status code stays, because `401` genuinely is a statement about the
+/// credential and several vendors send it with an empty body.
+fn build_failure_text(status: reqwest::StatusCode, body: &str) -> String {
+    format!("{}: {}", status.as_u16(), body)
 }
 
 /// The condition a transport failure classifies on.
@@ -759,12 +978,105 @@ mod tests {
     }
 
     #[test]
-    fn a_403_with_credential_wording_is_auth() {
+    fn a_403_that_names_no_credential_refusal_keeps_the_key() {
+        // Every one of these is a documented 403 from a provider we ship, and in
+        // every one the credential is **valid**. Before the positive list they
+        // all classified as `Auth` and deleted it — the string the classifier
+        // read carried our own `Forbidden` reason phrase, which was one of the
+        // four words the rule accepted as credential wording.
+        for body in [
+            // Together, for a prompt that ran past the context window. One long
+            // message and the key was gone.
+            "403: Input token count + max_tokens must be less than the context \
+             length of the model being queried",
+            // OpenRouter, whose 403 covers moderation as well as permissions.
+            "403: Forbidden (insufficient permissions, guardrail block, or \
+             moderation flag)",
+            // OpenAI, for where the request came from.
+            "403: Country, region, or territory not supported",
+            // Anthropic's permission_error. It names the API key in its own text,
+            // which is why matching the bare word `key` was never safe.
+            "403: Your API key does not have permission to use the specified \
+             resource.",
+            // Google, Groq, xAI and Cerebras, in their own words.
+            "403: PERMISSION_DENIED",
+            "403: not allowed due to permission restrictions",
+            "403: Ask your team admin for permission.",
+            "403: PermissionDeniedError",
+            // Fireworks' non-credential 403s.
+            "403: FireRouter is not available for Fireworks accounts with data \
+             residency enabled",
+        ] {
+            assert!(
+                !classify(body).destroys_credential(),
+                "this 403 must not delete the key: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_403_that_does_name_a_credential_refusal_is_still_auth() {
+        // Fireworks is the reason the fix could not be "403 is never auth": it
+        // maps a genuinely bad credential to 403 as well as 401, and these are
+        // the only two bad-key messages it documents. Neither matches
+        // `invalid api key`, so both are listed by hand.
         assert_eq!(
-            classify("403 Forbidden: your api key does not have permission"),
+            classify("403: The API key you provided is invalid"),
             ProbeClass::Auth
         );
-        assert!(classify("403 Forbidden: invalid credential").destroys_credential());
+        assert_eq!(
+            classify("403: You must provide an API key"),
+            ProbeClass::Auth
+        );
+        assert!(classify("403: invalid credential").destroys_credential());
+    }
+
+    #[test]
+    fn the_reason_phrase_is_not_part_of_what_is_classified() {
+        // The bug, stated as the one-line property that prevents its return: the
+        // text handed to `classify` carries the vendor's body and the status
+        // code, and nothing this module wrote. `Forbidden` appearing here would
+        // put the old failure back whatever the rules say.
+        let text = build_failure_text(
+            reqwest::StatusCode::FORBIDDEN,
+            "{\"error\":\"context length exceeded\"}",
+        );
+        assert!(!text.to_ascii_lowercase().contains("forbidden"), "{text}");
+        assert!(text.starts_with("403: "));
+        assert!(!classify(&text).destroys_credential());
+
+        // And 401 keeps working with an empty body, which is how several
+        // providers send it — the status is the whole signal there.
+        let text = build_failure_text(reqwest::StatusCode::UNAUTHORIZED, "");
+        assert!(
+            !text.to_ascii_lowercase().contains("unauthorized"),
+            "{text}"
+        );
+        assert_eq!(classify(&text), ProbeClass::Auth);
+    }
+
+    #[test]
+    fn a_400_about_our_request_shape_does_not_delete_the_key() {
+        // `authentication` used to match as a bare word. An endpoint telling us
+        // we used the wrong auth header is talking about our request, not about
+        // the operator's key, and the key it is refusing to look at is fine.
+        assert!(
+            !classify("400: Bearer authentication is not supported, use x-api-key")
+                .destroys_credential()
+        );
+        // Groq's 424 for a failed downstream dependency, which it documents as
+        // "(e.g., Remote MCP authentication)".
+        assert!(
+            !classify("424: dependent request failed (Remote MCP authentication)")
+                .destroys_credential()
+        );
+        // But a typed authentication error from Anthropic or DeepSeek still is
+        // one.
+        assert_eq!(classify("401: authentication_error"), ProbeClass::Auth);
+        assert_eq!(
+            classify("400: Authentication Fails (no such user)"),
+            ProbeClass::Auth
+        );
     }
 
     #[test]
@@ -980,6 +1292,70 @@ mod tests {
             check_endpoint("http://[fc00::1]/v1", LOCAL_OFFERED),
             Err(EndpointRefusal::PrivateNetwork)
         );
+    }
+
+    #[test]
+    fn a_key_is_never_sent_to_an_http_endpoint_off_this_host() {
+        // `http` stays in the allowed set because the local-runtime category
+        // needs it and there is no certificate to have at `localhost`. What is
+        // refused is a **credential** leaving this host in the clear.
+        assert_eq!(
+            check_endpoint_with_credential("http://gateway.acme.test/v1", SERVER_SIDE, true),
+            Err(EndpointRefusal::Cleartext)
+        );
+        // Without one there is nothing to leak, and this is a real shape: a
+        // keyless gateway on an intranet.
+        assert_eq!(
+            check_endpoint_with_credential("http://gateway.acme.test/v1", SERVER_SIDE, false),
+            Ok(())
+        );
+        // https is the point of the rule, not a coincidence of it.
+        assert_eq!(
+            check_endpoint_with_credential("https://gateway.acme.test/v1", SERVER_SIDE, true),
+            Ok(())
+        );
+        // Loopback never leaves the host — by name, which is what Ollama's own
+        // documentation prints, as well as by literal.
+        for local in [
+            "http://localhost:11434/v1",
+            "http://ollama.localhost:11434/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:11434/v1",
+            "http://[::ffff:127.0.0.1]:11434/v1",
+        ] {
+            assert_eq!(
+                check_endpoint_with_credential(local, LOCAL_OFFERED, true),
+                Ok(()),
+                "{local} is this host"
+            );
+        }
+        // And the address rules still run first: a credentialed https probe at
+        // the metadata address is refused as link-local, not waved through.
+        assert_eq!(
+            check_endpoint_with_credential("https://169.254.169.254/v1", SERVER_SIDE, true),
+            Err(EndpointRefusal::LinkLocal)
+        );
+    }
+
+    #[test]
+    fn a_credentialed_request_does_not_follow_a_redirect_off_its_origin() {
+        // `reqwest` strips `Authorization` when the host changes and keeps a
+        // custom header, and the catalogue's one non-bearer entry sends the key
+        // as `x-api-key` — so a provider that can answer `302` could name any
+        // host to hand it to.
+        let origin = "https://api.acme.test/v1/models";
+        assert!(same_origin(origin, "https://api.acme.test/v2/models"));
+        assert!(same_origin(
+            origin,
+            "https://API.ACME.TEST/v1/models?page=2"
+        ));
+        assert!(!same_origin(origin, "https://elsewhere.test/v1/models"));
+        // Scheme and port are part of an origin, both ways.
+        assert!(!same_origin(origin, "http://api.acme.test/v1/models"));
+        assert!(!same_origin(origin, "https://api.acme.test:8443/v1/models"));
+        // Unparseable is not a match: refusing costs a catalogue read, and
+        // following costs the key.
+        assert!(!same_origin(origin, "api.acme.test/v1/models"));
     }
 
     #[test]

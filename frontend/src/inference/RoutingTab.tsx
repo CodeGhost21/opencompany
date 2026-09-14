@@ -29,17 +29,24 @@ import {
   WORKLOAD_COPY,
   WORKLOAD_TIER,
   MANAGED_NOT_SET_UP_ELSEWHERE,
+  MANAGED_SWITCHED_OFF_ELSEWHERE,
+  SELECTABLE_MODES,
   applyToEveryWorkload,
   managedModeBadge,
   formatRef,
   modelAfterProviderChange,
+  nothingCanAnswer,
+  orphanedRouteNote,
   ownModeDraft,
   parseRef,
+  primaryLabel,
   routingTargets,
+  rowStateNote,
   rowValue,
 } from "./routing";
+import type { SelectableMode } from "./routing";
 import type { InferenceActions, InferenceState } from "./use-inference";
-import type { ProviderRef, RoutingMap, RoutingMode, Workload } from "./types";
+import type { ProviderRef, RoutingMap, Workload } from "./types";
 
 /**
  * Routing: which provider serves which workload.
@@ -76,7 +83,7 @@ export function RoutingTab({
   const [testResult, setTestResult] = useState<TestState>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
   /** Which mode the operator has selected, when it differs from the inferred one. */
-  const [chosenMode, setChosenMode] = useState<RoutingMode | null>(null);
+  const [chosenMode, setChosenMode] = useState<SelectableMode | null>(null);
   /**
    * The Own-mode form, **only once it has been edited**.
    *
@@ -99,7 +106,9 @@ export function RoutingTab({
     WORKLOADS.map((w) => [w, parseRef(state.routes[WORKLOAD_TIER[w]] ?? "")]),
   ) as RoutingMap;
   const mode = chosenMode ?? state.mode;
+  const managedConfigured = state.status?.managed?.configured;
   const targets = routingTargets(state.providers);
+  const dead = nothingCanAnswer(state.providers, managedConfigured);
   const ownSaved = ownModeDraft(routing);
   const ownSlug = ownDraft?.slug ?? ownSaved.slug;
   const ownModel = ownDraft?.model ?? ownSaved.model;
@@ -136,13 +145,56 @@ export function RoutingTab({
               {MANAGED_NOT_SET_UP_ELSEWHERE}
             </p>
           )}
-          {(["managed", "own", "advanced"] as const).map((option) => (
+          {/* **The state that had no screen.** An empty table used to render the
+              Managed row as selected while the same card badged it Not set up,
+              and the turn meanwhile went to whichever provider happened to be
+              first enabled. Nothing is selected now, and this says where work
+              actually goes — or that nothing can take it. */}
+          {mode === "unset" && (
+            <div
+              className="rounded-md border border-status-blocked bg-status-blocked-soft px-3 py-2"
+              data-testid="inference-mode-unset"
+            >
+              <p className="text-sm font-medium text-status-blocked-text">
+                {dead ? "No credential resolves — agents cannot think." : "Routing is not set."}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {dead
+                  ? "Nothing is switched on and Managed is not set up. Add a provider, or switch one back on, on the LLM Providers tab."
+                  : `Managed is not set up, so nothing is routed anywhere by choice — every workload falls through to ${primaryLabel(state.providers, managedConfigured)}. Pick a mode below to say where work should go.`}
+              </p>
+            </div>
+          )}
+          {/* Configured but switched off is a different sentence from not set
+              up, and it is the one that explains why the row below cannot be
+              chosen. Both cannot be true at once. */}
+          {managedConfigured !== false && state.status?.managed?.enabled === false && (
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="inference-managed-switched-off"
+            >
+              {MANAGED_SWITCHED_OFF_ELSEWHERE}
+            </p>
+          )}
+          {SELECTABLE_MODES.map((option) => (
             <ModeRow
               key={option}
               option={option}
               selected={mode === option}
-              managedConfigured={state.status?.managed?.configured}
-              disabled={!canManage}
+              managedConfigured={managedConfigured}
+              // **Unselectable unless Managed can actually serve a turn.**
+              // Selecting it writes `managed` into every tier and saves
+              // successfully; if it is switched off the resolver then refuses
+              // every one of those turns, and if the chain resolves to nothing
+              // they fail authentication instead. Either way an apparently
+              // successful click takes the company's inference offline.
+              // Connecting it, or switching it back on, is a different act on
+              // the other tab, and this row does not get to make it silently.
+              disabled={
+                !canManage ||
+                (option === "managed" &&
+                  (state.status?.managed?.enabled === false || managedConfigured === false))
+              }
               onSelect={() => {
                 setChosenMode(option);
                 // Managed is a whole-table statement, so it saves on selection.
@@ -264,9 +316,7 @@ export function RoutingTab({
 
       {state.orphaned.length > 0 && (
         <p className="text-xs text-status-blocked-text" data-testid="inference-orphaned-routes">
-          {state.orphaned
-            .map(([tier, slug]) => `${tier} names ${slug}, which this company has no provider for.`)
-            .join(" ")}
+          {orphanedRouteNote(state.orphaned)}
         </p>
       )}
       {/* The form's own failure stays in the form, where the thing to correct
@@ -278,6 +328,7 @@ export function RoutingTab({
         company={company}
         workload={editing}
         providers={state.providers}
+        managed={state.status?.managed}
         current={editing ? (routing[editing] ?? { kind: "default" }) : { kind: "default" }}
         testing={testing}
         testResult={testResult}
@@ -321,7 +372,7 @@ function ModeRow({
   disabled,
   onSelect,
 }: {
-  option: RoutingMode;
+  option: SelectableMode;
   selected: boolean;
   /** Whether the managed chain resolves — only the managed row reads it. */
   managedConfigured: boolean | undefined;
@@ -329,17 +380,23 @@ function ModeRow({
   onSelect: () => void;
 }) {
   const copy = MODE_COPY[option];
+  // **Not selectable when it cannot answer.** `ModeRow.disabled` used to be
+  // `!canManage` alone, so an operator could route all four workloads to a brain
+  // the same card calls Not set up — and the save succeeded. A mode that writes
+  // four rows to something that resolves to nothing is not a choice.
+  const unusable = option === "managed" && managedConfigured === false;
   return (
     <button
       type="button"
-      disabled={disabled}
+      disabled={disabled || unusable}
+      title={unusable ? "Managed is not set up on this company, so it cannot serve a workload." : undefined}
       aria-pressed={selected}
       data-testid={`inference-mode-${option}`}
       onClick={onSelect}
       className={cn(
         "flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left",
         selected ? "border-primary bg-accent" : "border-border",
-        disabled && "opacity-60",
+        (disabled || unusable) && "opacity-60",
       )}
     >
       <span className="grid min-w-0 flex-1 gap-0.5">
@@ -373,9 +430,15 @@ function WorkloadRow({
   onEdit: () => void;
 }) {
   const copy = WORKLOAD_COPY[workload];
-  // `rowValue` decides both the text and the button's word; this file decides
-  // neither. An unset row names the primary it will actually resolve through.
-  const { value, action } = rowValue(ref_, state.providers);
+  // `rowValue` decides the text, the button's word **and** whether what the row
+  // names can serve it; this file decides none of the three. An unset row names
+  // the primary it will actually resolve through.
+  const {
+    value,
+    action,
+    state: rowState,
+  } = rowValue(ref_, state.providers, state.status?.managed?.configured);
+  const note = rowStateNote(rowState);
   return (
     <div
       className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border py-3 first:border-t-0"
@@ -385,7 +448,23 @@ function WorkloadRow({
         <span className="truncate text-sm font-medium">{copy.label}</span>
         <span className="truncate text-xs text-muted-foreground">{copy.description}</span>
       </span>
-      <span className="truncate text-xs text-muted-foreground">{value}</span>
+      <span className="grid min-w-0 justify-items-end leading-tight">
+        <span
+          className={cn("truncate text-xs", note ? "text-status-blocked-text" : "text-muted-foreground")}
+        >
+          {value}
+        </span>
+        {/* Two of the five resolutions had no rendering anywhere. This is it:
+            the row that will fail says so before the turn does. */}
+        {note && (
+          <span
+            className="truncate text-xs text-status-blocked-text"
+            data-testid={`inference-workload-${workload}-state`}
+          >
+            {note}
+          </span>
+        )}
+      </span>
       <Button type="button" variant="outline" size="sm" disabled={!canManage} onClick={onEdit}>
         {action}
       </Button>

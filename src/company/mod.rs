@@ -30,6 +30,11 @@ pub mod artifact_mirror;
 pub mod avatar;
 pub mod company_key;
 pub mod composio;
+/// Classifying a Composio credential check, so a probe that failed for a proxy,
+/// a WAF or a rate limit never deletes a working key (issue #2275). Pure and
+/// always compiled — the decision is a function over a string, and the route
+/// that consumes it answers in every build. See [`composio_probe`].
+pub mod composio_probe;
 #[cfg(test)]
 mod content_test;
 // Which workspace documents each role is told to reason from
@@ -211,7 +216,8 @@ pub use workflow_file::{
 // `parse_workflow` above for validation before writing to disk.
 pub(crate) use workflow_file::{
     RawEdge, RawNode, RawWorkflow, channel_destination_missing_target_message,
-    raw_workflow_from_toml, render_workflow, required_config_problems,
+    list_workflows_with_global_baseline, raw_workflow_from_toml, render_workflow,
+    required_config_problems,
 };
 // Issue #661 (M7): the read half of the agent workflow-admin surface — a stored
 // graph projected onto the narrow agent authoring schema, plus the policy

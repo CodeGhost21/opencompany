@@ -107,13 +107,20 @@ loopback, link-local, metadata addresses, and a redirect target.
   frontend/src/inference/
     catalogue.ts        the mirror; data only
     types.ts            Provider, ProviderRef, RoutingMap, ProbeClass
-    routing.ts          inferRoutingMode, refSignature, scrub-on-remove   PURE
+    routing.ts          refSignature, scrub-on-remove, row + badge copy  PURE
     classify.ts         probe-class -> copy                                PURE
+    connect.ts          what each category asks for; the row's menu        PURE
+    model-filter.ts     the picker's filter                                PURE
+    proxy-compat.ts     whether an override is sendable through the proxy  PURE
+    use-inference.ts    the one read, the writes, and where they land
+    ProvidersTab.tsx    the Providers tab
     ProviderList.tsx    the connected rows
+    ProviderConnectDialog.tsx
     AddProviderDialog.tsx
-    ProviderKeyDialog.tsx
+    RemoveProviderDialog.tsx
+    ModelField.tsx
+    provider-icon.tsx
     RoutingTab.tsx
-    WorkloadRow.tsx
     WorkloadModelDialog.tsx
 ```
 
@@ -131,11 +138,11 @@ that precedent; it is the closest thing in this repo to a worked example.
 |---|---|---|
 | `catalogue` | unit + cross-language | every entry valid; Rust and TS agree |
 | `store` | unit, in-memory port | entry-zero, add, delete-clears-key, collisions, legacy reads |
-| `resolve` | unit, pure | precedence, no-inheritance, fail-closed, the three scrub rules |
+| `resolve` | unit, pure | precedence, no-inheritance, fail-closed, the three scrub rules, the inferred mode |
 | `probe::classify` | unit, table | all six classes, the proxy/WAF ordering traps |
 | SSRF guard | unit | loopback, link-local, metadata, redirect target |
 | routes | integration | auth (admin vs scoped), **key never in any response body** |
-| console pure | unit (vitest) | `inferRoutingMode`, ref signatures, scrub-on-remove, copy selection |
+| console pure | unit (vitest) | ref signatures, scrub-on-remove, row state, badge and warning copy |
 | console UI | e2e (Playwright) | the flows below |
 
 ### The e2e flows that must exist

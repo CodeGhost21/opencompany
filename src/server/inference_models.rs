@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::company::inference::TierVocabulary;
 use crate::company::inference::catalogue::{self, AuthStyle};
+use crate::company::inference::{TierVocabulary, probe};
 
 /// How long a successful catalog stays fresh in this process.
 pub(crate) const MODEL_CATALOG_TTL: Duration = Duration::from_secs(60 * 60);
@@ -44,6 +44,14 @@ pub(crate) const MODEL_CATALOG_FAILURE_TTL: Duration = Duration::from_secs(60);
 
 /// Maximum time a console page-load waits for the registry on a cache miss.
 const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many redirects a catalog read will follow.
+///
+/// Three rather than `reqwest`'s default ten, matching the connect-time probe:
+/// a model catalog is a leaf document, and a chain longer than a vendor's
+/// http→https plus a host move is not one. Every hop is re-checked against
+/// `probe::check_endpoint` — see [`discover_models`].
+const CATALOG_MAX_REDIRECTS: usize = 3;
 
 /// Maximum time a **turn** waits for a cold catalog before falling back.
 ///
@@ -202,11 +210,34 @@ impl std::fmt::Display for DiscoveryError {
 /// `bearer` is the credential the endpoint expects — the company's stored key
 /// for a tenant catalog read, `None` for a public registry (OpenRouter's) or a
 /// keyless local server.
+///
+/// ## The endpoint is a tenant's to choose, so it gets the probe's guard
+///
+/// Every `base_url` reaching here is one an operator typed: the stored provider
+/// record behind `GET …/providers/{slug}/models`, or the endpoint the setup
+/// wizard was handed. A connect-time probe alone does not make it safe to fetch
+/// later — the row survives a probe failure on purpose (that is the whole point
+/// of keeping a key whose endpoint was merely unreachable), `add anyway` stores
+/// one that was refused outright, and an edit can move the URL afterwards. So
+/// the same [`probe::check_endpoint`] policy is applied **here**, on every hop,
+/// rather than being trusted to have happened upstream. Without it a tenant
+/// admin on a hosted instance can point a provider at `169.254.169.254` and
+/// have this process read it for them, and a permitted host that redirects
+/// there does it without even needing the URL stored.
 pub(crate) async fn discover_models(
     base_url: &str,
     bearer: Option<&str>,
     auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
+    let policy = probe::default_policy();
+    let credentialed = bearer.is_some_and(|b| !b.trim().is_empty());
+    let origin = base_url.trim().to_string();
+    probe::check_endpoint_with_credential(
+        base_url,
+        policy,
+        bearer.is_some_and(|b| !b.trim().is_empty()),
+    )
+    .map_err(|refusal| DiscoveryError::endpoint(refusal.to_string()))?;
     let base = base_url.trim_end_matches('/');
     // Bounded here, not left to each caller: reqwest's async client has no
     // default timeout, so an endpoint that accepts the connection but never
@@ -214,8 +245,33 @@ pub(crate) async fn discover_models(
     // local/custom probe calls this directly (no wrapping timeout of its
     // own), while `catalog_models` below also wraps its call in
     // `tokio::time::timeout` for a friendlier, endpoint-naming message.
+    //
+    // The redirect policy is the second half of the guard: `reqwest` resolves
+    // and connects on our behalf, so the hop about to be made is the only thing
+    // there is to inspect, and a check applied to the first URL alone waves the
+    // interesting case straight through.
     let client = reqwest::Client::builder()
         .timeout(MODEL_CATALOG_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= CATALOG_MAX_REDIRECTS {
+                return attempt.stop();
+            }
+            // A credentialed read stays on its origin: `reqwest` drops
+            // `Authorization` across hosts but keeps a custom header, and the
+            // catalogue's one non-bearer entry sends the key as `x-api-key`, so
+            // a provider that can answer `302` could name any host to send it
+            // to. See `probe::same_origin`.
+            if credentialed && !probe::same_origin(&origin, attempt.url().as_str()) {
+                return attempt.stop();
+            }
+            match probe::check_endpoint(attempt.url().as_str(), policy) {
+                Ok(()) => attempt.follow(),
+                // `stop`, not `error`: the caller then classifies the redirect's
+                // own status as an endpoint problem, which is what it is. Either
+                // way the next request is never sent.
+                Err(_) => attempt.stop(),
+            }
+        }))
         .build()
         .map_err(|error| {
             DiscoveryError::endpoint(format!(
@@ -245,7 +301,12 @@ pub(crate) async fn discover_models(
         }
     }
 
-    fetch_catalog(&client, &format!("{base}/models"), bearer, auth).await
+    // The public registry needs the same shape parameters the scoped path uses:
+    // they are a property of OpenRouter's catalog API rather than of
+    // `/models/user`, and taking the defaults here is why this fallback returned
+    // a text-only, 500-entry view of a catalogue the caller believes is whole.
+    let query = crate::company::inference::catalogue::catalog_query(base);
+    fetch_catalog(&client, &format!("{base}/models{query}"), bearer, auth).await
 }
 
 /// One catalog read against one URL.
@@ -634,6 +695,35 @@ mod tests {
             name: None,
             context_length: None,
         }
+    }
+
+    /// A catalog read is refused at an address a model endpoint is never on.
+    ///
+    /// The connect-time probe is not the guard for this call. A provider row
+    /// outlives a failed probe on purpose, `add anyway` stores one that was
+    /// refused outright, and an edit can move the URL afterwards — so by the
+    /// time the picker asks this endpoint what it serves, "it passed once" is
+    /// not a statement about the URL in hand. On a hosted instance the address
+    /// below is where the container's credentials live.
+    #[tokio::test]
+    async fn a_catalog_read_is_refused_at_a_link_local_address() {
+        let refused = discover_models(
+            "http://169.254.169.254/latest/meta-data",
+            Some("pw-not-a-real-key"),
+            AuthStyle::Bearer,
+        )
+        .await
+        .expect_err("a link-local endpoint must not be fetched");
+
+        assert!(
+            refused.to_string().contains("link-local"),
+            "the refusal should name the reason, said: {refused}"
+        );
+        assert!(
+            !refused.credential_specific,
+            "a policy refusal is not evidence about the credential, and must not \
+             be classified as one"
+        );
     }
 
     /// A turn gives up on a hanging `/models` inside its own budget, not the

@@ -115,6 +115,28 @@ impl Workload {
             Self::Vision => "vision",
         }
     }
+
+    /// The name this workload has on screen.
+    ///
+    /// A tier id is an internal name and it leaked into two operator-facing
+    /// sentences — the disable note ("agentic-v1, vision-v1 are parked") and the
+    /// orphan banner. Every other sentence on both tabs says "Agentic", so an
+    /// operator had to learn a second name for the same row in order to read a
+    /// warning about it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Reasoning => "Reasoning",
+            Self::Agentic => "Agentic",
+            Self::Coding => "Coding",
+            Self::Vision => "Vision",
+        }
+    }
+}
+
+/// What a tier is called on screen, or the raw id when it is not one of ours.
+pub fn tier_label(tier: &str) -> String {
+    Workload::from_tier(tier).map_or_else(|| tier.to_string(), |w| w.label().to_string())
 }
 
 /// What one routing row points at.
@@ -397,22 +419,80 @@ fn resolve_by_category<'a>(
     }
 }
 
-/// The three routing modes, inferred from the routes.
+/// The routing modes, inferred from the routes.
 ///
 /// **Never stored.** A mode field would be a fifth thing that can disagree with
 /// the four routes, and the routes are the truth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoutingMode {
-    /// Every row is managed or unset.
+    /// Every row is managed or unset, **and managed can answer**.
     Managed,
     /// Every row names the same provider and model.
     Own,
     /// Anything else.
     Advanced,
+    /// Every row is managed or unset and **managed resolves to nothing**.
+    ///
+    /// The company has no mode it can use. This is not a fourth thing the
+    /// operator can pick — it is the absence of a usable choice, and it exists
+    /// so the console can render that absence rather than a selected row the
+    /// same card calls Not set up.
+    Unset,
 }
 
-/// Which mode the current routes describe.
-pub fn infer_routing_mode(routes: &Routes) -> RoutingMode {
+/// Whether any routable workload is **explicitly** pointed at the managed tier.
+///
+/// The one question boot-time brain selection had no way to ask. A company that
+/// routes its tiers to `managed` has configured its inference — but it has
+/// configured it in a place neither half of
+/// [`resolve_effective_scoped`](super::resolve_effective_scoped)'s original two
+/// branches looks: not in the provider list (managed has no record there), and
+/// not in the legacy runtime blob or the manifest. So `RuntimeBuilder::build`
+/// saw "nothing configured", handed the company the offline echo brain, and a
+/// restart changed nothing because a fresh boot ran the identical computation.
+///
+/// **[`ProviderRef::Default`] deliberately does not count.** An unset row means
+/// the operator chose nothing, and [`provider_for_workload`] maps it to
+/// [`Resolution::Primary`] — the provider list, then the legacy chain, both of
+/// which the caller has already tried by the time it asks this. Counting an
+/// absence as a choice here would report every company configured, which is the
+/// mirror image of the bug and strictly worse: it would take companies off the
+/// echo brain that genuinely have nothing to think with.
+///
+/// This is deliberately weaker than [`infer_routing_mode`]'s Managed rule, which
+/// also accepts all-unset. That function answers "which mode is this table
+/// describing"; this one answers "would a turn actually reach managed", and only
+/// an explicit row does that.
+pub fn any_route_is_managed(routes: &Routes) -> bool {
+    ROUTABLE_WORKLOADS
+        .iter()
+        .any(|w| matches!(routes.get(w.tier()), Some(ProviderRef::Managed)))
+}
+
+/// Which mode the current routes describe, given whether managed can answer.
+///
+/// ## Why this takes a second argument
+///
+/// The rule this ports — *every row managed or unset → Managed* — is faithful to
+/// openhuman, where it is also true: they run the managed backend, so managed is
+/// genuinely always on. **Here managed needs a credential and can resolve to
+/// nothing**, and a table of unset rows on such a company does not resolve to
+/// managed at all: [`provider_for_workload`] maps an unset row to
+/// [`Resolution::Primary`], which is the first enabled provider. So the screen
+/// said Managed while the turn went to the operator's own key — and on a company
+/// whose only provider had just been added with no per-tier model, that turn was
+/// the reported `404 model: agentic-v1`.
+///
+/// The principle, stated once: **the inferred default must be a mode the company
+/// can actually use.** An inferred Managed on a company where managed does not
+/// resolve is not a mode, it is a contradiction, and every symptom in the report
+/// falls out of it.
+///
+/// Only the *inference* changes. The mode is still a pure function of the table
+/// plus one fact about the company, still never stored, and an operator who has
+/// explicitly chosen managed still sees managed — they just see [`Self::Unset`]
+/// when that choice has nothing behind it, which is what is true.
+pub fn infer_routing_mode(routes: &Routes, managed_resolves: bool) -> RoutingMode {
     let refs: Vec<ProviderRef> = ROUTABLE_WORKLOADS
         .iter()
         .map(|w| {
@@ -426,7 +506,11 @@ pub fn infer_routing_mode(routes: &Routes) -> RoutingMode {
         .iter()
         .all(|r| matches!(r, ProviderRef::Managed | ProviderRef::Default))
     {
-        return RoutingMode::Managed;
+        return if managed_resolves {
+            RoutingMode::Managed
+        } else {
+            RoutingMode::Unset
+        };
     }
     let first = &refs[0];
     if refs.iter().all(|r| r == first) {
@@ -456,38 +540,90 @@ pub fn scrub_removed(
     remaining: &[Provider],
 ) -> Vec<String> {
     let category = catalogue::category_of(&removed.kind);
+    // **Enabled, not merely present.** A slugless `local:` route survives only
+    // while something in that category can still serve it, and a switched-off
+    // runtime cannot: `provider_for_workload` looks for an *enabled* target and
+    // fails the workload closed when it finds none. Counting a disabled row as
+    // a survivor left the route pinned and the turn hard-failing, instead of
+    // resetting to the primary the way the rule above says it should.
     let category_survives = remaining
         .iter()
+        .filter(|p| p.enabled)
         .any(|p| catalogue::category_of(&p.kind) == category);
 
     let mut reset = Vec::new();
     for (tier, route) in routes.iter_mut() {
-        let orphaned = match route {
-            // **A slug match is decisive, whatever the category.** This used to
-            // also require `category == Cloud`, and the two rules then never met
-            // for a local runtime: `ollama:llama3` parses as a `Cloud` ref
-            // because it carries a slug, while `category_of("ollama")` is
-            // `Local` — so the cloud arm refused it on category and the local
-            // arm never saw it, because that arm only matches the slug-less
-            // `local` ref. Removing Ollama left every row pointing at it, and
-            // the routing table then refused to save at all: `put_routes` fails
-            // closed on a route naming a provider nobody holds, so the operator
-            // could not re-save their own routing until they had changed every
-            // row by hand.
-            //
-            // A slug is unique per company, so naming one that is being removed
-            // is orphaned by definition. The category never added anything.
-            ProviderRef::Cloud { provider_slug, .. } => provider_slug == &removed.slug,
-            ProviderRef::Local { .. } => category == Category::Local && !category_survives,
-            ProviderRef::ClaudeCode { .. } => category == Category::Cli && !category_survives,
-            ProviderRef::Managed | ProviderRef::Default => false,
-        };
-        if orphaned {
+        // The three rules, in [`route_names`], shared with `routes_served_by`
+        // and `orphaned_routes`. Two of those three used to hold a third of this
+        // rule each, and both were wrong in the same direction.
+        if route_names(route, removed, category, category_survives) {
             *route = ProviderRef::Default;
             reset.push(tier.clone());
         }
     }
     reset
+}
+
+/// The tiers whose route `provider` serves, by [`scrub_removed`]'s three rules.
+///
+/// ## Why this exists, rather than a slug comparison at the call site
+///
+/// `parked_tiers` on the disable path did compare slugs — `route.slug() ==
+/// Some(provider.slug)` — and [`ProviderRef::slug`] is `None` for a `local` or
+/// `claude-code` ref. So disabling the only Ollama runtime parked every `local:`
+/// route while the note said **"Nothing was routed through it."** A false
+/// statement in the one sentence whose whole job is to be true.
+///
+/// `scrub_removed` gets this right with three rules and `orphaned_routes` got it
+/// wrong the same way. One matcher now, used by all three, so the next surface
+/// that needs the question asked cannot reimplement a third of the answer.
+///
+/// `alternatives` is what would still serve after `provider` goes: the remaining
+/// providers for a removal, the *still-enabled* ones for a disable. A slug-less
+/// ref names a category, so it is only orphaned once nothing of that category is
+/// left to serve it.
+pub fn routes_served_by(
+    routes: &Routes,
+    provider: &Provider,
+    alternatives: &[Provider],
+) -> Vec<String> {
+    let category = catalogue::category_of(&provider.kind);
+    let survives = alternatives
+        .iter()
+        .any(|p| catalogue::category_of(&p.kind) == category);
+    routes
+        .iter()
+        .filter(|(_, route)| route_names(route, provider, category, survives))
+        .map(|(tier, _)| tier.clone())
+        .collect()
+}
+
+/// Whether `route` is served by `provider` and by nothing else.
+///
+/// **A slug match is decisive, whatever the category.** This used to also
+/// require `category == Cloud`, and the two rules then never met for a local
+/// runtime: `ollama:llama3` parses as a `Cloud` ref because it carries a slug,
+/// while `category_of("ollama")` is `Local` — so the cloud arm refused it on
+/// category and the local arm never saw it, because that arm only matches the
+/// slug-less `local` ref. Removing Ollama left every row pointing at it, and the
+/// routing table then refused to save at all: `put_routes` fails closed on a
+/// route naming a provider nobody holds, so the operator could not re-save their
+/// own routing until they had changed every row by hand.
+///
+/// A slug is unique per company, so naming one that is going away is orphaned by
+/// definition. The category never added anything.
+fn route_names(
+    route: &ProviderRef,
+    provider: &Provider,
+    category: Category,
+    category_survives: bool,
+) -> bool {
+    match route {
+        ProviderRef::Cloud { provider_slug, .. } => provider_slug == &provider.slug,
+        ProviderRef::Local { .. } => category == Category::Local && !category_survives,
+        ProviderRef::ClaudeCode { .. } => category == Category::Cli && !category_survives,
+        ProviderRef::Managed | ProviderRef::Default => false,
+    }
 }
 
 /// Every route naming a provider this company does not hold.
@@ -497,11 +633,33 @@ pub fn scrub_removed(
 /// bypassed — by a hand-edited config or an older build — and an unresolvable
 /// route must be reported at load rather than discovered mid-turn.
 pub fn orphaned_routes(routes: &Routes, providers: &[Provider]) -> Vec<(String, String)> {
+    let holds = |category: Category| {
+        providers
+            .iter()
+            .any(|p| catalogue::category_of(&p.kind) == category)
+    };
     routes
         .iter()
-        .filter_map(|(tier, route)| {
-            let slug = route.slug()?;
-            (!providers.iter().any(|p| p.slug == slug)).then(|| (tier.clone(), slug.to_string()))
+        .filter_map(|(tier, route)| match route {
+            ProviderRef::Cloud { provider_slug, .. } => {
+                (!providers.iter().any(|p| &p.slug == provider_slug))
+                    .then(|| (tier.clone(), provider_slug.clone()))
+            }
+            // **Slug-less refs used to be skipped entirely.** `route.slug()?`
+            // early-returned on them, so a `local:` route on a company holding
+            // no local runtime was reported by nothing at all — while the turn
+            // refused it mid-flight with `Resolution::Missing`. The whole point
+            // of this second mechanism is that an unresolvable route is reported
+            // at load rather than discovered in a turn, and for two of the five
+            // ref shapes it never was. Third instance of the same bug shape, and
+            // the last one.
+            ProviderRef::Local { .. } => {
+                (!holds(Category::Local)).then(|| (tier.clone(), "local".to_string()))
+            }
+            ProviderRef::ClaudeCode { .. } => {
+                (!holds(Category::Cli)).then(|| (tier.clone(), "claude-code".to_string()))
+            }
+            ProviderRef::Managed | ProviderRef::Default => None,
         })
         .collect()
 }
@@ -879,15 +1037,134 @@ mod tests {
         );
     }
 
+    // ---- one question, one matcher -----------------------------------------
+
+    /// The disable path's own bug: `parked_tiers` compared slugs, and
+    /// `ProviderRef::slug()` is `None` for a `local` ref — so disabling the only
+    /// Ollama runtime parked every `local:` route while the note said "Nothing
+    /// was routed through it." A false statement in the one sentence whose job
+    /// is to be true.
+    #[test]
+    fn a_slug_less_route_is_served_by_the_runtime_it_names() {
+        let ollama = provider("ollama", "ollama", true);
+        let openrouter = provider("openrouter", "openrouter", true);
+        let routes = routes(&[
+            ("chat-v1", "local:llama3"),
+            ("reasoning-v1", "openrouter:gpt-5"),
+        ]);
+        assert_eq!(
+            routes_served_by(&routes, &ollama, std::slice::from_ref(&openrouter)),
+            vec!["chat-v1".to_string()],
+            "the `local` route is served by the only local runtime there is"
+        );
+        assert!(
+            routes_served_by(&routes, &openrouter, std::slice::from_ref(&ollama))
+                .contains(&"reasoning-v1".to_string())
+        );
+    }
+
+    /// And it is only parked once nothing of that category is left to serve it —
+    /// the same rule `scrub_removed` applies to a removal.
+    #[test]
+    fn a_second_runtime_of_the_category_keeps_the_route_served() {
+        let ollama = provider("ollama", "ollama", true);
+        let lmstudio = provider("lmstudio", "lmstudio", true);
+        let routes = routes(&[("chat-v1", "local:llama3")]);
+        assert!(routes_served_by(&routes, &ollama, &[lmstudio]).is_empty());
+        assert_eq!(
+            routes_served_by(&routes, &ollama, &[]),
+            vec!["chat-v1".to_string()]
+        );
+    }
+
+    /// `orphaned_routes` early-returned on `route.slug()?`, so a `local:` route
+    /// on a company holding no local runtime was reported by nothing at all —
+    /// while the turn refused it mid-flight. The whole point of the second
+    /// mechanism is that it is caught at load.
+    #[test]
+    fn a_slug_less_route_with_nothing_to_serve_it_is_reported_at_load() {
+        let openrouter = provider("openrouter", "openrouter", true);
+        let routes = routes(&[
+            ("chat-v1", "local:llama3"),
+            ("vision-v1", "claude-code:sonnet"),
+        ]);
+        let mut orphaned = orphaned_routes(&routes, &[openrouter]);
+        orphaned.sort();
+        assert_eq!(
+            orphaned,
+            vec![
+                ("chat-v1".to_string(), "local".to_string()),
+                ("vision-v1".to_string(), "claude-code".to_string()),
+            ]
+        );
+    }
+
+    /// A runtime of that category exists, so the route resolves — disabled or
+    /// not, which is `Resolution::Disabled`'s business rather than this one's.
+    #[test]
+    fn a_slug_less_route_is_not_orphaned_while_its_category_is_held() {
+        let ollama = provider("ollama", "ollama", false);
+        let routes = routes(&[("chat-v1", "local:llama3")]);
+        assert!(orphaned_routes(&routes, &[ollama]).is_empty());
+    }
+
+    /// The tier id is an internal name and it leaked into two operator-facing
+    /// sentences.
+    #[test]
+    fn a_tier_is_named_the_way_every_other_sentence_names_it() {
+        assert_eq!(tier_label("agentic-v1"), "Agentic");
+        assert_eq!(tier_label("vision-v1"), "Vision");
+        assert_eq!(
+            tier_label("embedding-v1"),
+            "embedding-v1",
+            "a tier this runtime has no workload for passes through unchanged"
+        );
+    }
+
     // ---- the inferred mode --------------------------------------------------
 
     #[test]
-    fn a_company_that_has_chosen_nothing_is_managed() {
-        assert_eq!(infer_routing_mode(&Routes::new()), RoutingMode::Managed);
+    fn a_company_that_has_chosen_nothing_is_managed_when_managed_answers() {
         assert_eq!(
-            infer_routing_mode(&routes(&[("chat-v1", "managed"), ("vision-v1", "")])),
+            infer_routing_mode(&Routes::new(), true),
             RoutingMode::Managed
         );
+        assert_eq!(
+            infer_routing_mode(&routes(&[("chat-v1", "managed"), ("vision-v1", "")]), true),
+            RoutingMode::Managed
+        );
+    }
+
+    /// The reported defect. A fresh company with no managed credential reads
+    /// `Managed` from an empty table while every unset row resolves to
+    /// [`Resolution::Primary`] — the first enabled provider. The screen named
+    /// one destination and the turn used another.
+    #[test]
+    fn nothing_chosen_and_managed_unresolvable_is_not_a_mode() {
+        assert_eq!(
+            infer_routing_mode(&Routes::new(), false),
+            RoutingMode::Unset
+        );
+        assert_eq!(
+            infer_routing_mode(&routes(&[("chat-v1", "managed"), ("vision-v1", "")]), false),
+            RoutingMode::Unset
+        );
+    }
+
+    /// Managed's availability decides **only** the managed-or-unset table. A
+    /// company that has named a provider on every row has a mode it can use
+    /// whatever the managed chain says, and reporting otherwise would hide a
+    /// choice the operator made.
+    #[test]
+    fn managed_availability_does_not_reach_a_table_that_names_a_provider() {
+        let all = routes(&[
+            ("chat-v1", "acme:gpt-5"),
+            ("reasoning-v1", "acme:gpt-5"),
+            ("agentic-v1", "acme:gpt-5"),
+            ("vision-v1", "acme:gpt-5"),
+        ]);
+        assert_eq!(infer_routing_mode(&all, false), RoutingMode::Own);
+        assert_eq!(infer_routing_mode(&all, true), RoutingMode::Own);
     }
 
     #[test]
@@ -898,7 +1175,7 @@ mod tests {
             ("agentic-v1", "acme:gpt-5"),
             ("vision-v1", "acme:gpt-5"),
         ]);
-        assert_eq!(infer_routing_mode(&all), RoutingMode::Own);
+        assert_eq!(infer_routing_mode(&all, true), RoutingMode::Own);
     }
 
     #[test]
@@ -909,12 +1186,12 @@ mod tests {
             ("agentic-v1", "acme:gpt-5"),
             ("vision-v1", "acme:vision"),
         ]);
-        assert_eq!(infer_routing_mode(&mixed), RoutingMode::Advanced);
+        assert_eq!(infer_routing_mode(&mixed, true), RoutingMode::Advanced);
 
         // Partly set is also advanced: "the same on every row" is not true of a
         // row that is unset.
         let partial = routes(&[("chat-v1", "acme:gpt-5")]);
-        assert_eq!(infer_routing_mode(&partial), RoutingMode::Advanced);
+        assert_eq!(infer_routing_mode(&partial, true), RoutingMode::Advanced);
     }
 
     #[test]
@@ -922,7 +1199,10 @@ mod tests {
         // There is no mode field, so there is nothing that can disagree with
         // the four routes. Re-deriving from the same map is stable.
         let map = routes(&[("chat-v1", "acme:gpt-5")]);
-        assert_eq!(infer_routing_mode(&map), infer_routing_mode(&map.clone()));
+        assert_eq!(
+            infer_routing_mode(&map, true),
+            infer_routing_mode(&map.clone(), true)
+        );
     }
 
     #[test]
@@ -994,5 +1274,22 @@ mod tests {
         let reset = scrub_removed(&mut routes, &ollama, std::slice::from_ref(&lmstudio));
         assert!(reset.is_empty(), "lmstudio still serves it");
         assert!(!scrub_removed(&mut routes, &ollama, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_switched_off_runtime_does_not_keep_a_slug_less_local_route_alive() {
+        // "Another runtime remains" has to mean one that can actually serve the
+        // route. `provider_for_workload` looks for an **enabled** target and
+        // fails the workload closed when it finds none, so counting a
+        // switched-off row as a survivor left the route pinned to a hard
+        // failure rather than resetting it to the primary.
+        let ollama = provider("ollama", "ollama", true);
+        let parked = provider("lmstudio", "lmstudio", false);
+        let mut routes = Routes::new();
+        routes.insert("chat-v1".into(), ProviderRef::parse("local:llama3"));
+
+        let reset = scrub_removed(&mut routes, &ollama, std::slice::from_ref(&parked));
+        assert_eq!(reset, vec!["chat-v1".to_string()]);
+        assert_eq!(routes.get("chat-v1"), Some(&ProviderRef::Default));
     }
 }

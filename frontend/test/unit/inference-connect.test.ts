@@ -22,7 +22,7 @@ import {
   slugErrorCopy,
   slugify,
 } from "@/inference/connect";
-import { CLOUD_PROVIDERS } from "@/inference/catalogue";
+import { CLOUD_PROVIDERS, LOCAL_RUNTIMES } from "@/inference/catalogue";
 import { stripEnvelopePrefix } from "@/inference/ProvidersTab";
 import type { Provider } from "@/inference/types";
 
@@ -81,8 +81,21 @@ describe("what each category asks for", () => {
     expect(ask.defaultEndpoint).toBe("http://localhost:11434");
   });
 
-  it("asks omlx for both, because it is the one local runtime that wants both", () => {
-    expect(credentialAsk("omlx")).toMatchObject({ needsKey: true, needsEndpoint: true });
+  it("asks omlx for an endpoint and does not demand a key", () => {
+    // It used to demand one, and the host enforces `needsKey`, so omlx could
+    // not be added at all. No build requires a key: two of the three projects
+    // called "omlx" have no auth mechanism whatsoever, and the third's is an
+    // opt-in `--api-key`. An operator who turned that on can still supply one —
+    // the dialog just no longer refuses without it.
+    expect(credentialAsk("omlx")).toMatchObject({ needsKey: false, needsEndpoint: true });
+  });
+
+  it("demands a key from no local runtime at all", () => {
+    // The rule rather than the row: a `needsKey` that is wrongly true does not
+    // mis-style the form, it makes the runtime unaddable.
+    for (const runtime of LOCAL_RUNTIMES) {
+      expect(credentialAsk(runtime.slug)).toMatchObject({ needsKey: false });
+    }
   });
 
   it("asks a CLI login for nothing", () => {
@@ -279,5 +292,21 @@ describe("providerMenu", () => {
     const labels = Object.fromEntries(providerMenu(row()).map((a) => [a.id, a.label]));
     expect(labels.removeKey).toBe("Remove key");
     expect(labels.remove).toBe("Remove provider");
+  });
+
+  it("offers entry zero only what it can actually do", () => {
+    // Entry zero refuses edit, remove and disable with three separate 400s. The
+    // console had no way to tell which row they applied to, so it rendered all
+    // three live and every one of them was a round trip to a refusal. Setting it
+    // as the default is not one of the three — that is a marker on the company,
+    // not a write to the row.
+    expect(ids({ origin: "entryZero" })).toEqual(["default"]);
+    expect(ids({ origin: "entryZero", isDefault: true })).toEqual([]);
+    expect(ids({ origin: "entryZero", enabled: false })).toEqual([]);
+  });
+
+  it("treats a row from an older host as an ordinary one", () => {
+    // Absent `origin` reads as indexed, which is what every row was before.
+    expect(ids()).toContain("remove");
   });
 });

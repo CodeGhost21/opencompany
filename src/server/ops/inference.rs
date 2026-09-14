@@ -422,6 +422,25 @@ struct ProviderDto {
     enabled: bool,
     /// Whether a credential is stored. **Never the credential.**
     key_configured: bool,
+    /// Which slot this record physically lives in: `entryZero` or `indexed`.
+    ///
+    /// **The console could not tell them apart**, and entry zero refuses three
+    /// operations with three separate 400s — disable ("cannot be switched off
+    /// from the list; reset the inference config instead"), edit ("is changed
+    /// through the inference config, not as a list entry") and remove ("is
+    /// cleared by resetting the inference config"). Correct rules, and the wrong
+    /// place to learn them: the only signal was `id == "prv_entry_zero"`, a
+    /// constant nothing outside `store.rs` reads, so the row rendered all three
+    /// controls live and every one of them was a round trip to a refusal.
+    ///
+    /// The rules stay exactly where they are — this is what lets the console
+    /// stop offering the controls that cannot work.
+    ///
+    /// It is not a *kind* — entry zero can be any kind — it is where the record
+    /// lives, and that is the thing the write routes branch on. One field rather
+    /// than a `legacy` boolean beside it, because two spellings of the same fact
+    /// are two things to keep in step.
+    origin: &'static str,
     /// Whether this is the provider an **unset** workload goes through.
     ///
     /// The *resolved* answer, not the raw marker: a company that has never said
@@ -443,10 +462,18 @@ struct ProviderDto {
 
 /// What the system last learnt about reaching a provider.
 ///
-/// Recorded from things that already happen — the add-time probe, the manual
-/// Test, and the turn path's own 401 — rather than from a poller. A poller costs
-/// a request per provider per interval across every company on this host to
-/// learn something the next real turn learns for free.
+/// Recorded from things that already happen — the add-time probe and the manual
+/// Test — rather than from a poller. A poller costs a request per provider per
+/// interval across every company on this host, most of them answering about a
+/// provider nobody is using this hour.
+///
+/// **The turn path does not write here, and this field does not claim it does.**
+/// `send_plan` invalidates a credential on a 401 and goes no further, so a key
+/// revoked after its last Test leaves this reading whatever that Test found
+/// until somebody presses Test again. That is the same honesty the `Option`
+/// above is for: absent means nobody has checked, not that it works. Latching
+/// `auth` from a real turn needs the secret store threaded into the turn path,
+/// which is a feature rather than a wording fix.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderHealthDto {
@@ -499,6 +526,10 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
             models: provider.models,
             enabled: provider.enabled,
             key_configured,
+            origin: match provider.origin {
+                store::ProviderOrigin::EntryZero => "entryZero",
+                store::ProviderOrigin::Indexed => "indexed",
+            },
             health,
         });
     }
@@ -895,6 +926,22 @@ async fn effective_status_with(
     })
 }
 
+/// Whether the managed brain can actually answer for this company.
+///
+/// The one fact [`resolve::infer_routing_mode`](crate::company::inference::resolve::infer_routing_mode)
+/// needs beyond the routes, read through the same [`managed_state`] the status
+/// card renders so the mode and the badge cannot disagree about it. Three store
+/// reads on a route nobody calls in a loop, in exchange for the console never
+/// again being told Managed on a company where managed resolves to nothing.
+async fn managed_resolves(runtime: &CompanyRuntime) -> Result<bool, ApiError> {
+    Ok(managed_state(
+        runtime,
+        platform_default(&crate::app::config::ProcessEnv).as_ref(),
+    )
+    .await?
+    .configured)
+}
+
 /// What the managed brain would resolve to for this company.
 ///
 /// Reads the three facts and hands them to
@@ -910,15 +957,10 @@ async fn managed_state(
     let secrets = runtime.secrets().as_ref();
     // Both addresses for the one meaning: the new per-provider slot and the
     // legacy flat slot it converges from.
-    let inference_key = inference::load_inference_key_scoped(
-        runtime.id(),
-        secrets,
-        inference::MANAGED_SLUG,
-        None,
-        &inference::HarnessScope::default(),
-    )
-    .await
-    .map_err(ApiError)?;
+    let inference_key =
+        inference::load_managed_key(runtime.id(), secrets, &inference::HarnessScope::default())
+            .await
+            .map_err(ApiError)?;
     let company_account = crate::company::company_key::load(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
@@ -1600,6 +1642,42 @@ base_url = "https://byo.example/v1"
         // it quiesced would turn a cosmetic dead end into an outage.
         let (status, _, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// `restart_runtime` takes `AdminScopedCompany` in its signature, but
+    /// nothing here had actually driven a plain member against it over HTTP —
+    /// every other test in this module authenticates as the seeded admin.
+    /// Rebuilding a company's runtime on demand is at least as sharp a
+    /// boundary as any other admin-only write in this module.
+    #[tokio::test]
+    async fn a_member_may_not_restart_the_runtime() {
+        let home_dir = home();
+        let home = home_dir.path();
+        let id = CompanyId::new("acme");
+        let state = state_with_company(home)
+            .await
+            .with_rebuilder(std::sync::Arc::new(Working {
+                home: home.to_path_buf(),
+            }));
+        state.set_boot_inputs(id.clone(), crate::runtime::BootInputs::default());
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let before = state.registry().get(&id).expect("registered");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/inference/restart")
+            .header("cookie", crate::server::test_support::member_cookie("acme"))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // A refused request must not have rebuilt the runtime either.
+        let after = state.registry().get(&id).expect("still registered");
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &after),
+            "a forbidden restart must not swap the runtime"
+        );
     }
 
     /// Issue #1736: the console cannot offer a restart it has no way to know is
@@ -3264,7 +3342,28 @@ base_url = "https://byo.example/v1"
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
-        assert_eq!(resp["affectedTiers"], json!(["reasoning-v1"]));
+        // The explicitly routed tier **and** the three unset ones. `acme` is
+        // this company's only provider, so it is also what every unrouted
+        // workload was going through — switching it off moves those to managed,
+        // and a response naming only the explicit route would have said nothing
+        // about a change of who pays for the other three.
+        let mut named: Vec<String> = resp["affectedTiers"]
+            .as_array()
+            .expect("affectedTiers is a list")
+            .iter()
+            .map(|t| t.as_str().unwrap_or_default().to_string())
+            .collect();
+        named.sort();
+        assert_eq!(
+            named,
+            vec![
+                "agentic-v1".to_string(),
+                "chat-v1".to_string(),
+                "reasoning-v1".to_string(),
+                "vision-v1".to_string(),
+            ],
+            "{raw}"
+        );
 
         let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
         assert_eq!(
@@ -3566,8 +3665,32 @@ base_url = "https://byo.example/v1"
         let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
+        // **The reported defect, at the HTTP boundary.** An empty table used to
+        // answer `managed` on a company whose managed chain resolves to nothing,
+        // while every unset row resolved to `Resolution::Primary` — the first
+        // enabled provider. The screen named one destination and the turn used
+        // another.
         let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
-        assert_eq!(routes["mode"], "managed", "nothing set is managed");
+        assert_eq!(
+            routes["mode"], "unset",
+            "nothing set is not a mode when Managed cannot answer"
+        );
+
+        // Give the chain something to resolve to, and the same empty table is
+        // genuinely Managed — the inference is about what the company can use,
+        // not about the table alone.
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/managed/key",
+            Some(json!({ "key": "th-not-a-real-key" })),
+        )
+        .await;
+        let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
+        assert_eq!(
+            routes["mode"], "managed",
+            "nothing set is managed once managed answers"
+        );
 
         send(
             &state,
@@ -3601,6 +3724,78 @@ base_url = "https://byo.example/v1"
         )
         .await;
         assert_eq!(routes["mode"], "advanced");
+    }
+
+    #[tokio::test]
+    async fn the_only_provider_a_company_can_use_is_routed_to() {
+        // §4. Nothing authored, no managed credential, one provider added: there
+        // is precisely one thing in this company that can serve a turn, so
+        // routing to anything else is not a choice that exists. Without this the
+        // operator adds a provider, every screen says Managed, and every turn
+        // goes to the provider anyway — with no per-tier model, which is the
+        // reported `404 model: agentic-v1`.
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (_, added, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+        )
+        .await;
+        assert_eq!(
+            added["affectedTiers"].as_array().map(Vec::len),
+            Some(4),
+            "the write says which rows it wrote rather than leaving them to be noticed: {added}"
+        );
+
+        let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
+        assert_eq!(
+            routes["mode"], "own",
+            "one provider on every row is own: {routes}"
+        );
+        assert_eq!(routes["routes"]["agentic-v1"], "acme");
+    }
+
+    #[tokio::test]
+    async fn a_provider_added_beside_managed_is_not_routed_to() {
+        // Row B2, and the case the guard exists for: Managed resolves, so adding
+        // a key may be for one workload, for vision only, or to compare. Writing
+        // all four rows would bill the operator for everything, silently, from a
+        // screen that still says Managed. The answer is to ask, which is what
+        // leaving the table empty does.
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/managed/key",
+            Some(json!({ "key": "th-not-a-real-key" })),
+        )
+        .await;
+        let (_, added, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE })),
+        )
+        .await;
+        assert!(
+            added["affectedTiers"]
+                .as_array()
+                .is_none_or(|tiers| tiers.is_empty()),
+            "nothing was routed on the operator's behalf: {added}"
+        );
+
+        let (_, routes, _) = send(&state, "GET", "/api/v1/company/inference/routes", None).await;
+        assert_eq!(
+            routes["mode"], "managed",
+            "the table is still empty: {routes}"
+        );
     }
 
     #[tokio::test]
@@ -3798,6 +3993,107 @@ base_url = "https://byo.example/v1"
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
         assert_eq!(err["code"], "inference_required");
+    }
+
+    /// The reported company at the HTTP boundary: every tier routed to
+    /// `managed`, a managed key stored, and nothing else configured.
+    ///
+    /// The unit half of this lives in
+    /// [`crate::company::inference`] — this is the same defect seen from the two
+    /// routes an operator actually meets. Managed has no row in
+    /// `inference/providers` and writes neither the legacy runtime blob nor a
+    /// manifest block, so before the third branch landed in
+    /// `resolve_effective_scoped` this company resolved `None`, booted onto the
+    /// offline echo brain, and stayed there across a restart — while the console
+    /// showed Managed available on both tabs and the chat pane said "no model
+    /// configured".
+    ///
+    /// `restartRequired` needs no widening of its own: it is `restart_pending`
+    /// over the same resolver, so fixing the resolver fixes the banner, and the
+    /// run route's `RunnerGap` inherits it for free. Both are asserted here,
+    /// because "the resolver is right but nothing downstream moved" is the
+    /// failure this whole family of bugs keeps taking.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn configuring_only_managed_after_boot_reports_restart_required() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime.cognition().path,
+            "echo",
+            "expected the no-inference boot to select the echo brain"
+        );
+
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        // Nothing configured yet: no legacy config, no providers, no managed
+        // credential. The flag must be off, or the assertion below proves
+        // nothing.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["restartRequired"], false);
+        assert_eq!(dto["managed"]["configured"], false);
+
+        // Configure Managed the way the console does — its own key route, then
+        // the routing table pointed at it. Neither writes `inference/config`.
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/managed/key",
+            Some(json!({ "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (status, _, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/routes",
+            Some(json!({
+                "routes": {
+                    "chat-v1": "managed",
+                    "reasoning-v1": "managed",
+                    "agentic-v1": "managed",
+                    "vision-v1": "managed"
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        // Managed resolves, and the running brain is still the one boot chose —
+        // which together are what `restartRequired` is supposed to mean.
+        assert_eq!(dto["managed"]["configured"], true, "{raw}");
+        assert_eq!(dto["managed"]["source"], "provider_key", "{raw}");
+        assert_eq!(dto["cognition"], "echo", "{raw}");
+        assert_eq!(dto["harnessReachable"], true, "{raw}");
+        // The regression itself.
+        assert_eq!(dto["restartRequired"], true, "{raw}");
+        assert!(!raw.contains(TOKEN), "GET response leaked the token: {raw}");
+
+        // Second surface, same widening: `runner_gap_for` classified this
+        // company as `not_wired` for the identical reason.
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "restart_required", "{raw}");
     }
 
     /// A brain standing in for the one a rebuild puts a configured company on,

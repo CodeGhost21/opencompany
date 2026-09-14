@@ -70,7 +70,13 @@ export function isProxyCompatible(value: string): boolean {
   if ((TIERS as readonly string[]).includes(trimmed)) return true;
   if (!trimmed.includes("/")) return false;
   if (!trimmed.startsWith("openrouter/")) return false;
-  return trimmed.split("/").length >= 3;
+  // Three segments, all of them present. Counting alone accepted
+  // `openrouter//model` and `openrouter/anthropic/` — three segments each, and
+  // neither one an author/model pair the proxy can route. They only arrive by
+  // hand, but this function exists to be the single place that decides, and a
+  // rule that admits its own counter-example is not one.
+  const parts = trimmed.split("/");
+  return parts.length === 3 && parts.every((part) => part.length > 0);
 }
 
 /**

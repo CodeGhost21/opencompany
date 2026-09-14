@@ -27,10 +27,15 @@ flows-only readiness check.
 
 Sourced from what already happens rather than from a new poller:
 
-- the add-time probe result
-- the manual Test
-- **the turn path** — a 401 already invalidates the credential cache; record the
-  provider, the status and the time alongside it
+- the add-time probe result **— shipped**
+- the manual Test **— shipped**
+- **the turn path — designed, not built.** A 401 there invalidates the
+  credential cache and goes no further: `send_plan` holds no `SecretStore` and
+  writes no health. So a key revoked after its last Test leaves the row reading
+  whatever that Test found, and only pressing Test again corrects it. Wiring it
+  means threading the store and the company id into the turn path, which is a
+  change to that seam rather than a line here — recorded so nobody maintaining
+  the resolver believes a revoked key updates the row on its own.
 
 Do not add a background poller. It costs a request per provider per interval
 across every company on the host, to learn something the next real turn learns

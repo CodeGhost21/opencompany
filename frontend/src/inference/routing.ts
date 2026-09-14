@@ -13,6 +13,7 @@
 // they overlap they are written to agree, and the ones that matter — the mode
 // inference and the three scrub rules — are pinned on both sides.
 
+import { categoryOf } from "./catalogue";
 import { MANAGED_OPTION_SLUG } from "./connect";
 import { overrideIsSendable } from "./proxy-compat";
 import type { Provider, ProviderRef, RoutingMap, RoutingMode, Workload } from "./types";
@@ -85,8 +86,21 @@ export const WORKLOAD_COPY: Record<Workload, WorkloadCopy> = {
   },
 };
 
+/**
+ * The modes an operator can pick, in the order they are offered.
+ *
+ * `unset` is not one of them and never appears here: it is what the host reports
+ * when the table is managed-or-empty and managed resolves to nothing, i.e. the
+ * **absence** of a usable mode. Offering it as a fourth row would be offering the
+ * operator the state they are trying to leave.
+ */
+export const SELECTABLE_MODES = ["managed", "own", "advanced"] as const;
+
+/** One of the three modes an operator can choose. */
+export type SelectableMode = (typeof SELECTABLE_MODES)[number];
+
 /** The three modes, and what each one claims. */
-export const MODE_COPY: Record<RoutingMode, { label: string; description: string }> = {
+export const MODE_COPY: Record<SelectableMode, { label: string; description: string }> = {
   managed: {
     label: "Managed",
     description:
@@ -154,6 +168,10 @@ export function managedFallbackNote(
   if (managed.enabled === false) return MANAGED_SWITCHED_OFF;
   return null;
 }
+
+/** The same statement plus where to fix it, for the page that cannot switch it. */
+export const MANAGED_SWITCHED_OFF_ELSEWHERE =
+  "Managed is switched off, so it cannot be routed to. Switch it back on from its row on the LLM Providers tab.";
 
 /** Set up, but switched out of routing — which is also not a fallback. */
 export const MANAGED_SWITCHED_OFF =
@@ -226,16 +244,40 @@ export function refFor(routing: RoutingMap, workload: Workload): ProviderRef {
   return routing[workload] ?? UNSET;
 }
 
+/*
+ * `orphanedRoutes` used to live here, a faithful port of the host's
+ * `orphaned_routes`. **It was never called** — the host reports orphans on
+ * `GET …/inference/routes` and the console renders `state.orphaned` — so it
+ * decided nothing, rendered nothing, and was pinned by unit tests that made a
+ * rule the product did not follow look covered. Deleted rather than corrected.
+ */
+
 /**
  * Which mode the current routes describe.
  *
  * **Inferred, never stored.** A mode field would be a fifth thing that can
- * disagree with the four routes, and the routes are the truth. Four fields, one
- * derived mode.
+ * disagree with the four routes, and the routes are the truth.
+ *
+ * Normally the rendered mode is the host's — `RoutesDto.mode`, which calls
+ * `resolve::infer_routing_mode`. This exists for the two paths in
+ * `use-inference.ts` where that response is the thing that did not arrive: a
+ * member is refused `GET …/inference/routes` with a 403, and a provider write's
+ * follow-up re-read can fail. Both still hold the persisted table, on the
+ * status the other call answered with, so the mode is derived from the same
+ * four routes the host would have derived it from rather than left at whatever
+ * it was before.
+ *
+ * `managedResolves` is the host's `managed_resolves` — `status.managed.configured`
+ * — and it is the whole difference between `managed` and `unset`: an all-default
+ * table with nothing behind Managed is not a company that chose Managed, it is a
+ * company that has not chosen. Keep this in step with `infer_routing_mode` in
+ * `src/company/inference/resolve.rs`; the tests below mirror its own.
  */
-export function inferRoutingMode(routing: RoutingMap): RoutingMode {
+export function inferRoutingMode(routing: RoutingMap, managedResolves: boolean): RoutingMode {
   const refs = WORKLOADS.map((w) => refFor(routing, w));
-  if (refs.every((r) => r.kind === "managed" || r.kind === "default")) return "managed";
+  if (refs.every((r) => r.kind === "managed" || r.kind === "default")) {
+    return managedResolves ? "managed" : "unset";
+  }
   const first = refSignature(refs[0]);
   if (refs.every((r) => refSignature(r) === first)) return "own";
   return "advanced";
@@ -261,11 +303,22 @@ export function inferRoutingMode(routing: RoutingMap): RoutingMode {
 export function scrubOnRemove(
   routing: RoutingMap,
   removed: Pick<Provider, "slug" | "kind">,
-  remaining: readonly Pick<Provider, "slug" | "kind">[],
+  remaining: readonly (Pick<Provider, "slug" | "kind"> & { enabled?: boolean })[],
   categoryOf: (kind: string) => "cloud" | "local" | "cli",
 ): { routing: RoutingMap; reset: Workload[] } {
   const category = categoryOf(removed.kind);
-  const categorySurvives = remaining.some((p) => categoryOf(p.kind) === category);
+  // **Enabled, not merely present**, mirroring `resolve::scrub_removed`. A
+  // slugless `local:` route survives only while something in that category can
+  // still serve it, and a switched-off runtime cannot — the resolver looks for
+  // an enabled target and fails the workload closed when it finds none, so
+  // counting a disabled row as a survivor leaves the route pinned to a
+  // hard failure instead of resetting it to the primary.
+  //
+  // `enabled` is optional so a caller passing bare `{slug, kind}` — which is
+  // what this signature took before — still means "these are the survivors".
+  const categorySurvives = remaining.some(
+    (p) => p.enabled !== false && categoryOf(p.kind) === category,
+  );
 
   const next: RoutingMap = { ...routing };
   const reset: Workload[] = [];
@@ -293,29 +346,6 @@ export function scrubOnRemove(
 }
 
 /**
- * Routes naming a provider this company does not hold.
- *
- * The second, independent check behind the same invariant as `scrubOnRemove`.
- * Two mechanisms for one rule, because the UI path can be bypassed by a config
- * edit or an older build — and an unresolvable route has to be reported rather
- * than discovered mid-turn.
- */
-export function orphanedRoutes(
-  routing: RoutingMap,
-  providers: readonly Pick<Provider, "slug">[],
-): { workload: Workload; slug: string }[] {
-  const out: { workload: Workload; slug: string }[] = [];
-  for (const workload of WORKLOADS) {
-    const ref = routing[workload];
-    if (ref?.kind !== "cloud") continue;
-    if (!providers.some((p) => p.slug === ref.providerSlug)) {
-      out.push({ workload, slug: ref.providerSlug });
-    }
-  }
-  return out;
-}
-
-/**
  * The provider an **unset** workload goes through.
  *
  * The marked default, and only then list order. `isDefault` is the host's
@@ -331,16 +361,117 @@ export function primaryProvider(providers: readonly Provider[]): Provider | unde
 }
 
 /**
+ * The sentence for a company with nothing behind it — no enabled provider, and a
+ * managed chain that resolves to nothing.
+ *
+ * The one state on this whole surface where the honest answer is that the
+ * company cannot think. It reads as a destination because it is where an unset
+ * row's work goes: nowhere.
+ */
+export const NOTHING_ANSWERS = "Nothing — no provider can answer";
+
+/**
  * What an unset row says it will actually use.
  *
  * `Primary (OpenRouter)` rather than a bare "Default", because "unset" is
  * otherwise a mystery on the one screen whose job is to say where work goes.
  * Read through {@link primaryProvider} on every render and never cached, so the
  * rows move when the marked default does.
+ *
+ * **`Primary (Managed)` used to be printed unconditionally** when nothing was
+ * enabled — the smallest, most concrete instance of treating managed as an
+ * always-available floor. It is not one here: managed needs a credential and can
+ * resolve to nothing, and on such a company that string named a destination that
+ * does not exist while the turn failed. `managedConfigured` is optional because
+ * an older host does not send it, and absent reads as the old behaviour rather
+ * than as a dead end — claiming a company cannot think on the strength of a
+ * field nobody sent would be the same mistake pointing the other way.
  */
-export function primaryLabel(providers: readonly Provider[]): string {
+export function primaryLabel(providers: readonly Provider[], managedConfigured?: boolean): string {
   const primary = primaryProvider(providers);
-  return primary ? `Primary (${primary.label})` : "Primary (Managed)";
+  if (primary) return `Primary (${primary.label})`;
+  return managedConfigured === false ? NOTHING_ANSWERS : "Primary (Managed)";
+}
+
+/**
+ * Whether this company has anything at all that can serve a turn.
+ *
+ * Rows E2 and A2: every provider switched off (or none added) with a managed
+ * chain that resolves to nothing. The one condition under which the console
+ * should stop describing routing and say that agents cannot think.
+ */
+export function nothingCanAnswer(
+  providers: readonly Provider[],
+  managedConfigured?: boolean,
+): boolean {
+  return managedConfigured === false && !providers.some((p) => p.enabled);
+}
+
+/**
+ * Whether any workload routes through this provider, and whether it can serve
+ * them.
+ *
+ * **A confirmation helps whoever clicks the toggle; a badge helps everyone who
+ * looks at the page**, including the person who did not click it. The row
+ * carried exactly one badge before this — `Default` — plus credential health
+ * that is deliberately silent when healthy, so routing health was absent
+ * entirely and "switched off" was expressed only by the switch position.
+ *
+ * Read through {@link scrubOnRemove}'s three matching rules rather than by
+ * comparing slugs here, so a local runtime and a CLI login get the same answer
+ * as a cloud row — the slug-only match is the bug this shape exists to avoid.
+ */
+export function providerRoutingState(
+  provider: Pick<Provider, "slug" | "kind" | "enabled">,
+  providers: readonly Provider[],
+  routing: RoutingMap,
+): "inUse" | "parked" | null {
+  const remaining = providers.filter((p) => p.slug !== provider.slug);
+  const { reset } = scrubOnRemove(routing, provider, remaining, categoryOf);
+  if (reset.length === 0) return null;
+  return provider.enabled ? "inUse" : "parked";
+}
+
+/** The badge each routing state gets, or `null` for a provider nothing routes to. */
+export function routingBadge(state: "inUse" | "parked" | null): string | null {
+  if (state === "inUse") return "In use";
+  if (state === "parked") return "Parked";
+  return null;
+}
+
+/**
+ * The workload a tier belongs to, for surfaces the host answers in tier ids.
+ *
+ * The orphan banner read *"`chat-v1` names `ghost`, which this company has no
+ * provider for"* — the right mechanism in the wrong vocabulary. `chat-v1` is an
+ * internal tier name; every other sentence on both tabs says "Chat". An operator
+ * should not have to learn a second name for the same row to read a warning
+ * about it.
+ */
+export function workloadForTier(tier: string): Workload | null {
+  return WORKLOADS.find((w) => WORKLOAD_TIER[w] === tier) ?? null;
+}
+
+/** What a tier is called on screen — its workload's name, or the raw id. */
+export function tierLabel(tier: string): string {
+  const workload = workloadForTier(tier);
+  return workload ? WORKLOAD_COPY[workload].label : tier;
+}
+
+/**
+ * The orphan banner, in workload names.
+ *
+ * `local` and `claude-code` arrive here as slugs too, because the host now
+ * reports slug-less refs as orphans — a `local:` route on a company holding no
+ * local runtime used to be reported by nothing at all while the turn refused it.
+ */
+export function orphanedRouteNote(orphaned: readonly [string, string][]): string {
+  return orphaned
+    .map(
+      ([tier, slug]) =>
+        `${tierLabel(tier)} is routed to ${slug}, which this company has no provider for.`,
+    )
+    .join(" ");
 }
 
 /** The providers a row may be pointed at: enabled ones, in list order. */
@@ -369,6 +500,15 @@ export function routingTargets(providers: readonly Provider[]): Provider[] {
 export function modelAfterProviderChange(model: string, from: string, to: string): string {
   return from === to ? model : "";
 }
+
+/**
+ * The three things that can be done to a provider from its row, in increasing
+ * severity: park it, forget its credential, delete it.
+ *
+ * One discriminator rather than three code paths, because the three are one menu
+ * apart and the copy is the only thing that keeps them distinguishable.
+ */
+export type ProviderIntent = "disable" | "key" | "provider";
 
 /** What removing a provider — or just its key — would cost. */
 export interface RemovalImpact {
@@ -427,10 +567,22 @@ export function removalImpact(
  * credential while the other deletes a record, its endpoint and its routes.
  */
 export function removalWarnings(
-  intent: "key" | "provider",
+  intent: ProviderIntent,
   label: string,
   impact: RemovalImpact,
+  managed?: { configured?: boolean; enabled?: boolean },
 ): string[] {
+  // **"Managed will answer" is a claim, and it has to be checked.** Two of
+  // these sentences promise a fallback the resolver will refuse if managed is
+  // switched off, or build without a credential if its chain resolves to
+  // nothing — so the operator would be confirming a destructive action under a
+  // reassurance that is false exactly when it matters most. Unknown is treated
+  // as available, which is what every caller meant before this argument.
+  //
+  // Computed here and passed down, so the disable sentences and the remove
+  // sentences cannot come to different conclusions about the same company.
+  const managedCanAnswer = !(managed?.enabled === false || managed?.configured === false);
+  if (intent === "disable") return disableWarnings(label, impact, managedCanAnswer);
   const lines: string[] =
     intent === "key"
       ? [
@@ -453,7 +605,9 @@ export function removalWarnings(
       lines.push(
         impact.defaultMovesTo
           ? `It is this company's default. Removing it moves the default to ${impact.defaultMovesTo}, and adding this provider again will not move it back.`
-          : `It is this company's default, and nothing is left to take that over — unrouted work falls back to Managed.`,
+          : managedCanAnswer
+            ? `It is this company's default, and nothing is left to take that over — unrouted work falls back to Managed.`
+            : `It is this company's default, nothing is left to take that over, and Managed cannot answer either. This company will have nothing to think with.`,
       );
     }
   }
@@ -466,11 +620,76 @@ export function removalWarnings(
     );
   }
   if (impact.lastEnabled && intent === "provider") {
+    // **Not "leaves Managed as the only thing that can answer"** — that was the
+    // same false floor as `primaryLabel`'s old `Primary (Managed)`. Managed needs
+    // a credential here and can resolve to nothing, and on such a company
+    // removing the last enabled provider leaves the company unable to think at
+    // all. Saying otherwise turned the most consequential line in this dialog
+    // into a reassurance that was untrue exactly when it mattered.
     lines.push(
-      `It is the only provider switched on, so removing it leaves Managed as the only thing that can answer.`,
+      managedCanAnswer
+        ? `It is the only provider switched on, so removing it leaves Managed as the only thing that can answer.`
+        : `It is the only provider switched on, and Managed cannot answer — removing it leaves this company with nothing to think with.`,
     );
   }
   return lines;
+}
+
+/**
+ * What switching a provider **off** costs — a third intent, and deliberately not
+ * a removal.
+ *
+ * Disabling keeps the endpoint, the label, the credential and **every route that
+ * names it**, which is why the host refuses to scrub them: scrubbing would make
+ * switching it back on a re-configuration rather than a switch. So the honest
+ * frame is *parked until you switch it back on*, not *this will be lost* — and
+ * the language is reversible throughout, against Remove's deliberately severe
+ * copy one menu item away.
+ *
+ * It exists because the toggle had **no confirmation at all**: the host already
+ * computes which tiers are parked and answers with them, and the console
+ * discarded that into a toast while the Routing tab went on rendering the parked
+ * rows as healthy.
+ */
+function disableWarnings(label: string, impact: RemovalImpact, managedCanAnswer: boolean): string[] {
+  const lines: string[] = [
+    `${label} keeps its endpoint, its key and every route that names it. Switching it back on restores all of them — nothing is deleted.`,
+  ];
+  if (impact.routed.length > 0) {
+    const named = impact.routed.map((w) => WORKLOAD_COPY[w].label);
+    lines.push(
+      `${describeWorkloads(named)} through ${label} and will be parked until you switch it back on.`,
+    );
+  }
+  if (impact.isDefault) {
+    lines.push(
+      impact.defaultMovesTo
+        ? `It is this company's default, so unrouted work moves to ${impact.defaultMovesTo} while it is off.`
+        : `It is this company's default, and nothing else is switched on to take that over.`,
+    );
+  }
+  if (impact.lastEnabled) {
+    lines.push(
+      managedCanAnswer
+        ? `It is the only provider switched on, so unrouted work falls back to Managed while it is off.`
+        : `It is the only provider switched on, and Managed cannot answer — with it off, nothing can answer and agents cannot think.`,
+    );
+  }
+  return lines;
+}
+
+/**
+ * "Vision and 3 other workloads", rather than a comma list that grows past
+ * reading.
+ *
+ * The operator's own phrasing, and it is the right one: the count is what tells
+ * them whether this is a small change, and the first name is what tells them
+ * whether it is the one they care about.
+ */
+function describeWorkloads(named: readonly string[]): string {
+  if (named.length === 1) return `${named[0]} routes`;
+  if (named.length === 2) return `${named[0]} and ${named[1]} route`;
+  return `${named[0]} and ${named.length - 1} other workloads route`;
 }
 
 /** The managed brain's name wherever a row or a list has to say it. */
@@ -489,6 +708,16 @@ export interface RoutingOption {
   slug: string;
   /** The name shown. */
   label: string;
+  /**
+   * Whether picking it would save a route that cannot serve a turn.
+   *
+   * Managed only, and for the two reasons the resolver refuses it: switched
+   * off, or a credential chain that resolves to nothing. Listed rather than
+   * dropped, because a workload already pointed there has to keep showing what
+   * it is pointed at — a select whose current value is missing from its own
+   * options is a worse lie than a disabled row.
+   */
+  unavailable?: boolean;
 }
 
 /**
@@ -506,11 +735,21 @@ export interface RoutingOption {
  * so it is one identity everywhere — and so a company whose entry zero *is* the
  * managed config does not get a row for it twice.
  */
-export function routingOptions(providers: readonly Provider[]): RoutingOption[] {
+export function routingOptions(
+  providers: readonly Provider[],
+  managed?: { configured?: boolean; enabled?: boolean },
+): RoutingOption[] {
   const rest = routingTargets(providers)
     .filter((p) => p.slug !== MANAGED_OPTION_SLUG)
     .map((p) => ({ slug: p.slug, label: p.label }));
-  return [{ slug: MANAGED_OPTION_SLUG, label: MANAGED_TARGET_LABEL }, ...rest];
+  // Unknown (no `managed` passed) is treated as available, because that is what
+  // every caller meant before this argument existed and a select that grey-out
+  // a working target is its own defect.
+  const unavailable = managed?.enabled === false || managed?.configured === false;
+  return [
+    { slug: MANAGED_OPTION_SLUG, label: MANAGED_TARGET_LABEL, unavailable },
+    ...rest,
+  ];
 }
 
 /**
@@ -550,11 +789,23 @@ export function refForTarget(
   target: string,
   model: string,
   providers: readonly Provider[],
+  current?: ProviderRef,
 ): ProviderRef {
   if (target === MANAGED_OPTION_SLUG) return { kind: "managed" };
   const slug = modelTarget(target, providers);
   const pinned = slug && overrideIsSendable(slug, model) ? model.trim() : "";
   if (target === UNSET_TARGET) {
+    // **A slug-less ref round-trips rather than collapsing.** `local:<model>`
+    // and `claude-code:<model>` are valid persisted forms with no option in
+    // this select to restore to, so `targetForRef` maps them to unset — and
+    // unset plus a model meant "pin it to the primary", which would have sent a
+    // local model id to a cloud account on a Save that changed nothing. Unset
+    // here means *unchanged* for those two; the way out is picking a provider,
+    // which is the only way in as well.
+    if (current && (current.kind === "local" || current.kind === "claudeCode")) {
+      const kept = model.trim();
+      return { ...current, model: kept.length > 0 ? kept : undefined };
+    }
     return pinned && slug ? parseRef(`${slug}:${pinned}`) : { kind: "default" };
   }
   return parseRef(pinned ? `${target}:${pinned}` : target);
@@ -581,6 +832,38 @@ export function targetForRef(ref: ProviderRef): string {
 }
 
 /**
+ * Whether the thing a row names can actually serve it.
+ *
+ * `null` is healthy. The other three are the resolutions that had no rendering:
+ * `parked` is the host's `Resolution::Disabled` — the provider is held and
+ * switched off, which is reversible; `missing` is `Resolution::Missing` —
+ * nothing by that name is held at all; `dead` is the company-wide dead end,
+ * where the row resolves somewhere that resolves to nothing.
+ */
+export type RowState = "parked" | "missing" | "dead" | null;
+
+/** What a row's value column reads, what its button says, and whether it works. */
+export interface RowValue {
+  value: string;
+  action: "Change Model" | "Choose Model";
+  state: RowState;
+}
+
+/** The sentence a row in each unhealthy state carries. */
+export function rowStateNote(state: RowState): string | null {
+  switch (state) {
+    case "parked":
+      return "Switched off — this workload is parked until it is switched back on.";
+    case "missing":
+      return "This company has no provider by that name, so the workload fails.";
+    case "dead":
+      return "Nothing is switched on and Managed is not set up, so this workload cannot run.";
+    default:
+      return null;
+  }
+}
+
+/**
  * What a row's value column reads, and what its button says.
  *
  * The button is **Change Model** when something is set and **Choose Model**
@@ -589,27 +872,68 @@ export function targetForRef(ref: ProviderRef): string {
 export function rowValue(
   ref: ProviderRef,
   providers: readonly Provider[],
-): { value: string; action: "Change Model" | "Choose Model" } {
+  managedConfigured?: boolean,
+): RowValue {
   switch (ref.kind) {
     case "default":
       // Not "No model selected". An unset row is not a gap — it resolves
       // somewhere, and naming where is the difference between a screen that
       // reports routing and one that hides half of it.
-      return { value: primaryLabel(providers), action: "Choose Model" };
+      return {
+        value: primaryLabel(providers, managedConfigured),
+        action: "Choose Model",
+        state: nothingCanAnswer(providers, managedConfigured) ? "dead" : null,
+      };
     case "managed":
-      return { value: MANAGED_TARGET_LABEL, action: "Change Model" };
+      return {
+        value: MANAGED_TARGET_LABEL,
+        action: "Change Model",
+        // A row the operator deliberately pointed at a brain that resolves to
+        // nothing. `Resolution::Managed` is served unconditionally on the turn
+        // path, so this is the only place the operator can learn it will fail.
+        state: managedConfigured === false ? "dead" : null,
+      };
     case "cloud": {
-      const label = providers.find((p) => p.slug === ref.providerSlug)?.label ?? ref.providerSlug;
-      return { value: ref.model ? `${label} · ${ref.model}` : label, action: "Change Model" };
+      const target = providers.find((p) => p.slug === ref.providerSlug);
+      const label = target?.label ?? ref.providerSlug;
+      return {
+        value: ref.model ? `${label} · ${ref.model}` : label,
+        action: "Change Model",
+        // `Resolution::Missing` and `Resolution::Disabled` — two of the five
+        // resolutions, and until now neither had any rendering at all. Both are
+        // *reported* states rather than silent demotions (the turn fails closed
+        // rather than moving the spend), so the row is the only surface that can
+        // say so before the turn does.
+        state: !target ? "missing" : target.enabled ? null : "parked",
+      };
     }
     case "local":
-      return { value: ref.model ? `Local · ${ref.model}` : "Local", action: "Change Model" };
+      return {
+        value: ref.model ? `Local · ${ref.model}` : "Local",
+        action: "Change Model",
+        state: categoryState(providers, "local"),
+      };
     case "claudeCode":
       return {
         value: ref.model ? `Claude Code · ${ref.model}` : "Claude Code",
         action: "Change Model",
+        state: categoryState(providers, "cli"),
       };
   }
+}
+
+/**
+ * A slug-less ref names a **category**, not a record, so its health is the
+ * category's: parked once every runtime of that kind is switched off, missing
+ * once none is held at all.
+ *
+ * Kept in step with the host's `resolve_by_category`, which answers the same
+ * three ways for the same three inputs.
+ */
+function categoryState(providers: readonly Provider[], category: "local" | "cli"): RowState {
+  const of = providers.filter((p) => categoryOf(p.kind) === category);
+  if (of.length === 0) return "missing";
+  return of.some((p) => p.enabled) ? null : "parked";
 }
 
 /**
@@ -631,7 +955,7 @@ export function rowValue(
  * bug it sat next to.
  *
  * Blank when the rows do not agree, which is the same condition
- * {@link inferRoutingMode} calls `advanced`: there is no single provider to show
+ * the host's `infer_routing_mode` calls `advanced`: there is no single provider to show
  * and inventing one from the first row would misreport the other three.
  */
 export function ownModeDraft(routing: RoutingMap): { slug: string; model: string } {

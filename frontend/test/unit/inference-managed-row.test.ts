@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MANAGED_OPTION_SLUG, addOptions, offersManaged } from "@/inference/connect";
-import { managedRow } from "@/inference/ProviderList";
+import { NO_CREDENTIAL_RESOLVES, managedRow } from "@/inference/ProviderList";
 import {
   MANAGED_NOT_SET_UP,
   MANAGED_NOT_SET_UP_ELSEWHERE,
@@ -44,6 +44,15 @@ describe("what the managed row says", () => {
 
   it("says outright that agents cannot think when nothing resolves", () => {
     expect(managedRow("none")).toContain("cannot think");
+  });
+
+  it("keeps that sentence reachable from the states that need it", () => {
+    // It could not render: the managed row is gated on `managed.configured`, the
+    // host derives that as `source.resolves()`, so `source === "none"` implies no
+    // row — and the one state that needed this sentence was the one state that
+    // could never show it. The two dead-end states say it now, through the same
+    // constant, so the row and the banner cannot drift apart.
+    expect(managedRow("none")).toBe(NO_CREDENTIAL_RESOLVES);
   });
 });
 

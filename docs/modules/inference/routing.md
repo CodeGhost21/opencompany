@@ -39,9 +39,15 @@ cached, so the rows move when the marked default does.
 
 The per-workload dialog carries the workload's recommendation hint, a provider
 select whose first two items are the primary and Managed (an absence and a
-choice, which are different states), a free-text model id, and **Test** — the
-one control in this surface that sends a real completion, with the cost warning
-on the button rather than above the fold.
+choice, which are different states), a free-text model id, and **Test** — a
+catalogue read, the same `GET {base}/models` the add flow uses, described on the
+button as free because it is.
+
+It once promised "one real completion, your provider may charge for it" and sent
+that same catalogue read: it cost nothing, charged nothing, and could not tell a
+bogus model id from a good one. What it settles is reachability plus whether the
+endpoint publishes this id. Whether the model will *answer* needs a completion,
+and nothing on this surface sends one.
 
 The model field is **a catalog select with a free-text escape hatch**, not one or
 the other. The catalog is what makes the screen usable — an operator who has to
@@ -104,15 +110,36 @@ instances of.
 drift out of sync with the routes:
 
 ```
-inferRoutingMode(routing):
-    refs = the nine workload refs
-    if every ref is 'openhuman' or 'default'        -> managed
+infer_routing_mode(routes, managed_resolves):
+    refs = the four workload refs
+    if every ref is 'managed' or 'default':
+        -> managed   when managed_resolves
+        -> unset     when it does not
     if every ref has the same provider+model         -> own
-    otherwise                                        -> custom
+    otherwise                                        -> advanced
 ```
 
-Nine fields, one derived mode. A mode field would be a tenth thing that can
-disagree with the other nine.
+Four fields, one derived mode. A mode field would be a fifth thing that can
+disagree with the other four.
+
+**The second argument is ours, and it is not a refinement — it is a correction.**
+The rule as ported returns `managed` for an empty table, which is true in
+openhuman because they run the managed backend and it is genuinely always on.
+Here managed needs a credential and can resolve to nothing, and an empty table
+does not resolve to managed at all: an unset row is `Resolution::Primary`, the
+first enabled provider. So the screen said Managed while the turn went to the
+operator's own key — and on a company whose only provider had just been added
+with no per-tier model, that turn was `404 model: agentic-v1`.
+
+`unset` is the absence of a usable mode rather than a fourth one. It is never
+offered as a row: the console renders no selection, says where work actually
+goes, and — when nothing is enabled either — says that agents cannot think.
+
+**The rule lives in exactly one place**, `infer_routing_mode` in
+`src/company/inference/resolve.rs`. The console had a faithful copy that was
+never called — the rendered mode has always come from `RoutesDto.mode` — and six
+unit tests pinning it. Copy and tests are both deleted; the same applies to the
+console's `orphanedRoutes`.
 
 ## The nine workloads
 
@@ -206,31 +233,48 @@ With no providers connected it says so rather than showing empty selects:
 > Add or connect a provider first. Then you can route every workload through one
 > model here.
 
-## Managed stays a fallback, always
+## Managed is a fallback until it is switched off
+
+The design this ports puts a standing line above the modes:
 
 > Managed is always available as a fallback. To use your own model, choose a
 > routing mode below.
 
-It renders a **badge**, not a disabled toggle. openhuman's note on why, which is
-worth keeping: a locked switch reads as switchable-but-broken and invites a fight
-the user cannot win.
+**Neither half of that sentence is true here**, and both were corrected for the
+same reason: ours needs a credential and can resolve to nothing, and it has an
+operator behind it who may want to stop paying for it.
 
-What the badge **says** is not ported. openhuman's reads `Always on`, which is
-true there — they run the managed backend. Ours needs a credential and can
-resolve to nothing, so the row reports which step of the credential chain
-answered, and shows no badge at all when none did. See
-[`connect-flow.md`](connect-flow.md).
+* **Availability.** The *mode* still renders a badge rather than a locked
+  toggle — openhuman's note on why is worth keeping, a locked switch reads as
+  switchable-but-broken and invites a fight the user cannot win — but what the
+  badge says is not ported. `Always on` is true where the same company runs the
+  managed backend. Ours reports which step of the credential chain answered, and
+  shows no badge at all when none did.
+* **"Always".** The Providers row *does* carry a real switch, and switching it
+  off is honoured on the turn path: an explicit `managed` route fails closed, an
+  unset workload stops falling back, and this tab's Managed mode and the
+  per-workload picker both stop offering it. It is not the credential — every
+  step of the chain stays where it was. See
+  [`connect-flow.md`](connect-flow.md).
+
+**And the claim that it is always a fallback is not ported either.** Three
+surfaces treated managed as an always-available floor and every one of them was
+untrue on a company where it resolves to nothing. What each of the five
+resolutions renders, what switching a provider off now asks, and the one matcher
+the three route-orphaning callers share:
+[`routing-states.md`](routing-states.md).
 
 ## The per-workload dialog
 
 Opened by Change Model / Choose Model. It carries the workload's recommendation
 hint, a provider select, a model select sourced from that provider's `/models`,
-a free-text escape hatch (**Enter model id**), and a **Test** button that sends
-one real one-turn completion for that workload and reports the result inline.
+a free-text escape hatch (**Enter model id**), and a **Test** button.
 
-openhuman tests here with a real completion rather than a catalog listing,
-because the add flow wants "is this reachable" and a routing row wants "will this
-model actually answer".
+openhuman's Test sends one real one-turn completion, because the add flow wants
+"is this reachable" and a routing row wants "will this model actually answer".
+**Ours does not.** It sends the same `GET {base}/models` the add flow does, and
+says so on the button — so it settles reachability plus whether the endpoint
+publishes this id, costs nothing, and cannot answer the second question at all.
 
 **What shipped does not send a completion, and no longer claims to.** The button
 called the per-provider check, which is `GET /models` — so it cost nothing,
@@ -314,7 +358,8 @@ operation that could be forgotten.
 primary(providers, marked):
     the marked provider, if it exists and is enabled
     else the first enabled provider          ← every company that has not said
-    else None                                ← the managed brain, always available
+    else None                                ← the managed brain, if it is on
+                                               and its chain resolves
 ```
 
 No migration and no backfill: an unmarked company behaves exactly as it did.

@@ -80,9 +80,25 @@ The last two "on" states are **not collapsed**. One bills the company's own
 account and the other bills whoever runs the server, and that is the decision an
 operator is on this page to make.
 
-**No toggle on this row.** Managed cannot be switched off, and a control that
-does nothing is worse than no control — the same reasoning the read-only rows
-already follow.
+**The toggle is real, and it is about routing rather than the credential.**
+It was once absent, on the reasoning that a control that does nothing is worse
+than no control; the answer to that was to make it do something rather than to
+leave managed as the one provider an operator cannot stop spending on.
+
+Switching it off writes `inference/managed/enabled` and changes three things:
+
+* a workload routed explicitly to `managed` **fails closed**, in the same words
+  a route to a switched-off provider gets;
+* an **unset** workload stops falling back to managed — which is the case that
+  matters more, since a company that has never opened the Routing tab has four
+  unset rows;
+* the Routing tab's **Managed mode** cannot be selected, because selecting it
+  writes `managed` into every tier and would take the company offline with a
+  save that reported success.
+
+It is **not** the credential. Every step of the chain stays exactly where it
+was, and switching it back on restores the row unchanged — which is the
+distinction between this and Remove key, and the reason both exist.
 
 ### Setting it up is the ordinary add flow
 
@@ -251,6 +267,12 @@ valid credentials.
                           │ no                         │  BEFORE endpoint: the
                           ▼                            │  endpoint branch matches
         ┌───────────────────────────────────────┐      │  a bare "not found"
+        │ quota / insufficient / billing / 429  │──▶ quota     (non-destructive)
+        │ / rate limit                          │
+        └───────────────────────────────────────┘
+                          │ no
+                          ▼
+        ┌───────────────────────────────────────┐
         │ 404 / not found / DNS / refused       │──▶ endpoint  (non-destructive)
         └───────────────────────────────────────┘
                           │ no

@@ -41,10 +41,12 @@ import type { Provider, ProviderRef, Workload } from "./types";
 /**
  * Choosing what one workload runs on.
  *
- * The **only** place in this surface that tests with a real completion rather
- * than a catalog listing, and correctly so: the add flow asks "is this
- * reachable", a routing row asks "will this model actually answer". Those are
- * different questions and a catalog listing cannot answer the second.
+ * Its **Test is a catalogue read**, the same `GET {base}/models` the add flow
+ * uses. It once said it sent a real completion and never did; the copy is
+ * corrected on the button and this paragraph used to contradict it. What the
+ * check settles is reachability plus whether the endpoint publishes this model
+ * id — not whether the model will answer, which only a completion could tell
+ * you and which nothing here charges for.
  *
  * The dialog carries the workload's recommendation hint, because it is the part
  * that makes this screen usable by someone who has never chosen a model before.
@@ -62,6 +64,7 @@ export function WorkloadModelDialog({
   company,
   workload,
   providers,
+  managed,
   current,
   testing,
   testResult,
@@ -74,6 +77,14 @@ export function WorkloadModelDialog({
   /** The workload being edited, or `null` when the dialog is closed. */
   workload: Workload | null;
   providers: readonly Provider[];
+  /**
+   * What managed would do if a row were pointed at it.
+   *
+   * Only this dialog's Managed option reads it: routing a workload there while
+   * it is switched off or unresolved saves successfully and then fails every
+   * turn, which is a click that reports the opposite of what it did.
+   */
+  managed?: { configured?: boolean; enabled?: boolean };
   current: ProviderRef;
   testing: boolean;
   /** What the last check said, with its tone. */
@@ -94,11 +105,11 @@ export function WorkloadModelDialog({
 
   if (!workload) return null;
   const copy = WORKLOAD_COPY[workload];
-  const options = routingOptions(providers);
+  const options = routingOptions(providers, managed);
   /** Whose catalog the model field reads, and `null` when the row takes no id. */
   const modelSlug = modelTarget(target, providers);
   const outcome = testOutcome(testResult);
-  const ref: ProviderRef = refForTarget(target, model, providers);
+  const ref: ProviderRef = refForTarget(target, model, providers, current);
 
   return (
     <Dialog open onOpenChange={(next) => !next && onCancel()}>
@@ -137,8 +148,17 @@ export function WorkloadModelDialog({
                     primary twice, once under its own label and once as
                     `Primary (…)`, and the two behaved differently. */}
                 {options.map((option) => (
-                  <SelectItem key={option.slug} value={option.slug}>
+                  <SelectItem
+                    key={option.slug}
+                    value={option.slug}
+                    // Listed and unpickable rather than dropped: a workload
+                    // already pointed here has to keep showing what it is
+                    // pointed at, and a select whose current value is missing
+                    // from its own options is the worse lie.
+                    disabled={option.unavailable === true && option.slug !== target}
+                  >
                     {option.label}
+                    {option.unavailable === true ? " — not available" : ""}
                   </SelectItem>
                 ))}
               </SelectContent>

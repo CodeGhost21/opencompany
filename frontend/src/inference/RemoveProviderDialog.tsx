@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -8,10 +9,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { removalWarnings } from "./routing";
-import type { RemovalImpact } from "./routing";
+import type { ProviderIntent, RemovalImpact } from "./routing";
 
-/** Which of the two removals is being confirmed. */
-export type RemovalIntent = "key" | "provider";
+/**
+ * Which of the three is being confirmed.
+ *
+ * `disable` joined the two removals because **the toggle had no confirmation at
+ * all**, and it is the one of the three that is fully reversible — so it gets the
+ * same machinery and deliberately different language. See `removalWarnings`.
+ */
+export type RemovalIntent = ProviderIntent;
 
 /**
  * Confirming a removal, with what it costs said out loud.
@@ -46,6 +53,7 @@ export function RemoveProviderDialog({
   intent,
   label,
   impact,
+  managed,
   busy,
   onCancel,
   onDisable,
@@ -57,19 +65,38 @@ export function RemoveProviderDialog({
   impact: RemovalImpact;
   busy: boolean;
   onCancel: () => void;
+  /**
+   * What managed would do if this removal left nothing else.
+   *
+   * Two of the warnings below promise it as a fallback, and that promise is
+   * false when managed is switched off or its chain resolves to nothing —
+   * exactly when the operator most needs to know. Optional because an older
+   * host does not say; unknown is read as available.
+   */
+  managed?: { configured?: boolean; enabled?: boolean };
   /** Offered only where it is a real alternative — see the component doc. */
   onDisable?: () => void;
   onConfirm: () => void;
 }) {
   if (!intent) return null;
-  const lines = removalWarnings(intent, label, impact);
+  const lines = removalWarnings(intent, label, impact, managed);
+  // **Reversible, and the buttons say so.** Switching a provider off keeps its
+  // endpoint, its key and its routes; the host refuses to scrub them precisely so
+  // that switching it back on is a switch rather than a re-configuration.
+  // Destructive styling here would teach an operator that the two are the same
+  // act, which is the confusion the Remove dialog exists to clear up.
+  const reversible = intent === "disable";
 
   return (
     <Dialog open onOpenChange={(next) => !next && onCancel()}>
       <DialogContent className="sm:max-w-md" data-testid="inference-remove-dialog">
         <DialogHeader>
           <DialogTitle>
-            {intent === "key" ? `Remove ${label}'s key?` : `Remove ${label}?`}
+            {intent === "disable"
+              ? `Switch off ${label}?`
+              : intent === "key"
+                ? `Remove ${label}'s key?`
+                : `Remove ${label}?`}
           </DialogTitle>
           {/* The first line is always the distinction between the two, because
               it is the one an operator is most likely to have got wrong. */}
@@ -79,7 +106,10 @@ export function RemoveProviderDialog({
         {lines.length > 1 && (
           <ul className="grid gap-1.5" data-testid="inference-remove-impact">
             {lines.slice(1).map((line) => (
-              <li key={line} className="text-xs text-status-blocked-text">
+              <li
+                key={line}
+                className={cn("text-xs", reversible ? "text-muted-foreground" : "text-status-blocked-text")}
+              >
                 {line}
               </li>
             ))}
@@ -103,12 +133,12 @@ export function RemoveProviderDialog({
           )}
           <Button
             type="button"
-            variant="destructive"
+            variant={reversible ? "default" : "destructive"}
             disabled={busy}
             data-testid="inference-remove-confirm"
             onClick={onConfirm}
           >
-            {intent === "key" ? "Remove key" : "Remove provider"}
+            {intent === "disable" ? "Continue" : intent === "key" ? "Remove key" : "Remove provider"}
           </Button>
         </DialogFooter>
       </DialogContent>

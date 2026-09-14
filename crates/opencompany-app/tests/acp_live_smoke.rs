@@ -8,7 +8,7 @@
 //! selected by CI — run explicitly:
 //!
 //! ```text
-//! cargo test -p opencompany-desktop --test acp_live_smoke -- --ignored --nocapture
+//! cargo test --manifest-path crates/opencompany-app/Cargo.toml --test acp_live_smoke -- --ignored --nocapture
 //! ```
 //!
 //! Exists to validate, against the real adapter rather than the fixture, the

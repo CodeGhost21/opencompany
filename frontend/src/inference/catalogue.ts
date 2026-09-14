@@ -54,7 +54,7 @@ export interface CloudProvider {
  *
  * The endpoints are presets rather than a pattern, and the paths are the reason:
  * `/openai/v1`, `/inference/v1`, `/v1beta/openai`, `/v1/openai`, `/v3/openai`,
- * `/api/paas/v4`, `/api/gateway`, `/step_plan/v1`. Deriving one as
+ * `/api/paas/v4`, `/api/gateway`, and DeepSeek's bare host. Deriving one as
  * `https://{host}/v1` is wrong for about a third of this list, which is why the
  * cloud category never asks the operator to type an endpoint.
  *
@@ -130,14 +130,14 @@ export const CLOUD_PROVIDERS: readonly CloudProvider[] = [
   {
     slug: "deepseek",
     label: "DeepSeek",
-    endpoint: "https://api.deepseek.com/v1",
+    endpoint: "https://api.deepseek.com",
     auth: "bearer",
     keyPlaceholder: "sk-...",
   },
   {
     slug: "together",
     label: "Together AI",
-    endpoint: "https://api.together.xyz/v1",
+    endpoint: "https://api.together.ai/v1",
     auth: "bearer",
   },
   {
@@ -186,7 +186,7 @@ export const CLOUD_PROVIDERS: readonly CloudProvider[] = [
   {
     slug: "stepfun",
     label: "StepFun",
-    endpoint: "https://api.stepfun.ai/step_plan/v1",
+    endpoint: "https://api.stepfun.ai/v1",
     auth: "bearer",
   },
   {
@@ -241,7 +241,15 @@ export interface LocalRuntime {
   label: string;
   /** A starting endpoint where one is conventional; the operator still confirms it. */
   defaultEndpoint?: string;
-  /** Whether this runtime also wants a credential. */
+  /**
+   * Whether this runtime **requires** a credential, and so whether the add
+   * dialog refuses without one.
+   *
+   * A floor, not a ceiling — a runtime with `false` may still accept a key an
+   * operator chooses to supply. The host mirrors this value and enforces it, so
+   * a wrongly-`true` here does not merely mis-style the form: it makes the
+   * runtime unaddable.
+   */
   needsKey: boolean;
 }
 
@@ -253,7 +261,10 @@ export interface LocalRuntime {
  * machine. The category still ports, and it is the reason loopback is an
  * explicit allowance in the connect flow's SSRF guard rather than an oversight.
  *
- * `omlx` is the only one that wants a key as well as an endpoint.
+ * **None of them requires a key.** `omlx` used to be marked as doing so, which
+ * made it impossible to add at all — the host refuses a local runtime whose
+ * `needsKey` is unmet. No build of any of the three projects called "omlx"
+ * requires one: two have no auth mechanism at all and the third's is opt-in.
  */
 export const LOCAL_RUNTIMES: readonly LocalRuntime[] = [
   {
@@ -270,7 +281,7 @@ export const LOCAL_RUNTIMES: readonly LocalRuntime[] = [
   {
     slug: "omlx",
     label: "OMLX",
-    needsKey: true,
+    needsKey: false,
   },
 ];
 
@@ -429,9 +440,21 @@ export function isReservedSlug(slug: string): boolean {
   return (
     cloudProvider(trimmed) !== undefined ||
     localRuntime(trimmed) !== undefined ||
-    CLI_LOGINS.some((c) => c.storedSlug === trimmed)
+    CLI_LOGINS.some((c) => c.storedSlug === trimmed) ||
+    INTERNAL_SLUGS.includes(trimmed)
   );
 }
+
+/**
+ * Slugs this product owns that are not catalogue rows.
+ *
+ * Managed is deliberately not a row — it is a chain, not a vendor — but it has a
+ * slug, and that slug is an address: `provider/tinyhumans/key` is where its
+ * credential lives, and `managed` is the word the route grammar uses. Mirrors
+ * `catalogue::INTERNAL_SLUGS`, and the host refuses these regardless; this is
+ * so the operator is told before a round trip rather than after one.
+ */
+const INTERNAL_SLUGS: readonly string[] = ["tinyhumans", "managed"];
 
 /**
  * Which of the three questions a provider answers.

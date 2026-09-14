@@ -487,6 +487,29 @@ pub async fn list_providers(
     Ok(out)
 }
 
+/// Whether the legacy flat `inference/key` slot belongs to **managed**.
+///
+/// One address, two possible owners: entry zero's credential and managed's both
+/// read through it. Which one it is depends on what entry zero's kind normalises
+/// to — and a company whose original provider is a vendor account has its *BYOK*
+/// key in there. The managed write path has always gated on this; the read paths
+/// did not, so an upgraded BYOK company's vendor key was offered to the platform
+/// URL as though it were a TinyHumans one.
+///
+/// `true` when there is no entry zero at all: the slot is then nobody else's,
+/// and a company that predates the list and has only ever used managed is the
+/// case the fallback exists for.
+pub async fn legacy_slot_is_managed(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<bool> {
+    Ok(list_providers(company, secrets)
+        .await?
+        .iter()
+        .find(|p| p.origin == ProviderOrigin::EntryZero)
+        .is_none_or(|zero| zero.slug == super::MANAGED_SLUG))
+}
+
 /// One provider by slug, or `None`.
 pub async fn get_provider(
     company: &CompanyId,
@@ -602,6 +625,13 @@ pub async fn delete_provider(
     if !index.iter().any(|s| s.slug == slug) {
         return Ok(false);
     }
+    // Kept, so the ordering is a rollback rather than a preference. Clearing
+    // first is right — of the two half-states, "visible with its credential" is
+    // the one an operator can see and act on — but it is only right if the
+    // credential comes back when the index write fails. Without that, a DELETE
+    // that reported failure had still thrown the key away irreversibly, and the
+    // row it left behind could no longer answer.
+    let previous = load_key(company, secrets, slug).await?;
     secrets
         .set(company, &provider_key_key(slug), SecretValue(String::new()))
         .await
@@ -613,7 +643,37 @@ pub async fn delete_provider(
             ))
         })?;
     index.retain(|s| s.slug != slug);
-    save_index(company, secrets, &index).await.map(|()| true)
+    match save_index(company, secrets, &index).await {
+        Ok(()) => Ok(true),
+        Err(err) => {
+            if !previous.trim().is_empty()
+                && let Err(restore) = secrets
+                    .set(company, &provider_key_key(slug), SecretValue(previous))
+                    .await
+            {
+                tracing::error!(
+                    company = %company.as_ref(),
+                    provider = %slug,
+                    error = %restore,
+                    "a removal failed to write the provider index and then failed to put \
+                     the credential back; this row is still listed and can no longer answer",
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+/// This provider's credential at its own address, without the legacy fallback.
+///
+/// [`delete_provider`] needs the value it is about to clear so it can put it
+/// back, and only that address is its to restore: `inference/key` may belong to
+/// something else entirely, and clearing it is not what this function did.
+async fn load_key(company: &CompanyId, secrets: &dyn SecretStore, slug: &str) -> Result<String> {
+    Ok(match secrets.get(company, &provider_key_key(slug)).await? {
+        Some(SecretValue(raw)) => raw,
+        None => String::new(),
+    })
 }
 
 /// Writes a provider's outbound credential, **and converges its address**.
@@ -671,16 +731,22 @@ pub async fn load_provider_key(
     secrets: &dyn SecretStore,
     provider: &Provider,
 ) -> Result<String> {
+    // Trimmed on the way out, because it is trimmed on the way in to decide
+    // whether it is set at all: `provider_key_configured` calls `!raw.trim()
+    // .is_empty()` a stored `"sk-…\n"` true, and this returning the newline
+    // meant the value that answered "yes, configured" and the value put in an
+    // `Authorization` header were not the same string. A pasted key keeps its
+    // trailing newline far more often than anyone would like.
     if let Some(SecretValue(raw)) = secrets.get(company, &provider.key_key()).await?
         && !raw.trim().is_empty()
     {
-        return Ok(raw);
+        return Ok(raw.trim().to_string());
     }
     if let Some(legacy) = provider.legacy_key_key()
         && let Some(SecretValue(raw)) = secrets.get(company, legacy).await?
         && !raw.trim().is_empty()
     {
-        return Ok(raw);
+        return Ok(raw.trim().to_string());
     }
     Ok(String::new())
 }

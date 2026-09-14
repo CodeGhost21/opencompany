@@ -60,6 +60,19 @@ export interface Provider {
    * Optional because an older host does not send it.
    */
   isDefault?: boolean;
+  /**
+   * Which slot this record lives in.
+   *
+   * `entryZero` is the pre-list company's single `inference/config` blob,
+   * surfaced as element 0 of the list. It refuses edit, remove and disable with
+   * three separate 400s — correct rules, and the console could not tell which row
+   * they applied to, so it rendered all three controls live and every one of them
+   * was a round trip to a refusal.
+   *
+   * Optional because an older host does not send it; absent reads as `indexed`,
+   * which is what every row was treated as before.
+   */
+  origin?: "entryZero" | "indexed";
   /** The last thing the system learnt about reaching it, if anything. */
   health?: ProviderHealth;
 }
@@ -102,5 +115,14 @@ export type ProviderRef =
 /** Workload → what it routes through. A workload absent from the map is unset. */
 export type RoutingMap = Partial<Record<Workload, ProviderRef>>;
 
-/** The three routing modes. Inferred from the map, never stored. */
-export type RoutingMode = "managed" | "own" | "advanced";
+/**
+ * The routing modes. **Inferred host-side from the routes, never stored.**
+ *
+ * `unset` is not a mode an operator picks — it is the absence of one. The host
+ * reports it when every row is managed-or-empty *and* the managed chain resolves
+ * to nothing, which used to be reported as `managed`: the screen said Managed
+ * while the turn went to whichever provider happened to be first enabled, and on
+ * a company whose only provider had just been added that turn was the reported
+ * `404 model: agentic-v1`.
+ */
+export type RoutingMode = "managed" | "own" | "advanced" | "unset";

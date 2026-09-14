@@ -3617,8 +3617,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "opencompany"
-version = "0.1.2"
+name = "opencompany-app"
+version = "0.1.6"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "keyring",
+ "opencompany-core",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-shell",
+ "tauri-plugin-updater",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "opencompany-core"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3667,28 +3689,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "opencompany-desktop"
-version = "0.1.2"
-dependencies = [
- "async-trait",
- "futures-util",
- "keyring",
- "opencompany",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-shell",
- "tauri-plugin-updater",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

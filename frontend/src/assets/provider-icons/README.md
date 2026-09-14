@@ -10,7 +10,7 @@ looking at, one request per row — and the marks would vanish on an offline hos
   `ollama.svg`, `openai.svg`, `vercel.svg`, `xai.svg` — **Simple Icons**, via
   `react-icons@5.5.0`'s `si` set. The path data was extracted and written out as
   standalone SVGs rather than adding the dependency: `react-icons` is 83 MB
-  installed and we need ten marks from it. `lucide-react`, which this console
+  installed and we need the nine marks listed above from it. `lucide-react`, which this console
   already uses, carries no brand marks.
 - Everything else — carried across from openhuman's
   `app/src/assets/provider-icons/` at `5e543a76b`, unmodified.

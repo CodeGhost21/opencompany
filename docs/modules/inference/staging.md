@@ -148,6 +148,6 @@ is anything to leak.
 copied, so a faithful port would quietly drop it. Two production incidents are
 recorded in its comments. Each provider keeps its own.
 
-**The third is the five non-inference consumers of `InferenceStatus`.**
+**The third is the four non-inference consumers of `InferenceStatus`.**
 `SetupDialog`, `AgentDetailView`, `CopilotPanel` and `WorkflowCreateDialog` use
 it as the "can this company think?" oracle. Add to that DTO; do not reshape it.

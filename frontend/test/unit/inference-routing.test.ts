@@ -13,7 +13,6 @@ import {
   MANAGED_TARGET_LABEL,
   UNSET_TARGET,
   modelTarget,
-  orphanedRoutes,
   ownModeDraft,
   parseRef,
   modelAfterProviderChange,
@@ -26,10 +25,18 @@ import {
   refSignature,
   routingTargets,
   rowValue,
+  rowStateNote,
   scrubOnRemove,
+  NOTHING_ANSWERS,
+  nothingCanAnswer,
+  orphanedRouteNote,
+  primaryLabel,
+  providerRoutingState,
+  routingBadge,
+  tierLabel,
 } from "@/inference/routing";
 import type { RemovalImpact } from "@/inference/routing";
-import type { Provider, RoutingMap } from "@/inference/types";
+import type { Provider, ProviderRef, RoutingMap } from "@/inference/types";
 
 /**
  * Manage Routing, as decisions.
@@ -111,34 +118,58 @@ describe("the hand-editable route grammar", () => {
   });
 });
 
-describe("inferring the routing mode", () => {
-  it("calls a company that has chosen nothing managed", () => {
-    expect(inferRoutingMode({})).toBe("managed");
-    expect(inferRoutingMode({ chat: { kind: "managed" }, vision: { kind: "default" } })).toBe(
-      "managed",
-    );
+/*
+ * `orphanedRoutes` and its test are gone with the function. It was a green
+ * suite over a rule the product did not follow: the host reports orphans on
+ * `GET …/inference/routes` and the console renders `state.orphaned`, so the
+ * console's copy was never called by anything.
+ */
+
+describe("inferring the mode the routes describe", () => {
+  // The rendered mode is normally the host's. This is the fallback
+  // `use-inference` uses when `GET …/inference/routes` is the response that did
+  // not arrive — a member's 403, or a failed re-read after a provider write —
+  // so it has to answer what `infer_routing_mode` would have answered. These
+  // mirror its own tests in `src/company/inference/resolve.rs`.
+  const every = (ref: ProviderRef): RoutingMap =>
+    Object.fromEntries(WORKLOADS.map((w) => [w, ref])) as RoutingMap;
+
+  it("reads an all-default table as Managed only when Managed resolves", () => {
+    // The distinction the `unset` mode exists for: a company that has chosen
+    // nothing and has nothing behind Managed has not chosen Managed, and saying
+    // it did is the claim that put a selected radio on a card badged Not set up.
+    expect(inferRoutingMode({} as RoutingMap, true)).toBe("managed");
+    expect(inferRoutingMode({} as RoutingMap, false)).toBe("unset");
   });
 
-  it("calls one provider and model on every row own", () => {
-    expect(inferRoutingMode(applyToEveryWorkload("acme", "gpt-5"))).toBe("own");
+  it("treats an explicit managed row beside unset ones the same way", () => {
+    const partial = { chat: { kind: "managed" } } as RoutingMap;
+    expect(inferRoutingMode(partial, true)).toBe("managed");
+    expect(inferRoutingMode(partial, false)).toBe("unset");
   });
 
-  it("calls a single differing row advanced", () => {
-    const mixed: RoutingMap = {
-      ...applyToEveryWorkload("acme", "gpt-5"),
-      vision: { kind: "cloud", providerSlug: "acme", model: "vision" },
-    };
-    expect(inferRoutingMode(mixed)).toBe("advanced");
+  it("reads four rows pointing at one provider as Own, whatever Managed does", () => {
+    const own = every({ kind: "cloud", providerSlug: "acme", model: "gpt-5" });
+    expect(inferRoutingMode(own, true)).toBe("own");
+    expect(inferRoutingMode(own, false)).toBe("own");
   });
 
-  it("calls a partly-set map advanced, because an unset row is not the same", () => {
-    expect(inferRoutingMode({ chat: { kind: "cloud", providerSlug: "acme" } })).toBe("advanced");
+  it("ignores an absent versus undefined model when comparing rows", () => {
+    // `refSignature`, not structural equality — the reason that helper exists.
+    const own = {
+      ...every({ kind: "cloud", providerSlug: "acme" }),
+      chat: { kind: "cloud", providerSlug: "acme", model: undefined },
+    } as RoutingMap;
+    expect(inferRoutingMode(own, true)).toBe("own");
   });
 
-  it("is a function of the routes and nothing else", () => {
-    // There is no mode field, so nothing can disagree with the four routes.
-    const map = applyToEveryWorkload("acme", "gpt-5");
-    expect(inferRoutingMode(map)).toBe(inferRoutingMode({ ...map }));
+  it("reads rows that disagree as Advanced", () => {
+    const mixed = {
+      ...every({ kind: "cloud", providerSlug: "acme" }),
+      vision: { kind: "managed" },
+    } as RoutingMap;
+    expect(inferRoutingMode(mixed, true)).toBe("advanced");
+    expect(inferRoutingMode(mixed, false)).toBe("advanced");
   });
 });
 
@@ -211,20 +242,6 @@ describe("scrubbing the routes a removal orphans", () => {
   });
 });
 
-describe("the second mechanism behind the same invariant", () => {
-  it("catches a route edited in outside the UI", () => {
-    // The UI path can be bypassed by a config edit or an older build, so an
-    // unresolvable route has to be reported at load rather than mid-turn.
-    const routing: RoutingMap = {
-      chat: { kind: "cloud", providerSlug: "ghost", model: "gpt-5" },
-      reasoning: { kind: "cloud", providerSlug: "acme" },
-    };
-    expect(orphanedRoutes(routing, [provider("acme", "openai_compatible")])).toEqual([
-      { workload: "chat", slug: "ghost" },
-    ]);
-  });
-});
-
 describe("what a row offers and reads", () => {
   it("says Choose Model when nothing is set and Change Model when something is", () => {
     // An unset row names where it will actually go. "No model selected" said
@@ -233,6 +250,7 @@ describe("what a row offers and reads", () => {
     expect(rowValue({ kind: "default" }, [])).toEqual({
       value: "Primary (Managed)",
       action: "Choose Model",
+      state: null,
     });
     expect(rowValue({ kind: "managed" }, []).action).toBe("Change Model");
   });
@@ -277,7 +295,6 @@ describe("ownModeDraft", () => {
     // indistinguishable from the routing table being inert.
     const saved = applyToEveryWorkload("anthropic", "claude-sonnet-5");
     expect(ownModeDraft(saved)).toEqual({ slug: "anthropic", model: "claude-sonnet-5" });
-    expect(inferRoutingMode(saved)).toBe("own");
   });
 
   it("keeps a blank model blank rather than inventing a placeholder", () => {
@@ -288,13 +305,12 @@ describe("ownModeDraft", () => {
   });
 
   it("is blank when the rows disagree", () => {
-    // The same condition `inferRoutingMode` calls advanced. Showing the first
-    // row's provider here would misreport the other three.
+    // The same condition the host's `infer_routing_mode` calls advanced.
+    // Showing the first row's provider here would misreport the other three.
     const mixed = {
       ...applyToEveryWorkload("openrouter", "gpt-5"),
       vision: parseRef("anthropic:claude-sonnet-5"),
     } as RoutingMap;
-    expect(inferRoutingMode(mixed)).toBe("advanced");
     expect(ownModeDraft(mixed)).toEqual({ slug: "", model: "" });
   });
 
@@ -325,6 +341,68 @@ describe("the per-workload select", () => {
     // its own. One identity, one entry.
     const options = routingOptions([provider("tinyhumans", "managed"), ...connected]);
     expect(options.filter((o) => o.slug === "tinyhumans")).toHaveLength(1);
+  });
+
+  it("round-trips a slugless local route instead of pinning it to the primary", () => {
+    // `local:<model>` is a valid persisted form with no option in the select to
+    // restore to, so `targetForRef` maps it to unset — and unset plus a model
+    // used to mean "pin it to the primary", which sent a local model id to a
+    // cloud account on a Save that changed nothing.
+    const local: ProviderRef = { kind: "local", model: "llama3" };
+    expect(targetForRef(local)).toBe(UNSET_TARGET);
+    expect(refForTarget(UNSET_TARGET, "llama3", connected, local)).toEqual(local);
+    // An edited model stays on the same runtime rather than moving provider.
+    expect(refForTarget(UNSET_TARGET, "mistral", connected, local)).toEqual({
+      kind: "local",
+      model: "mistral",
+    });
+    // And picking a provider is still how you leave it.
+    expect(refForTarget("openrouter", "", connected, local)).toEqual({
+      kind: "cloud",
+      providerSlug: "openrouter",
+      model: undefined,
+    });
+  });
+
+  it("marks Managed unpickable when it cannot serve a turn", () => {
+    // Routing a workload there while it is switched off or unresolved saves
+    // successfully and then fails every turn — a click that reports the
+    // opposite of what it did.
+    const off = routingOptions(connected, { configured: true, enabled: false });
+    expect(off[0].slug).toBe("tinyhumans");
+    expect(off[0].unavailable).toBe(true);
+
+    const unset = routingOptions(connected, { configured: false, enabled: true });
+    expect(unset[0].unavailable).toBe(true);
+
+    // Usable, and unknown — which is what every caller meant before the
+    // argument existed — both stay pickable.
+    expect(routingOptions(connected, { configured: true, enabled: true })[0].unavailable).toBe(
+      false,
+    );
+    expect(routingOptions(connected)[0].unavailable).toBe(false);
+  });
+
+  it("does not promise a fallback Managed cannot provide", () => {
+    const impact: RemovalImpact = {
+      routed: [],
+      isDefault: true,
+      lastEnabled: true,
+      defaultMovesTo: null,
+    };
+    const available = removalWarnings("provider", "Anthropic", impact, {
+      configured: true,
+      enabled: true,
+    }).join(" ");
+    expect(available).toContain("falls back to Managed");
+    expect(available).toContain("only thing that can answer");
+
+    const off = removalWarnings("provider", "Anthropic", impact, {
+      configured: true,
+      enabled: false,
+    }).join(" ");
+    expect(off).not.toContain("falls back to Managed");
+    expect(off).toContain("nothing to think with");
   });
 
   it("gives Default and the provider it resolves to the same field shape", () => {
@@ -526,7 +604,7 @@ describe("removing a local runtime", () => {
     expect(reset).toEqual(["chat"]);
     expect(next.chat).toEqual({ kind: "default" });
     expect(next.reasoning).toEqual(parseRef("openrouter:gpt-5"));
-    expect(orphanedRoutes(next, [openrouter])).toEqual([]);
+    expect(next.chat).toEqual({ kind: "default" });
   });
 
   it("leaves a slug-less local route alone while another runtime serves it", () => {
@@ -535,5 +613,219 @@ describe("removing a local runtime", () => {
     const routing = { chat: parseRef("local:llama3") } as RoutingMap;
     expect(scrubOnRemove(routing, ollama, [lmstudio], categoryOf).reset).toEqual([]);
     expect(scrubOnRemove(routing, ollama, [], categoryOf).reset).toEqual(["chat"]);
+  });
+});
+
+describe("the false Managed floor", () => {
+  /**
+   * `primaryLabel` printed `Primary (Managed)` whenever nothing was enabled —
+   * the smallest, most concrete instance of treating Managed as an
+   * always-available fallback. Here it needs a credential and can resolve to
+   * nothing, and that string then named a destination that does not exist while
+   * every turn failed.
+   */
+  it("stops naming Managed as a destination when Managed cannot answer", () => {
+    expect(primaryLabel([], false)).toBe(NOTHING_ANSWERS);
+    expect(primaryLabel([], true)).toBe("Primary (Managed)");
+  });
+
+  it("keeps the old answer when the host did not say, rather than inventing a dead end", () => {
+    // An older host sends no `configured`. Claiming a company cannot think on
+    // the strength of a field nobody sent is the same mistake pointing the
+    // other way.
+    expect(primaryLabel([])).toBe("Primary (Managed)");
+  });
+
+  it("says nothing can answer only when nothing actually can", () => {
+    const off = provider("anthropic", "anthropic", false);
+    const on = provider("anthropic", "anthropic");
+    expect(nothingCanAnswer([off], false)).toBe(true);
+    expect(nothingCanAnswer([on], false)).toBe(false);
+    expect(nothingCanAnswer([off], true)).toBe(false);
+    expect(nothingCanAnswer([], undefined)).toBe(false);
+  });
+
+  it("does not reassure that Managed will take over when it cannot", () => {
+    const only = provider("anthropic", "anthropic");
+    const impact = removalImpact(only, [only], {} as RoutingMap, categoryOf);
+    expect(impact.lastEnabled).toBe(true);
+    // Two different ways Managed cannot answer, and the sentence has to be the
+    // same for both: a chain that resolves to nothing, and a switch that is off.
+    for (const managed of [{ configured: false }, { enabled: false }]) {
+      const lines = removalWarnings("provider", "Anthropic", impact, managed);
+      expect(lines.some((l) => l.includes("nothing to think with"))).toBe(true);
+      expect(lines.some((l) => l.includes("leaves Managed as the only thing"))).toBe(false);
+    }
+    // And the reassurance is printed where it is true.
+    expect(
+      removalWarnings("provider", "Anthropic", impact, { configured: true, enabled: true }).some(
+        (l) => l.includes("leaves Managed as the only thing"),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("the resolutions that had no rendering", () => {
+  it("marks a row pointed at a switched-off provider as parked", () => {
+    const off = provider("anthropic", "anthropic", false);
+    const row = rowValue(parseRef("anthropic:claude-sonnet-5"), [off]);
+    expect(row.state).toBe("parked");
+    expect(rowStateNote(row.state)).toContain("parked");
+  });
+
+  it("marks a row pointed at a provider nobody holds as missing", () => {
+    expect(rowValue(parseRef("ghost:gpt-5"), []).state).toBe("missing");
+  });
+
+  it("answers for a slug-less ref by its category, like resolve_by_category", () => {
+    const ollama = provider("ollama", "ollama");
+    expect(rowValue(parseRef("local:llama3"), [ollama]).state).toBeNull();
+    expect(
+      rowValue(parseRef("local:llama3"), [{ ...ollama, enabled: false }]).state,
+    ).toBe("parked");
+    expect(rowValue(parseRef("local:llama3"), []).state).toBe("missing");
+  });
+
+  it("marks a deliberately managed row dead when Managed resolves to nothing", () => {
+    // `Resolution::Managed` is served unconditionally on the turn path, so the
+    // row is the only place the operator can learn it will fail.
+    expect(rowValue({ kind: "managed" }, [], false).state).toBe("dead");
+    expect(rowValue({ kind: "managed" }, [], true).state).toBeNull();
+  });
+
+  it("leaves a healthy row unmarked", () => {
+    const acme = provider("acme", "openai_compatible");
+    expect(rowValue(parseRef("acme:gpt-5"), [acme]).state).toBeNull();
+    expect(rowStateNote(null)).toBeNull();
+  });
+});
+
+describe("routing health on the provider row", () => {
+  /**
+   * The data was already in the component — `ProvidersTab` builds the same
+   * routing map the Routing tab renders — and the row carried no routing badge
+   * at all, so "switched off while four workloads route through it" was
+   * expressed only by a switch position.
+   */
+  it("says In use while a routed provider is on, and Parked once it is off", () => {
+    const anthropic = provider("anthropic", "anthropic");
+    const routing = {
+      vision: parseRef("anthropic:claude-sonnet-5"),
+    } as RoutingMap;
+    expect(providerRoutingState(anthropic, [anthropic], routing)).toBe("inUse");
+    expect(
+      providerRoutingState(
+        { ...anthropic, enabled: false },
+        [anthropic],
+        routing,
+      ),
+    ).toBe("parked");
+    expect(routingBadge("inUse")).toBe("In use");
+    expect(routingBadge("parked")).toBe("Parked");
+  });
+
+  it("says nothing about a provider no workload routes through", () => {
+    const anthropic = provider("anthropic", "anthropic");
+    expect(
+      providerRoutingState(anthropic, [anthropic], {} as RoutingMap),
+    ).toBeNull();
+    expect(routingBadge(null)).toBeNull();
+  });
+
+  it("catches a local runtime, which a slug-only match would miss", () => {
+    // The bug shape the host's `parked_tiers` had: `route.slug()` is null for a
+    // `local:` ref, so disabling the only Ollama reported "Nothing was routed
+    // through it" while every local route was in fact parked.
+    const ollama = provider("ollama", "ollama");
+    const routing = { chat: parseRef("local:llama3") } as RoutingMap;
+    expect(providerRoutingState(ollama, [ollama], routing)).toBe("inUse");
+  });
+});
+
+describe("switching a provider off", () => {
+  it("names what is parked in the operator's own words, and is reversible throughout", () => {
+    const anthropic = provider("anthropic", "anthropic");
+    const routing = applyToEveryWorkload("anthropic", "claude-sonnet-5");
+    const impact = removalImpact(anthropic, [anthropic], routing, categoryOf);
+    const lines = removalWarnings("disable", "Anthropic", impact, { configured: true });
+    expect(lines[0]).toContain("nothing is deleted");
+    expect(
+      lines.some((l) =>
+        l.includes("3 other workloads route through Anthropic"),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes("parked until you switch it back on")),
+    ).toBe(true);
+    // None of Remove's one-way language.
+    expect(lines.some((l) => l.includes("deletes"))).toBe(false);
+  });
+
+  it("counts one and two workloads without the 'other' phrasing", () => {
+    const anthropic = provider("anthropic", "anthropic");
+    const one = removalWarnings(
+      "disable",
+      "Anthropic",
+      removalImpact(
+        anthropic,
+        [anthropic],
+        { vision: parseRef("anthropic:x") } as RoutingMap,
+        categoryOf,
+      ),
+      { configured: true },
+    );
+    expect(one.some((l) => l.includes("Vision routes through Anthropic"))).toBe(
+      true,
+    );
+
+    const two = removalWarnings(
+      "disable",
+      "Anthropic",
+      removalImpact(
+        anthropic,
+        [anthropic],
+        {
+          vision: parseRef("anthropic:x"),
+          chat: parseRef("anthropic:x"),
+        } as RoutingMap,
+        categoryOf,
+      ),
+      { configured: true },
+    );
+    expect(
+      two.some((l) => l.includes("Chat and Vision route through Anthropic")),
+    ).toBe(true);
+  });
+
+  it("says the company cannot think when the last provider goes off with no Managed", () => {
+    const anthropic = provider("anthropic", "anthropic");
+    const impact = removalImpact(
+      anthropic,
+      [anthropic],
+      {} as RoutingMap,
+      categoryOf,
+    );
+    for (const managed of [{ configured: false }, { enabled: false }]) {
+      expect(
+        removalWarnings("disable", "Anthropic", impact, managed).some((l) =>
+          l.includes("agents cannot think"),
+        ),
+      ).toBe(true);
+    }
+  });
+});
+
+describe("the orphan banner's vocabulary", () => {
+  it("names the workload, not the tier id", () => {
+    // "`chat-v1` names `ghost`" was the right mechanism in the wrong
+    // vocabulary: every other sentence on both tabs says "Chat".
+    expect(tierLabel("chat-v1")).toBe("Chat");
+    const note = orphanedRouteNote([["chat-v1", "ghost"]]);
+    expect(note).toContain("Chat is routed to ghost");
+    expect(note).not.toContain("chat-v1");
+  });
+
+  it("passes a tier it does not recognise through unchanged", () => {
+    expect(tierLabel("embedding-v1")).toBe("embedding-v1");
   });
 });
