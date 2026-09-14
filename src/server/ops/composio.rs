@@ -434,7 +434,7 @@ struct MutationResponse {
     /// mutation that is not a guarded clear/switch, and on a guarded one that
     /// had nothing to warn about.
     #[serde(skip_serializing_if = "Option::is_none")]
-    used_by: Option<serde_json::Value>,
+    used_by: Option<crate::error::UsedBy>,
 }
 
 /// Set-token body. `token` is write-only intake (never returned): a non-empty
@@ -660,19 +660,24 @@ async fn get_status(company: ScopedCompany) -> Result<Json<ComposioStatusDto>, A
 }
 
 /// The `usedBy` a Composio credential clear or mode switch would carry, per
-/// `docs/key-reworks/in-use-guards.md` §1: `{ "surfaces": ["composio"] }`
-/// when [`has_connected_integrations`] says this company has pinned at least
-/// one toolkit connection, else `None` — the whole field is omitted rather
-/// than emitted empty, matching every other producer of this shape.
+/// `docs/key-reworks/in-use-guards.md` §1/§2: `surfaces: [Composio]` when
+/// [`has_connected_integrations`] says this company has pinned at least one
+/// toolkit connection, else `None` — the whole field is omitted rather than
+/// emitted empty, matching every other producer of this shape.
 ///
 /// Composio never populates `default` or `agents`: it has no default/pair
-/// concept of its own (§1, "only `surfaces`, since Composio has no
+/// concept of its own (§1: "only `surfaces`, since Composio has no
 /// default/agent-pair concept").
-async fn composio_used_by(runtime: &CompanyRuntime) -> Result<Option<serde_json::Value>, ApiError> {
+async fn composio_used_by(
+    runtime: &CompanyRuntime,
+) -> Result<Option<crate::error::UsedBy>, ApiError> {
     let in_use = has_connected_integrations(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
-    Ok(in_use.then(|| serde_json::json!({ "surfaces": ["composio"] })))
+    Ok(in_use.then(|| crate::error::UsedBy {
+        surfaces: vec![crate::error::UsedBySurface::Composio],
+        ..Default::default()
+    }))
 }
 
 /// §2's fixed sentence for "a key clear/disable with only `surfaces`":
