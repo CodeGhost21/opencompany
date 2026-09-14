@@ -339,6 +339,18 @@ describe("endpointHasCredentials", () => {
     expect(normalizeEndpoint("http://HTTP://alice:hunter2@127.0.0.1:8597/v1")).toBeNull();
   });
 
+  it("reads a malformed endpoint conservatively", () => {
+    // Codex review on #2281: no `://` at all, so the first `/` used to end the
+    // "authority" before the `@`.
+    expect(endpointHasCredentials("http:/alice:hunter2@127.0.0.1:8597/v1")).toBe(true);
+    expect(endpointHasCredentials("http://http:/alice:hunter2@127.0.0.1:8597/v1")).toBe(true);
+    expect(endpointHasCredentials("alice:/hunter2@127.0.0.1:8597/v1")).toBe(true);
+    expect(normalizeEndpoint("http:/alice:hunter2@127.0.0.1:8597/v1")).toBeNull();
+    for (const good of ["http://[::1]:11434/v1", "https://api.acme.example:8443/v1/@me"]) {
+      expect(endpointHasCredentials(good)).toBe(false);
+    }
+  });
+
   it("still ignores an @ outside every authority", () => {
     expect(endpointHasCredentials("HTTPS://api.acme.example/v1/@me")).toBe(false);
     expect(endpointHasCredentials("https://api.acme.example/v1?to=a@b")).toBe(false);

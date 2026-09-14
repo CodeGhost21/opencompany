@@ -418,20 +418,26 @@ export function normalizeEndpoint(raw: string): string | null {
  */
 export function endpointHasCredentials(raw: string): boolean {
   const trimmed = raw.trim();
-  // Every `://` starts a candidate authority, not only the first — as on the
-  // host. A doubled scheme (`http://HTTP://alice:pw@host/v1`) otherwise hides
-  // the credential behind an `HTTP:` authority that has no `@`.
-  const starts: number[] = [];
-  for (let i = trimmed.indexOf("://"); i !== -1; i = trimmed.indexOf("://", i + 3)) {
-    starts.push(i + 3);
+  // Query and fragment are never the authority in any reading of the value.
+  const cut = trimmed.search(/[?#]/);
+  const head = cut === -1 ? trimmed : trimmed.slice(0, cut);
+  // One unambiguous reading — a single valid scheme and `://`, or no scheme,
+  // with no other `:/` — and the `@` has to be in the authority, as on the host.
+  const split = head.indexOf("://");
+  const unambiguous =
+    split === -1
+      ? !head.includes(":/")
+      : /^[A-Za-z][A-Za-z0-9+.-]*$/.test(head.slice(0, split)) &&
+        !head.slice(split + 3).includes(":/");
+  if (unambiguous) {
+    const rest = split === -1 ? head : head.slice(split + 3);
+    const end = rest.indexOf("/");
+    return (end === -1 ? rest : rest.slice(0, end)).includes("@");
   }
-  if (starts.length === 0) starts.push(0);
-  return starts.some((start) => {
-    const rest = trimmed.slice(start);
-    const end = rest.search(/[/?#]/);
-    const authority = end === -1 ? rest : rest.slice(0, end);
-    return authority.includes("@");
-  });
+  // Malformed (`http:/alice:pw@host`, `http://HTTP://alice:pw@host`): every `@`
+  // before the query counts, mirroring the host's conservative reading.
+  const lead = /^https?:\/*/i.exec(head);
+  return head.slice(lead ? lead[0].length : 0).includes("@");
 }
 
 /**
