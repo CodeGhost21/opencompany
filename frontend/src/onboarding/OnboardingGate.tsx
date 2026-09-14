@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { IntegrationStep } from "@/onboarding/IntegrationStep";
 import type { GateStepId } from "@/onboarding/state";
 import { WorkflowStep } from "@/onboarding/WorkflowStep";
+import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
  * Whether `href` names a route this console actually serves — the same test
@@ -66,13 +67,29 @@ interface GateStep {
 }
 
 /**
- * Where "Enter a credential in Apps" sends the founder. The hash the console's
+ * Where "Connect a provider in Apps" sends the founder. The hash the console's
  * own Connections rail uses for its Apps sub-page (`CONNECTION_PAGES`), named
  * here as a bare string rather than imported so this module stays clear of the
  * section that pulls `OAuthView` and `McpServersView` in behind it — the same
  * reason `connection-pages.ts` is a leaf module in the first place.
  */
 const APPS_ROUTE = "#/connections/apps";
+
+/**
+ * Where "Enter a credential" sends a founder who has none, and why it is two
+ * addresses rather than Apps.
+ *
+ * Apps has no credential field since the Connections split (#2259). The card's
+ * copy names the credential to enter, and this must be the page that accepts
+ * the one named FIRST: with the managed route on offer that is the TinyHumans
+ * account key, entered on the API Key page (the Composio page no longer carries
+ * that card); with the route hidden the copy names only a Composio API key, and
+ * that lives on the Composio page. Reading the same flag the copy reads is what
+ * keeps the sentence and the destination from coming apart again.
+ */
+const CREDENTIAL_ROUTE = COMPOSIO_MANAGED_HIDDEN
+  ? "#/connections/composio"
+  : "#/connections/api-key";
 const WORKFLOWS_ROUTE = "#/workflows";
 const APPROVALS_ROUTE = "#/approvals";
 
@@ -296,6 +313,7 @@ export function OnboardingGate({
                     client={client}
                     company={company}
                     onOpenApps={() => onLeave(APPS_ROUTE)}
+                    onOpenCredential={() => onLeave(CREDENTIAL_ROUTE)}
                     onWaive={() => onWaiveStep("integration")}
                   />
                 )}

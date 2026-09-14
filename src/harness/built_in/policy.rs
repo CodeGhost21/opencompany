@@ -835,6 +835,7 @@ pub struct ApprovalPolicy {
     /// the process and bury everything else. Once per policy is the useful
     /// signal.
     no_meter_warned: AtomicBool,
+    unenforced_cap_warned: AtomicBool,
     /// Where a `RequireApproval` decision is recorded so the runtime can park it
     /// (issue #172). The default is a private queue nobody drains, which keeps
     /// every non-harness construction site (and every test) behaving exactly as
@@ -957,6 +958,7 @@ impl ApprovalPolicy {
             workflow: None,
             spend: None,
             no_meter_warned: AtomicBool::new(false),
+            unenforced_cap_warned: AtomicBool::new(false),
             // The strict path by default — see `for_authored_workflow_nodes`.
             call_path: CallPath::Agent,
             // No read declaration by default, so every MCP bridge call gates
@@ -1120,6 +1122,18 @@ impl ApprovalPolicy {
     /// The per-agent daily budget, if any.
     pub fn budget_usd_daily(&self) -> Option<f64> {
         self.budget_usd_daily
+    }
+
+    /// The declared daily cap this call will not be judged against: a priced
+    /// call, a cap in the manifest, and policy-generated approvals off, which
+    /// leaves `daily_budget_verdict` below the `Allow` that `check` returns
+    /// first. `None` when the cap is absent, inapplicable, or in force.
+    fn unenforced_daily_cap(&self, tool: &str, args: &serde_json::Value) -> Option<f64> {
+        if self.policy_hitl_enabled {
+            return None;
+        }
+        let cap = self.budget_usd_daily?;
+        Self::is_priced_call(tool, args, Self::amount_usd(args)).then_some(cap)
     }
 
     /// Whether `kind` is in the manifest's `always_approve` list.
@@ -1942,6 +1956,16 @@ impl ToolPolicy for ApprovalPolicy {
         // Keep the readonly brake and old-grant redemption above this point,
         // but bypass every arm below that would turn classification into HITL.
         if !self.policy_hitl_enabled {
+            if let Some(cap) = self.unenforced_daily_cap(tool, &request.arguments)
+                && !self.unenforced_cap_warned.swap(true, Ordering::Relaxed)
+            {
+                let agent = self.agent.as_deref().unwrap_or("<unnamed>");
+                log::warn!(
+                    "[approval] agent '{agent}' declares a daily budget of ${cap:.2}, but \
+                     policy-generated approvals are disabled on this host, so the cap does not \
+                     gate priced tool calls such as '{tool}'"
+                );
+            }
             return ToolPolicyDecision::Allow;
         }
 
@@ -4637,6 +4661,74 @@ mod tests {
         );
     }
 
+    /// LIMIT-axis (TOOL-008): `media_generate_image`/`media_generate_video` are
+    /// the one policy-manufactured approval left once policy HITL is disabled
+    /// — the production shape, since they park above that bypass rather than
+    /// below it — but they still file into the exact same
+    /// `MAX_APPROVAL_REQUESTS_PER_TURN` bucket `escalate_to_human` floods
+    /// above. Nothing owns that overflow story for a paid card specifically: a
+    /// chatty turn that raises the cap's worth of questions before the agent
+    /// ever reaches its media call pushes the real spend request off the
+    /// drain, and the operator never sees a card for the money the agent is
+    /// about to commit to spending.
+    #[tokio::test]
+    async fn a_flood_of_escalations_can_push_a_paid_media_card_off_the_shared_cap() {
+        use openhuman_core::openhuman::tools::traits::Tool as _;
+
+        let queue = ApprovalRequestQueue::default();
+        let policy = policy("full", &[], None)
+            .with_policy_hitl_disabled()
+            .with_requests(queue.clone());
+        let blockers = crate::harness::built_in::blockers::EscalateToHumanTool::new(
+            queue.clone(),
+            "engineer".to_string(),
+        );
+
+        for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+            let asked = blockers
+                .execute(serde_json::json!({ "question": format!("question {i}?") }))
+                .await
+                .expect("the question runs");
+            assert!(!asked.is_error, "{}", asked.output());
+        }
+
+        assert!(
+            matches!(
+                policy
+                    .check(&request("media_generate_image", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "policy HITL disabled must still stage the paid media call for approval"
+        );
+
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(
+            drained.requests.len(),
+            MAX_APPROVAL_REQUESTS_PER_TURN,
+            "the cap is shared across kinds, not per-kind"
+        );
+        assert_eq!(
+            drained.discarded, 1,
+            "the ninth card — the paid one — is what overflows the shared cap"
+        );
+        assert!(
+            drained
+                .requests
+                .iter()
+                .all(|r| r.tool != "media_generate_image"),
+            "the media card lost the race to the questions asked before it and never reached \
+             the operator's queue: {:?}",
+            drained.requests.iter().map(|r| &r.tool).collect::<Vec<_>>()
+        );
+    }
+
+    /// `check`'s fail-closed boundary (the block right above `Deny`ing every
+    /// call once `request_approval` has fired) reads the same task-local as
+    /// `explicit_request_pending`. Since `escalate_to_human` never sets it, a
+    /// sibling gated call queued in the same turn right after a question is
+    /// evaluated on its own terms rather than refused outright the way a
+    /// second `request_approval` would be.
     #[tokio::test]
     async fn escalate_to_human_respects_combined_cycle_and_unscoped_capacity() {
         use openhuman_core::openhuman::tools::traits::Tool as _;
@@ -5932,6 +6024,54 @@ mod tests {
                 .with_spend(meter, CompanyId::new("acme")),
             grants,
         )
+    }
+
+    /// Production disables policy-generated approvals, which puts the daily cap
+    /// below the `Allow` that `check` returns first — so a manifest cap does not
+    /// judge a priced call on the shipped path. Every other test here leaves
+    /// that switch on, a configuration production never runs.
+    ///
+    /// Pins the reporting, not the bypass: the gap must stay detectable.
+    #[test]
+    fn a_declared_cap_reports_itself_unenforced_once_policy_hitl_is_off() {
+        let p = Policy {
+            mode: "full".to_string(),
+            always_approve: Vec::new(),
+            auto_approve_under_usd: None,
+            approval_ttl_hours: None,
+        };
+        let priced = serde_json::json!({ "amount_usd": 1.0 });
+
+        let shipped = ApprovalPolicy::new(&p, Some(5.0))
+            .with_policy_hitl_disabled()
+            .with_agent("writer".to_string());
+        assert_eq!(
+            shipped.unenforced_daily_cap("pay_invoice", &priced),
+            Some(5.0),
+            "a priced call under a declared cap must be reportable as ungated"
+        );
+
+        let gating = ApprovalPolicy::new(&p, Some(5.0)).with_agent("writer".to_string());
+        assert_eq!(
+            gating.unenforced_daily_cap("pay_invoice", &priced),
+            None,
+            "with policy approvals on, the cap is in force and there is nothing to report"
+        );
+
+        let uncapped = ApprovalPolicy::new(&p, None)
+            .with_policy_hitl_disabled()
+            .with_agent("writer".to_string());
+        assert_eq!(
+            uncapped.unenforced_daily_cap("pay_invoice", &priced),
+            None,
+            "no cap declared is not an unenforced cap"
+        );
+
+        assert_eq!(
+            shipped.unenforced_daily_cap("file_read", &serde_json::json!({})),
+            None,
+            "an unpriced call was never the cap's business"
+        );
     }
 
     /// The core of #304: at cap, a **priced** call parks — and it parks through

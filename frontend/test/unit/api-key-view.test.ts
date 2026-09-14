@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyCredentialStatus } from "@/api/credential";
+import { ApiError } from "@/api/types";
+import { captureKeyLink } from "@/lib/pending-key-link";
 import { ApiKeyView } from "@/views/connections/ApiKeyView";
 
 let container: HTMLDivElement;
@@ -38,6 +40,41 @@ function clientFor(handlers: {
   } as unknown as OpenCompanyClient;
 }
 
+/** An admin client, so the controls a member never sees are actually rendered.
+ * `writes` collects every PUT body, which is how the confirmation tests tell a
+ * cleared key from an offered one. */
+function adminClient(
+  credentialFor: () => Promise<CompanyCredentialStatus>,
+  writes: unknown[] = [],
+): OpenCompanyClient {
+  return {
+    scopeFor: () => "/api/v1/companies/acme",
+    get: async (path: string) => {
+      if (path.endsWith("/credential/billing")) return { configured: false };
+      if (path.endsWith("/auth/me")) return { role: "admin" };
+      if (path.endsWith("/credential")) return credentialFor();
+      throw new Error(`unexpected GET ${path}`);
+    },
+    put: async (_path: string, body: unknown) => {
+      writes.push(body);
+      return { status: await credentialFor(), note: "" };
+    },
+  } as unknown as OpenCompanyClient;
+}
+
+/** Clicks a rendered control and lets the resulting state settle.
+ *
+ * Menus and dialogs render into a portal on `document.body`, not into the
+ * container, so the queries below deliberately ask the document. */
+async function press(selector: string) {
+  const el = document.querySelector(selector);
+  if (el === null) throw new Error(`nothing to press at ${selector}`);
+  await act(async () => {
+    (el as HTMLElement).click();
+  });
+  await act(async () => {});
+}
+
 async function mount(client: OpenCompanyClient) {
   await act(async () => {
     root.render(createElement(ApiKeyView, { client, company: "acme" }));
@@ -61,10 +98,10 @@ afterEach(() => {
 describe("ApiKeyView billing failures stay distinguishable from no key", () => {
   // The regression this covers (CodeRabbit + Codex, PR #2216): the old catch
   // converted every billing rejection into `{ configured: false }`, so a
-  // company that HAS a key saw the balance card vanish entirely — the same
-  // outcome as never having set one, even though `billing.unavailable` exists
+  // company that HAS a key saw the balance vanish entirely — the same outcome
+  // as never having set one, even though `billing.unavailable` exists
   // precisely to say "the key is set, the hub just would not answer".
-  it("keeps the balance card in its unavailable state when billing rejects but a key is configured", async () => {
+  it("keeps the balance row in its unavailable state when billing rejects but a key is configured", async () => {
     const client = clientFor({
       credential: async () => credential({ configured: true, source: "company" }),
       billing: async () => {
@@ -75,12 +112,14 @@ describe("ApiKeyView billing failures stay distinguishable from no key", () => {
     await mount(client);
 
     const text = container.textContent ?? "";
-    expect(text).toContain("balance could not be read");
-    // Must NOT have fallen back to the pitch's "no key" copy.
-    expect(text).not.toContain("Until one is set, agents cannot think");
+    expect(container.querySelector('[data-testid="account-balance"]')).not.toBeNull();
+    expect(text).toContain("Balance unknown");
+    expect(text).toContain("The key is set");
+    // Must NOT have fallen through to the empty state.
+    expect(container.querySelector('[data-testid="account-empty"]')).toBeNull();
   });
 
-  it("reports no key at all when billing rejects and no credential is configured", async () => {
+  it("reports no account at all when billing rejects and nothing resolves", async () => {
     const client = clientFor({
       credential: async () => credential({ configured: false, source: "none" }),
       billing: async () => {
@@ -90,20 +129,21 @@ describe("ApiKeyView billing failures stay distinguishable from no key", () => {
 
     await mount(client);
 
-    const text = container.textContent ?? "";
-    // No balance card at all — nothing to be "unavailable" about.
-    expect(text).not.toContain("balance could not be read");
-    expect(text).toContain("Until one is set, agents cannot think");
+    // No balance row at all — nothing to be "unavailable" about.
+    expect(container.querySelector('[data-testid="account-balance"]')).toBeNull();
+    expect(container.querySelector('[data-testid="account-empty"]')).not.toBeNull();
+    expect(container.textContent ?? "").toContain("No account connected yet.");
   });
 });
 
 describe("ApiKeyView describes a fallback platform identity honestly", () => {
   // Codex P2: a host with no company key but a live instance identity
   // (`attested` / `static`) already lets agents think and providers connect —
-  // the "agents cannot think and no provider can be connected" wording is
-  // simply false there and would send an operator to reconnect something
-  // that already works.
-  it("does not claim agents cannot think when a fallback identity is active", async () => {
+  // "agents cannot think and no app can be connected" is simply false there
+  // and would send an operator to reconnect something that already works. The
+  // row is keyed on what `resolve` returned, not on `configured`, which is
+  // false in exactly this case.
+  it("names the server's identity rather than saying nothing is configured", async () => {
     const client = clientFor({
       credential: async () => credential({ configured: false, source: "attested" }),
       billing: async () => ({ configured: false }),
@@ -111,12 +151,51 @@ describe("ApiKeyView describes a fallback platform identity honestly", () => {
 
     await mount(client);
 
-    const text = container.textContent ?? "";
-    expect(text).not.toContain("Until one is set, agents cannot think");
-    expect(text).toContain("platform identity covers agents and connected providers");
+    const subline = container.querySelector('[data-testid="account-row-subline"]');
+    expect(subline?.textContent).toBe("Acting as the account of whoever runs this server");
+    expect(container.querySelector('[data-testid="account-empty"]')).toBeNull();
   });
 
-  it("still warns plainly when there is truly no identity at all", async () => {
+  it("still says plainly when there is no identity at all", async () => {
+    const client = clientFor({
+      credential: async () => credential({ configured: false, source: "none" }),
+      billing: async () => ({ configured: false }),
+    });
+
+    await mount(client);
+
+    expect(container.querySelector('[data-testid="account-empty"]')).not.toBeNull();
+    expect(container.textContent ?? "").toContain("No account connected yet.");
+    expect(container.textContent ?? "").toContain("Apps cannot be connected");
+  });
+});
+
+describe("ApiKeyView never overstates what a missing account breaks", () => {
+  // QA, 2026-09-11. The old page said "Until one is set, agents cannot think
+  // and no provider can be connected", and it is **false** on a company whose
+  // LLM page holds a provider key of its own: `inference/key` resolves without
+  // this credential, so such a company thinks perfectly well at `source:
+  // "none"` — and the sentence sends its operator to fix something that is not
+  // broken. The page may say what this key governs; it may not claim the whole
+  // company has stopped.
+  it("never claims agents cannot think, in any state", async () => {
+    for (const source of ["none", "attested", "static", "company"] as const) {
+      const client = clientFor({
+        credential: async () => credential({ configured: source === "company", source }),
+        billing: async () => ({ configured: false }),
+      });
+
+      await mount(client);
+
+      const text = (container.textContent ?? "").toLowerCase();
+      expect(text, `source=${source}`).not.toContain("agents cannot think");
+      expect(text, `source=${source}`).not.toContain("cannot think");
+    }
+  });
+
+  // The exception is named rather than denied — an operator who has set a
+  // provider key on the LLM page must be able to see that it still applies.
+  it("names the LLM-page provider key as the thing that still works", async () => {
     const client = clientFor({
       credential: async () => credential({ configured: false, source: "none" }),
       billing: async () => ({ configured: false }),
@@ -125,7 +204,346 @@ describe("ApiKeyView describes a fallback platform identity honestly", () => {
     await mount(client);
 
     expect(container.textContent ?? "").toContain(
-      "Until one is set, agents cannot think and no provider can be connected.",
+      "a provider key set on the LLM page still works",
     );
+  });
+
+  // The billing consequence belongs to the control it is true of. `PUT
+  // …/credential` — what the paste dialog submits — writes `tinyhumans/key`
+  // and stops; only `finish_link` also writes `inference/key` and declares the
+  // managed provider. So the header card, which carries the Connect button,
+  // states the move, and the dialog must not: telling someone that pasting a
+  // key moved their model spend is the same defect pointing the other way.
+  it("puts the billing move on the connect path, not on the paste field", async () => {
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: true })),
+    );
+
+    // The header card says it, beside the button it is true of.
+    expect(container.textContent ?? "").toContain(
+      "Connecting points both at this company's account",
+    );
+    // …and qualifies it, because the managed chain has rungs above this key.
+    expect(container.textContent ?? "").toContain("which keeps precedence");
+  });
+
+  // The dialog is kept minimal at the operator's request (2026-09-14): a
+  // heading, the field, the link and its controls — no explanatory paragraph,
+  // and so no billing claim that could be wrong either way.
+  it("keeps the API-key dialog to its heading, field and link", async () => {
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: false })),
+    );
+
+    await press('[data-testid="account-add-key"]');
+
+    const dialog = document.body.textContent ?? "";
+    expect(dialog).toContain("Add your API key");
+    expect(dialog).toContain("Don't have an API key?");
+    expect(dialog).not.toContain("connects apps as");
+    expect(dialog).not.toContain("It does not choose a model provider");
+    expect(dialog).not.toContain("moves every agent turn");
+  });
+});
+
+/** Types into a React-controlled input the way a person would. */
+async function typeInto(selector: string, value: string) {
+  const el = document.querySelector(selector) as HTMLInputElement | null;
+  if (el === null) throw new Error(`nothing to type into at ${selector}`);
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  await act(async () => {
+    setter?.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+describe("ApiKeyView offers one way to connect", () => {
+  // The sign-in option was removed at the operator's request (2026-09-14):
+  // even on a host with a hub, the header card offers Connect to TinyHumans
+  // alone.
+  it("shows Connect to TinyHumans and no sign-in option where the host has a hub", async () => {
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: true })),
+    );
+
+    expect(container.querySelector('[data-testid="account-add-key"]')?.textContent).toContain(
+      "Connect to TinyHumans",
+    );
+    expect(container.querySelector('[data-testid="connect-tinyhumans"]')).toBeNull();
+    expect(container.textContent ?? "").not.toContain("Sign in with TinyHumans");
+  });
+
+  it("shows the same single option where there is no hub", async () => {
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: false })),
+    );
+
+    expect(container.querySelector('[data-testid="account-add-key"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="connect-tinyhumans"]')).toBeNull();
+  });
+
+  // Connected: the row's menu carries Replace and Remove; a Connect CTA above
+  // it would be a second route to the same write.
+  it("offers no connect CTA once this company has a key of its own", async () => {
+    await mount(adminClient(async () => credential({ source: "company", hubLink: true })));
+
+    expect(container.querySelector('[data-testid="account-add-key"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-tinyhumans"]')).toBeNull();
+    expect(container.querySelector('[data-testid="account-row-menu"]')).not.toBeNull();
+  });
+});
+
+describe("ApiKeyView's Connect to TinyHumans dialog", () => {
+  function recordingClient(
+    writes: { path: string; body: unknown }[],
+    put?: () => Promise<unknown>,
+  ): OpenCompanyClient {
+    return {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) {
+          return credential({ configured: false, source: "none", hubLink: true });
+        }
+        throw new Error(`unexpected GET ${path}`);
+      },
+      put: async (path: string, body: unknown) => {
+        writes.push({ path, body });
+        if (put) return put();
+        return { status: credential({ source: "company" }), note: "" };
+      },
+    } as unknown as OpenCompanyClient;
+  }
+
+  it("asks for the API key and links to where one is created", async () => {
+    await mount(recordingClient([]));
+    await press('[data-testid="account-add-key"]');
+
+    const input = document.querySelector('[data-testid="account-key-input"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    // Write-only: never echoed.
+    expect(input.type).toBe("password");
+    expect(document.body.textContent ?? "").toContain("Add your API key");
+    expect(document.body.textContent ?? "").toContain("Don't have an API key?");
+
+    const link = document.querySelector('[data-testid="account-key-get-link"]') as HTMLAnchorElement;
+    expect(link.textContent).toContain("Get an API key");
+    // The same page the setup wizard's Managed field sends an operator to.
+    expect(link.getAttribute("href")).toBe("https://tinyhumans.ai/dashboard?tab=api-keys");
+    expect(link.getAttribute("target")).toBe("_blank");
+  });
+
+  it("writes the typed key to the company credential route and closes", async () => {
+    const writes: { path: string; body: unknown }[] = [];
+    await mount(recordingClient(writes));
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    // The Account page's own slot (`tinyhumans/key`), never the inference
+    // managed-key route.
+    expect(writes).toEqual([
+      { path: "/api/v1/companies/acme/credential", body: { key: "th-not-a-real-key" } },
+    ]);
+    expect(document.querySelector('[data-testid="account-key-input"]')).toBeNull();
+  });
+
+  it("shows a refused save inside the dialog and keeps it open", async () => {
+    const writes: { path: string; body: unknown }[] = [];
+    await mount(
+      recordingClient(writes, async () => {
+        throw new ApiError(400, "invalid", "that key was not accepted", true);
+      }),
+    );
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    expect(writes).toHaveLength(1);
+    expect(document.querySelector('[data-testid="account-key-input"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="account-key-error"]')?.textContent).toBe(
+      "that key was not accepted",
+    );
+  });
+});
+
+describe("ApiKeyView confirms before clearing a credential", () => {
+  // QA matrix X8, and the standing rule behind it — an operator lost a live
+  // key to an unconfirmed clear. `store_key("")` is how the store spells a
+  // delete, it is irreversible from this console (the hub shows a key's value
+  // once), and the menu item cannot show what it costs.
+  it("offers Remove key as a confirmation, never as a direct write", async () => {
+    const writes: unknown[] = [];
+    await mount(adminClient(async () => credential({ source: "company" }), writes));
+
+    // Mounting and rendering the row must never have written anything.
+    expect(writes).toHaveLength(0);
+    // At rest the menu is closed, so there is no one-press path to a cleared
+    // key on the page at all.
+    expect(document.querySelector('[data-testid="account-remove-key"]')).toBeNull();
+
+    // Open it and press the destructive item. This is the press that used to
+    // clear the key outright, and the assertion that matters is that it still
+    // has not written anything.
+    await press('[data-testid="account-row-menu"]');
+    await press('[data-testid="account-remove-key"]');
+    expect(writes).toHaveLength(0);
+    expect(document.body.textContent ?? "").toContain("Remove this company's account key?");
+
+    // Only the second, deliberate press reaches the host — and reaches it once,
+    // with the empty value that is how the store spells a delete.
+    await press('[data-testid="account-remove-key-confirm"]');
+    expect(writes).toEqual([{ key: "" }]);
+  });
+});
+
+describe("ApiKeyView never renders an unreadable store as an empty one", () => {
+  // `company_key::resolve` propagates a secret-store read error rather than
+  // falling through to the instance identity, because a connection made under
+  // a silently-borrowed identity belongs to the wrong account invisibly and
+  // permanently. The console has to spend a state on that, or the distinction
+  // the host paid for is thrown away at the last step.
+  it("says the host could not answer, and offers no empty state", async () => {
+    const client = clientFor({
+      credential: async () => {
+        throw new Error("secret store unavailable");
+      },
+      billing: async () => ({ configured: false }),
+    });
+
+    await mount(client);
+
+    const subline = container.querySelector('[data-testid="account-row-subline"]');
+    expect(subline?.textContent).toContain("not the same as having no key");
+    expect(container.querySelector('[data-testid="account-empty"]')).toBeNull();
+    // And no balance under a row that has just said it does not know whose
+    // account this is.
+    expect(container.querySelector('[data-testid="account-balance"]')).toBeNull();
+  });
+
+  // The same honesty, applied to the controls rather than the words. An admin
+  // reading "the host could not say" must not be offered a key field beside
+  // it: the write it opens overwrites a write-only credential this console has
+  // just admitted it cannot see, and the value it replaces cannot be read back
+  // from the hub, which shows a key's plaintext once.
+  it("offers no way to overwrite a key it cannot read", async () => {
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) throw new Error("secret store unavailable");
+        throw new Error(`unexpected GET ${path}`);
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+
+    // The row is there, saying it does not know — that part is the point above.
+    expect(container.querySelector('[data-testid="account-row"]')).not.toBeNull();
+    // The header card's action is gone rather than disabled: there is no state
+    // in which it is the right offer, so a greyed one would only invite a
+    // retry.
+    expect(container.querySelector('[data-testid="account-add-key"]')).toBeNull();
+    // And the row menu, which carries the same "Add a key" item, cannot open.
+    const menu = container.querySelector('[data-testid="account-row-menu"]');
+    expect(menu).not.toBeNull();
+    // Either spelling counts — the trigger is a `Button` rendered through the
+    // menu primitive, and which of the two it forwards is the primitive's
+    // business rather than this page's.
+    const shut =
+      menu?.hasAttribute("disabled") === true || menu?.getAttribute("aria-disabled") === "true";
+    expect(shut).toBe(true);
+  });
+});
+
+describe("ApiKeyView offers no control that cannot act", () => {
+  // The rule that removed a toggle from the Managed inference row. Remove key
+  // clears `tinyhumans/key`, which a company on the instance's identity does
+  // not have — so offering it would be a destructive control that changes
+  // nothing.
+  it("does not offer Remove key when the identity is the instance's", async () => {
+    const writes: unknown[] = [];
+    // An **admin**, so the gate under test is the source rather than the role:
+    // a member's menu is disabled whatever the tier, and asserting through one
+    // would pass for the wrong reason.
+    await mount(adminClient(async () => credential({ configured: false, source: "static" }), writes));
+
+    await press('[data-testid="account-row-menu"]');
+
+    // The menu opens — the admin gets the other item — and the destructive one
+    // is simply not in it. `tinyhumans/key` is not what resolved here, so a
+    // Remove would clear nothing.
+    expect(document.body.textContent ?? "").toContain("Add a key");
+    expect(document.querySelector('[data-testid="account-remove-key"]')).toBeNull();
+    expect(writes).toHaveLength(0);
+  });
+});
+
+describe("ApiKeyView redeems a returning grant whatever else failed", () => {
+  // The grant comes back as a top-level navigation: `App` takes the code off
+  // the URL before the first render, strips the address bar because it is a
+  // live single-use credential, and hands it to a module-local box that a
+  // reload empties. `useRedeemKeyGrant`, which `ApiKeyView` calls
+  // unconditionally, is the only thing on this page that spends it.
+  //
+  // So that call must not be gated on the credential read. It was, briefly:
+  // the header's action is chosen from `status`, which is null while the read
+  // is in flight and stays null when it fails — and a company whose secret
+  // store hiccuped on exactly that page load would have lost the key it had
+  // just minted, with nothing on screen to try again with. The sign-in button
+  // is gone from this page (2026-09-14); the redemption must not have gone
+  // with it. Only what is *shown* may depend on the read.
+  it("finishes the link even when the credential read fails", async () => {
+    const finished: unknown[] = [];
+    captureKeyLink({ state: "st", code: "cd" }, false);
+
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) throw new Error("secret store unavailable");
+        throw new Error(`unexpected GET ${path}`);
+      },
+      post: async (path: string, body: unknown) => {
+        finished.push({ path, body });
+        return { status: credential({ source: "company" }), note: "" };
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+    await act(async () => {});
+
+    expect(finished).toHaveLength(1);
+    expect((finished[0] as { path: string }).path).toContain("/credential/link/finish");
+    expect((finished[0] as { body: unknown }).body).toEqual({ state: "st", code: "cd" });
+  });
+
+  // And the box is emptied by the redemption rather than by the mount, so a
+  // page that never had a grant never calls the route.
+  it("calls nothing when no grant is pending", async () => {
+    const finished: unknown[] = [];
+    captureKeyLink(null, false);
+
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) return credential({ source: "company" });
+        throw new Error(`unexpected GET ${path}`);
+      },
+      post: async () => {
+        finished.push(true);
+        return {};
+      },
+    } as unknown as OpenCompanyClient;
+
+    await mount(client);
+    await act(async () => {});
+
+    expect(finished).toHaveLength(0);
   });
 });

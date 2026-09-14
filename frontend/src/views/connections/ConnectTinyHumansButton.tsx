@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { Loader2, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { finishCredentialLink, startCredentialLink } from "@/api/credential";
+import { startCredentialLink } from "@/api/credential";
 import { ApiError } from "@/api/types";
 import { Button } from "@/components/ui/button";
-import { takeKeyLink, takeKeyLinkRefusal } from "@/lib/pending-key-link";
+import { useRedeemKeyGrant } from "@/views/connections/use-redeem-key-grant";
 
 interface Props {
   client: OpenCompanyClient;
@@ -22,12 +22,13 @@ interface Props {
 }
 
 /**
- * "Connect TinyHumans" — the whole key flow, as one button.
+ * "Connect TinyHumans" — the whole key-grant flow, as one button.
  *
- * Used by both pages that used to ask for a pasted key, so the two cannot drift
- * into different versions of the same errand. Clicking it starts a PKCE grant on
- * the host, navigates to the hub, and — on the way back — the same component,
- * freshly mounted, claims the code and finishes the exchange.
+ * Clicking it starts a PKCE grant on the host and navigates to the hub; on the
+ * way back the same component, freshly mounted, redeems the code through
+ * {@link useRedeemKeyGrant}. The Account page does not render this button — it
+ * calls that hook directly, unconditionally — so the return leg does not depend
+ * on a button being shown.
  *
  * ## Why the return leg lives here rather than in `App`
  *
@@ -45,52 +46,11 @@ export function ConnectTinyHumansButton({
   configured,
   onConnected,
 }: Props) {
-  const [busy, setBusy] = useState(false);
-  // The redemption runs from an effect, and StrictMode double-invokes effects.
-  // The code is single-use, so a second call would spend nothing and report the
-  // host's "expired" refusal over a connection that in fact succeeded.
-  const redeeming = useRef(false);
-
-  const finish = useCallback(
-    async (state: string, code: string) => {
-      setBusy(true);
-      try {
-        const result = await finishCredentialLink(client, company, state, code);
-        toast.success("Connected to TinyHumans.", { description: result.note });
-        onConnected?.();
-      } catch (err) {
-        // The host's own words where it sent them: "that connection attempt has
-        // expired" tells an operator to click again, which a generic failure
-        // does not.
-        toast.error(
-          err instanceof ApiError ? err.message : "Couldn't finish connecting to TinyHumans.",
-        );
-      } finally {
-        setBusy(false);
-      }
-    },
-    [client, company, onConnected],
-  );
-
-  useEffect(() => {
-    if (redeeming.current) return;
-    if (takeKeyLinkRefusal()) {
-      redeeming.current = true;
-      // Cancelling on the hub's consent screen lands here too, which is why this
-      // is not worded as an error. Nothing was created either way.
-      toast.info("No key was created.", {
-        description: "The TinyHumans connection was cancelled or refused.",
-      });
-      return;
-    }
-    const pending = takeKeyLink();
-    if (!pending) return;
-    redeeming.current = true;
-    void finish(pending.state, pending.code);
-  }, [finish]);
+  const redeeming = useRedeemKeyGrant(client, company, onConnected);
+  const [starting, setStarting] = useState(false);
 
   const start = useCallback(async () => {
-    setBusy(true);
+    setStarting(true);
     try {
       const { authorizeUrl } = await startCredentialLink(client, company);
       // A top-level navigation, not a fetch: the person signs in on the hub's
@@ -100,7 +60,7 @@ export function ConnectTinyHumansButton({
       toast.error(
         err instanceof ApiError ? err.message : "Couldn't start the TinyHumans connection.",
       );
-      setBusy(false);
+      setStarting(false);
     }
   }, [client, company]);
 
@@ -108,6 +68,7 @@ export function ConnectTinyHumansButton({
   // exactly as it did before this flow existed — the paste field, alone.
   if (!available || !canManage) return null;
 
+  const busy = redeeming || starting;
   return (
     <div className="space-y-2">
       <Button

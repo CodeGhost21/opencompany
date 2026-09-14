@@ -449,6 +449,7 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Get, "/composio", Scoped, Ordinary, ""),
     r!(Put, "/composio/token", Admin, Credential, ""),
     r!(Put, "/composio/api-key", Admin, Credential, ""),
+    r!(Post, "/composio/api-key/test", Admin, Credential, ""),
     r!(Post, "/composio/authorize", Admin, Credential, ""),
     r!(Get, "/composio/connections", Scoped, Ordinary, ""),
     r!(
@@ -553,6 +554,55 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
         "Members may probe inference with the stored credential."
     ),
     r!(Post, "/inference/restart", Admin, Authority, ""),
+    r!(Post, "/inference/providers", Admin, Credential, ""),
+    r!(Put, "/inference/providers/{slug}", Admin, Credential, ""),
+    r!(
+        Delete,
+        "/inference/providers/{slug}",
+        Admin,
+        Destructive,
+        ""
+    ),
+    r!(
+        Post,
+        "/inference/providers/{slug}/enabled",
+        Admin,
+        Authority,
+        ""
+    ),
+    r!(
+        Post,
+        "/inference/providers/{slug}/default",
+        Admin,
+        Authority,
+        ""
+    ),
+    r!(
+        Post,
+        "/inference/providers/{slug}/test",
+        Scoped,
+        Credential,
+        "Members may probe a stored provider with its stored credential."
+    ),
+    r!(
+        Get,
+        "/inference/providers/{slug}/models",
+        Scoped,
+        Ordinary,
+        ""
+    ),
+    r!(Post, "/inference/probe", Admin, Credential, ""),
+    r!(Get, "/inference/routes", Admin, Ordinary, ""),
+    r!(Put, "/inference/routes", Admin, Authority, ""),
+    r!(Put, "/inference/managed/key", Admin, Credential, ""),
+    r!(Post, "/inference/managed/enabled", Admin, Authority, ""),
+    r!(
+        Post,
+        "/inference/managed/test",
+        Scoped,
+        Credential,
+        "Members may probe the managed tier with the stored credential."
+    ),
     r!(Get, "/ledgers", Scoped, Ordinary, ""),
     red!(Post, "/ledgers", Authority, LedgerFix),
     r!(Get, "/ledgers/{slug}", Scoped, Ordinary, ""),
@@ -695,7 +745,20 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Get, "/runs/{run_id}", Scoped, Ordinary, ""),
     r!(Get, "/search", Scoped, Ordinary, ""),
     r!(Put, "/search", Admin, Credential, ""),
+    // Which provider the teammates search through decides whose account is
+    // billed, so marking the default is an authority-level credential action
+    // rather than an ordinary edit.
+    r!(Put, "/search/default", Admin, Credential, ""),
     r!(Delete, "/search/key", Admin, Credential, ""),
+    r!(Post, "/search/providers", Admin, Credential, ""),
+    r!(Put, "/search/providers/{slug}", Admin, Credential, ""),
+    r!(Delete, "/search/providers/{slug}", Admin, Credential, ""),
+    r!(Put, "/search/providers/{slug}/key", Admin, Credential, ""),
+    // Admin rather than Scoped, unlike the inference probe it is modelled on:
+    // this check spends the company's money (no search provider publishes a
+    // free credential validator) and, for a self-hosted provider, fetches an
+    // operator-supplied address that is allowed to be on a private network.
+    r!(Post, "/search/test", Admin, Credential, ""),
     r!(Post, "/setup/roster", Scoped, Ordinary, ""),
     r!(Post, "/skills/{slug}/install", Admin, Authority, ""),
     r!(Post, "/skills/{slug}/uninstall", Admin, Destructive, ""),
@@ -1686,24 +1749,24 @@ async fn company_status_temp_password_boundary_waits_for_an_assigned_branch() {
 
 #[test]
 fn table_counts_and_intentional_widenings_are_explicit() {
-    assert_eq!(OPS_SCOPED_ROUTES.len(), 188);
+    assert_eq!(OPS_SCOPED_ROUTES.len(), 208);
     assert_eq!(
         OPS_SCOPED_ROUTES
             .iter()
             .map(|route| route.path)
             .collect::<BTreeSet<_>>()
             .len(),
-        146,
+        163,
     );
     assert_eq!(OPS_EXACT_ROUTES.len(), 3);
     assert_eq!(
         OPS_SCOPED_ROUTES.len() * 2,
-        376,
+        416,
         "dual-address ops route-method rows",
     );
     assert_eq!(
         OPS_SCOPED_ROUTES.len() * 2 + OPS_EXACT_ROUTES.len(),
-        379,
+        419,
         "complete ops route-method rows",
     );
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 4);
@@ -1714,7 +1777,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        429,
+        467,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1722,10 +1785,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        338,
+        370,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 3_003);
+    assert_eq!(render_snapshot().lines().count(), 3_269);
     assert_eq!(
         all_routes()
             .map(|route| {
@@ -1744,8 +1807,8 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .iter()
             .filter(|route| route.access == Access::Admin)
             .count(),
-        60,
-        "45 signature-admin, seven body-admin, and eight aspirational authority rows",
+        77,
+        "62 signature-admin, seven body-admin, and eight aspirational authority rows",
     );
     assert_eq!(
         OPS_SCOPED_ROUTES
@@ -1792,7 +1855,8 @@ fn table_counts_and_intentional_widenings_are_explicit() {
 #[test]
 fn committed_snapshot_pins_every_expected_cell() {
     let actual = render_snapshot();
-    let snapshot = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/auth-matrix.txt");
+    let snapshot =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/snapshots/auth-matrix.txt");
     if std::env::var_os("BLESS_AUTH_MATRIX").is_some() {
         std::fs::write(&snapshot, &actual).expect("write auth matrix snapshot");
         return;
@@ -1834,7 +1898,7 @@ fn render_snapshot() -> String {
 
 #[test]
 fn source_path_set_equals_the_ops_matrix_path_set() {
-    let server_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let server_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/server");
     let ops_root = server_root.join("ops");
     let scanned = scan_ops_routes(&ops_root).unwrap_or_else(|error| panic!("{error}"));
 
@@ -1918,7 +1982,7 @@ fn source_path_set_equals_the_ops_matrix_path_set() {
 
 #[test]
 fn external_authority_router_files_have_no_unclassified_paths() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/server");
     let provision = scan_file_route_literals(&root.join("provision.rs"))
         .unwrap_or_else(|error| panic!("{error}"));
     assert_set_eq(
@@ -2675,7 +2739,7 @@ mod scanner_tests {
 
 #[test]
 fn chained_route_verbs_are_all_recorded() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/server");
     let setup = scan_file_route_literals(&root.join("setup.rs")).expect("scan");
     assert!(
         setup.direct_methods.contains("GET /api/v1/setup")
