@@ -912,8 +912,12 @@ fn transport_condition(error: &reqwest::Error) -> &'static str {
 /// back in a response body: the password as written in the URL, the password
 /// decoded, and the Basic token. Each is replaced with
 /// [`REDACTED_USERINFO`](catalogue::REDACTED_USERINFO), both padded and unpadded.
-/// The username alone is not a secret and is left, so an error naming the
-/// account still reads.
+///
+/// **A username with no password is the credential.** `http://sk-secret@host`
+/// is how a token gets pasted into a URL, and `reqwest` sends it as
+/// `Basic base64(sk-secret:)` — so it is scrubbed as written and decoded, like a
+/// password (Codex review on #2281). Beside a password the username is an
+/// account name, and is left so an error naming the account still reads.
 fn scrub_endpoint_credential(endpoint: &str, text: &str) -> String {
     let Ok(parsed) = url::Url::parse(endpoint.trim()) else {
         return text.to_string();
@@ -926,9 +930,15 @@ fn scrub_endpoint_credential(endpoint: &str, text: &str) -> String {
     let decoded = password.map(percent_decode).unwrap_or_default();
     let token = base64_standard(format!("{username}:{decoded}").as_bytes());
     let mut secrets = vec![token.trim_end_matches('=').to_string(), token];
-    if let Some(raw) = password {
-        secrets.push(raw.to_string());
-        secrets.push(decoded);
+    match password {
+        Some(raw) => {
+            secrets.push(raw.to_string());
+            secrets.push(decoded);
+        }
+        None => {
+            secrets.push(parsed.username().to_string());
+            secrets.push(username);
+        }
     }
     secrets.retain(|secret| !secret.is_empty());
     // Longest first, so a shorter secret never splits a longer one it sits in.
@@ -1301,6 +1311,26 @@ mod tests {
             scrubbed.contains("alice"),
             "the account name still reads: {scrubbed}"
         );
+
+        // Username only: that username is the token, in every form it can echo.
+        let token_only = "http://sk-not%2Ba-real-key@127.0.0.1:9/v1/models";
+        let basic = base64_standard(b"sk-not+a-real-key:");
+        let echoed = format!(
+            "bad key sk-not+a-real-key (sent sk-not%2Ba-real-key) in Basic {basic} / {}",
+            basic.trim_end_matches('=')
+        );
+        let scrubbed = scrub_endpoint_credential(token_only, &echoed);
+        for secret in [
+            "sk-not+a-real-key",
+            "sk-not%2Ba-real-key",
+            basic.as_str(),
+            basic.trim_end_matches('='),
+        ] {
+            assert!(
+                !scrubbed.contains(secret),
+                "{secret:?} survived: {scrubbed}"
+            );
+        }
         // No userinfo: the text is untouched.
         assert_eq!(
             scrub_endpoint_credential("http://127.0.0.1:9/v1", "Basic abc"),
