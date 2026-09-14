@@ -48,7 +48,9 @@ import { Switch } from "@/components/ui/switch";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import {
   agentEdits,
+  agentPairBrokenCopy,
   companyCovers,
+  companyDefaultLabel,
   draftFrom,
   draftIsValid,
   missingRequired,
@@ -58,7 +60,10 @@ import {
   harnessOptionLabel,
   isEditable,
   modelEdit,
+  pairLabel,
   parseToolGlobs,
+  providerEdit,
+  resolveAgentDefault,
   resolvedHarnessKind,
   summarizeGrants,
   tierLabel,
@@ -67,7 +72,10 @@ import {
   type AgentFieldKey,
 } from "@/lib/agent";
 import { draftAgentField } from "@/api/agent-copilot";
-import { getInferenceStatus, type CognitionPath } from "@/api/inference";
+import { getInferenceStatus, type CognitionPath, type InferenceStatus } from "@/api/inference";
+import { checkModelId, modelIdErrorCopy } from "@/inference/connect";
+import { ModelField } from "@/inference/ModelField";
+import type { DefaultChoice, Provider } from "@/inference/types";
 import { FieldCopilot } from "@/views/team/FieldCopilot";
 import { consoleHref } from "@/lib/console-paths";
 import { fetchBoardColumns } from "@/lib/board-columns";
@@ -100,6 +108,14 @@ const HARNESS_DEFAULT = "__default__";
  * at the single point that crosses the boundary, the select's `onValueChange`.
  */
 const MODEL_HARNESS_DEFAULT = "__harness_default__";
+
+/**
+ * The Provider select's value for "use the company default" (keys rework,
+ * issue #2306, slice 3b) — the built-in-harness sibling of
+ * {@link HARNESS_DEFAULT} and {@link MODEL_HARNESS_DEFAULT}, and for the same
+ * reason: `""` is Base UI Select's own unset marker.
+ */
+const PROVIDER_COMPANY_DEFAULT = "__company_default__";
 
 /**
  * Why a detail read failed, in the operator's terms rather than the wire's.
@@ -295,6 +311,12 @@ export function AgentDetailView({
   const [editingHarness, setEditingHarness] = useState(false);
   const [harnessDraft, setHarnessDraft] = useState(HARNESS_DEFAULT);
   const [modelDraft, setModelDraft] = useState("");
+  /**
+   * The provider half of the pair, on a built-in harness (keys rework, issue
+   * #2306, slice 3b) — `""` means "use the company default". Reset alongside
+   * `modelDraft` everywhere that resets it; the two are always sent together.
+   */
+  const [providerDraft, setProviderDraft] = useState("");
   const [savingHarness, setSavingHarness] = useState(false);
   /**
    * The company's declared harnesses, for the picker's options. Best-effort
@@ -303,6 +325,14 @@ export function AgentDetailView({
    * just has nothing to offer beyond the free-text model field it already had.
    */
   const [harnesses, setHarnesses] = useState<HarnessDto[]>([]);
+  /**
+   * The company's providers and its default choice (keys rework, issue #2306,
+   * slice 3b) — what the Provider select offers, and what an unpinned agent's
+   * fallback line names. Loaded once per teammate, not gated on the editor
+   * being open: the **view** mode also needs it, to render "Company default ·
+   * X · Y" rather than a bare "uses the company default".
+   */
+  const [inference, setInference] = useState<InferenceStatus | null>(null);
 
   /**
    * The required fields the draft leaves blank, so the form can say why Save is
@@ -337,6 +367,30 @@ export function AgentDetailView({
     };
   }, [editing, client, company]);
 
+  // Keys rework (issue #2306, slice 3b): the pair editor's own read, unlike
+  // the cognition effect above — it feeds the **view** mode too (the "Company
+  // default · X · Y" fallback line), not only the editor, so it is not gated
+  // on `editing`. Keyed on the teammate rather than on nothing, so navigating
+  // to a different agent does not keep showing the previous one's providers
+  // for the length of one request.
+  useEffect(() => {
+    let live = true;
+    setInference(null);
+    void getInferenceStatus(client, company)
+      .then((status) => {
+        if (live) setInference(status);
+      })
+      .catch(() => {
+        // Best-effort, like `harnesses` below: an older host or a slow read
+        // must not block the teammate itself from rendering. The fallback
+        // line then reads by slug rather than by label, and the Provider
+        // select's options list is empty until a retry succeeds.
+        if (live) setInference(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, company, agentId]);
 
   const boot = useCallback(async () => {
     setLoad("loading");
@@ -372,6 +426,7 @@ export function AgentDetailView({
     setEditingHarness(false);
     setHarnessDraft(HARNESS_DEFAULT);
     setModelDraft("");
+    setProviderDraft("");
   }, [agentId]);
 
   /**
@@ -596,14 +651,32 @@ export function AgentDetailView({
   async function saveHarnessAndModel() {
     if (!agent) return;
     const harness = harnessEdit(agent.harness, harnessDraft === HARNESS_DEFAULT ? "" : harnessDraft);
-    const model = modelEdit(agent.model, modelDraft);
-    if (harness === undefined && model === undefined) {
+    const draftKind = resolvedHarnessKind(harnesses, harnessDraft === HARNESS_DEFAULT ? undefined : harnessDraft);
+    const edits: EditAgentInput = {};
+    if (harness !== undefined) edits.harness = harness;
+
+    // Keys rework (issue #2306, slice 3b): on a built-in harness, `provider`
+    // and `model` are one pair and are sent together in this same request, so
+    // the host validates the pair it is about to store rather than one half
+    // against a binding this save is simultaneously changing. On ACP, `model`
+    // keeps its own meaning (issue #1245) and `provider` is never sent.
+    if (draftKind === "acp") {
+      const model = modelEdit(agent.model, modelDraft);
+      if (model !== undefined) edits.model = model;
+      if (agent.provider) edits.provider = null;
+    } else {
+      const provider = providerEdit(agent.provider, providerDraft);
+      const model = modelEdit(agent.model, providerDraft === "" ? "" : modelDraft);
+      if (provider !== undefined || model !== undefined) {
+        edits.provider = providerDraft === "" ? null : providerDraft;
+        edits.model = providerDraft === "" ? null : modelDraft.trim();
+      }
+    }
+
+    if (Object.keys(edits).length === 0) {
       setEditingHarness(false);
       return;
     }
-    const edits: EditAgentInput = {};
-    if (harness !== undefined) edits.harness = harness;
-    if (model !== undefined) edits.model = model;
 
     setSavingHarness(true);
     try {
@@ -1048,10 +1121,16 @@ export function AgentDetailView({
               editing={editingHarness}
               harnessDraft={harnessDraft}
               modelDraft={modelDraft}
+              providerDraft={providerDraft}
+              providers={(inference?.providers ?? []).filter((p) => p.enabled)}
+              defaultChoice={inference?.defaultChoice}
+              client={client}
+              company={company}
               saving={savingHarness}
               onEdit={() => {
                 setHarnessDraft(agent.harness ?? HARNESS_DEFAULT);
                 setModelDraft(agent.model ?? "");
+                setProviderDraft(agent.provider ?? "");
                 setEditingHarness(true);
               }}
               onHarnessChange={(next) => {
@@ -1059,9 +1138,12 @@ export function AgentDetailView({
                 // A model override only means anything against a harness that
                 // can be told which model to run. Switching to a `built_in`
                 // one — the host's own engine, whose model is the host's to
-                // choose — must drop the override rather than save a value
-                // that will silently never apply. Leaving it also made the
-                // form claim a binding it was not going to honour.
+                // choose — must drop the ACP override rather than save a value
+                // that will silently never apply, and switching to or from
+                // `acp` must drop the pair for the same reason in reverse: a
+                // pair is refused outright on an ACP harness (3a). Leaving
+                // either also made the form claim a binding it was not going
+                // to honour.
                 // The sentinel has to be resolved first, not excluded. "Company
                 // default" is a *binding*, not a kind — when the company
                 // default is `built_in`, picking it lands the teammate on a
@@ -1077,8 +1159,8 @@ export function AgentDetailView({
                 const before = resolve(harnessDraft);
                 const bound = resolve(next);
 
-                // Two ways a model stops meaning anything, and both have to
-                // clear it:
+                // Two ways an ACP model override stops meaning anything, and
+                // both have to clear it:
                 //
                 //   - the target is managed, whose model is the host's choice;
                 //   - the target is a *different* ACP agent. Model ids are the
@@ -1090,11 +1172,28 @@ export function AgentDetailView({
                 // Compared on `agent` rather than harness id, since two
                 // harnesses can drive the same CLI and a model is valid across
                 // those.
-                if (!bound || bound.kind !== "acp" || bound.agent !== before?.agent) {
-                  setModelDraft("");
+                const acpModelStillValid = bound?.kind === "acp" && bound.agent === before?.agent;
+
+                // The pair kind boundary: crossing between `acp` and anything
+                // else drops both halves, restored from the agent's own stored
+                // pair only if the new kind lands back where it started —
+                // switching harness twice and returning should not have
+                // silently discarded a pin along the way.
+                const declaredKind = resolvedHarnessKind(harnesses, agent.harness);
+                const crossedPairBoundary = (bound?.kind === "acp") !== (before?.kind === "acp");
+
+                if (!acpModelStillValid) setModelDraft("");
+                if (crossedPairBoundary) {
+                  if (bound?.kind === declaredKind) {
+                    setProviderDraft(agent.provider ?? "");
+                    if (declaredKind !== "acp") setModelDraft(agent.model ?? "");
+                  } else {
+                    setProviderDraft("");
+                  }
                 }
               }}
               onModelChange={setModelDraft}
+              onProviderChange={setProviderDraft}
               onCancel={() => setEditingHarness(false)}
               onSave={() => void saveHarnessAndModel()}
             />
@@ -1631,10 +1730,16 @@ function HarnessAndModel({
   editing,
   harnessDraft,
   modelDraft,
+  providerDraft,
+  providers,
+  defaultChoice,
+  client,
+  company,
   saving,
   onEdit,
   onHarnessChange,
   onModelChange,
+  onProviderChange,
   onCancel,
   onSave,
 }: {
@@ -1643,14 +1748,23 @@ function HarnessAndModel({
   editing: boolean;
   harnessDraft: string;
   modelDraft: string;
+  /** The provider half of the pair on a built-in harness (keys rework, issue #2306, slice 3b). `""` = company default. */
+  providerDraft: string;
+  /** Enabled providers only — a disabled one is never offered as a new pin. */
+  providers: readonly Provider[];
+  defaultChoice: DefaultChoice | null | undefined;
+  client: OpenCompanyClient;
+  company: string | null;
   saving: boolean;
   onEdit: () => void;
   onHarnessChange: (value: string) => void;
   onModelChange: (value: string) => void;
+  onProviderChange: (value: string) => void;
   onCancel: () => void;
   onSave: () => void;
 }) {
-  const editable = agent.editable.includes("harness") || agent.editable.includes("model");
+  const editable =
+    agent.editable.includes("harness") || agent.editable.includes("model") || agent.editable.includes("provider");
   const declaredKind = resolvedHarnessKind(harnesses, agent.harness);
   const draftKind = resolvedHarnessKind(
     harnesses,
@@ -1724,7 +1838,7 @@ function HarnessAndModel({
   return (
     <Section
       title="Harness & model"
-      subtitle="Which coding engine this agent runs on, and — on an ACP harness (an operator's own coding CLI) — which model to pin it to."
+      subtitle="Which coding engine this agent runs on, and which provider and model it uses — its own pair, or the company default."
       action={
         editable && !editing ? (
           <Button variant="ghost" size="sm" onClick={onEdit} data-testid="agent-harness-edit">
@@ -1822,15 +1936,106 @@ function HarnessAndModel({
               </>
             )
           ) : (
-            <p className="text-xs text-muted-foreground">
-              A model override only applies on an ACP harness — pick one above to set one.
-            </p>
+            // Keys rework (issue #2306, slice 3b): a built-in harness runs on
+            // this teammate's own `{provider, model}` pair, or the company
+            // default when neither is set.
+            <div className="space-y-3" data-testid="agent-pair-editor">
+              <div className="space-y-1.5">
+                <Label htmlFor="agent-provider-select">Provider</Label>
+                <Select
+                  value={providerDraft === "" ? PROVIDER_COMPANY_DEFAULT : providerDraft}
+                  onValueChange={(value) => {
+                    const next = !value || value === PROVIDER_COMPANY_DEFAULT ? "" : value;
+                    onProviderChange(next);
+                    // Prefill with that row's own model; the operator may still
+                    // pick another one — the same "belongs to the provider it
+                    // was chosen from" rule the LLM page's own fields follow.
+                    onModelChange(next ? (providers.find((p) => p.slug === next)?.model ?? "") : "");
+                  }}
+                >
+                  <SelectTrigger className="w-full" data-testid="agent-provider-select">
+                    <SelectValue>
+                      {() =>
+                        providerDraft === ""
+                          ? companyDefaultLabel(defaultChoice, providers)
+                          : (providers.find((p) => p.slug === providerDraft)?.label ?? providerDraft)
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={PROVIDER_COMPANY_DEFAULT}>
+                      {companyDefaultLabel(defaultChoice, providers)}
+                    </SelectItem>
+                    {providers.map((p) => (
+                      <SelectItem key={p.slug} value={p.slug}>
+                        {p.label}
+                        {p.model && <span className="text-muted-foreground"> · {p.model}</span>}
+                      </SelectItem>
+                    ))}
+                    {/* A pair naming a provider that is gone or switched off
+                        stays visible, never silently dropped (F6) — a typo
+                        slug only ever comes from a hand-authored manifest, but
+                        an operator can still remove or disable a provider a
+                        pin already names. */}
+                    {agent.provider && !providers.some((p) => p.slug === agent.provider) && (
+                      <SelectItem value={agent.provider}>
+                        {agent.provider}
+                        <span className="text-muted-foreground"> — not available</span>
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+              {providerDraft !== "" && (
+                <div className="space-y-1.5" data-testid="agent-model-field">
+                  <ModelField
+                    client={client}
+                    company={company}
+                    slug={providerDraft}
+                    id="agent-model-field-input"
+                    value={modelDraft}
+                    disabled={saving}
+                    onChange={onModelChange}
+                  />
+                  {(() => {
+                    const modelError = modelDraft.trim() ? checkModelId(modelDraft) : "empty";
+                    if (!modelError) return null;
+                    return (
+                      <p className="text-xs text-status-blocked-text" data-testid="agent-pair-model-required">
+                        {modelError === "empty" ? "Choose a model for this provider." : modelIdErrorCopy(modelError)}
+                      </p>
+                    );
+                  })()}
+                </div>
+              )}
+              {(providerDraft !== "" || agent.provider) && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  data-testid="agent-pair-clear"
+                  onClick={() => {
+                    onProviderChange("");
+                    onModelChange("");
+                  }}
+                >
+                  Use company default
+                </Button>
+              )}
+            </div>
           )}
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={onCancel} disabled={saving}>
               Cancel
             </Button>
-            <Button onClick={onSave} disabled={saving} data-testid="agent-harness-save">
+            <Button
+              onClick={onSave}
+              disabled={
+                saving ||
+                (draftKind !== "acp" && providerDraft !== "" && checkModelId(modelDraft) !== null)
+              }
+              data-testid="agent-harness-save"
+            >
               Save
             </Button>
           </div>
@@ -1841,20 +2046,73 @@ function HarnessAndModel({
             <Server className="size-3" />
             {agent.harness ?? (defaultHarness ? `${defaultHarness.id} (default)` : "default harness")}
           </Badge>
-          {agent.model ? (
-            <Badge variant="secondary" className="gap-1 font-mono text-xs" data-testid="agent-model">
-              <Cpu className="size-3" /> {agent.model}
+          {declaredKind === "acp" ? (
+            agent.model ? (
+              <Badge variant="secondary" className="gap-1 font-mono text-xs" data-testid="agent-model">
+                <Cpu className="size-3" /> {agent.model}
+              </Badge>
+            ) : (
+              <span className="text-sm text-muted-foreground" data-testid="agent-model-empty">
+                No model override set — uses the harness&apos;s own default.
+              </span>
+            )
+          ) : agent.provider && agent.model ? (
+            // Keys rework (issue #2306, slice 3b): pinned to its own pair.
+            // Stays visible even if the provider is now gone or switched off
+            // (F6) — the badge names what is pinned, the fact that it will
+            // fail is `agentPairBrokenCopy` below, not a silent substitution.
+            <Badge variant="secondary" className="gap-1 font-mono text-xs" data-testid="agent-pair-badge">
+              <Cpu className="size-3" /> {pairLabel(agent.provider, agent.model, providers)}
             </Badge>
           ) : (
-            <span className="text-sm text-muted-foreground" data-testid="agent-model-empty">
-              {declaredKind === "acp"
-                ? "No model override set — uses the harness's own default."
-                : "No model override (this harness has no ACP transport to steer)."}
-            </span>
+            <PairFallbackLine agent={agent} providers={providers} defaultChoice={defaultChoice} />
           )}
         </div>
       )}
+      {declaredKind !== "acp" && agent.provider && agent.model && (
+        <BrokenPairNote agent={agent} providers={providers} />
+      )}
     </Section>
+  );
+}
+
+/**
+ * What an unpinned agent (no provider/model of its own) actually resolves to
+ * — decision X9's exact sentences, so this line and the LLM page's own default
+ * banner never disagree about the same broken or absent default.
+ */
+function PairFallbackLine({
+  agent,
+  providers,
+  defaultChoice,
+}: {
+  agent: AgentDetailDto;
+  providers: readonly Provider[];
+  defaultChoice: DefaultChoice | null | undefined;
+}) {
+  const resolution = resolveAgentDefault(defaultChoice, providers, agent.name ?? agent.role);
+  if (resolution.kind === "full") {
+    return (
+      <span className="text-sm text-muted-foreground" data-testid="agent-pair-default">
+        {resolution.label}
+      </span>
+    );
+  }
+  return (
+    <span className="text-sm text-status-blocked-text" data-testid="agent-pair-default">
+      {resolution.message}
+    </span>
+  );
+}
+
+/** X9: a pinned pair naming a provider that is now gone or switched off. */
+function BrokenPairNote({ agent, providers }: { agent: AgentDetailDto; providers: readonly Provider[] }) {
+  const broken = agentPairBrokenCopy(agent, providers);
+  if (!broken) return null;
+  return (
+    <p className="mt-2 text-xs text-status-blocked-text" data-testid="agent-pair-broken">
+      {broken}
+    </p>
   );
 }
 

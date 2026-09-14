@@ -370,19 +370,27 @@ mod test {
     /// client can render exactly what a confirmed retry would break.
     #[tokio::test]
     async fn in_use_envelope_carries_used_by() {
+        use crate::error::{UsedBy, UsedByAgent};
         use axum::body::to_bytes;
 
         let err = ApiError(OpenCompanyError::InUse {
             message: "Anthropic is used by the company default and 2 agents: \
                       Researcher, Web search."
                 .to_string(),
-            used_by: json!({
-                "default": true,
-                "agents": [
-                    {"id": "researcher", "name": "Researcher"},
-                    {"id": "web_search", "name": "Web search"},
+            used_by: UsedBy {
+                default: true,
+                agents: vec![
+                    UsedByAgent {
+                        id: "researcher".to_string(),
+                        name: "Researcher".to_string(),
+                    },
+                    UsedByAgent {
+                        id: "web_search".to_string(),
+                        name: "Web search".to_string(),
+                    },
                 ],
-            }),
+                surfaces: Vec::new(),
+            },
         });
         assert_eq!(err.status(), StatusCode::CONFLICT);
         assert_eq!(err.0.code(), "in_use");
@@ -394,6 +402,21 @@ mod test {
         assert!(json["error"].as_str().unwrap().contains("Anthropic"));
         assert_eq!(json["usedBy"]["default"], true);
         assert_eq!(json["usedBy"]["agents"][0]["id"], "researcher");
+        assert!(
+            json["usedBy"].get("surfaces").is_none(),
+            "empty surfaces are omitted"
+        );
         assert!(json.get("problems").is_none(), "{json}");
+    }
+
+    /// [`crate::error::UsedBy`]'s own contract: every field omitted, never
+    /// `false`/`[]`, when there is nothing to say.
+    #[test]
+    fn used_by_omits_every_empty_field() {
+        use crate::error::UsedBy;
+
+        let value = serde_json::to_value(UsedBy::default()).unwrap();
+        assert_eq!(value, serde_json::json!({}), "{value}");
+        assert!(UsedBy::default().is_empty());
     }
 }

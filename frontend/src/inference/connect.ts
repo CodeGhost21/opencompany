@@ -21,8 +21,7 @@ import {
   isReservedSlug,
   localRuntime,
 } from "./catalogue";
-import type { ManagedState } from "@/api/inference";
-import type { Provider } from "./types";
+import type { DefaultChoice, Provider } from "./types";
 
 /** One choosable row in the add dialog. */
 export interface AddOption {
@@ -121,37 +120,17 @@ export function providerMenu(
   return actions;
 }
 
-/** The slug the managed tier is offered and keyed under. */
-export const MANAGED_OPTION_SLUG = "tinyhumans";
-
 /**
- * Whether the managed tier belongs in the Cloud list.
+ * The slug TinyHumans is offered and keyed under — also the legacy Managed
+ * fallback chain's own identity in the route grammar.
  *
- * The list rule is "only what is not yet connected", and it is applied here
- * without an exception — but **managed resolves through a chain rather than a
- * record**, so "connected" is a question about resolution, not about a row
- * existing. A hosted tenant has a working managed provider nobody ever added.
- *
- * ## The one place the simple rule does not settle the product question
- *
- * At step 4 the chain resolves against the **instance's** identity: it works,
- * and the server is paying. On the plain rule that is "connected", so the entry
- * would disappear — and with it the only route from *the server pays* to *we
- * pay*, which is a decision an operator actively wants to make.
- *
- * So it stays listed at step 4. The cost is that one entry can appear in the
- * list while a row for it is also on the page; the benefit is that a capability
- * does not vanish. The Connected row carries the sentence that explains it
- * ("Billed to whoever runs this server"), so the list itself stays uniform.
- *
- * Steps 1-3 are the company's own credential in one form or another, and there
- * is nothing left to upgrade to — so it is hidden, exactly like OpenRouter once
- * you have added it.
+ * @deprecated keys-rework #2306: the name is overdue for a rename now that
+ * TinyHumans is an ordinary catalogue row (slice 2a) rather than a
+ * managed-only sentinel, but the value is a stored slug
+ * (`provider/tinyhumans/key`) and every call site below still needs it, so the
+ * rename is deferred rather than done as drive-by churn here.
  */
-export function offersManaged(managed: ManagedState | undefined): boolean {
-  if (!managed) return false;
-  return managed.source === "none" || managed.source === "instance";
-}
+export const MANAGED_OPTION_SLUG = "tinyhumans";
 
 /**
  * What each category offers, minus what is already connected.
@@ -160,36 +139,29 @@ export function offersManaged(managed: ManagedState | undefined): boolean {
  * modal shows the rest, and offering to add something twice is how you get two
  * rows for one provider.
  *
+ * TinyHumans is one more `CLOUD_PROVIDERS` row now (keys rework, issue #2306,
+ * slice 2a) rather than a special-cased list entry keyed on the legacy managed
+ * chain's resolution — `isConnected` already hides it once a `tinyhumans` row
+ * exists (an added row, or entry zero on a managed config), which is exactly
+ * the one-row rule (decision Q3). The legacy chain resolving through the
+ * company account or the instance identity with **no** row yet is still real
+ * and is shown separately, on the Connected list's own legacy row
+ * (`showsLegacyManagedRow` in `ProviderList.tsx`) — not duplicated here.
+ *
  * The detail lines differ per category because the categories ask three
  * different questions: a cloud provider is identified by the host its key goes
  * to, a local runtime by the fact that it is local, and a CLI login by whose
  * credential it borrows.
  */
-export function addOptions(
-  providers: readonly Provider[],
-  managed?: ManagedState,
-): AddOptions {
-  const managedEntry: AddOption[] = offersManaged(managed)
-    ? [
-        {
-          value: MANAGED_OPTION_SLUG,
-          label: "Managed (TinyHumans)",
-          // The endpoint host, like every other cloud row. The reason it is
-          // still offered belongs on the Connected row, not in this list.
-          detail: endpointHost(managed?.baseUrl),
-        },
-      ]
-    : [];
+export function addOptions(providers: readonly Provider[]): AddOptions {
   return {
-    cloud: managedEntry.concat(
-      CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map((p) => ({
-        value: p.slug,
-        label: p.label,
-        // The host, not the whole URL: the path is noise at a glance and the
-        // host is the part an operator recognises.
-        detail: endpointHost(p.endpoint),
-      })),
-    ),
+    cloud: CLOUD_PROVIDERS.filter((p) => !isConnected(providers, p.slug)).map((p) => ({
+      value: p.slug,
+      label: p.label,
+      // The host, not the whole URL: the path is noise at a glance and the
+      // host is the part an operator recognises.
+      detail: endpointHost(p.endpoint),
+    })),
     local: LOCAL_RUNTIMES.filter((r) => !isConnected(providers, r.slug)).map((r) => ({
       value: r.slug,
       label: r.label,
@@ -249,9 +221,11 @@ export interface CredentialAsk {
  * the dialog can offer a model rather than the host refusing after a round trip.
  */
 export function probeEndpoint(optionSlug: string, typed?: string): string | null {
+  // TinyHumans (`MANAGED_OPTION_SLUG`) is a `cloudProvider` row now (keys
+  // rework, issue #2306, slice 2a), so this branch already answers it with
+  // the proxy endpoint — no special case needed.
   const cloud = cloudProvider(optionSlug);
   if (cloud) return cloud.endpoint;
-  if (optionSlug === MANAGED_OPTION_SLUG) return null;
   return typed ? normalizeEndpoint(typed) : null;
 }
 
@@ -292,17 +266,12 @@ export function credentialAsk(optionSlug: string): CredentialAsk {
   if (cli) {
     return { title: `Connect ${cli.label}`, needsKey: false, needsEndpoint: false };
   }
-  if (optionSlug === MANAGED_OPTION_SLUG) {
-    // Its own shape: the endpoint is the platform's and is not typed, and the
-    // *other* way to set it up is an account link rather than a key — which the
-    // dialog offers beside the field rather than duplicating here.
-    return {
-      title: "Connect TinyHumans",
-      needsKey: true,
-      needsEndpoint: false,
-      keyPlaceholder: "th-...",
-    };
-  }
+  // TinyHumans (`MANAGED_OPTION_SLUG`) is a `CLOUD_PROVIDERS` row now (keys
+  // rework, issue #2306, slice 2a), so the `cloud` branch above already
+  // answers it: title "Connect TinyHumans", `needsKey: true`,
+  // `needsEndpoint: false`, placeholder "th-...". Its *other* way to set up —
+  // an account link rather than a key — is offered beside the field in
+  // `ProviderConnectDialog`, not duplicated here.
   return {
     title: "Add cloud provider",
     needsKey: true,
@@ -496,4 +465,202 @@ export function clampToProviderNameLimit(label: string): string {
   if (name.length <= MAX_PROVIDER_NAME_CHARS) return label;
   const leading = label.slice(0, label.length - label.trimStart().length);
   return leading + name.slice(0, MAX_PROVIDER_NAME_CHARS).join("");
+}
+
+// ---- the model step: every provider asks for one, always (keys rework, ------
+// ---- issue #2306, slices 2a/2b/2c/2d) ----------------------------------------
+//
+// D-model: a provider is a provider plus one chosen model, and there is no
+// bare-tier passthrough left to fall back to (2d) — so unlike the old
+// `needsModel`-gated ask, the model step is unconditional for every kind:
+// cloud, local, custom and TinyHumans alike. No tier name is ever presented as
+// a model (2d, D-no-tier).
+
+/**
+ * The workload tier names (`INFERENCE_TIERS` on the host), the one thing a
+ * model id may never equal. Kept here rather than imported from `./routing`,
+ * which is deleted with per-workload routing (phase 5b) — this list outlives
+ * it, because `check_model_id` still refuses these on every write.
+ */
+/** Whether `id` contains a C0 or C1 control character (see `checkModelId`). */
+function hasControlChar(id: string): boolean {
+  for (const ch of id) {
+    const code = ch.codePointAt(0) ?? 0;
+    if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
+const TIER_NAMES: readonly string[] = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"];
+
+/** The longest a model id may be, in Unicode code points. Mirrors `store::MAX_MODEL_ID_CHARS`. */
+export const MAX_MODEL_ID_CHARS = 256;
+
+/** Why a typed model id cannot be used. */
+export type ModelIdError = "empty" | "control" | "whitespace" | "tooLong" | "tier";
+
+/**
+ * The console half of the host's `check_model_id` — same checks, same order,
+ * counted in Unicode code points as the host counts with `chars()`. Never a
+ * network check: a catalogue can be stale, and an Azure deployment name is
+ * never in `/models` by design, so this validates shape only.
+ */
+export function checkModelId(raw: string): ModelIdError | null {
+  const id = raw.trim();
+  if (!id) return "empty";
+  // Mirrors the host's `char::is_control`: C0 controls (0x00-0x1f, 0x7f)
+  // and C1 controls (0x80-0x9f). Checked via code points rather than a
+  // regex literal, which editor and tool pipelines have a way of mangling.
+  if (hasControlChar(id)) return "control";
+  if (/\s/.test(id)) return "whitespace";
+  if ([...id].length > MAX_MODEL_ID_CHARS) return "tooLong";
+  if (TIER_NAMES.includes(id)) return "tier";
+  return null;
+}
+
+/** What to say about a model id {@link checkModelId} refused. */
+export function modelIdErrorCopy(error: ModelIdError): string {
+  switch (error) {
+    case "empty":
+      return "Choose a model.";
+    case "control":
+      return "A model id cannot contain control characters.";
+    case "whitespace":
+      return "A model id cannot contain spaces.";
+    case "tooLong":
+      return `A model id can be at most ${MAX_MODEL_ID_CHARS} characters.`;
+    case "tier":
+      return "That is a workload name, not a model. Choose a model id.";
+  }
+}
+
+/** What the model step is fed: a list already read, or a reason there is none. */
+export interface ModelAsk {
+  /** The ids to offer, exactly as the endpoint published them. */
+  models: string[];
+  /** An endpoint whose `model` field keys on a deployment name `/models` never publishes. */
+  freeTextOnly: boolean;
+  /** Why the list is empty, when it is worth saying — never shown as a failure to save. */
+  error?: string;
+}
+
+/**
+ * Builds the model step's input from a draft probe's answer.
+ *
+ * The step **always opens** now (D-model): a failed or empty probe still opens
+ * it, in free text, with the reason said rather than swallowed — never "add
+ * anyway skips the model", because a provider is never shown as set without
+ * one.
+ */
+export function modelAskFromProbe(
+  url: string | null,
+  probe: { ok: boolean; message?: string; models?: string[] } | null,
+  isAzureEndpoint: (url: string | null | undefined) => boolean,
+): ModelAsk {
+  if (url === null) return { models: [], freeTextOnly: false };
+  if (!probe || !probe.ok) {
+    return {
+      models: [],
+      freeTextOnly: false,
+      error: `Could not read this provider's models: ${probe?.message ?? "no answer"}. Type a model id.`,
+    };
+  }
+  return { models: probe.models ?? [], freeTextOnly: isAzureEndpoint(url) };
+}
+
+/** Whether the company's stored default names a provider but no model — Q1's bare-slug case. */
+export function defaultNeedsModel(choice: DefaultChoice | null | undefined): boolean {
+  return choice != null && choice.model == null;
+}
+
+/**
+ * Whether this row is the company's **full** default: the slug matches and a
+ * model is chosen. A resolved-but-unmarked default (nothing stored at all) is
+ * never full — `provider.isDefault` alone answers "unrouted work resolves
+ * here", which is a different question from "there is a full default to show".
+ */
+export function isFullDefault(
+  provider: Pick<Provider, "slug">,
+  choice: DefaultChoice | null | undefined,
+): boolean {
+  return choice != null && choice.model != null && choice.provider === provider.slug;
+}
+
+/** "Default · <model>" for a row holding the full default, else plain "Default". */
+export function defaultBadgeLabel(
+  provider: Pick<Provider, "slug">,
+  choice: DefaultChoice | null | undefined,
+): string {
+  return isFullDefault(provider, choice) && choice ? `Default · ${choice.model}` : "Default";
+}
+
+/**
+ * Whether a row's "Needs a model" chip should show: its own stored model is
+ * ambiguous (two or more distinct ids, never guessed), or it is the row a
+ * bare-slug default names.
+ */
+export function rowNeedsModel(
+  provider: Pick<Provider, "slug" | "modelAmbiguous">,
+  choice: DefaultChoice | null | undefined,
+): boolean {
+  return Boolean(provider.modelAmbiguous) || (defaultNeedsModel(choice) && choice?.provider === provider.slug);
+}
+
+/**
+ * What to seed the "Set as default" model field with: the row's own model when
+ * it has one, else the stored choice's model when the choice names this row
+ * (the bare-slug case), else blank.
+ */
+export function defaultModelPrefill(
+  provider: Pick<Provider, "slug" | "model">,
+  choice: DefaultChoice | null | undefined,
+): string {
+  if (provider.model) return provider.model;
+  if (choice?.provider === provider.slug && choice.model) return choice.model;
+  return "";
+}
+
+// ---- shared copy (orchestrator decision X9, 2026-09-15) ---------------------
+//
+// Exact sentences, used verbatim wherever the console builds one of these
+// states itself. Where the host's own refusal already carries this wording,
+// its message is shown verbatim instead (`stripEnvelopePrefix`) — these exist
+// for the states the console detects client-side, from a status read, before
+// any request naming them is even sent.
+
+/** Whether `slug` names a provider this company no longer has, or has switched off. */
+export function providerState(
+  slug: string,
+  providers: readonly Pick<Provider, "slug" | "enabled">[],
+): "ok" | "removed" | "disabled" {
+  const row = providers.find((p) => p.slug === slug);
+  if (!row) return "removed";
+  return row.enabled ? "ok" : "disabled";
+}
+
+/** X9: "Choose a model for {Provider} before saving." */
+export function modelRequiredCopy(providerLabel: string): string {
+  return `Choose a model for ${providerLabel} before saving.`;
+}
+
+/**
+ * X9 / X14: the company default names a provider this company no longer has,
+ * or has switched off, or `null` when the default is fine — including when it
+ * is unset, or a bare slug with no model to be "broken" about (that is
+ * {@link defaultNeedsModel}'s banner instead).
+ *
+ * Decision X14 (2026-09-15): disabling or deleting the default's provider
+ * never clears the stored default, so this state is reachable and durable —
+ * the same sentence renders here and in the agent editor's fallback line for
+ * every agent whose own pair is unset.
+ */
+export function defaultBrokenCopy(
+  choice: DefaultChoice | null | undefined,
+  providers: readonly Pick<Provider, "slug" | "label" | "enabled">[],
+): string | null {
+  if (!choice || choice.model == null) return null;
+  const state = providerState(choice.provider, providers);
+  if (state === "ok") return null;
+  const label = providers.find((p) => p.slug === choice.provider)?.label ?? choice.provider;
+  return `The company default uses ${label}, which is ${state === "removed" ? "removed" : "turned off"}. Choose a new default in API Keys → LLM.`;
 }

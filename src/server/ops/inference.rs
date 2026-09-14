@@ -140,7 +140,15 @@ struct ModelCatalogDto {
 /// exactly the companies that never configured anything.
 async fn resolved_endpoint(
     runtime: &CompanyRuntime,
-) -> Result<Option<(String, Option<String>, catalogue::AuthStyle)>, ApiError> {
+) -> Result<
+    Option<(
+        String,
+        Option<String>,
+        catalogue::AuthStyle,
+        catalogue::CatalogShape,
+    )>,
+    ApiError,
+> {
     let (manifest, _harness_id) = manifest_inference(runtime).await?;
     let secrets = runtime.secrets().as_ref();
     let platform = platform_default(&crate::app::config::ProcessEnv);
@@ -155,7 +163,11 @@ async fn resolved_endpoint(
     // value and the header it belongs in. Splitting them is how the catalog
     // read came to send every provider a bearer.
     let auth = catalogue::auth_style_for(&decl.provider);
-    Ok(Some((decl.base_url.clone(), bearer, auth)))
+    // Keys rework (#2306), slice 2a: the shape this endpoint's `/models`
+    // answers in, so a `tinyhumans` row (or an env default already pointed
+    // at the proxy) reads its paged envelope rather than the OpenAI shape.
+    let shape = catalogue::catalog_shape_for(&decl.provider, &decl.base_url);
+    Ok(Some((decl.base_url.clone(), bearer, auth, shape)))
 }
 
 /// `GET …/inference/models` — the model catalog of the endpoint **this company**
@@ -169,7 +181,7 @@ async fn resolved_endpoint(
 /// serves.
 async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let Some((base_url, bearer, auth)) = resolved_endpoint(runtime).await? else {
+    let Some((base_url, bearer, auth, shape)) = resolved_endpoint(runtime).await? else {
         // Nothing resolves — not even a platform default on this host. There is
         // no endpoint to ask, and saying so beats listing some other vendor's
         // catalog as if it were this company's.
@@ -194,6 +206,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
         bearer.as_deref(),
         Some(runtime.id().as_ref()),
         auth,
+        shape,
     )
     .await
     {
@@ -1344,6 +1357,7 @@ async fn test_config(company: ScopedCompany) -> Response {
                     bearer.as_deref(),
                     Some(runtime.id().as_ref()),
                     catalogue::auth_style_for(&decl.provider),
+                    catalogue::catalog_shape_for(&decl.provider, &decl.base_url),
                 )
                 .await;
                 decl.with_vocabulary(vocabulary)
@@ -3638,6 +3652,97 @@ base_url = "https://byo.example/v1"
             None,
         )
         .await;
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(default_slug(&dto).as_deref(), Some("first"));
+    }
+
+    /// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+    /// disabling, clearing the key of, or deleting the provider
+    /// `inference/default` names never rewrites that **stored** value — only
+    /// the derived `isDefault`/`defaultChoice` view changes, via
+    /// `resolve::primary`'s existing first-enabled fallback. This is the
+    /// regression `disabling_or_deleting_the_default_never_leaves_it_marked`
+    /// above cannot catch, because it only reads that derived view (which
+    /// already looked the same whether or not the raw marker was cleared).
+    #[tokio::test]
+    async fn a_delete_disable_or_key_clear_never_rewrites_the_stored_default_marker() {
+        use crate::company::inference::store;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        let id = CompanyId::new("acme");
+
+        for label in ["First", "Second"] {
+            send(
+                &state,
+                "POST",
+                "/api/v1/company/inference/providers",
+                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE })),
+            )
+            .await;
+        }
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/default",
+            None,
+        )
+        .await;
+
+        async fn raw_marker(state: &AppState, id: &CompanyId) -> Option<String> {
+            let runtime = state.registry().get(id).expect("registered");
+            let secrets = runtime.secrets();
+            store::load_default_slug(id, secrets.as_ref())
+                .await
+                .unwrap()
+        }
+        assert_eq!(raw_marker(&state, &id).await.as_deref(), Some("second"));
+
+        // Disabling it: the stored marker is untouched.
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/enabled",
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a disable must not rewrite inference/default"
+        );
+
+        // Clearing its key (edit with an empty key): still untouched.
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/second",
+            Some(json!({ "key": "" })),
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a key clear must not rewrite inference/default"
+        );
+
+        // Deleting it: still untouched, even though no row now answers to it.
+        send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/second",
+            None,
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a delete must not rewrite inference/default"
+        );
+
+        // The derived view still degrades gracefully — this is what the
+        // console's status read and banner are for.
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
         assert_eq!(default_slug(&dto).as_deref(), Some("first"));
     }

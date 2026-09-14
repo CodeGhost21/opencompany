@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import type { OpenCompanyClient } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,16 +14,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   MANAGED_OPTION_SLUG,
+  checkModelId,
   checkProviderName,
   checkSlug,
   clampToProviderNameLimit,
   credentialAsk,
   customProviderReady,
   endpointHasCredentials,
+  modelIdErrorCopy,
   normalizeEndpoint,
   slugErrorCopy,
   slugify,
 } from "./connect";
+import type { ModelAsk } from "./connect";
+import { ModelField } from "./ModelField";
 import type { Provider } from "./types";
 
 /** What connecting one provider sends. */
@@ -31,23 +36,12 @@ export interface ConnectDraft {
   label?: string;
   baseUrl?: string;
   key?: string;
-  /** The model every workload routes to, once the endpoint has been asked. */
+  /** The one model this row serves — required by the time the final submit fires (D-model). */
   model?: string;
   addAnyway?: boolean;
 }
 
-/**
- * The model step, once the endpoint has said it needs one.
- *
- * `models` is that endpoint's own published catalogue, so the operator chooses
- * from what is actually there rather than typing an id and finding out on the
- * first turn. It can be empty — plenty of endpoints serve inference and publish
- * no catalog — and the field stays free text either way, because an Azure
- * deployment name is never in `/models` by design.
- */
-export interface ModelAsk {
-  models: string[];
-}
+export type { ModelAsk };
 
 /**
  * The fields a chosen provider needs, and nothing else.
@@ -58,12 +52,23 @@ export interface ModelAsk {
  * the submit path is where the credential is, which is the last thing worth
  * having four copies of.
  *
+ * ## Three steps, one dialog (keys rework, issue #2306)
+ *
+ * `"details"` — the name/endpoint/key fields every kind but a CLI login asks
+ * for. `"model"` — once step 1 has been submitted, this ALWAYS opens next (2c,
+ * D-model: there is no longer a "this endpoint resolves tiers itself, skip the
+ * model" branch — no tier name is ever sent as a model, 2d). `"edit"` — an
+ * existing row's own fields, plus its own model, all in one form.
+ *
+ * The step-1 fields stay mounted (`hidden`, not unmounted) through the model
+ * step, so their state survives the transition and `submit` still sends them —
+ * only the model step's own fields are visible.
+ *
  * ## The custom shape is this one plus a name
  *
  * A custom provider adds a **Name**, and the slug falls out of it rather than
  * being typed. The preview line under the field is not decoration: the slug is
- * what a routing entry will say, so the operator should see it before they
- * commit to it rather than meet it later in a routing row.
+ * what the operator should see before they commit to it.
  *
  * The slug is checked for empty, in-use and reserved **before the Add button is
  * enabled**, which is the console half of the same check the host performs
@@ -97,6 +102,8 @@ function keyToSend(needsKey: boolean, editing: boolean, typed: string): string |
 }
 
 export function ProviderConnectDialog({
+  client,
+  company,
   optionSlug,
   providers,
   editing,
@@ -104,18 +111,21 @@ export function ProviderConnectDialog({
   error,
   offerAddAnyway,
   modelAsk,
+  replacesKey,
   onCancel,
+  onBack,
   onSubmit,
 }: {
+  client: OpenCompanyClient;
+  company: string | null;
   /** The chosen option, or `null` when the dialog is closed. */
   optionSlug: string | null;
   providers: readonly Provider[];
   /**
    * The row this dialog is editing, or `null` when it is adding one.
    *
-   * Carries the two things an edit must not invent: the stored label and the
-   * stored endpoint. It is also what excludes the row from its own slug
-   * collision check.
+   * Carries the things an edit must not invent: the stored label, endpoint and
+   * model. It is also what excludes the row from its own slug collision check.
    */
   editing?: Provider | null;
   busy: boolean;
@@ -124,12 +134,21 @@ export function ProviderConnectDialog({
   /** Whether the last failure was a probe failure, which is the only one that unlocks "add anyway". */
   offerAddAnyway: boolean;
   /**
-   * The endpoint's catalogue, once it has said it cannot resolve a tier name on
-   * its own. `null` until then — the field does not appear at all for a gateway
-   * that resolves `agentic-v1` itself, because there is nothing to ask.
+   * The endpoint's catalogue, once step 1 has been submitted. `null` before
+   * then — the model step does not appear at all until it does, and it always
+   * does once it appears (D-model): there is no longer a "resolves tiers
+   * itself, no model needed" case.
    */
   modelAsk: ModelAsk | null;
+  /**
+   * Whether connecting this option replaces a key already saved for the legacy
+   * Managed row (keys rework, issue #2306, slice 2a) — TinyHumans and the
+   * legacy chain share one slot, `provider/tinyhumans/key`.
+   */
+  replacesKey?: boolean;
   onCancel: () => void;
+  /** Back from the model step to the details step, without closing the dialog. */
+  onBack: () => void;
   onSubmit: (draft: ConnectDraft) => void;
 }) {
   const open = optionSlug !== null;
@@ -142,9 +161,9 @@ export function ProviderConnectDialog({
   // The caller gives this component a `key` of the option plus the row being
   // edited, so React unmounts and remounts it on every open and these
   // initialisers run once, before first paint. An effect that reset the same
-  // three fields was a race with its own dialog: `useEffect` is passive, so it
-  // runs *after* the browser paints the visible dialog, and anything typed into
-  // a field in between — a fast operator, or a browser test — was wiped by it
+  // fields was a race with its own dialog: `useEffect` is passive, so it runs
+  // *after* the browser paints the visible dialog, and anything typed into a
+  // field in between — a fast operator, or a browser test — was wiped by it
   // with nothing on screen to say so.
   //
   // **A conventional endpoint is a starting point for an ADD and a wrong answer
@@ -161,7 +180,16 @@ export function ProviderConnectDialog({
   // it and nothing here could display it — so an empty field in edit mode means
   // "leave it alone", which is what `submit` sends.
   const [key, setKey] = useState("");
-  const [model, setModel] = useState("");
+  // Seeded from the row's own model in edit mode — leaving it unchanged sends
+  // nothing (`submit` compares against this same seed).
+  const [model, setModel] = useState(() => editing?.model ?? "");
+  // Orchestrator decision X1 (2026-09-15): the first provider a company
+  // connects always becomes its default — there is no checkbox to untick, and
+  // no client-sent `makeDefault` flag. The host decides and sets it; this
+  // dialog only says so. Every later add offers no default control at all —
+  // "Set as default" (`DefaultModelDialog`) is the one way to change it after
+  // connecting, and it confirms before replacing an existing full default.
+  const firstProvider = providers.length === 0;
 
   // The row being edited is not its own collision. Its slug is already taken —
   // by it — and `edit` is keyed on the stored slug rather than on this one, so
@@ -175,13 +203,20 @@ export function ProviderConnectDialog({
   // limit is what the operator can actually see and fix — the slug is derived.
   const slugError = custom ? (checkProviderName(label) ?? checkSlug(rivals, slug)) : null;
   const endpointOk = !ask.needsEndpoint || normalizeEndpoint(baseUrl) !== null;
-  // Once the endpoint has said it needs a model, it needs one: adding without it
-  // is the reported dead end, and the host refuses it anyway.
-  const modelOk = !modelAsk || model.trim().length > 0;
-  const ready =
+  const modelError = model.trim() ? checkModelId(model) : "empty";
+
+  const step: "details" | "model" | "edit" = editing ? "edit" : modelAsk ? "model" : "details";
+
+  const detailsOk =
     (custom
       ? customProviderReady(rivals, { label, baseUrl })
-      : endpointOk && (!ask.needsKey || key.trim().length > 0)) && modelOk;
+      : endpointOk && (!ask.needsKey || key.trim().length > 0));
+  const ready =
+    step === "model"
+      ? modelError === null
+      : step === "edit"
+        ? detailsOk && modelError === null
+        : detailsOk;
 
   const submit = (addAnyway: boolean) =>
     onSubmit({
@@ -202,6 +237,10 @@ export function ProviderConnectDialog({
       // silently disable every turn routed through it. The field starts empty
       // because a stored key cannot be shown, so empty has to mean "unchanged".
       key: keyToSend(ask.needsKey, editing != null, key),
+      // Sent whenever there is a value to send. In edit mode an unchanged
+      // value is simply the same string the host already has, so sending it
+      // is a no-op rather than a risk — unlike the key, a model is never
+      // write-only, so there is nothing to accidentally overwrite with a mask.
       model: model.trim() || undefined,
       addAnyway,
     });
@@ -210,11 +249,9 @@ export function ProviderConnectDialog({
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
       <DialogContent className="sm:max-w-md" data-testid="inference-connect-provider">
         <DialogHeader>
-          <DialogTitle>{ask.title}</DialogTitle>
-          {/* Where the key goes, said plainly, or nothing. The reference this
-              layout is ported from renders a duplicated interpolation here; a
-              broken string is not a detail to reproduce faithfully. */}
-          {ask.needsKey ? (
+          <DialogTitle>{step === "model" ? `${ask.title}: choose a model` : ask.title}</DialogTitle>
+          {/* Where the key goes, said plainly, or nothing. */}
+          {ask.needsKey && step !== "model" ? (
             <DialogDescription>
               The key is stored on this company and never shown again.
             </DialogDescription>
@@ -222,148 +259,159 @@ export function ProviderConnectDialog({
         </DialogHeader>
 
         <div className="grid gap-4">
-          {custom && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="inference-connect-name">Name</Label>
-              <Input
-                id="inference-connect-name"
-                value={label}
-                placeholder="My Provider"
-                autoComplete="off"
-                // The host holds this rule; clamping here only stops a paste
-                // becoming a 400 the operator has to read to understand. Counted
-                // in code points, as the host counts — never `maxLength`, which
-                // counts UTF-16 units and refuses names the host accepts.
-                onChange={(e) => setLabel(clampToProviderNameLimit(e.target.value))}
-              />
-              {/* The slug is what a routing entry will say, so the operator
-                  sees it before they commit to it rather than meeting it later
-                  in a routing row. */}
-              <p
-                className="font-mono text-xs text-muted-foreground"
-                data-testid="inference-slug-preview"
-              >
-                Slug: {slug || "None"}
+          {/* The step-1 fields stay mounted (not unmounted) through the model
+              step, so React keeps their state and `submit` still sends them —
+              they are simply hidden while the model step has the floor. */}
+          <div className={step === "model" ? "hidden" : "grid gap-4"}>
+            {custom && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="inference-connect-name">Name</Label>
+                <Input
+                  id="inference-connect-name"
+                  value={label}
+                  placeholder="My Provider"
+                  autoComplete="off"
+                  // The host holds this rule; clamping here only stops a paste
+                  // becoming a 400 the operator has to read to understand. Counted
+                  // in code points, as the host counts — never `maxLength`, which
+                  // counts UTF-16 units and refuses names the host accepts.
+                  onChange={(e) => setLabel(clampToProviderNameLimit(e.target.value))}
+                />
+                {/* The slug is what the operator will see elsewhere on this
+                    page, so they should see it before they commit to it. */}
+                <p
+                  className="font-mono text-xs text-muted-foreground"
+                  data-testid="inference-slug-preview"
+                >
+                  Slug: {slug || "None"}
+                </p>
+                {slugError && (
+                  <p className="text-xs text-status-blocked-text" data-testid="inference-slug-error">
+                    {slugErrorCopy(slugError)}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {ask.needsEndpoint && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="inference-connect-url">
+                  {custom ? "OpenAI URL" : "Endpoint"}
+                </Label>
+                <Input
+                  id="inference-connect-url"
+                  aria-describedby={error ? "inference-connect-error" : undefined}
+                  value={baseUrl}
+                  placeholder="https://api.openai.com/v1"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                />
+                {baseUrl.trim() && !endpointOk && (
+                  <p className="text-xs text-status-blocked-text">
+                    {endpointHasCredentials(baseUrl)
+                      ? "Remove the username and password from the URL and put the credential in the API key field — an endpoint is stored as written and is readable by everyone who can see this company's settings."
+                      : "That must be an http or https address."}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {ask.needsKey && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="inference-connect-key">API Key</Label>
+                <Input
+                  id="inference-connect-key"
+                  aria-describedby={error ? "inference-connect-error" : undefined}
+                  type="password"
+                  value={key}
+                  placeholder={ask.keyPlaceholder ?? "sk-..."}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  onChange={(e) => setKey(e.target.value)}
+                />
+                {replacesKey && (
+                  <p
+                    className="text-xs text-muted-foreground"
+                    data-testid="inference-connect-replaces-key"
+                  >
+                    A key is already saved for Managed. Connecting TinyHumans replaces it with
+                    this one.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Managed has two ways in, and only one of them is a key. The other
+                writes the company's TinyHumans **account**, which is a different
+                credential with a different lifecycle — it is rotated, and it moves
+                every brokered surface at once, not just this one. It already has a
+                home on Connections → Account, and a second form for one credential
+                is how two surfaces come to disagree about whether a company has
+                it. So this links there rather than duplicating it. */}
+            {managed && (
+              <div className="grid gap-1.5 rounded-md border border-border px-3 py-2">
+                <p className="text-sm font-medium">Or connect your TinyHumans account</p>
+                <p className="text-xs text-muted-foreground">
+                  One account key pays for thinking and for app connections, and rotating it
+                  reaches both. Set it up on Connections → Account.
+                </p>
+                <a
+                  className="text-xs font-medium underline underline-offset-4"
+                  href="#/connections/api-key"
+                  data-testid="inference-managed-account-link"
+                  onClick={onCancel}
+                >
+                  Go to Account
+                </a>
+              </div>
+            )}
+
+            {!ask.needsKey && !ask.needsEndpoint && (
+              <p className="text-sm text-muted-foreground">
+                Nothing to enter — another command line tool already holds this credential.
               </p>
-              {slugError && (
-                <p className="text-xs text-status-blocked-text" data-testid="inference-slug-error">
-                  {slugErrorCopy(slugError)}
-                </p>
-              )}
-            </div>
-          )}
+            )}
+          </div>
 
-          {ask.needsEndpoint && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="inference-connect-url">
-                {custom ? "OpenAI URL" : "Endpoint"}
-              </Label>
-              <Input
-                id="inference-connect-url"
-                aria-describedby={error ? "inference-connect-error" : undefined}
-                value={baseUrl}
-                placeholder="https://api.openai.com/v1"
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono text-xs"
-                onChange={(e) => setBaseUrl(e.target.value)}
-              />
-              {baseUrl.trim() && !endpointOk && (
-                <p className="text-xs text-status-blocked-text">
-                  {endpointHasCredentials(baseUrl)
-                    ? "Remove the username and password from the URL and put the credential in the API key field — an endpoint is stored as written and is readable by everyone who can see this company's settings."
-                    : "That must be an http or https address."}
-                </p>
-              )}
-            </div>
-          )}
-
-          {ask.needsKey && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="inference-connect-key">API Key</Label>
-              <Input
-                id="inference-connect-key"
-                aria-describedby={error ? "inference-connect-error" : undefined}
-                type="password"
-                value={key}
-                placeholder={ask.keyPlaceholder ?? "sk-..."}
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono text-xs"
-                onChange={(e) => setKey(e.target.value)}
-              />
-            </div>
-          )}
-
-          {/* **The ask that never happened.** `add_provider` wrote four empty
-              tier mappings and nothing anywhere asked which model this provider
-              should serve, so the abstract tier name went out as the model id
-              and the vendor 404'd it. `TierVocabulary::Unknown` exists precisely
-              to refuse to guess and `tier_defaults()` returns an empty map for
-              it *so the console will ask* — this is the console asking, with
-              that endpoint's own catalogue in hand. */}
-          {modelAsk && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="inference-connect-model">Model</Label>
-              <Input
-                id="inference-connect-model"
+          {/* The model step. It always opens once step 1 succeeds (D-model) —
+              every kind asks, always, because a provider is never shown as set
+              without a model and no tier name is ever sent as one (2d). */}
+          {(step === "model" || step === "edit") && (
+            <div className="grid gap-1.5" data-testid="inference-connect-model-step">
+              <ModelField
+                client={client}
+                company={company}
+                slug={step === "edit" ? (editing?.slug ?? null) : null}
+                id={step === "edit" ? "inference-edit-model" : "inference-connect-model"}
                 value={model}
-                list={modelAsk.models.length > 0 ? "inference-connect-model-options" : undefined}
-                placeholder="claude-sonnet-5"
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono text-xs"
-                data-testid="inference-connect-model"
-                onChange={(e) => setModel(e.target.value)}
+                disabled={busy}
+                onChange={setModel}
+                // In the add flow the list is already in hand from the draft
+                // probe that opened this step — nothing is fetched again. In
+                // edit mode the row is already saved, so its own catalogue is
+                // read live instead (`slug` above, `models` omitted).
+                {...(step === "model" && modelAsk
+                  ? { models: modelAsk.models, freeTextOnly: modelAsk.freeTextOnly, catalogError: modelAsk.error }
+                  : {})}
               />
-              {/* A datalist rather than a select: a catalogue can be empty, or
-                  can omit an id that still works — an Azure deployment name is
-                  never published by design — so the list suggests and the field
-                  still accepts anything. */}
-              {modelAsk.models.length > 0 && (
-                <datalist id="inference-connect-model-options">
-                  {modelAsk.models.map((id) => (
-                    <option key={id} value={id} />
-                  ))}
-                </datalist>
+              {model.trim() && modelError && (
+                <p className="text-xs text-status-blocked-text" data-testid="inference-model-id-error">
+                  {modelIdErrorCopy(modelError)}
+                </p>
               )}
-              <p className="text-xs text-muted-foreground">
-                {modelAsk.models.length > 0
-                  ? `This endpoint does not resolve workload names like agentic-v1, so it needs a model id. It publishes ${modelAsk.models.length} — pick one, or type another. Every workload starts on it; change that under Routing.`
-                  : "This endpoint does not resolve workload names like agentic-v1 and publishes no catalogue, so the model id has to be typed. Every workload starts on it; change that under Routing."}
-              </p>
+              {/* Decision X1: the first provider a company connects always
+                  becomes its default. No checkbox — the host decides, this
+                  just says so. Every later add offers no default control at
+                  all; "Set as default" on the row is the way to change it. */}
+              {step === "model" && firstProvider && (
+                <p className="text-xs text-muted-foreground" data-testid="inference-first-default-note">
+                  This becomes the company default.
+                </p>
+              )}
             </div>
-          )}
-
-          {/* Managed has two ways in, and only one of them is a key. The other
-              writes the company's TinyHumans **account**, which is a different
-              credential with a different lifecycle — it is rotated, and it moves
-              every brokered surface at once, not just this one. It already has a
-              home on Connections → Account, and a second form for one credential
-              is how two surfaces come to disagree about whether a company has
-              it. So this links there rather than duplicating it. */}
-          {managed && (
-            <div className="grid gap-1.5 rounded-md border border-border px-3 py-2">
-              <p className="text-sm font-medium">Or connect your TinyHumans account</p>
-              <p className="text-xs text-muted-foreground">
-                One account key pays for thinking and for app connections, and rotating it
-                reaches both. Set it up on Connections → Account.
-              </p>
-              <a
-                className="text-xs font-medium underline underline-offset-4"
-                href="#/connections/api-key"
-                data-testid="inference-managed-account-link"
-                onClick={onCancel}
-              >
-                Go to Account
-              </a>
-            </div>
-          )}
-
-          {!ask.needsKey && !ask.needsEndpoint && (
-            <p className="text-sm text-muted-foreground">
-              Nothing to enter — another command line tool already holds this credential.
-            </p>
           )}
 
           {/* Always present, never mounted with its text: a live region that
@@ -381,13 +429,21 @@ export function ProviderConnectDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
-            Cancel
-          </Button>
+          {step === "model" ? (
+            <Button type="button" variant="outline" onClick={onBack} disabled={busy} data-testid="inference-connect-back">
+              Back
+            </Button>
+          ) : (
+            <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
+              Cancel
+            </Button>
+          )}
           {/* Gated on a typed probe failure, never on a boolean: a slug
               collision or a failed key write must not unlock it, because
-              neither is evidence that the endpoint is fine. */}
-          {offerAddAnyway && (
+              neither is evidence that the endpoint is fine. Only meaningful on
+              the model step, since that is the step whose submit performs the
+              write the probe failure would otherwise block. */}
+          {offerAddAnyway && step === "model" && (
             <Button
               type="button"
               variant="outline"
@@ -407,7 +463,17 @@ export function ProviderConnectDialog({
             data-testid="inference-connect-submit"
             onClick={() => submit(false)}
           >
-            {busy ? "Testing…" : custom ? "Add Provider" : "Connect"}
+            {busy
+              ? step === "details"
+                ? "Reading models…"
+                : "Saving…"
+              : step === "details"
+                ? "Continue"
+                : step === "edit"
+                  ? "Save"
+                  : custom
+                    ? "Add Provider"
+                    : "Connect"}
           </Button>
         </DialogFooter>
       </DialogContent>

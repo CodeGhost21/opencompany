@@ -347,6 +347,37 @@ async fn add_provider(
         ))));
     }
 
+    // Keys rework (#2306), slice 2a: TinyHumans always needs a model, whatever
+    // its catalog contains — unlike `needs_an_explicit_model` below, this is
+    // not a content-based backstop; the console always asks (`asksForModel`)
+    // and the host refuses before any write so a curl caller gets the same
+    // floor. 2c generalizes this to every kind with `check_model_id`; this
+    // check is kept narrow to TinyHumans until that slice lands so it never
+    // has to move.
+    if plan.slug == crate::company::inference::MANAGED_SLUG && asked_model.is_none() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "Choose a model for TinyHumans.".to_string(),
+        )));
+    }
+
+    // Keys rework (#2306), slice 2a: `provider/tinyhumans/key` can already
+    // hold the legacy Managed row's key with no index record behind it (set
+    // through `PUT …/inference/managed/key`, or the account-key fan-out).
+    // Every rollback below clears that slot (`roll_back_add` →
+    // `store::delete_provider`, `clear_orphaned_key`), so a failed TinyHumans
+    // add would silently delete a key nothing here wrote. Read the old value
+    // now and put it back after any rollback.
+    let previous_key = if plan.slug == crate::company::inference::MANAGED_SLUG {
+        secrets
+            .get(runtime.id(), &store::provider_key_key(&plan.slug))
+            .await
+            .map_err(ApiError)?
+            .map(|crate::ports::types::SecretValue(raw)| raw)
+            .filter(|raw| !raw.trim().is_empty())
+    } else {
+        None
+    };
+
     // Step 3: the credential first. The probe resolves the key by slug, so it
     // has to land before the record does.
     let key = body.key.map(|k| k.trim().to_string()).unwrap_or_default();
@@ -389,6 +420,7 @@ async fn add_provider(
             if !key.is_empty() {
                 clear_orphaned_key(runtime, &plan.slug).await;
             }
+            restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
             return Err(ApiError(err));
         }
     };
@@ -407,6 +439,7 @@ async fn add_provider(
     let auth = catalogue::auth_style_for(&plan.kind);
     let credential = (!key.is_empty()).then_some(key.as_str());
     let worth_probing = plan.probes && (auth == catalogue::AuthStyle::None || credential.is_some());
+    let shape = catalogue::catalog_shape_for(&plan.kind, &provider.base_url);
     let outcome = if worth_probing {
         Some(
             probe::probe_models(
@@ -414,6 +447,7 @@ async fn add_provider(
                 credential,
                 auth,
                 probe::default_policy(),
+                shape,
             )
             .await,
         )
@@ -441,6 +475,7 @@ async fn add_provider(
             // caller, because a console is not a security boundary.
             if asked_model.is_none() && needs_an_explicit_model(&models) {
                 roll_back_add(runtime, &provider).await;
+                restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
                 return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
                     "{} does not resolve workload names like `agentic-v1`, so it needs a model id \
                      to route to. It publishes {} model{} — pick one and add it again.",
@@ -479,6 +514,7 @@ async fn add_provider(
                 && !body.add_anyway
             {
                 roll_back_add(runtime, &provider).await;
+                restore_previous_key(runtime, &plan.slug, previous_key.as_deref()).await;
                 // The **refusal** wording, not `describe`'s: nothing was saved,
                 // and every one of `describe`'s sentences but the auth one
                 // opens by saying it was.
@@ -715,6 +751,16 @@ fn plan_add(
     let invalid = |msg: String| ApiError(OpenCompanyError::InvalidRequest(msg));
 
     if let Some(cloud) = catalogue::cloud_provider(kind) {
+        // Keys rework (#2306), slice 2a: TinyHumans is an ordinary cloud row,
+        // but unlike every other cloud kind it has no fallback identity to
+        // probe with (D-set forbids reusing `tinyhumans/key` or the instance
+        // token on an indexed row — `catalog_shape_for`'s doc explains why an
+        // indexed row never proxies). A keyless add would therefore add a row
+        // with nothing to authenticate its probe, silently landing on
+        // `unchecked` health forever.
+        if cloud.slug == crate::company::inference::MANAGED_SLUG && !has_key {
+            return Err(invalid("TinyHumans needs an API key.".to_string()));
+        }
         return Ok(AddPlan {
             slug: cloud.slug.to_string(),
             label: cloud.label.to_string(),
@@ -869,6 +915,38 @@ async fn clear_orphaned_key(runtime: &CompanyRuntime, slug: &str) {
             "could not clear the credential of a provider whose record failed to write;              it is orphaned at provider/<slug>/key and re-adding this slug would reuse it",
         );
     }
+}
+
+/// Puts back a key that an add replaced and then rolled back (keys rework,
+/// issue #2306, slice 2a). `None` does nothing.
+///
+/// `provider/<slug>/key` is one slot; a TinyHumans add overwrites it before it
+/// knows whether the add will stick (`add_provider` writes the key before the
+/// record, so the probe can read it by slug). A rollback then clears that same
+/// slot (`roll_back_add` → `store::delete_provider`; `clear_orphaned_key`),
+/// taking the legacy Managed row's key with it even though nothing about that
+/// row was touched. This restores exactly what was there before the request.
+async fn restore_previous_key(runtime: &CompanyRuntime, slug: &str, previous: Option<&str>) {
+    let Some(previous) = previous else {
+        return;
+    };
+    if let Err(err) = runtime
+        .secrets()
+        .set(
+            runtime.id(),
+            &store::provider_key_key(slug),
+            crate::ports::types::SecretValue(previous.to_string()),
+        )
+        .await
+    {
+        tracing::error!(
+            company = %runtime.id(),
+            provider = %slug,
+            error = %err,
+            "could not restore the key a rolled-back add had replaced",
+        );
+    }
+    crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
 }
 
 /// Records health, never failing the request over it.
@@ -1147,11 +1225,18 @@ async fn delete_provider(
             "removed a provider but could not clear its health record",
         );
     }
-    // The marker goes with the record, for the same reason the routes do: a
-    // marker naming a provider that is gone is a default nobody can see and
-    // nobody chose. `primary` would fall back correctly anyway — this is the
-    // write path keeping that rare rather than relying on it.
-    clear_default_if_marked(runtime, &provider.slug).await;
+    // Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+    // `inference/default` is left exactly as it was, even though it may now
+    // name a slug with no row at all. An operator who confirmed this delete
+    // made one decision — remove the provider — and a silent second one —
+    // "and also pick a new default" — is not that decision. A **full**
+    // `{provider, model}` default (2b/2c) fails a turn closed when the marked
+    // provider is gone, via `resolve_choice`; a legacy bare-slug marker keeps
+    // its pre-existing behaviour of falling back to `resolve::primary`'s
+    // first-enabled provider (D-legacy: unchanged for a company with no full
+    // default). Either way, the console's job is to show the stale marker —
+    // via the status route — not for this handler to paper over it by
+    // quietly moving it to whatever the fallback happens to be today.
     crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
 
     let note = if reset.is_empty() {
@@ -1225,13 +1310,14 @@ async fn set_enabled(
     let parked = if body.enabled {
         Vec::new()
     } else {
-        // A disabled provider cannot be the default. The marker is **cleared**
-        // rather than moved to the next enabled provider: moving it would mark
-        // something the operator never chose, which is precisely the positional
-        // default the marker exists to replace. Cleared, `primary` falls back to
-        // first-enabled — the same answer, but nothing on the page claims the
-        // operator decided it.
-        clear_default_if_marked(runtime, &provider.slug).await;
+        // Keys rework (#2306), decision D-never-clear-default (X14,
+        // 2026-09-15): `inference/default` is left exactly as marked, even
+        // though this provider can no longer serve. An earlier version of
+        // this handler cleared the marker here on the theory that moving it
+        // to first-enabled was "the same answer" with less claim to intent —
+        // but silently retargeting the default is itself an undocumented
+        // decision the operator did not make. See the identical note in
+        // `delete_provider` above for which resolution path this then takes.
         let mut tiers = parked_tiers(runtime, &provider).await?;
         // **An unset row is served by this provider too, and it moves.** Only
         // explicit routes name a slug, so switching off the provider every
@@ -1316,33 +1402,12 @@ async fn set_default(
     }))
 }
 
-/// Drops the default marker when it names `slug`.
-///
-/// Never fails the request it is part of: the marker is a preference, and a
-/// company left with a stale one still resolves — [`resolve::primary`] falls
-/// back. Losing a delete or a disable over it would be the tail wagging the dog.
-async fn clear_default_if_marked(runtime: &CompanyRuntime, slug: &str) {
-    let secrets = runtime.secrets().as_ref();
-    match store::load_default_slug(runtime.id(), secrets).await {
-        Ok(Some(marked)) if marked == slug => {
-            if let Err(err) = store::clear_default_slug(runtime.id(), secrets).await {
-                tracing::warn!(
-                    company = %runtime.id(),
-                    provider = %slug,
-                    error = %err,
-                    "could not clear the default marker; it now names a provider that is \
-                     gone or off, and unrouted work falls back to the first enabled one",
-                );
-            }
-        }
-        Ok(_) => {}
-        Err(err) => tracing::warn!(
-            company = %runtime.id(),
-            error = %err,
-            "could not read the default marker while changing a provider",
-        ),
-    }
-}
+// DEPRECATED(keys-rework #2306): `clear_default_if_marked` used to live here,
+// clearing `inference/default` whenever a delete or a disable named the
+// marked provider. Removed by decision D-never-clear-default (X14,
+// 2026-09-15, docs/key-reworks/README.md): see the notes at both of its
+// former call sites, in `delete_provider` and `set_enabled` above. Removable
+// once nobody searches the history for why the behaviour changed.
 
 /// The tiers whose route `provider` serves, so switching it off can name them.
 ///
@@ -1552,6 +1617,7 @@ async fn test_managed(
         bearer.as_deref(),
         catalogue::AuthStyle::Bearer,
         probe::default_policy(),
+        catalogue::catalog_shape_for(inference::LEGACY_MANAGED, &base_url),
     )
     .await
     {
@@ -1644,6 +1710,7 @@ async fn list_provider_models(
         (!key.trim().is_empty()).then(|| key.trim()),
         Some(&scope),
         catalogue::auth_style_for(&provider.kind),
+        catalogue::catalog_shape_for(&provider.kind, &provider.base_url),
     )
     .await
     {
@@ -1807,6 +1874,7 @@ async fn test_provider(
         (!key.trim().is_empty()).then(|| key.trim()),
         catalogue::auth_style_for(&provider.kind),
         probe::default_policy(),
+        catalogue::catalog_shape_for(&provider.kind, &provider.base_url),
     )
     .await
     {
@@ -1891,6 +1959,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
         body.key.as_deref().filter(|k| !k.trim().is_empty()),
         auth,
         probe::default_policy(),
+        catalogue::catalog_shape_for(kind, body.base_url.trim()),
     )
     .await
     {

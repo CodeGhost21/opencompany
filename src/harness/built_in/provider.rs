@@ -2126,6 +2126,7 @@ impl TenantProvider {
             bearer.as_deref(),
             Some(&self.catalog_scope()),
             crate::company::inference::catalogue::auth_style_for(&decl.provider),
+            crate::company::inference::catalogue::catalog_shape_for(&decl.provider, &decl.base_url),
         )
         .await;
         Ok(decl.with_vocabulary(vocabulary))
