@@ -107,29 +107,42 @@ export function canRemoveKey(status: CompanyCredentialStatus | null): boolean {
   return status?.source === "company";
 }
 
+/** Which of the page's two ways to connect the header card shows. */
+export interface HeaderActions {
+  /** "Connect to TinyHumans" — the dialog that takes an API key. */
+  key: boolean;
+  /** "Sign in with TinyHumans" — the key grant, where the host has a hub. */
+  grant: boolean;
+}
+
 /**
- * The single action the header card offers, or `null` for none.
+ * The page's two options, each shown or not.
  *
- * `connect` is the short path and wins wherever the host can complete a grant.
- * `key` is the paste dialog, which is the only route on a host with no hub
- * wired — so the slot holds whichever action is actually live rather than a
- * primary button that renders nothing and leaves a heading over empty space.
+ * Two, and only two: paste an API key, or sign in and have one minted. The key
+ * dialog works on every host; the grant only where one has a hub wired
+ * (`hubLink`), so a self-hosted instance shows the first alone.
+ *
+ * Neither is offered once this company has a key of its own. The connected row
+ * carries Replace and Remove, and a Connect button above a row that already
+ * says "connected" is a second path to the same write, asked for by nobody.
+ *
+ * This decides what is **shown**. `ConnectTinyHumansButton` stays mounted
+ * whatever it says, because it also redeems a returning grant.
  */
-export function headerAction(
+export function headerActions(
   status: CompanyCredentialStatus | null,
   canManage: boolean,
-): "connect" | "key" | null {
-  if (!canManage) return null;
+): HeaderActions {
   // No status is not "no key". `refresh` drops `status` to `null` both while
   // the read is in flight and when it fails, and in the failed case the row
-  // beneath this button is already saying the host could not answer. Offering
-  // "Add a key" under that sentence is the control-that-cannot-act rule
-  // pointing the other way: the write it opens is a blind overwrite of a
-  // write-only credential the console has just admitted it cannot see, and the
-  // value it replaces cannot be read back from anywhere. Wait for a known
-  // state — {@link accountShape} spends one on this for the same reason.
-  if (status === null) return null;
-  return status.hubLink === true ? "connect" : "key";
+  // beneath these buttons is already saying the host could not answer. Offering
+  // a key field under that sentence opens a blind overwrite of a write-only
+  // credential the console has just admitted it cannot see, and the value it
+  // replaces cannot be read back from anywhere.
+  if (!canManage || status === null || canRemoveKey(status)) {
+    return { key: false, grant: false };
+  }
+  return { key: true, grant: status.hubLink === true };
 }
 
 /**

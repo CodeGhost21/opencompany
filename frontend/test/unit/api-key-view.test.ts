@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyCredentialStatus } from "@/api/credential";
+import { ApiError } from "@/api/types";
 import { captureKeyLink } from "@/lib/pending-key-link";
 import { ApiKeyView } from "@/views/connections/ApiKeyView";
 
@@ -226,11 +227,10 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
     expect(container.textContent ?? "").toContain("which keeps precedence");
   });
 
-  // The other half, and it has to open the dialog to be worth anything: with a
-  // hub wired the header renders Connect and no paste field exists, so an
+  // The other half, and it has to open the dialog to be worth anything: an
   // assertion against the closed page could not fail however the dialog were
-  // worded. `hubLink: false` is the path that offers the field.
-  it("says in the paste dialog that a paste sets the identity only", async () => {
+  // worded.
+  it("says in the API-key dialog that a key sets the account only", async () => {
     await mount(
       adminClient(async () => credential({ configured: false, source: "none", hubLink: false })),
     );
@@ -238,14 +238,132 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
     await press('[data-testid="account-add-key"]');
 
     const dialog = document.body.textContent ?? "";
-    expect(dialog).toContain("Pasting one sets the identity");
-    expect(dialog).toContain("it does not choose a model provider");
     // `PUT …/credential` writes `tinyhumans/key` and stops; only `finish_link`
-    // also declares the `managed` provider. What the field must not claim any
-    // more is that it leaves the thinking alone — since #2266 a managed turn
-    // resolves through this very key — so the dialog says that instead.
-    expect(dialog).toContain("its turns resolve through this same key");
+    // also declares the `managed` provider.
+    expect(dialog).toContain("It does not choose a model provider");
+    // Since #2266 a managed turn resolves through this very key.
+    expect(dialog).toContain("its TinyHumans models resolve through");
     expect(dialog).not.toContain("moves every agent turn");
+  });
+});
+
+/** Types into a React-controlled input the way a person would. */
+async function typeInto(selector: string, value: string) {
+  const el = document.querySelector(selector) as HTMLInputElement | null;
+  if (el === null) throw new Error(`nothing to type into at ${selector}`);
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  await act(async () => {
+    setter?.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+describe("ApiKeyView offers two ways to connect", () => {
+  it("shows Connect to TinyHumans and Sign in with TinyHumans where the host has a hub", async () => {
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: true })),
+    );
+
+    expect(container.querySelector('[data-testid="account-add-key"]')?.textContent).toContain(
+      "Connect to TinyHumans",
+    );
+    expect(container.querySelector('[data-testid="connect-tinyhumans"]')?.textContent).toContain(
+      "Sign in with TinyHumans",
+    );
+  });
+
+  it("shows the API-key option alone where there is no hub", async () => {
+    await mount(
+      adminClient(async () => credential({ configured: false, source: "none", hubLink: false })),
+    );
+
+    expect(container.querySelector('[data-testid="account-add-key"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="connect-tinyhumans"]')).toBeNull();
+  });
+
+  // Connected: the row's menu carries Replace and Remove; a Connect CTA above
+  // it would be a second route to the same write.
+  it("offers no connect CTA once this company has a key of its own", async () => {
+    await mount(adminClient(async () => credential({ source: "company", hubLink: true })));
+
+    expect(container.querySelector('[data-testid="account-add-key"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-tinyhumans"]')).toBeNull();
+    expect(container.querySelector('[data-testid="account-row-menu"]')).not.toBeNull();
+  });
+});
+
+describe("ApiKeyView's Connect to TinyHumans dialog", () => {
+  function recordingClient(
+    writes: { path: string; body: unknown }[],
+    put?: () => Promise<unknown>,
+  ): OpenCompanyClient {
+    return {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) {
+          return credential({ configured: false, source: "none", hubLink: true });
+        }
+        throw new Error(`unexpected GET ${path}`);
+      },
+      put: async (path: string, body: unknown) => {
+        writes.push({ path, body });
+        if (put) return put();
+        return { status: credential({ source: "company" }), note: "" };
+      },
+    } as unknown as OpenCompanyClient;
+  }
+
+  it("asks for the API key and links to where one is created", async () => {
+    await mount(recordingClient([]));
+    await press('[data-testid="account-add-key"]');
+
+    const input = document.querySelector('[data-testid="account-key-input"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    // Write-only: never echoed.
+    expect(input.type).toBe("password");
+    expect(document.body.textContent ?? "").toContain("Add your API key");
+    expect(document.body.textContent ?? "").toContain("Don't have an API key?");
+
+    const link = document.querySelector('[data-testid="account-key-get-link"]') as HTMLAnchorElement;
+    expect(link.textContent).toContain("Get your API key");
+    // The same page the setup wizard's Managed field sends an operator to.
+    expect(link.getAttribute("href")).toBe("https://tinyhumans.ai/dashboard?tab=api-keys");
+    expect(link.getAttribute("target")).toBe("_blank");
+  });
+
+  it("writes the typed key to the company credential route and closes", async () => {
+    const writes: { path: string; body: unknown }[] = [];
+    await mount(recordingClient(writes));
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    // The Account page's own slot (`tinyhumans/key`), never the inference
+    // managed-key route.
+    expect(writes).toEqual([
+      { path: "/api/v1/companies/acme/credential", body: { key: "th-not-a-real-key" } },
+    ]);
+    expect(document.querySelector('[data-testid="account-key-input"]')).toBeNull();
+  });
+
+  it("shows a refused save inside the dialog and keeps it open", async () => {
+    const writes: { path: string; body: unknown }[] = [];
+    await mount(
+      recordingClient(writes, async () => {
+        throw new ApiError(400, "invalid", "that key was not accepted", true);
+      }),
+    );
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    expect(writes).toHaveLength(1);
+    expect(document.querySelector('[data-testid="account-key-input"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="account-key-error"]')?.textContent).toBe(
+      "that key was not accepted",
+    );
   });
 });
 

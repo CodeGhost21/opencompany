@@ -41,7 +41,7 @@ import {
   accountSubline,
   balanceLine,
   canRemoveKey,
-  headerAction,
+  headerActions,
   type AccountLoad,
 } from "@/views/connections/account";
 import { AccountKeyDialog } from "@/views/connections/AccountKeyDialog";
@@ -124,6 +124,8 @@ export function ApiKeyView({ client, company }: Props) {
   const [load, setLoad] = useState<AccountLoad>("loading");
   const [generation, setGeneration] = useState(0);
   const [editing, setEditing] = useState(false);
+  /** Why the last key save failed — shown inside the dialog, not as a toast. */
+  const [keyError, setKeyError] = useState<string | null>(null);
   /** Whether the Remove-key confirmation is open. */
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -208,6 +210,7 @@ export function ApiKeyView({ client, company }: Props) {
   const write = useCallback(
     async (key: string, mode: "save" | "clear") => {
       setBusy(true);
+      setKeyError(null);
       try {
         const result = await setCompanyCredential(client, company, key);
         // Unconditional: the write really did land, and an admin who navigated
@@ -220,14 +223,14 @@ export function ApiKeyView({ client, company }: Props) {
       } catch (err) {
         // The host's own reason where it sent one — an admin-only refusal or a
         // store failure says something specific, and a generic "couldn't save"
-        // throws away the only actionable part.
-        toast.error(
-          err instanceof ApiError
-            ? err.message
-            : mode === "save"
-              ? "Couldn't save the key."
-              : "Couldn't remove the key.",
-        );
+        // throws away the only actionable part. A failed save stays in the
+        // dialog, beside the key that was refused; a failed removal has no
+        // dialog left open to hold it.
+        if (mode === "save") {
+          setKeyError(err instanceof ApiError ? err.message : "Couldn't save the key.");
+        } else {
+          toast.error(err instanceof ApiError ? err.message : "Couldn't remove the key.");
+        }
       } finally {
         setBusy(false);
       }
@@ -238,7 +241,11 @@ export function ApiKeyView({ client, company }: Props) {
   const shape = accountShape(load, status);
   const configured = status?.configured ?? false;
   const removable = canRemoveKey(status);
-  const action = headerAction(status, canManage);
+  const actions = headerActions(status, canManage);
+  const openKeyDialog = () => {
+    setKeyError(null);
+    setEditing(true);
+  };
   const balance = balanceLine(billing);
   const account = status?.account;
 
@@ -280,11 +287,12 @@ export function ApiKeyView({ client, company }: Props) {
                 already holds a TinyHumans key of its own, which keeps precedence.
               </p>
             </div>
-            {/* Whichever action is live, never both and never a dead one. The
-                grant is the short path where the host has a hub; the paste
-                dialog is the only route where it does not.
+            {/* Two ways to connect, and only two: paste an API key (every host),
+                or sign in and have one minted (hosts with a hub). Neither once
+                this company has a key of its own — the row below carries
+                Replace and Remove. Decided in `headerActions`.
 
-                The connect button is **mounted unconditionally** and hides
+                The sign-in button is **mounted unconditionally** and hides
                 itself — `available`/`canManage` already make it render null —
                 rather than being gated by `action` out here. It is not only a
                 button: the effect that redeems a returning grant lives in it,
@@ -293,22 +301,26 @@ export function ApiKeyView({ client, company }: Props) {
                 that a reload empties. Gating the mount on state that is null
                 while the credential read is in flight, or that stays null when
                 it fails, would drop the credential on the floor with no way
-                back to it. Only what is *shown* may depend on `action`. */}
-            <ConnectTinyHumansButton
-              client={client}
-              company={company}
-              available={action === "connect" && (status?.hubLink ?? false)}
-              canManage={canManage}
-              configured={configured}
-              hint={false}
-              onConnected={() => setGeneration((n) => n + 1)}
-            />
-            {action === "key" && (
-              <Button type="button" onClick={() => setEditing(true)} data-testid="account-add-key">
-                <KeyRound className="size-4" />
-                {removable ? "Replace key" : "Add a key"}
-              </Button>
-            )}
+                back to it. Only what is *shown* may depend on `actions`. */}
+            <div className="flex flex-wrap items-center gap-2">
+              {actions.key && (
+                <Button type="button" onClick={openKeyDialog} data-testid="account-add-key">
+                  <KeyRound className="size-4" />
+                  Connect to TinyHumans
+                </Button>
+              )}
+              <ConnectTinyHumansButton
+                client={client}
+                company={company}
+                available={actions.grant}
+                canManage={canManage}
+                configured={configured}
+                hint={false}
+                label="Sign in with TinyHumans"
+                variant="outline"
+                onConnected={() => setGeneration((n) => n + 1)}
+              />
+            </div>
           </CardContent>
         </Card>
 
@@ -403,7 +415,7 @@ export function ApiKeyView({ client, company }: Props) {
                       <EllipsisVertical className="size-4" />
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={() => setEditing(true)}>
+                      <DropdownMenuItem onClick={openKeyDialog}>
                         {removable ? "Replace key" : "Add a key"}
                       </DropdownMenuItem>
                       {/* Offered only when there is a key of this row's own to
@@ -491,6 +503,7 @@ export function ApiKeyView({ client, company }: Props) {
           onOpenChange={setEditing}
           replacing={removable}
           busy={busy}
+          error={keyError}
           onSubmit={(key) => void write(key, "save")}
         />
 

@@ -6,7 +6,7 @@ import {
   accountSubline,
   balanceLine,
   canRemoveKey,
-  headerAction,
+  headerActions,
   REMOVAL_CONSEQUENCE,
   REMOVAL_AND_THINKING,
 } from "@/views/connections/account";
@@ -133,21 +133,35 @@ describe("canRemoveKey offers Remove only where it would remove something", () =
   });
 });
 
-describe("headerAction holds whichever action is live", () => {
+describe("headerActions offers the page's two ways to connect", () => {
+  const none = { key: false, grant: false };
+
   it("offers nothing to a member", () => {
-    expect(headerAction(status({ hubLink: true }), false)).toBeNull();
-    expect(headerAction(status({ hubLink: false }), false)).toBeNull();
+    expect(headerActions(status({ source: "none", hubLink: true }), false)).toEqual(none);
+    expect(headerActions(status({ source: "none", hubLink: false }), false)).toEqual(none);
   });
 
-  it("prefers the grant where the host has a hub", () => {
-    expect(headerAction(status({ hubLink: true }), true)).toBe("connect");
+  it("offers both the API key and the sign-in where the host has a hub", () => {
+    expect(headerActions(status({ configured: false, source: "none", hubLink: true }), true)).toEqual(
+      { key: true, grant: true },
+    );
   });
 
-  // Without this the header card on a self-hosted instance is a heading over
-  // empty space: `ConnectTinyHumansButton` renders null with no hub wired.
-  it("falls back to the paste dialog where it does not", () => {
-    expect(headerAction(status({ hubLink: false }), true)).toBe("key");
-    expect(headerAction(status({ hubLink: undefined }), true)).toBe("key");
+  // The sign-in cannot complete without a hub, so a self-hosted instance gets
+  // the API-key option alone rather than a button that renders nothing.
+  it("offers the API key alone where there is no hub", () => {
+    expect(headerActions(status({ configured: false, source: "none", hubLink: false }), true)).toEqual(
+      { key: true, grant: false },
+    );
+    expect(
+      headerActions(status({ configured: false, source: "static", hubLink: undefined }), true),
+    ).toEqual({ key: true, grant: false });
+  });
+
+  // Connected: the row carries Replace and Remove, and a Connect button above
+  // it would be a second path to the same write.
+  it("offers no connect action once this company has a key of its own", () => {
+    expect(headerActions(status({ source: "company", hubLink: true }), true)).toEqual(none);
   });
 
   // A null status is the read having failed or not yet landed — not "no key".
@@ -157,8 +171,8 @@ describe("headerAction holds whichever action is live", () => {
   // be read back from anywhere, which is what makes this worse than an ordinary
   // control-that-cannot-act.
   it("offers nothing at all while the credential state is unknown", () => {
-    expect(headerAction(null, true)).toBeNull();
-    expect(headerAction(null, false)).toBeNull();
+    expect(headerActions(null, true)).toEqual({ key: false, grant: false });
+    expect(headerActions(null, false)).toEqual({ key: false, grant: false });
   });
 });
 

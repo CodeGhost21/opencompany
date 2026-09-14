@@ -30,6 +30,14 @@ interface Props {
    * component can make look right anyway.
    */
   hint?: boolean;
+  /**
+   * The button's words, where the default would collide with a neighbour. The
+   * Account page offers "Connect to TinyHumans" for its API-key dialog, so the
+   * grant beside it says "Sign in with TinyHumans" instead.
+   */
+  label?: string;
+  /** The button's weight — `outline` where it stands beside a primary action. */
+  variant?: "default" | "outline";
 }
 
 /**
@@ -56,6 +64,8 @@ export function ConnectTinyHumansButton({
   configured,
   onConnected,
   hint = true,
+  label,
+  variant = "default",
 }: Props) {
   const [busy, setBusy] = useState(false);
   // The redemption runs from an effect, and StrictMode double-invokes effects.
@@ -124,12 +134,13 @@ export function ConnectTinyHumansButton({
     <div className="space-y-2">
       <Button
         type="button"
+        variant={variant}
         disabled={busy}
         onClick={() => void start()}
         data-testid="connect-tinyhumans"
       >
         {busy ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-        {configured ? "Reconnect TinyHumans" : "Connect TinyHumans"}
+        {label ?? (configured ? "Reconnect TinyHumans" : "Connect TinyHumans")}
       </Button>
       {hint && (
         <p className="text-xs text-muted-foreground">
