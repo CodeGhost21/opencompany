@@ -845,11 +845,16 @@ pub async fn probe_models(
         let classified = build_failure_text(status, body.trim());
         // The reason phrase is for a human reading the log, and stays out of the
         // text above. See `build_failure_text`.
+        // The body goes to a log, and it can echo the request back. A legacy
+        // endpoint with userinfo made `reqwest` send it as `Authorization:
+        // Basic`, and an upstream 4xx that repeats its headers or credentials
+        // would put that password on disk (Codex review on #2281). Scrubbed of
+        // exactly what this request carried because of the endpoint.
         let detail = format!(
             "{named}: {} {}: {}",
             status.as_u16(),
             status.canonical_reason().unwrap_or("error"),
-            body.trim()
+            scrub_endpoint_credential(&url, body.trim())
         );
         return Err(ProbeFailure::classified_as(&classified, detail));
     }
@@ -897,6 +902,84 @@ fn transport_condition(error: &reqwest::Error) -> &'static str {
         return "redirect not followed: unreachable";
     }
     "the check did not complete"
+}
+
+/// `text` with every credential removed that a request to `endpoint` carried
+/// **because of the endpoint's own userinfo**.
+///
+/// `reqwest` lifts `user:password@` out of a URL and sends it as `Authorization:
+/// Basic base64(user:password)`, percent-decoded first. So three forms can come
+/// back in a response body: the password as written in the URL, the password
+/// decoded, and the Basic token. Each is replaced with
+/// [`REDACTED_USERINFO`](catalogue::REDACTED_USERINFO), both padded and unpadded.
+/// The username alone is not a secret and is left, so an error naming the
+/// account still reads.
+fn scrub_endpoint_credential(endpoint: &str, text: &str) -> String {
+    let Ok(parsed) = url::Url::parse(endpoint.trim()) else {
+        return text.to_string();
+    };
+    let username = percent_decode(parsed.username());
+    let password = parsed.password();
+    if username.is_empty() && password.is_none() {
+        return text.to_string();
+    }
+    let decoded = password.map(percent_decode).unwrap_or_default();
+    let token = base64_standard(format!("{username}:{decoded}").as_bytes());
+    let mut secrets = vec![token.trim_end_matches('=').to_string(), token];
+    if let Some(raw) = password {
+        secrets.push(raw.to_string());
+        secrets.push(decoded);
+    }
+    secrets.retain(|secret| !secret.is_empty());
+    // Longest first, so a shorter secret never splits a longer one it sits in.
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets.dedup();
+    let mut out = text.to_string();
+    for secret in &secrets {
+        out = out.replace(secret.as_str(), catalogue::REDACTED_USERINFO);
+    }
+    out
+}
+
+/// Percent-decodes `s` the way `reqwest` decodes URL userinfo; an invalid
+/// escape is kept as written.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| (b as char).to_digit(16);
+            if let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Standard padded base64, for matching a Basic token without a dependency this
+/// crate only takes behind a feature.
+fn base64_standard(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Reads at most [`PROBE_BODY_CAP`] bytes, discarding the rest.
@@ -1181,6 +1264,108 @@ mod tests {
             );
         }
         assert!(describe(ProbeClass::Auth, "Acme").starts_with("Could not reach Acme"));
+    }
+
+    // ---- what a failure may write down ---------------------------------------
+
+    #[test]
+    fn a_basic_token_is_encoded_the_way_reqwest_sends_it() {
+        assert_eq!(base64_standard(b"alice:hunter2"), "YWxpY2U6aHVudGVyMg==");
+        assert_eq!(base64_standard(b"a"), "YQ==");
+        assert_eq!(base64_standard(b"ab"), "YWI=");
+        assert_eq!(base64_standard(b""), "");
+        assert_eq!(percent_decode("p%40ss%zz"), "p@ss%zz");
+    }
+
+    #[test]
+    fn every_form_of_the_endpoint_credential_is_scrubbed_from_text() {
+        let endpoint = "http://alice:p%40ss@127.0.0.1:9/v1/models";
+        let token = base64_standard(b"alice:p@ss");
+        let echoed = format!(
+            "rejected Basic {token} / {} for alice:p@ss (raw p%40ss)",
+            token.trim_end_matches('=')
+        );
+        let scrubbed = scrub_endpoint_credential(endpoint, &echoed);
+        for secret in [
+            "p@ss",
+            "p%40ss",
+            token.as_str(),
+            token.trim_end_matches('='),
+        ] {
+            assert!(
+                !scrubbed.contains(secret),
+                "{secret:?} survived: {scrubbed}"
+            );
+        }
+        assert!(
+            scrubbed.contains("alice"),
+            "the account name still reads: {scrubbed}"
+        );
+        // No userinfo: the text is untouched.
+        assert_eq!(
+            scrub_endpoint_credential("http://127.0.0.1:9/v1", "Basic abc"),
+            "Basic abc"
+        );
+    }
+
+    /// An upstream that echoes the request's `Authorization` header back in its
+    /// 401 body. Served on loopback by hand, so the test needs nothing but tokio.
+    #[tokio::test]
+    async fn a_probe_failure_never_logs_the_basic_credential_an_endpoint_carried() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let authorization = request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_string())
+                })
+                .unwrap_or_default();
+            let body = format!("{{\"error\":\"rejected [{authorization}] for alice:hunter2\"}}");
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.ok();
+            authorization
+        });
+
+        let failure = probe_models(
+            &format!("http://alice:hunter2@{address}/v1"),
+            None,
+            catalogue::AuthStyle::None,
+            LOCAL_OFFERED,
+        )
+        .await
+        .expect_err("a 401 is a failure");
+        let sent = server.await.unwrap();
+
+        assert_eq!(
+            sent, "Basic YWxpY2U6aHVudGVyMg==",
+            "the premise: reqwest sends the endpoint's userinfo as Basic auth"
+        );
+        assert!(
+            failure.raw.contains("[Basic ***]"),
+            "the echo reached the log text, scrubbed: {}",
+            failure.raw
+        );
+        for secret in ["hunter2", "YWxpY2U6aHVudGVyMg"] {
+            assert!(
+                !failure.raw.contains(secret),
+                "{secret} reached the log text: {}",
+                failure.raw
+            );
+        }
     }
 
     // ---- the SSRF guard -----------------------------------------------------
