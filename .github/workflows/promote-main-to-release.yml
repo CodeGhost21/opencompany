@@ -7,7 +7,7 @@
 # A maintainer dispatches this to take a snapshot of main. It pushes a merge
 # commit from main into `release` directly — no PR. The push is made as the
 # `tiny-humans-bot` GitHub App, not with GITHUB_TOKEN: `release` is protected by
-# the `Protect release` ruleset (`.github/rulesets/`), which requires a pull
+# the `Protect release` ruleset (repository settings → Rules), which requires a pull
 # request for every push and lists the App — and only the App — as an actor
 # allowed to bypass that. A push made with GITHUB_TOKEN would be rejected. The
 # App's push also fires `push` workflows, so `ci.yml` runs on the promoted

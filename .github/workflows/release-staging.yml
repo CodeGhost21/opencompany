@@ -80,7 +80,7 @@ jobs:
       # real history, and a shallow clone makes `merge-base` lie.
       # Least privilege: this job only pushes the version-bump commit and tag
       # (and the back-merge to main) — contents: write is all it needs. Branch-
-      # ruleset bypass (`.github/rulesets/`) comes from the App's identity in
+      # ruleset bypass (repository settings → Rules) comes from the App's identity in
       # the ruleset bypass list, not from token scopes; a push made with
       # GITHUB_TOKEN would be rejected by `Protect main` / `Protect release`.
       - name: Generate GitHub App token

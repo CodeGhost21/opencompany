@@ -2336,7 +2336,7 @@ jobs:
         working-directory: crates/opencompany-app
         run: ../../frontend/node_modules/.bin/tauri build --debug --no-bundle
 
-  # The one check the branch rulesets require (`.github/rulesets/`). Every
+  # The one check the branch rulesets (repository settings → Rules) require. Every
   # lane above is `if:`-gated on the changed areas, and a required status
   # check that never reports blocks the PR forever — so the rulesets cannot
   # name the lanes themselves. This job always runs (`if: always()`), waits on
