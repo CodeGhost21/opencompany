@@ -3183,6 +3183,7 @@ base_url = "https://byo.example/v1"
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
 
+        use crate::company::inference::store;
         let runtime = state
             .registry()
             .get(&CompanyId::new("acme"))

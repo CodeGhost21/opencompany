@@ -752,8 +752,9 @@ pub fn redact_endpoint(endpoint: &str) -> String {
     // the scan rather than masked around, because a client drops them too and
     // an offset into the raw value would not line up with the credential.
     let mut out = as_url_parser_reads(endpoint);
+    let ranges = endpoint_userinfo_ranges(&out);
     // Last range first, so each replacement leaves the earlier offsets valid.
-    for range in endpoint_userinfo_ranges(&out.clone()).into_iter().rev() {
+    for range in ranges.into_iter().rev() {
         out.replace_range(range, REDACTED_USERINFO);
     }
     out
