@@ -37,11 +37,25 @@
 //! tone here is a design-token decision on the console side rather than a column
 //! of this table. The table stays presentation-free.
 //!
-//! And the 27th Rust entry, `openhuman` — their managed first-party backend — is
-//! not a row here. Our equivalent is the managed TinyHumans brain, which is
-//! already modelled with its own auth path ([`super::PLATFORM_BASE_URL`]) and
-//! must keep it. Porting `openhuman` as a row would give the managed brain a
-//! second, bearer-shaped identity.
+//! `openhuman` — their managed first-party backend — is not a row here. Our
+//! equivalent, TinyHumans, **is** a row (slug `tinyhumans`): its OpenRouter
+//! proxy, its bearer key, its paged catalog (keys rework, issue #2306, slice
+//! 2a). The legacy managed *chain* — the fallback that resolves with no row at
+//! all, from an account key or the instance identity — keeps its own auth path
+//! ([`super::PLATFORM_BASE_URL`]) and is unaffected by this row's existence.
+
+/// The shape a provider's `GET {base}/models` answers in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CatalogShape {
+    /// `{"data":[{"id":…}]}`, one response.
+    OpenAi,
+    /// `{"success":true,"data":{"data":[…],"total":N,"limit":L,"offset":O}}`,
+    /// paged. See [`super::paged_catalog`].
+    PagedEnvelope,
+}
+
+/// The path the TinyHumans OpenRouter proxy is served under.
+pub const TINYHUMANS_PROXY_PATH: &str = "/agent-integrations/openrouter";
 
 /// How a provider expects its credential presented.
 ///
@@ -91,7 +105,7 @@ pub struct CloudProvider {
     pub key_placeholder: Option<&'static str>,
 }
 
-/// The 26 hosted providers the add-dialog offers.
+/// The 27 hosted providers the add-dialog offers.
 ///
 /// ## The endpoints are presets, not a pattern
 ///
@@ -325,6 +339,17 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         endpoint: "https://api-inference.modelscope.cn/v1",
         auth: AuthStyle::Bearer,
         key_placeholder: Some("ms-..."),
+    },
+    // Keys rework (#2306), slice 2a: TinyHumans as an ordinary cloud row on its
+    // OpenRouter proxy. Must stay the LAST entry — `the_console_mirror_lists_the_same_cloud_providers`
+    // compares this table against `frontend/src/inference/catalogue.ts` row by
+    // row, and both tables append it last.
+    CloudProvider {
+        slug: "tinyhumans",
+        label: "TinyHumans",
+        endpoint: "https://api.tinyhumans.ai/agent-integrations/openrouter",
+        auth: AuthStyle::Bearer,
+        key_placeholder: Some("th-..."),
     },
 ];
 
@@ -785,6 +810,28 @@ pub fn cli_login(option_slug: &str) -> Option<&'static CliLogin> {
     CLI_LOGINS.iter().find(|c| c.option_slug == option_slug)
 }
 
+/// Which catalog shape to read at `base_url` for a provider of `kind`.
+///
+/// `tinyhumans` always pages. Any other kind pages only when its endpoint's
+/// path ends in [`TINYHUMANS_PROXY_PATH`]: the legacy managed declaration has
+/// kind `openrouter` (`super::LEGACY_MANAGED` is a routing word, not a
+/// catalogue kind), and once its base is the proxy — after the managed URL
+/// constants point there, or with an injected `OPENCOMPANY_INFERENCE_URL` set
+/// to the proxy — its model list pages the same way. A read-only path check;
+/// no URL is built and no request is made here.
+pub fn catalog_shape_for(kind: &str, base_url: &str) -> CatalogShape {
+    if kind.trim() == super::MANAGED_SLUG
+        || base_url
+            .trim()
+            .trim_end_matches('/')
+            .ends_with(TINYHUMANS_PROXY_PATH)
+    {
+        CatalogShape::PagedEnvelope
+    } else {
+        CatalogShape::OpenAi
+    }
+}
+
 /// How a credential must be presented to a provider of this kind.
 ///
 /// A decision rather than a lookup, because three of the four cases are not in
@@ -997,6 +1044,11 @@ pub fn is_reserved_slug(slug: &str) -> bool {
 /// of vendors and these are not vendors; kept in the *reserved* check because
 /// that check has exactly one meaning — a custom provider may not take a name
 /// something else already owns.
+///
+/// `tinyhumans` (`super::MANAGED_SLUG`) is also a cloud row now (slice 2a): it
+/// stays listed here too, so reservation does not depend on the table — a
+/// custom provider named "TinyHumans" is refused whether or not a `tinyhumans`
+/// row has been added yet.
 const INTERNAL_SLUGS: &[&str] = &[super::MANAGED_SLUG, super::LEGACY_MANAGED];
 
 /// Which of the three questions a provider answers.
@@ -1075,7 +1127,7 @@ mod tests {
 
     #[test]
     fn the_catalogue_ships_the_counts_the_plan_names() {
-        assert_eq!(CLOUD_PROVIDERS.len(), 26, "cloud providers");
+        assert_eq!(CLOUD_PROVIDERS.len(), 27, "cloud providers");
         assert_eq!(LOCAL_RUNTIMES.len(), 3, "local runtimes");
         assert_eq!(CLI_LOGINS.len(), 2, "CLI logins");
     }
@@ -1255,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_owns_its_slug_even_though_it_is_not_a_catalogue_row() {
+    fn tinyhumans_owns_its_slug_and_is_a_catalogue_row() {
         // `provider/tinyhumans/key` is where the managed credential lives, and
         // `managed` is the word the route grammar uses. A custom provider named
         // "TinyHumans" slugified straight into the first: adding it stored a
@@ -1265,9 +1317,57 @@ mod tests {
         assert!(is_reserved_slug(super::super::MANAGED_SLUG));
         assert!(is_reserved_slug("tinyhumans"));
         assert!(is_reserved_slug("managed"));
-        // Reserved is about the name, not the shape: a company may still be
-        // *on* managed, and this only stops a second thing taking its address.
-        assert!(cloud_provider("tinyhumans").is_none());
+        // Keys rework (#2306) slice 2a: unlike before, `tinyhumans` IS now a
+        // catalogue row too — reservation and catalogue membership are no
+        // longer mutually exclusive for this slug.
+        assert!(cloud_provider("tinyhumans").is_some());
+    }
+
+    #[test]
+    fn tinyhumans_is_a_bearer_row_on_the_proxy() {
+        let tinyhumans = cloud_provider("tinyhumans").expect("tinyhumans is in the catalogue");
+        assert_eq!(
+            tinyhumans.endpoint,
+            "https://api.tinyhumans.ai/agent-integrations/openrouter"
+        );
+        assert_eq!(auth_style_for("tinyhumans"), AuthStyle::Bearer);
+        assert_eq!(tinyhumans.key_placeholder, Some("th-..."));
+    }
+
+    #[test]
+    fn catalog_shape_is_paged_only_for_tinyhumans_or_the_proxy_path() {
+        let proxy = "https://api.tinyhumans.ai/agent-integrations/openrouter";
+        assert_eq!(
+            catalog_shape_for("tinyhumans", proxy),
+            CatalogShape::PagedEnvelope
+        );
+        // Whitespace around the kind, and a blank base URL, still recognise
+        // the kind on its own.
+        assert_eq!(
+            catalog_shape_for(" tinyhumans ", ""),
+            CatalogShape::PagedEnvelope
+        );
+        // A trailing slash on the proxy path still matches.
+        assert_eq!(
+            catalog_shape_for("openrouter", &format!("{proxy}/")),
+            CatalogShape::PagedEnvelope
+        );
+        assert_eq!(
+            catalog_shape_for("openrouter", "https://api.tinyhumans.ai/openai/v1"),
+            CatalogShape::OpenAi
+        );
+        assert_eq!(
+            catalog_shape_for("custom", "http://127.0.0.1:8099/v1"),
+            CatalogShape::OpenAi
+        );
+        for provider in CLOUD_PROVIDERS.iter().filter(|p| p.slug != "tinyhumans") {
+            assert_eq!(
+                catalog_shape_for(provider.slug, provider.endpoint),
+                CatalogShape::OpenAi,
+                "{}: only tinyhumans/the proxy path pages",
+                provider.slug
+            );
+        }
     }
 
     #[test]

@@ -723,6 +723,21 @@ impl ProbeFailure {
             raw: refusal.to_string(),
         }
     }
+
+    /// A page of the TinyHumans paged catalog that connected but did not parse
+    /// (keys rework, issue #2306, slice 2a).
+    ///
+    /// Classified `Unknown`, never `Auth`: the request reached the endpoint and
+    /// got a 2xx with a body this parser could not read, which says nothing
+    /// about the credential. `ProbeClass::Auth` is the one class that rolls a
+    /// key back on add, so a parse failure must never produce it — a page the
+    /// proxy answers oddly is not proof the key is wrong.
+    fn unreadable(raw: String) -> Self {
+        Self {
+            class: ProbeClass::Unknown,
+            raw,
+        }
+    }
 }
 
 /// Applies a provider's credential to a request in the style that provider's
@@ -771,11 +786,18 @@ pub fn apply_auth(
 /// only [`ProbeClass::Auth`] means the credential should be rolled back — see
 /// the module header for why the naive "roll everything back" answer destroys
 /// valid keys.
+///
+/// `shape` (keys rework, issue #2306, slice 2a) picks the envelope this reads:
+/// [`catalogue::CatalogShape::OpenAi`] is the single-response body this
+/// function always read; [`catalogue::CatalogShape::PagedEnvelope`] pages the
+/// TinyHumans proxy's `{success, data:{data,total,limit,offset}}` shape to
+/// `total`, via [`super::paged_catalog`].
 pub async fn probe_models(
     base_url: &str,
     credential: Option<&str>,
     auth: catalogue::AuthStyle,
     policy: ProbePolicy,
+    shape: catalogue::CatalogShape,
 ) -> Result<Vec<String>, ProbeFailure> {
     check_endpoint_with_credential(
         base_url,
@@ -789,11 +811,10 @@ pub async fn probe_models(
     // caps at 500, so the picker this probe populates silently has no vision
     // model in it. See `catalogue::catalog_query`.
     let url = format!("{base}/models{}", catalogue::catalog_query(base));
-    // What the failure text is allowed to say. `raw` reaches a host log, and a
+    // What the failure text is allowed to say (`raw` reaches a host log, and a
     // log is disk — so an endpoint carrying userinfo must not be written into
-    // one verbatim. The request itself still goes to `url`; only the sentence
-    // about it is redacted.
-    let named = catalogue::redact_endpoint(&url);
+    // one verbatim) is computed per request inside `probe_get` now, since a
+    // paged read makes one per page rather than once here.
 
     // The redirect policy is where the guard earns its keep. `reqwest` resolves
     // and connects on our behalf, so the only place a redirect target can be
@@ -825,10 +846,61 @@ pub async fn probe_models(
         .build()
         .map_err(|e| ProbeFailure::from_raw(format!("could not build the probe client: {e}")))?;
 
+    // Keys rework (#2306), slice 2a: the TinyHumans proxy pages, and a page is
+    // its own GET with its own success/failure classification — `probe_get`
+    // below is what both this branch and the plain OpenAI-shaped read call.
+    // `origin` (above) is the first page's URL, and every later page shares
+    // it, so the same-origin redirect guard still holds across the loop.
+    if shape == catalogue::CatalogShape::PagedEnvelope {
+        let mut collector = super::paged_catalog::Collector::default();
+        loop {
+            let page_url = format!(
+                "{base}{}",
+                super::paged_catalog::page_path(collector.offset())
+            );
+            let body = probe_get(
+                &client,
+                &page_url,
+                auth,
+                credential,
+                super::paged_catalog::PAGE_BODY_CAP,
+            )
+            .await?;
+            let page = super::paged_catalog::parse_page(&body).map_err(|e| {
+                ProbeFailure::unreadable(format!("{}: {e}", catalogue::redact_endpoint(&page_url)))
+            })?;
+            if !matches!(collector.push(page), super::paged_catalog::NextPage::At(_)) {
+                break;
+            }
+        }
+        return Ok(collector.finish().into_iter().map(|e| e.id).collect());
+    }
+
+    let body = probe_get(&client, &url, auth, credential, PROBE_BODY_CAP).await?;
+    Ok(parse_model_ids(&body))
+}
+
+/// One GET, classified on failure. Shared by the plain OpenAI-shaped read and
+/// every page of the TinyHumans paged read (keys rework, issue #2306, slice
+/// 2a) — the request, transport-error and HTTP-failure handling used to live
+/// inline in [`probe_models`]; extracted so a page is not a second copy of it.
+///
+/// `success_cap` bounds a **successful** body (a page can run to
+/// [`super::paged_catalog::PAGE_BODY_CAP`], larger than an ordinary probe's
+/// [`PROBE_BODY_CAP`]); a failure body always reads at the smaller
+/// `PROBE_BODY_CAP`, because nothing needs more of an error to classify it.
+async fn probe_get(
+    client: &reqwest::Client,
+    url: &str,
+    auth: catalogue::AuthStyle,
+    credential: Option<&str>,
+    success_cap: usize,
+) -> Result<String, ProbeFailure> {
+    let named = catalogue::redact_endpoint(url);
     // The one non-bearer entry in the whole catalogue. A probe that assumed one
     // auth style would fail exactly one provider — the one people try first —
     // and would classify the result as `auth`, deleting a perfectly good key.
-    let request = apply_auth(client.get(&url), auth, credential);
+    let request = apply_auth(client.get(url), auth, credential);
 
     let response = request.send().await.map_err(|e| {
         // Classified on the condition alone; the full error, URL and all, is
@@ -836,8 +908,8 @@ pub async fn probe_models(
         ProbeFailure::classified_as(transport_condition(&e), format!("{named}: {e}"))
     })?;
     let status = response.status();
-    let body = read_capped(response).await;
     if !status.is_success() {
+        let body = read_capped_to(response, PROBE_BODY_CAP).await;
         // The body is included in the string the classifier reads, and only
         // there: vendors put "invalid api key" and "model not found" in the
         // body rather than the reason phrase, so classifying on the status
@@ -854,11 +926,11 @@ pub async fn probe_models(
             "{named}: {} {}: {}",
             status.as_u16(),
             status.canonical_reason().unwrap_or("error"),
-            scrub_endpoint_credential(&url, body.trim())
+            scrub_endpoint_credential(url, body.trim())
         );
         return Err(ProbeFailure::classified_as(&classified, detail));
     }
-    Ok(parse_model_ids(&body))
+    Ok(read_capped_to(response, success_cap).await)
 }
 
 /// The text [`classify`] reads for an HTTP failure: the status code and the
@@ -992,14 +1064,17 @@ fn base64_standard(input: &[u8]) -> String {
     out
 }
 
-/// Reads at most [`PROBE_BODY_CAP`] bytes, discarding the rest.
+/// Reads at most `cap` bytes, discarding the rest.
 ///
 /// Chunk by chunk rather than `text()`, because `text()` trusts the endpoint to
 /// stop sending. A `Content-Length` header is not a promise either — it is
-/// whatever the far side wrote.
-async fn read_capped(mut response: reqwest::Response) -> String {
+/// whatever the far side wrote. `cap` used to be fixed at [`PROBE_BODY_CAP`];
+/// it is now a parameter so a successful TinyHumans catalog page (keys rework,
+/// slice 2a) can read up to [`super::paged_catalog::PAGE_BODY_CAP`] while a
+/// failure body still reads at the smaller, fixed cap.
+async fn read_capped_to(mut response: reqwest::Response, cap: usize) -> String {
     let mut buf: Vec<u8> = Vec::new();
-    while buf.len() < PROBE_BODY_CAP {
+    while buf.len() < cap {
         match response.chunk().await {
             Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
             // A body that stops mid-stream is still worth classifying on what
@@ -1007,7 +1082,7 @@ async fn read_capped(mut response: reqwest::Response) -> String {
             Ok(None) | Err(_) => break,
         }
     }
-    buf.truncate(PROBE_BODY_CAP);
+    buf.truncate(cap);
     String::from_utf8_lossy(&buf).into_owned()
 }
 
@@ -1375,6 +1450,7 @@ mod tests {
             None,
             catalogue::AuthStyle::None,
             LOCAL_OFFERED,
+            catalogue::CatalogShape::OpenAi,
         )
         .await
         .expect_err("a 401 is a failure");
@@ -1396,6 +1472,108 @@ mod tests {
                 failure.raw
             );
         }
+    }
+
+    // ---- the paged catalog (keys rework, issue #2306, slice 2a) ------------
+
+    /// A `PagedEnvelope` probe reads every page, following `total`, and sends
+    /// the bearer on every request — not just the first.
+    #[tokio::test]
+    async fn a_paged_probe_reads_every_page_with_the_bearer() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_route = seen.clone();
+        let app = axum::Router::new().route(
+            "/agent-integrations/openrouter/models",
+            axum::routing::get(
+                move |Query(params): Query<HashMap<String, String>>,
+                      headers: axum::http::HeaderMap| {
+                    let seen = seen_for_route.clone();
+                    async move {
+                        let query = params
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join("&");
+                        let auth = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        seen.lock().unwrap().push((query, auth));
+                        let offset: usize = params.get("offset").and_then(|o| o.parse().ok()).unwrap_or(0);
+                        let data = if offset == 0 {
+                            serde_json::json!([{"id": "acme/test-model"}, {"id": "acme/other-model"}])
+                        } else {
+                            serde_json::json!([{"id": "acme/third-model"}])
+                        };
+                        axum::Json(serde_json::json!({
+                            "success": true,
+                            "data": {"data": data, "total": 3, "limit": 500, "offset": offset},
+                        }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = format!("http://{address}/agent-integrations/openrouter");
+
+        let ids = probe_models(
+            &base,
+            Some("th-not-a-real-key"),
+            catalogue::AuthStyle::Bearer,
+            LOCAL_OFFERED,
+            catalogue::CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect("the paged catalog reads");
+        server.abort();
+
+        assert_eq!(
+            ids,
+            vec!["acme/test-model", "acme/other-model", "acme/third-model"]
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one request per page, got: {seen:?}");
+        assert!(seen[0].0.contains("limit=500") && seen[0].0.contains("offset=0"));
+        assert!(seen[1].0.contains("limit=500") && seen[1].0.contains("offset=2"));
+        for (_, auth) in seen.iter() {
+            assert_eq!(auth.as_deref(), Some("Bearer th-not-a-real-key"));
+        }
+    }
+
+    /// A page that answers the OpenAI shape (not the envelope) classifies
+    /// `Unknown`, never `Auth` — a body that fails to parse says nothing about
+    /// the credential.
+    #[tokio::test]
+    async fn a_paged_probe_that_gets_an_openai_body_is_unknown_not_auth() {
+        let app = axum::Router::new().route(
+            "/agent-integrations/openrouter/models",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({"data": [{"id": "acme/test-model"}]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = format!("http://{address}/agent-integrations/openrouter");
+
+        let failure = probe_models(
+            &base,
+            Some("th-not-a-real-key"),
+            catalogue::AuthStyle::Bearer,
+            LOCAL_OFFERED,
+            catalogue::CatalogShape::PagedEnvelope,
+        )
+        .await
+        .expect_err("an OpenAI-shaped body is not the envelope");
+        server.abort();
+
+        assert_eq!(failure.class, ProbeClass::Unknown);
     }
 
     // ---- the SSRF guard -----------------------------------------------------

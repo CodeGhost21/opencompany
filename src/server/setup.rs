@@ -1293,11 +1293,18 @@ async fn probe_inference<E: EnvSource + Sync>(
         // now. It is here so that widening the branch cannot silently
         // reintroduce the bug.
         let auth = crate::company::inference::catalogue::auth_style_for(&req.provider);
-        crate::server::inference_models::discover_models(&decl.base_url, bearer.as_deref(), auth)
-            .await
-            .ok()
-            .and_then(|models| models.into_iter().next())
-            .map(|model| model.id)
+        let shape =
+            crate::company::inference::catalogue::catalog_shape_for(&req.provider, &decl.base_url);
+        crate::server::inference_models::discover_models(
+            &decl.base_url,
+            bearer.as_deref(),
+            auth,
+            shape,
+        )
+        .await
+        .ok()
+        .and_then(|models| models.into_iter().next())
+        .map(|model| model.id)
     } else {
         None
     };

@@ -50,7 +50,7 @@ export interface CloudProvider {
 }
 
 /**
- * The 26 hosted providers the add dialog offers.
+ * The 27 hosted providers the add dialog offers.
  *
  * The endpoints are presets rather than a pattern, and the paths are the reason:
  * `/openai/v1`, `/inference/v1`, `/v1beta/openai`, `/v1/openai`, `/v3/openai`,
@@ -232,6 +232,13 @@ export const CLOUD_PROVIDERS: readonly CloudProvider[] = [
     endpoint: "https://api-inference.modelscope.cn/v1",
     auth: "bearer",
     keyPlaceholder: "ms-...",
+  },
+  {
+    slug: "tinyhumans",
+    label: "TinyHumans",
+    endpoint: "https://api.tinyhumans.ai/agent-integrations/openrouter",
+    auth: "bearer",
+    keyPlaceholder: "th-...",
   },
 ];
 
@@ -446,13 +453,16 @@ export function isReservedSlug(slug: string): boolean {
 }
 
 /**
- * Slugs this product owns that are not catalogue rows.
+ * Slugs this product owns that need reserving even when — like `tinyhumans` —
+ * they are also a catalogue row.
  *
- * Managed is deliberately not a row — it is a chain, not a vendor — but it has a
- * slug, and that slug is an address: `provider/tinyhumans/key` is where its
- * credential lives, and `managed` is the word the route grammar uses. Mirrors
- * `catalogue::INTERNAL_SLUGS`, and the host refuses these regardless; this is
- * so the operator is told before a round trip rather than after one.
+ * Managed the *chain* is not a row — it is a fallback, not a vendor — but it
+ * has a slug, and that slug is an address: `provider/tinyhumans/key` is where
+ * its credential lives, and `managed` is the word the route grammar uses.
+ * `tinyhumans` is also a cloud row now (keys rework, issue #2306, slice 2a):
+ * it stays listed here too, so reservation does not depend on the table.
+ * Mirrors `catalogue::INTERNAL_SLUGS`, and the host refuses these regardless;
+ * this is so the operator is told before a round trip rather than after one.
  */
 const INTERNAL_SLUGS: readonly string[] = ["tinyhumans", "managed"];
 
