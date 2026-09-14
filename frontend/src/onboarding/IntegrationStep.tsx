@@ -137,12 +137,27 @@ export function IntegrationStep({
   client,
   company,
   onOpenApps,
+  onOpenCredential,
   onWaive,
 }: {
   client: OpenCompanyClient;
   company: string | null;
-  /** Leaves the gate for the real Apps page — see `OnboardingGate`'s `onLeave`. */
+  /**
+   * Leaves the gate for the real Apps page — see `OnboardingGate`'s `onLeave`.
+   * Taken once a credential exists: Apps is where a provider is connected.
+   */
   onOpenApps: () => void;
+  /**
+   * Leaves the gate for the page where the credential this card names can
+   * actually be entered.
+   *
+   * Not Apps. Since the Connections split (#2259) Apps is `OAuthView` and has
+   * no credential field at all, so "Enter a credential in Apps" sent a founder
+   * with nothing to paste into to a page with nowhere to paste it. The caller
+   * decides the page, because it depends on which credential the copy puts
+   * first.
+   */
+  onOpenCredential: () => void;
   /** Records this step as answered as far as this build allows. */
   onWaive: () => void;
 }) {
@@ -319,8 +334,11 @@ export function IntegrationStep({
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={onOpenApps} data-testid="gate-integration-open-apps">
-          {hasCredential ? "Connect a provider in Apps" : "Enter a credential in Apps"}
+        <Button
+          onClick={hasCredential ? onOpenApps : onOpenCredential}
+          data-testid="gate-integration-open-apps"
+        >
+          {hasCredential ? "Connect a provider in Apps" : "Enter a credential"}
           <ArrowRight className="size-4" />
         </Button>
         {/* A credential that exists is always a completable step — offering to

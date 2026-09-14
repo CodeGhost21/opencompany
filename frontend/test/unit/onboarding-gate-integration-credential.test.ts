@@ -58,6 +58,7 @@ async function render(credentialSource: ComposioCredentialSource | "hang") {
         client: fakeClient(credentialSource),
         company: null,
         onOpenApps: () => {},
+        onOpenCredential: () => {},
         onWaive: () => {},
       }),
     );
@@ -159,6 +160,7 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
             client,
             company: null,
             onOpenApps: () => {},
+            onOpenCredential: () => {},
             onWaive: () => {},
           }),
         );
@@ -212,6 +214,7 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
             client,
             company: null,
             onOpenApps: () => {},
+            onOpenCredential: () => {},
             onWaive: () => {},
           }),
         );
@@ -273,6 +276,7 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
             client,
             company: null,
             onOpenApps: () => {},
+            onOpenCredential: () => {},
             onWaive: () => {},
           }),
         );
@@ -298,7 +302,40 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
     }
   });
 
-  it("names every credential route the Apps page it links to will actually take", async () => {
+  it("sends a founder with no credential to a page that accepts one, and never to Apps", async () => {
+    // Apps is `OAuthView` since the Connections split and has no credential
+    // field, so the button used to send a founder with nothing to paste into to
+    // a page with nowhere to paste it. Once a credential exists the step is
+    // about connecting a provider, and Apps is right again.
+    const openApps = vi.fn();
+    const openCredential = vi.fn();
+    const client = {
+      scopeFor: () => "/api/v1/company",
+      get: async () => ({ inBuild: true, credentialSource: "none" }) as unknown as ComposioStatus,
+    } as unknown as OpenCompanyClient;
+    await act(async () => {
+      root.render(
+        createElement(IntegrationStep, {
+          client,
+          company: null,
+          onOpenApps: openApps,
+          onOpenCredential: openCredential,
+          onWaive: () => {},
+        }),
+      );
+    });
+    const button = container.querySelector(
+      '[data-testid="gate-integration-open-apps"]',
+    ) as HTMLButtonElement | null;
+    expect(button?.textContent).not.toContain("in Apps");
+    await act(async () => {
+      button!.click();
+    });
+    expect(openCredential).toHaveBeenCalledTimes(1);
+    expect(openApps).not.toHaveBeenCalled();
+  });
+
+  it("names every credential route the page it links to will actually take", async () => {
     // This sentence is the first-run instruction, and its whole job is to send
     // the founder after a credential the page it links to accepts. While
     // `COMPOSIO_MANAGED_HIDDEN` was set, that was a Composio API key and
@@ -348,7 +385,13 @@ describe("IntegrationStep distinguishes a missing connection from a missing cred
     } as unknown as OpenCompanyClient;
     await act(async () => {
       root.render(
-        createElement(IntegrationStep, { client, company: null, onOpenApps: () => {}, onWaive: () => {} }),
+        createElement(IntegrationStep, {
+          client,
+          company: null,
+          onOpenApps: () => {},
+          onOpenCredential: () => {},
+          onWaive: () => {},
+        }),
       );
       await Promise.resolve();
       await Promise.resolve();
