@@ -426,8 +426,8 @@ export function endpointHasCredentials(raw: string): boolean {
   // Read as an HTTP client reads it, mirroring the host's
   // `endpoint_credential_range`: a leading `http:`/`https:` (any case) or other
   // `scheme://`, any run of `/` or `\`, then the authority up to the next `/`
-  // or `\`. The read continues past an authority only when it is itself a bare
-  // scheme (`http://HTTP://alice:pw@host`), never into ordinary path text, so
+  // or `\`. The read continues past an authority only for a doubled scheme
+  // (`http://HTTP://alice:pw@host`), never into ordinary path text, so
   // `https://gateway.example/proxy/http:user@example.com/v1` stays an endpoint.
   let pos = 0;
   for (let hop = 0; hop < 8; hop++) {
@@ -439,7 +439,10 @@ export function endpointHasCredentials(raw: string): boolean {
     const end = tail.search(/[/\\]/);
     const authority = end === -1 ? tail : tail.slice(0, end);
     if (authority.includes("@")) return true;
-    if (from === pos || !/^[A-Za-z][A-Za-z0-9+.-]*:$/.test(authority)) return false;
+    // A doubled `scheme://scheme://` only: one slash after a bare scheme is a
+    // host with an empty port (`http://http:/v1@beta`), as on the host.
+    const doubled = /^[/\\]{2}/.test(tail.slice(authority.length));
+    if (from === pos || !doubled || !/^[A-Za-z][A-Za-z0-9+.-]*:$/.test(authority)) return false;
     pos = from;
   }
   return false;

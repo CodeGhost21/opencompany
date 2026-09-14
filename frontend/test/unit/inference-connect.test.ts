@@ -363,7 +363,6 @@ describe("endpointHasCredentials", () => {
       "http:///alice:hunter2@127.0.0.1:8597/v1",
       "http:\\\\alice:hunter2@127.0.0.1:8597/v1",
       "HTTP:alice:hunter2@127.0.0.1:8597/v1",
-      "http://http:/alice:hunter2@127.0.0.1:8597/v1",
       "http://alice:one@outer/http://bob:two@inner/v1",
     ]) {
       expect(endpointHasCredentials(bad)).toBe(true);
@@ -384,6 +383,9 @@ describe("endpointHasCredentials", () => {
     expect(endpointHasCredentials(gateway)).toBe(false);
     expect(normalizeEndpoint(gateway)).toBe(gateway);
     expect(endpointHasCredentials("http://localhost:/v1/@me")).toBe(false);
+    // Host `http`, empty port, path `/v1@beta`: not a second scheme.
+    expect(endpointHasCredentials("http://http:/v1@beta")).toBe(false);
+    expect(normalizeEndpoint("http://http:/v1@beta")).toBe("http://http:/v1@beta");
     expect(endpointHasCredentials("https://http://alice@api.acme.example/v1")).toBe(true);
   });
 
