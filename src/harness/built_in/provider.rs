@@ -1638,8 +1638,9 @@ pub struct RequestPlan {
 
 /// Builds the [`RequestPlan`] for one turn against a tenant provider.
 ///
-/// * The abstract tier (`chat-v1`, …) is mapped through the tenant
-///   `[inference].models` table; an unmapped tier passes through verbatim.
+/// * A decl with a chosen model (keys rework #2306, slice 2b) sends it;
+///   otherwise the abstract tier (`chat-v1`, …) is mapped through the tenant
+///   `[inference].models` table, and an unmapped tier passes through verbatim.
 /// * OpenRouter gets its mandatory `HTTP-Referer` / `X-Title` attribution
 ///   headers; other providers get none.
 /// * The bearer is resolved from the decl's [`Credential`] **here**, so every
@@ -1664,7 +1665,14 @@ pub async fn request_plan(
     // not proxied, and rewriting `chat-v1` to an OpenRouter slug for it is what
     // produced `Model 'anthropic/claude-sonnet-5' is not available` against an
     // endpoint that publishes `chat-v1` itself.
-    let model = inference::model_for_tier(abstract_model, &decl.models, decl.vocabulary());
+    //
+    // Keys rework (#2306), slice 2b: a decl with a chosen model (a full
+    // company default, or — from 3a — an agent pair) sends it as-is; only a
+    // legacy decl with none falls through to the tier map.
+    let model = match decl.chosen_model() {
+        Some(chosen) => chosen.to_string(),
+        None => inference::model_for_tier(abstract_model, &decl.models, decl.vocabulary()),
+    };
     let url = format!("{}/chat/completions", decl.base_url.trim_end_matches('/'));
     let bearer = decl
         .bearer()
@@ -2084,27 +2092,36 @@ impl TenantProvider {
     }
 
     /// Re-resolves the effective config from the secret store and updates the
-    /// cached telemetry slug. Errors when no provider is configured at all.
+    /// cached telemetry slug. Errors with [`inference::NO_MODEL_CHOSEN`] (or a
+    /// fail-closed sentence for a broken pin/full default) when nothing
+    /// resolves.
     ///
-    /// `tier` is the abstract tier **this** turn carries, and it is not
-    /// decoration: the company's routing table routes per workload, so resolving
-    /// without it answers "where does this company send work" when the question
-    /// is "where does this company send *this* work". Resolved per turn rather
-    /// than cached for the same reason the credential is — an operator moves a
-    /// row on the Routing tab and the next turn has to honour it.
+    /// `tier` is the abstract tier **this** turn carries. Keys rework (#2306,
+    /// slice 2b): resolution no longer depends on it for a company with an
+    /// agent pair or a full default — [`inference::resolve_for_turn`] decides
+    /// the model directly — but the legacy chain (no pin, no full default)
+    /// still routes per workload exactly as it always did, so `tier` still
+    /// has to reach it.
     async fn resolve(&self, tier: &str) -> anyhow::Result<InferenceDecl> {
-        let decl = inference::resolve_effective_for_tier(
+        let decl = inference::resolve_for_turn(
             &self.company,
             &self.manifest,
             self.env_default.as_ref(),
             self.secrets.as_ref(),
             &self.scope,
+            None, // the agent pair: slice 3a passes `self.pin.clone()`
             tier,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
-        .ok_or_else(|| anyhow::anyhow!("no inference provider is configured for this company"))?;
+        .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?;
         *self.slug.write().unwrap() = decl.telemetry_slug();
+        // A chosen model (a full default, or — from 3a — a pin) is sent as
+        // given: no tier vocabulary, no catalogue read. Only the legacy arm
+        // below still needs to know what an unmapped tier means to this
+        // endpoint.
+        if decl.chosen_model().is_some() {
+            return Ok(decl);
+        }
         // Ask the endpoint what vocabulary it speaks before deciding whether to
         // rewrite this turn's tier. Cached per company, harness and endpoint for
         // an hour (and per failure for a minute), so this is one extra request
@@ -4901,7 +4918,12 @@ mod tests {
             .invoke(&(), user_request("hi"))
             .await
             .expect_err("no provider configured");
-        assert!(err.to_string().contains("no inference provider"), "{err}");
+        // Keys rework (#2306), slice 2b: `resolve_for_turn`'s refusal replaces
+        // the old "no inference provider is configured" sentence.
+        assert!(
+            err.to_string().contains("No model is chosen for this company"),
+            "{err}"
+        );
     }
 
     /// The product-identity contract at the transport: `HostedProvider::invoke`

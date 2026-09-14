@@ -513,6 +513,11 @@ pub struct InferenceDecl {
     /// (`crate::server::inference_models::discovered_vocabulary`) rather than
     /// performed inside this resolve, which runs on every turn.
     vocabulary: Option<TierVocabulary>,
+    /// The model the new resolution path chose (keys rework, issue #2306,
+    /// slice 2b): a full company default's (or, from slice 3a, an agent
+    /// pair's). `None` on every legacy arm. Set only through
+    /// [`with_chosen_model`](Self::with_chosen_model).
+    chosen_model: Option<String>,
 }
 
 impl InferenceDecl {
@@ -585,6 +590,21 @@ impl InferenceDecl {
     #[must_use]
     pub fn with_vocabulary(mut self, vocabulary: Option<TierVocabulary>) -> Self {
         self.vocabulary = vocabulary;
+        self
+    }
+
+    /// The model a turn sends, when the new path (2b: a full company
+    /// default; 3a: an agent pair) chose one.
+    pub fn chosen_model(&self) -> Option<&str> {
+        self.chosen_model.as_deref()
+    }
+
+    /// Attaches the chosen model (keys rework, issue #2306, slice 2b). Never
+    /// call this on a legacy arm — [`decl_for_choice`] is the one place that
+    /// does.
+    #[must_use]
+    pub fn with_chosen_model(mut self, model: String) -> Self {
+        self.chosen_model = Some(model);
         self
     }
 
@@ -736,6 +756,7 @@ pub fn decl_for_probe(
         credential,
         proxied,
         vocabulary: None,
+        chosen_model: None,
     }
 }
 
@@ -1178,11 +1199,12 @@ pub async fn key_configured(
 
 /// Resolves a company's *effective* inference configuration.
 ///
-/// Precedence is **provider list > runtime > manifest > env-default > a routing
-/// table that names `managed`**. Returns `None` when no source configures
-/// inference at all — the caller then keeps the managed/echo brain. The single
-/// seam the harness builder and the ops route both use so the agent-facing
-/// resolution and the console's status view stay identical.
+/// Precedence is **full default (2b) > provider list > runtime > manifest >
+/// env-default > a routing table that names `managed`**. Returns `None` when
+/// no source configures inference at all — the caller then keeps the
+/// managed/echo brain. The single seam the harness builder and the ops route
+/// both use so the agent-facing resolution and the console's status view
+/// stay identical.
 ///
 /// This re-reads the secret store on every call, which is what makes a console
 /// switch take effect on the agents' next turn with no rebuild.
@@ -1246,6 +1268,18 @@ pub async fn resolve_effective_scoped(
     // company's — and charged the wrong one, with nothing on any screen saying
     // the harness's own section had stopped applying.
     if scope.is_default || !harness_configures_itself(company, secrets, scope).await? {
+        // Keys rework (#2306), slice 2b: a full company default outranks the
+        // provider list's own positional/marked-primary rule — an operator
+        // who chose `{provider, model}` explicitly said more than "this row
+        // is my default slug", and that choice's model is what a status read
+        // and a turn both send. A default naming a missing or switched-off
+        // provider falls through here (see `full_default_decl`'s own doc);
+        // the turn path's `resolve_for_turn` is where that fails closed.
+        if let Some(decl) =
+            full_default_decl(company, manifest, env_default, secrets, scope).await?
+        {
+            return Ok(Some(decl));
+        }
         let providers = store::list_providers(company, secrets).await?;
         if let Some(decl) = decl_for_primary(company, secrets, &providers).await? {
             return Ok(Some(decl));
@@ -1441,6 +1475,7 @@ async fn decl_for_indexed(
         credential,
         proxied,
         vocabulary: None,
+        chosen_model: None,
     })
 }
 
@@ -1496,6 +1531,7 @@ async fn resolve_legacy_scoped(
             credential,
             proxied,
             vocabulary: None,
+            chosen_model: None,
         }));
     }
 
@@ -1540,6 +1576,7 @@ async fn resolve_legacy_scoped(
             credential,
             proxied,
             vocabulary: None,
+            chosen_model: None,
         }));
     }
 
@@ -1587,10 +1624,193 @@ async fn resolve_legacy_scoped(
             credential,
             proxied,
             vocabulary: None,
+            chosen_model: None,
         }));
     }
 
     Ok(None)
+}
+
+/// The turn-path refusal when neither a pin, a full default, nor the legacy
+/// chain gives a model (keys rework, issue #2306, slices 2b/2d). Superseded
+/// as the *sentence itself* by decision D-copy (X9, 2026-09-15,
+/// `docs/key-reworks/README.md`) — see
+/// [`copy::nothing_resolved_for_company`] for the company-wide wording this
+/// constant now delegates to, and [`copy::nothing_resolved`] for the
+/// per-agent one. Kept as a `pub const` because slice names outside this
+/// module still match error text against it.
+pub const NO_MODEL_CHOSEN: &str = copy::COMPANY_NO_MODEL_CHOSEN;
+
+/// Which explicit choice is being resolved; only the refusal wording differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChoiceSource {
+    /// An agent pair (3a).
+    Pin,
+    /// The company's full default.
+    Default,
+}
+
+/// The decl one chosen provider resolves to, carrying the chosen model (keys
+/// rework, issue #2306, slice 2b).
+///
+/// `Indexed` ⇒ [`decl_for_indexed`]. `EntryZero` ⇒ [`resolve_legacy_scoped`]
+/// at the flat scope, the same rule as the entry-zero route arm, so the
+/// proxy inheritance, the managed chain and `reject_unknown_provider` still
+/// apply to a default (or pin) that happens to name entry zero.
+async fn decl_for_choice(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+    provider: &store::Provider,
+    model: &str,
+) -> Result<Option<InferenceDecl>> {
+    let decl = match provider.origin {
+        store::ProviderOrigin::Indexed => Some(decl_for_indexed(company, secrets, provider).await?),
+        store::ProviderOrigin::EntryZero => {
+            let flat = HarnessScope::default_harness(&scope.id);
+            resolve_legacy_scoped(company, manifest, env_default, secrets, &flat).await?
+        }
+    };
+    Ok(decl.map(|d| d.with_chosen_model(model.to_string())))
+}
+
+/// A full default, for **read** paths (boot and status) (keys rework, issue
+/// #2306, slice 2b).
+///
+/// A default naming a missing or switched-off provider answers `None`, and
+/// the caller falls through to today's steps: a read must be able to
+/// describe the state that refuses a turn (see
+/// `refuse_a_managed_fallback_that_is_switched_off`). The refusal itself
+/// lives in [`resolve_for_turn`], not here.
+async fn full_default_decl(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<Option<InferenceDecl>> {
+    let store::DefaultChoice::Full(choice) = store::load_default(company, secrets).await? else {
+        return Ok(None);
+    };
+    let Some(provider) = store::get_provider(company, secrets, &choice.provider).await? else {
+        return Ok(None);
+    };
+    if !provider.enabled {
+        return Ok(None);
+    }
+    decl_for_choice(
+        company,
+        manifest,
+        env_default,
+        secrets,
+        scope,
+        &provider,
+        &choice.model,
+    )
+    .await
+}
+
+/// Resolves an explicit choice, failing closed (F6) (keys rework, issue
+/// #2306, slice 2b): a missing or switched-off provider is an error, never a
+/// fall-through to the default or to legacy.
+async fn resolve_choice(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+    choice: &store::ModelChoice,
+    source: ChoiceSource,
+) -> Result<InferenceDecl> {
+    let slug = choice.provider.trim();
+    let Some(provider) = store::get_provider(company, secrets, slug).await? else {
+        return Err(OpenCompanyError::Config(match source {
+            // Deliberately agent-less: this is the pin's OWN fallback, reached
+            // only if a caller resolves a pin without going through 3a's
+            // `TenantProvider::resolve` pin check, which runs first there and
+            // produces `copy::pair_broken` (with the real agent name) before
+            // this branch is ever reached in practice.
+            ChoiceSource::Pin => format!(
+                "this agent is set to `{slug}`, which this company does not have. \
+                 Choose another provider in Team → the agent → Model."
+            ),
+            ChoiceSource::Default => copy::default_broken(slug, copy::ProviderGone::Removed),
+        }));
+    };
+    if !provider.enabled {
+        let label = provider.label.as_str();
+        return Err(OpenCompanyError::Config(match source {
+            ChoiceSource::Pin => format!(
+                "this agent is set to `{label}`, which is switched off. Switch it back on \
+                 in Settings → Inference, or choose another provider in Team → the agent → Model."
+            ),
+            ChoiceSource::Default => copy::default_broken(label, copy::ProviderGone::TurnedOff),
+        }));
+    }
+    decl_for_choice(
+        company,
+        manifest,
+        env_default,
+        secrets,
+        scope,
+        &provider,
+        &choice.model,
+    )
+    .await?
+    .ok_or_else(|| OpenCompanyError::Config(copy::nothing_resolved_for_company()))
+}
+
+/// The turn resolver (keys rework, issue #2306, slice 2b; 3a adds `pin`).
+/// Order, and nothing else:
+///
+/// 1. `pin` (an agent pair; always `None` until 3a) ⇒ [`resolve_choice`].
+/// 2. A named, non-default harness that configures itself skips step 3.
+/// 3. A [`store::DefaultChoice::Full`] default ⇒ [`resolve_choice`].
+/// 4. Otherwise ⇒ [`resolve_effective_for_tier`] with `legacy_hint` as the
+///    tier, byte for byte; `None` becomes the company-wide "no model chosen"
+///    refusal.
+pub async fn resolve_for_turn(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+    pin: Option<store::ModelChoice>,
+    legacy_hint: &str,
+) -> Result<InferenceDecl> {
+    if let Some(pin) = pin {
+        return resolve_choice(
+            company,
+            manifest,
+            env_default,
+            secrets,
+            scope,
+            &pin,
+            ChoiceSource::Pin,
+        )
+        .await;
+    }
+    let harness_owns_its_inference =
+        !scope.is_default && harness_configures_itself(company, secrets, scope).await?;
+    if !harness_owns_its_inference
+        && let store::DefaultChoice::Full(choice) = store::load_default(company, secrets).await?
+    {
+        return resolve_choice(
+            company,
+            manifest,
+            env_default,
+            secrets,
+            scope,
+            &choice,
+            ChoiceSource::Default,
+        )
+        .await;
+    }
+    resolve_effective_for_tier(company, manifest, env_default, secrets, scope, legacy_hint)
+        .await?
+        .ok_or_else(|| OpenCompanyError::Config(copy::nothing_resolved_for_company()))
 }
 
 /// [`resolve_effective_scoped`] for the workload one turn is actually for.
@@ -1757,6 +1977,7 @@ async fn managed_decl(
         credential,
         proxied,
         vocabulary: None,
+        chosen_model: None,
     })
 }
 
