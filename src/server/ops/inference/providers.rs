@@ -1225,11 +1225,18 @@ async fn delete_provider(
             "removed a provider but could not clear its health record",
         );
     }
-    // The marker goes with the record, for the same reason the routes do: a
-    // marker naming a provider that is gone is a default nobody can see and
-    // nobody chose. `primary` would fall back correctly anyway — this is the
-    // write path keeping that rare rather than relying on it.
-    clear_default_if_marked(runtime, &provider.slug).await;
+    // Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+    // `inference/default` is left exactly as it was, even though it may now
+    // name a slug with no row at all. An operator who confirmed this delete
+    // made one decision — remove the provider — and a silent second one —
+    // "and also pick a new default" — is not that decision. A **full**
+    // `{provider, model}` default (2b/2c) fails a turn closed when the marked
+    // provider is gone, via `resolve_choice`; a legacy bare-slug marker keeps
+    // its pre-existing behaviour of falling back to `resolve::primary`'s
+    // first-enabled provider (D-legacy: unchanged for a company with no full
+    // default). Either way, the console's job is to show the stale marker —
+    // via the status route — not for this handler to paper over it by
+    // quietly moving it to whatever the fallback happens to be today.
     crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
 
     let note = if reset.is_empty() {
@@ -1303,13 +1310,14 @@ async fn set_enabled(
     let parked = if body.enabled {
         Vec::new()
     } else {
-        // A disabled provider cannot be the default. The marker is **cleared**
-        // rather than moved to the next enabled provider: moving it would mark
-        // something the operator never chose, which is precisely the positional
-        // default the marker exists to replace. Cleared, `primary` falls back to
-        // first-enabled — the same answer, but nothing on the page claims the
-        // operator decided it.
-        clear_default_if_marked(runtime, &provider.slug).await;
+        // Keys rework (#2306), decision D-never-clear-default (X14,
+        // 2026-09-15): `inference/default` is left exactly as marked, even
+        // though this provider can no longer serve. An earlier version of
+        // this handler cleared the marker here on the theory that moving it
+        // to first-enabled was "the same answer" with less claim to intent —
+        // but silently retargeting the default is itself an undocumented
+        // decision the operator did not make. See the identical note in
+        // `delete_provider` above for which resolution path this then takes.
         let mut tiers = parked_tiers(runtime, &provider).await?;
         // **An unset row is served by this provider too, and it moves.** Only
         // explicit routes name a slug, so switching off the provider every
@@ -1394,33 +1402,12 @@ async fn set_default(
     }))
 }
 
-/// Drops the default marker when it names `slug`.
-///
-/// Never fails the request it is part of: the marker is a preference, and a
-/// company left with a stale one still resolves — [`resolve::primary`] falls
-/// back. Losing a delete or a disable over it would be the tail wagging the dog.
-async fn clear_default_if_marked(runtime: &CompanyRuntime, slug: &str) {
-    let secrets = runtime.secrets().as_ref();
-    match store::load_default_slug(runtime.id(), secrets).await {
-        Ok(Some(marked)) if marked == slug => {
-            if let Err(err) = store::clear_default_slug(runtime.id(), secrets).await {
-                tracing::warn!(
-                    company = %runtime.id(),
-                    provider = %slug,
-                    error = %err,
-                    "could not clear the default marker; it now names a provider that is \
-                     gone or off, and unrouted work falls back to the first enabled one",
-                );
-            }
-        }
-        Ok(_) => {}
-        Err(err) => tracing::warn!(
-            company = %runtime.id(),
-            error = %err,
-            "could not read the default marker while changing a provider",
-        ),
-    }
-}
+// DEPRECATED(keys-rework #2306): `clear_default_if_marked` used to live here,
+// clearing `inference/default` whenever a delete or a disable named the
+// marked provider. Removed by decision D-never-clear-default (X14,
+// 2026-09-15, docs/key-reworks/README.md): see the notes at both of its
+// former call sites, in `delete_provider` and `set_enabled` above. Removable
+// once nobody searches the history for why the behaviour changed.
 
 /// The tiers whose route `provider` serves, so switching it off can name them.
 ///

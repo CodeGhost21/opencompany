@@ -3656,6 +3656,97 @@ base_url = "https://byo.example/v1"
         assert_eq!(default_slug(&dto).as_deref(), Some("first"));
     }
 
+    /// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
+    /// disabling, clearing the key of, or deleting the provider
+    /// `inference/default` names never rewrites that **stored** value — only
+    /// the derived `isDefault`/`defaultChoice` view changes, via
+    /// `resolve::primary`'s existing first-enabled fallback. This is the
+    /// regression `disabling_or_deleting_the_default_never_leaves_it_marked`
+    /// above cannot catch, because it only reads that derived view (which
+    /// already looked the same whether or not the raw marker was cleared).
+    #[tokio::test]
+    async fn a_delete_disable_or_key_clear_never_rewrites_the_stored_default_marker() {
+        use crate::company::inference::store;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        let id = CompanyId::new("acme");
+
+        for label in ["First", "Second"] {
+            send(
+                &state,
+                "POST",
+                "/api/v1/company/inference/providers",
+                Some(json!({ "kind": "custom", "label": label, "baseUrl": UNREACHABLE })),
+            )
+            .await;
+        }
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/default",
+            None,
+        )
+        .await;
+
+        async fn raw_marker(state: &AppState, id: &CompanyId) -> Option<String> {
+            let runtime = state.registry().get(id).expect("registered");
+            let secrets = runtime.secrets();
+            store::load_default_slug(id, secrets.as_ref())
+                .await
+                .unwrap()
+        }
+        assert_eq!(raw_marker(&state, &id).await.as_deref(), Some("second"));
+
+        // Disabling it: the stored marker is untouched.
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/second/enabled",
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a disable must not rewrite inference/default"
+        );
+
+        // Clearing its key (edit with an empty key): still untouched.
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference/providers/second",
+            Some(json!({ "key": "" })),
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a key clear must not rewrite inference/default"
+        );
+
+        // Deleting it: still untouched, even though no row now answers to it.
+        send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/second",
+            None,
+        )
+        .await;
+        assert_eq!(
+            raw_marker(&state, &id).await.as_deref(),
+            Some("second"),
+            "a delete must not rewrite inference/default"
+        );
+
+        // The derived view still degrades gracefully — this is what the
+        // console's status read and banner are for.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(default_slug(&dto).as_deref(), Some("first"));
+    }
+
     #[tokio::test]
     async fn a_provider_that_is_switched_off_cannot_be_made_the_default() {
         let home_dir = home();
