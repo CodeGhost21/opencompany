@@ -69,6 +69,7 @@ import {
   type SetupDraft,
 } from "@/lib/company-setup";
 import { isDesktopRuntime } from "@/api/transport";
+import { TINYHUMANS_API_KEYS_URL } from "@/lib/links";
 import { cn } from "@/lib/utils";
 import { HOST_SETTINGS_HIDDEN } from "@/product-scope";
 
@@ -126,7 +127,7 @@ const STEPS: readonly (Step & { fields: readonly string[] })[] = [
 const PROVIDER_KEY_SOURCE: Record<string, { label: string; url: string }> = {
   managed: {
     label: "TinyHumans",
-    url: "https://tinyhumans.ai/dashboard?tab=api-keys",
+    url: TINYHUMANS_API_KEYS_URL,
   },
   openrouter: {
     label: "OpenRouter",
