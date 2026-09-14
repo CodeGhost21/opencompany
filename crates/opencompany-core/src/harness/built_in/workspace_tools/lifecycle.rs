@@ -409,16 +409,21 @@ impl Tool for WorkspaceDeleteTool {
             .delete(&self.workspace.company, &entry.node.id)
             .await
         {
-            Ok(true) => Ok(ToolResult::success(format!(
-                "Deleted the workspace {what} `{shown}` (id={id}).{history}",
-                what = match entry.node.kind {
-                    NodeKind::Folder => "folder",
-                    NodeKind::File => "note",
-                },
-                shown = echo_path(&entry.path),
-                id = entry.node.id,
-                history = history.note(),
-            ))),
+            Ok(true) => {
+                if let Some(outputs) = &self.workspace.outputs {
+                    outputs.remove_workspace_node(&entry.node.id);
+                }
+                Ok(ToolResult::success(format!(
+                    "Deleted the workspace {what} `{shown}` (id={id}).{history}",
+                    what = match entry.node.kind {
+                        NodeKind::Folder => "folder",
+                        NodeKind::File => "note",
+                    },
+                    shown = echo_path(&entry.path),
+                    id = entry.node.id,
+                    history = history.note(),
+                )))
+            }
             Ok(false) => Ok(ToolResult::error(format!(
                 "Refused: `{shown}` was already gone by the time the delete ran — somebody removed \
                  it while you were deciding. Nothing was changed.",

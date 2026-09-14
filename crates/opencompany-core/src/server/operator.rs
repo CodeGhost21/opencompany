@@ -60,6 +60,18 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/companies/{id}", get(company_status))
         .route("/api/v1/companies/{id}/chat", post(operator_chat))
         .route("/api/v1/companies/{id}/chat/history", get(chat_history))
+        // One agent's whole session: every line it said and heard, across every
+        // channel it can read, in journal order. Registered explicitly rather
+        // than through `scoped` because the two forms take different path
+        // tuples — `(id, agent_id)` against `(agent_id)`.
+        .route(
+            "/api/v1/companies/{id}/agents/{agent_id}/session",
+            get(agent_session),
+        )
+        .route(
+            "/api/v1/company/agents/{agent_id}/session",
+            get(agent_session_single),
+        )
         .route(
             "/api/v1/companies/{id}/chat/attribution-audit",
             get(attribution_audit),
@@ -1618,6 +1630,7 @@ fn project_event_for_viewer(
             agent_id,
             text,
             steps,
+            outputs,
             task_id,
             parent,
             mentions,
@@ -1643,6 +1656,9 @@ fn project_event_for_viewer(
             // when empty so a tool-less reply's wire form is unchanged.
             if !steps.is_empty() {
                 o["steps"] = json!(steps);
+            }
+            if !outputs.is_empty() {
+                o["outputs"] = json!(outputs);
             }
             // Correlation key for a dispatch-produced reply (#185); omitted for
             // an ordinary chat reply so the legacy wire shape is unchanged.
@@ -2823,6 +2839,7 @@ async fn run_chat(
                     .to_string(),
                 steps: Vec::new(),
                 task_id: None,
+                outputs: Vec::new(),
                 mentions: Vec::new(),
                 mention_depth: 0,
             };
@@ -3178,6 +3195,31 @@ async fn drain_bounded(
     }
 }
 
+/// Who a chat turn addressed to `desk` is expected to be answered by.
+///
+/// Recorded on the turn's row so a console with no receipt can still name the
+/// teammate. A chat turn used to record the DESK here — `for_chat(.., desk,
+/// desk)` — so every one of them read `agent_id == chat_id` ("main" for
+/// General). The console's rich receipt names whoever the first live frame
+/// named, but a receipt is client state: a reload throws it away, re-arms from
+/// `/runs` alone, and could then render only a bare "Working…" — no name, no
+/// clock, nothing to distinguish a turn in flight from a console that lost it.
+///
+/// The same ladder [`crate::runtime::cycle`]'s small-talk fast path runs, which
+/// is itself "the same resolution the harness brain's `responder_for` runs", so
+/// the name on the row is the voice the turn will actually answer in.
+///
+/// **Optimistic, and the callers depend on it being cheap.** This is the sync,
+/// record-only seam — no inference — so the brain's per-message rung may still
+/// pick a different seat; the turn's first live frame supersedes whatever is
+/// recorded here. A company with nobody resolvable falls back to `desk`, which
+/// is precisely the old behaviour, so the change can only add a name.
+fn chat_turn_responder(record: &crate::ports::types::CompanyRecord, desk: &str) -> String {
+    crate::runtime::delegation_tools::chat_responder(record, desk)
+        .or_else(|| crate::company::orchestrator_id(&record.effective_agents()).map(str::to_string))
+        .unwrap_or_else(|| desk.to_string())
+}
+
 async fn accept_chat_turn(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
@@ -3271,6 +3313,12 @@ async fn accept_chat_turn(
         .await;
 
     let turn_id = crate::ports::generate_id();
+    // A record this read cannot load leaves the turn recorded exactly as it was
+    // before: the desk's own id, which is what `for_chat` was passed twice.
+    let responder = match runtime.store().load(id).await {
+        Ok(Some(record)) => chat_turn_responder(&record, desk),
+        _ => desk.to_string(),
+    };
     let turn_id = match runtime
         .runs()
         .create_run(
@@ -3289,7 +3337,8 @@ async fn accept_chat_turn(
             // before the host has assigned this message a seq. Rooting it at
             // its own seq would key the two legs differently and the reload
             // leg would stop matching the arm.
-            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk).in_thread(parent),
+            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, responder)
+                .in_thread(parent),
         )
         .await
     {
@@ -3926,6 +3975,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                     text: turn_failure_notice(&err.0.to_string()),
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     mentions: Vec::new(),
                     mention_depth: 0,
                 };
@@ -4098,6 +4148,7 @@ mod readable_responses_test {
             steps: Vec::new(),
             reply_to: None,
             task_id: None,
+            outputs: Vec::new(),
             message_id: None,
             mentions: Vec::new(),
         }
@@ -4276,6 +4327,9 @@ pub(crate) async fn journal_chat_replies(
                     // Persist the per-bubble timeline so a history reload
                     // rehydrates the tool calls, not just the text.
                     steps: response.steps.clone(),
+                    // Persist the structured addresses, never the redacted
+                    // display strings in the step timeline.
+                    outputs: response.outputs.clone(),
                 },
             )
             .await;
@@ -4462,6 +4516,24 @@ pub(crate) struct ReferralConversationDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AsideLineDto {
+    /// The agent that wrote it.
+    author_id: String,
+    /// What they said, with the `!aside @peer` head already stripped.
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AsideConversationDto {
+    /// Everyone in it — the author first, then who they addressed.
+    members: Vec<String>,
+    /// The exchange, oldest first. Its length is the count in the label.
+    lines: Vec<AsideLineDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ReferredFromDto {
     /// The desk that asked, by id — for the link, never for display.
     desk_id: String,
@@ -4505,6 +4577,7 @@ struct ChatHistoryMessageDto {
     /// every ordinary message, so the wire shape is unchanged for them.
     #[serde(skip_serializing_if = "Option::is_none")]
     referral_conversation: Option<ReferralConversationDto>,
+    aside_conversation: Option<AsideConversationDto>,
     /// When it was journaled, epoch millis.
     at_millis: f64,
     /// Whether it is the operator's own message.
@@ -4530,6 +4603,9 @@ struct ChatHistoryMessageDto {
     /// existed — so the legacy shape is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
+    /// Workspace objects produced by this reply's turn. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    outputs: Vec<crate::ports::types::ChatOutput>,
     /// The message this one replies to (issue #364), so a thread survives a
     /// reload instead of collapsing into the channel. Omitted on a message
     /// posted straight into the channel — which is every message journaled
@@ -4643,6 +4719,17 @@ impl From<ReactionView> for ChatReactionDto {
 impl From<MessageView> for ChatHistoryMessageDto {
     fn from(view: MessageView) -> Self {
         Self {
+            aside_conversation: view.aside_conversation.map(|aside| AsideConversationDto {
+                members: aside.members,
+                lines: aside
+                    .lines
+                    .into_iter()
+                    .map(|line| AsideLineDto {
+                        author_id: line.author_id,
+                        text: line.text,
+                    })
+                    .collect(),
+            }),
             referral_conversation: view.referral_conversation.map(|crossing| {
                 ReferralConversationDto {
                     asker_id: crossing.asker_id,
@@ -4684,6 +4771,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
             by_person: view.by_person,
             steps: view.steps,
             task_id: view.task_id,
+            outputs: view.outputs,
             parent_id: view.parent_id,
             reactions: view
                 .reactions
@@ -4838,6 +4926,183 @@ async fn chat_history_single(
     let runtime = sole(&state)?;
     let id = runtime.id().clone();
     chat_history_response(&state, &id, runtime, &headers, peer, query).await
+}
+
+/// One line of an agent's session, as the console renders it.
+///
+/// A `ChatHistoryMessageDto` plus where it was said. The reuse is the point:
+/// the console's `fromHistory` already maps every field of that type, including
+/// the referral and aside collapses, so the session view renders an
+/// agent-to-agent exchange with the components that already exist rather than
+/// with a second set that would drift from them.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSessionMessageDto {
+    /// The line itself.
+    #[serde(flatten)]
+    message: ChatHistoryMessageDto,
+    /// The channel it was said on, as the rail names it (`#general`, `dm`).
+    session_channel: String,
+    /// The desk id behind that label, so a row can link to its conversation.
+    session_channel_id: String,
+    /// **What the agent was told to call this row's author.**
+    ///
+    /// Not the same string as the flattened `author`, and deliberately so: that
+    /// one is the display name a *person* reads and falls back to `"someone"`
+    /// where this falls back to the signed-in user's id. The console's raw view
+    /// reproduces the cue line the model was handed, and a cue rendered from
+    /// the display name would put a name in front of the operator that the
+    /// agent never saw. See [`cue_author`](crate::server::chat_history::cue_author).
+    cue_author: String,
+    /// **The text half of the cue line the model was actually handed** —
+    /// before [`readable_moves`](crate::server::chat_history::readable_moves)
+    /// rewrote it into operator-facing prose (Codex P2: the raw-turns surface
+    /// must show `!support #topic ^3`, not the prose it becomes for a person).
+    /// Same reasoning as `cue_author`, for the other half of the line. See
+    /// [`MessageView::cue_text`](crate::server::chat_history::MessageView::cue_text).
+    cue_text: String,
+    /// **The openhuman session these turns belong to** — `{company}:{agent_id}`,
+    /// exactly as
+    /// [`openhuman_session_key`](crate::session_key::openhuman_session_key)
+    /// mints it for the builder that stamps it onto the live session.
+    ///
+    /// # Why a per-row field and not an envelope
+    ///
+    /// This is metadata about the *session*, not about the row, so the tidy
+    /// shape would be `{ sessionKey, rows: [...] }`. It is a field anyway,
+    /// because the route already answers a bare JSON array and every existing
+    /// caller — both console surfaces, and anything else reading the documented
+    /// route — indexes, filters and maps that array directly. Wrapping it is a
+    /// breaking change to a shipped shape in exchange for saving one repeated
+    /// string; an added field is one every old caller ignores. The repetition
+    /// is bounded and constant: one short string per row of a page already
+    /// capped at `CHAT_HISTORY_PAGE_LIMIT`.
+    ///
+    /// The console renders this and never rebuilds it: a second spelling of a
+    /// session's name in TypeScript is a second spelling that can drift from
+    /// the one the runtime actually uses.
+    openhuman_session_key: String,
+}
+
+/// `GET {scope}/agents/{agent_id}/session` — every row on every channel this
+/// agent is eligible to read.
+///
+/// # Why this is one route and not "read the desks yourself"
+///
+/// The console could fetch `chat/history` per desk and merge. It must not: the
+/// set of channels an agent can read is decided by
+/// [`agent_channels`](crate::server::chat_history::agent_channels),
+/// and that function is also what decides the agent's **own** session. Asking
+/// it here is what keeps the page from claiming an agent saw something it did
+/// not — one function, two readers, no drift.
+///
+/// # Eligible is not delivered
+///
+/// This is channel history the agent **may** read, not a record of what it
+/// has **already** been handed. A `desk_dm` journals a row and runs nothing —
+/// the recipient reads it on its own next turn, through the per-agent
+/// watermark `agent_session::AgentSessionState` tracks. That watermark lives
+/// in the live `HarnessPool`, gated behind the `openhuman` feature; this route
+/// has no access to it and compiles in every build. So a message queued
+/// behind another turn shows up here immediately,
+/// same as one the agent answered an hour ago. See
+/// `docs/spec/runtime/speech.md#reading-it-back`.
+///
+/// # The operator sees more than the agent does, deliberately
+///
+/// Projected with the caller's own [`Viewer`], so an operator reads private
+/// asides in full while the agent's session has them narrowed by
+/// `Audience::admits`. That asymmetry is the documented rule: privacy here is a
+/// deliberation device between agents and never a security boundary.
+async fn agent_session_response(
+    state: &AppState,
+    company: &CompanyId,
+    runtime: Arc<CompanyRuntime>,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    agent_id: &str,
+    query: ChatHistoryQuery,
+) -> Result<Json<Vec<AgentSessionMessageDto>>, crate::server::Rejection> {
+    let (viewer, is_admin) = history_viewer(headers, state, company, peer).await?;
+    let limit = query
+        .limit
+        .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
+        .min(CHAT_HISTORY_PAGE_LIMIT);
+    let Some(record) = runtime.store().load(runtime.id()).await? else {
+        return Ok(Json(Vec::new()));
+    };
+    let channels = crate::server::chat_history::agent_channels(&record, agent_id);
+
+    // One page per channel, then merged by sequence. Each page is already
+    // bounded by `limit`, so the merge is bounded by `channels × limit` before
+    // the tail cut below — and an agent sits on a handful of desks, not a
+    // hundred.
+    // Minted once, by the one function that names a session, and copied onto
+    // every row. See `AgentSessionMessageDto::openhuman_session_key`.
+    let session_key = crate::session_key::openhuman_session_key(company, agent_id);
+    let mut rows: Vec<AgentSessionMessageDto> = Vec::new();
+    for channel in &channels {
+        let messages = history_for_desk(
+            &runtime,
+            &channel.id,
+            &channel.name,
+            &viewer,
+            query.before,
+            limit,
+            is_admin,
+        )
+        .await?;
+        for message in messages {
+            // Read before the conversion: `ChatHistoryMessageDto::from` takes
+            // the view by value, and neither field below is one it carries —
+            // they are what the agent was handed, not what the reader is.
+            let cue_author = message.cue_author.clone();
+            let cue_text = message.cue_text.clone();
+            rows.push(AgentSessionMessageDto {
+                message: ChatHistoryMessageDto::from(message),
+                cue_author,
+                cue_text,
+                session_channel: channel.label.clone(),
+                session_channel_id: channel.id.clone(),
+                openhuman_session_key: session_key.clone(),
+            });
+        }
+    }
+    // Journal order, oldest first — the order the agent itself experienced.
+    // `id` is the sequence the row was journaled under, so it sorts numerically
+    // rather than lexically; a string sort would put [10] before [9].
+    rows.sort_by_key(|row| row.message.id.parse::<u64>().unwrap_or(0));
+    rows.dedup_by(|a, b| a.message.id == b.message.id);
+    if rows.len() > limit {
+        rows.drain(..rows.len() - limit);
+    }
+    Ok(Json(rows))
+}
+
+/// `GET /api/v1/companies/{id}/agents/{agent_id}/session`.
+async fn agent_session(
+    State(state): State<AppState>,
+    Path((id, agent_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    Query(query): Query<ChatHistoryQuery>,
+) -> Result<Json<Vec<AgentSessionMessageDto>>, crate::server::Rejection> {
+    let company = CompanyId::new(&id);
+    let runtime = lookup(&state, &id)?;
+    agent_session_response(&state, &company, runtime, &headers, peer, &agent_id, query).await
+}
+
+/// `GET /api/v1/company/agents/{agent_id}/session` (single-company alias).
+async fn agent_session_single(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    Query(query): Query<ChatHistoryQuery>,
+) -> Result<Json<Vec<AgentSessionMessageDto>>, crate::server::Rejection> {
+    let runtime = sole(&state)?;
+    let id = runtime.id().clone();
+    agent_session_response(&state, &id, runtime, &headers, peer, &agent_id, query).await
 }
 
 /// The wire shape of `GET {scope}/chat/attribution-audit` (issue #885).
@@ -5824,6 +6089,53 @@ async fn extend_approval(
 
 #[cfg(test)]
 mod test {
+    /// The wire shape the console binds to.
+    ///
+    /// `fold_asides` is worthless if the field reaches the browser under a
+    /// different name, and `tsc` cannot catch that: the DTO is Rust, the
+    /// interface is hand-written TypeScript, and nothing checks one against the
+    /// other. This is that check.
+    #[test]
+    fn the_folded_aside_reaches_the_wire_as_camel_case() {
+        use crate::server::chat_history::{AsideConversation, AsideLine};
+
+        let aside = AsideConversation {
+            members: vec!["exchanges".to_owned(), "refunds".to_owned()],
+            lines: vec![AsideLine {
+                author_id: "exchanges".to_owned(),
+                text: "the difference is -$16.63".to_owned(),
+            }],
+        };
+        let dto = super::AsideConversationDto {
+            members: aside.members,
+            lines: aside
+                .lines
+                .into_iter()
+                .map(|line| super::AsideLineDto {
+                    author_id: line.author_id,
+                    text: line.text,
+                })
+                .collect(),
+        };
+        let wire = serde_json::to_value(&dto).expect("the DTO serializes");
+
+        assert!(
+            wire.get("members").is_some(),
+            "author first, then who they addressed: {wire}"
+        );
+        let line = &wire.get("lines").and_then(|l| l.as_array()).expect("lines")[0];
+        assert_eq!(
+            line.get("authorId").and_then(|a| a.as_str()),
+            Some("exchanges"),
+            "camelCase, as the console reads it: {wire}"
+        );
+        assert_eq!(
+            line.get("text").and_then(|t| t.as_str()),
+            Some("the difference is -$16.63"),
+            "and the marker head never reaches the browser"
+        );
+    }
+
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -7284,6 +7596,94 @@ mode = "full"
              [[group_chat]]\nid = \"studio\"\nname = \"Studio\"\nmembers = [\"ceo\"]\n",
         )
         .unwrap()
+    }
+
+    /// A bare record carrying `manifest`, for resolvers that read nothing else.
+    fn record_with(manifest: CompanyManifest) -> CompanyRecord {
+        CompanyRecord {
+            overlay_desk_hive: Vec::new(),
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+        }
+    }
+
+    /// The name a chat turn's row carries.
+    ///
+    /// Reproduced against a live company before this was written: a turn sent to
+    /// `#general` recorded `agent_id == chat_id == "main"`. A console that
+    /// reloaded mid-turn therefore had a durable row, a live turn, and nobody to
+    /// name — so its re-armed indicator could say only a bare "Working…", which
+    /// reads exactly like a console that has lost the turn.
+    #[test]
+    fn a_chat_turn_records_who_answers_rather_than_the_desk_it_was_sent_to() {
+        let record = record_with(desk_manifest());
+        assert_eq!(
+            chat_turn_responder(&record, "studio"),
+            "ceo",
+            "a desk's turn is answered by the desk's lead, and that is the name \
+             the reload leg has to render"
+        );
+        assert_ne!(
+            chat_turn_responder(&record, "studio"),
+            "studio",
+            "recording the desk is the regression: it is what made every chat \
+             row read `agent_id == chat_id`"
+        );
+    }
+
+    /// A DM addresses the teammate directly — its thread id *is* a roster id —
+    /// so the row names that teammate rather than falling through to the
+    /// orchestrator.
+    #[test]
+    fn a_direct_message_records_the_teammate_it_addresses() {
+        let record = record_with(desk_manifest());
+        assert_eq!(chat_turn_responder(&record, "eng"), "eng");
+    }
+
+    /// Every spelling of the company's own line folds to one answer, so the
+    /// indicator does not name a different teammate depending on how the
+    /// console happened to address General.
+    #[test]
+    fn every_general_spelling_records_the_same_answer() {
+        let record = record_with(desk_manifest());
+        let folded: Vec<String> = ["", "main", "general", "General"]
+            .into_iter()
+            .map(|spelling| chat_turn_responder(&record, spelling))
+            .collect();
+        assert!(
+            folded.windows(2).all(|pair| pair[0] == pair[1]),
+            "the General spellings disagreed about who answers: {folded:?}"
+        );
+    }
+
+    /// The floor. A company with nobody to name records the desk — which is
+    /// precisely what every chat turn recorded before this change, so the worst
+    /// case is the old behaviour rather than a row naming a teammate that does
+    /// not exist.
+    #[test]
+    fn a_company_with_no_roster_records_the_desk_exactly_as_before() {
+        let empty: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n").expect("a roster-less manifest");
+        assert_eq!(chat_turn_responder(&record_with(empty), "studio"), "studio");
     }
 
     /// Builds an app state whose sole company carries `manifest`.
@@ -9728,6 +10128,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "General".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "reply under General".to_string(),
@@ -9746,6 +10147,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "main".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "reply under main".to_string(),
@@ -9784,6 +10186,100 @@ mode = "full"
         );
     }
 
+    /// Everything one agent said and heard, for a company with one reply in it.
+    ///
+    /// Fetched through the router so the assertion is about the wire, not about
+    /// the struct it was built from.
+    async fn session_rows(uri: &str) -> Vec<serde_json::Value> {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    chat_id: "General".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "one turn, from one session".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let rows = value.as_array().cloned().unwrap_or_default();
+        assert!(!rows.is_empty(), "no session rows came back from {uri}");
+        rows
+    }
+
+    /// The console must name the session the runtime actually uses.
+    ///
+    /// Pinned to [`openhuman_session_key`] itself rather than to the literal
+    /// `"acme:ceo"`, because the property worth keeping is not the current
+    /// spelling — it is that there is only ever **one** spelling. A route that
+    /// built its own `format!` would pass a literal assertion on the day it was
+    /// written and go on passing it the day the minting function changed.
+    #[tokio::test]
+    async fn the_session_route_reports_the_key_openhuman_session_key_mints() {
+        let expected = crate::session_key::openhuman_session_key(&CompanyId::new("acme"), "ceo");
+        let rows = session_rows("/api/v1/companies/acme/agents/ceo/session").await;
+        for row in &rows {
+            assert_eq!(
+                row.get("openhumanSessionKey").and_then(|k| k.as_str()),
+                Some(expected.as_str()),
+                "every row of one agent's session belongs to that one session: {row}"
+            );
+        }
+    }
+
+    /// The single-company alias resolves the same company, so it must report
+    /// the same session — an operator reading the same agent through the other
+    /// scope form is not looking at a second session.
+    #[tokio::test]
+    async fn both_scope_forms_of_the_session_route_report_the_same_key() {
+        let scoped = session_rows("/api/v1/companies/acme/agents/ceo/session").await;
+        let alias = session_rows("/api/v1/company/agents/ceo/session").await;
+        assert_eq!(
+            scoped[0].get("openhumanSessionKey"),
+            alias[0].get("openhumanSessionKey"),
+        );
+    }
+
+    /// The field reaches the browser under the name the console binds to.
+    /// `tsc` cannot check a hand-written interface against a Rust DTO; this is
+    /// that check, in the idiom the folded-aside test above set.
+    #[tokio::test]
+    async fn the_session_key_reaches_the_wire_as_camel_case() {
+        let rows = session_rows("/api/v1/companies/acme/agents/ceo/session").await;
+        assert!(
+            rows[0].get("openhuman_session_key").is_none(),
+            "snake_case would silently read as undefined in the console: {}",
+            rows[0]
+        );
+        assert!(rows[0].get("openhumanSessionKey").is_some(), "{}", rows[0]);
+    }
+
     /// Regression: a reply's tool-call timeline must survive a history reload —
     /// switching threads and coming back reloads `chat/history`, which used to
     /// return text only, so the steps vanished. They are now persisted on the
@@ -9805,6 +10301,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "main".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "done".to_string(),
@@ -9847,6 +10344,145 @@ mode = "full"
         );
         assert_eq!(reply["steps"][0]["status"], "ok");
         assert_eq!(reply["steps"][0]["elapsedMs"], 9);
+    }
+
+    /// A reply's produced-file buttons are durable transcript data, and the
+    /// projection must stop returning either kind once its target is gone.
+    #[tokio::test]
+    async fn chat_history_route_rehydrates_outputs_and_drops_deleted_targets() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let company = runtime.id().clone();
+
+        runtime
+            .workspace()
+            .create(
+                &company,
+                &attachment_note_node("node-1", "launch-note.md"),
+                Some("Launch notes"),
+            )
+            .await
+            .unwrap();
+        runtime
+            .workspace()
+            .create(
+                &company,
+                &attachment_note_node("node-2", "surviving-note.md"),
+                Some("Keep this note"),
+            )
+            .await
+            .unwrap();
+        runtime
+            .artifacts()
+            .upsert(
+                &company,
+                &crate::ports::artifacts::ArtifactRecord::new(
+                    "artifact-1",
+                    "task-1",
+                    "Launch brief",
+                    crate::ports::artifacts::ArtifactKind::Markdown,
+                    "# Launch",
+                    "ceo",
+                    1,
+                ),
+            )
+            .await
+            .unwrap();
+        runtime
+            .events()
+            .append(
+                &company,
+                CompanyEvent::AgentReply {
+                    audience: Vec::new(),
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    parent: None,
+                    task_id: None,
+                    outputs: vec![
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::WorkspaceNode,
+                            target_id: "node-1".to_string(),
+                            title: "launch-note.md".to_string(),
+                            task_id: None,
+                            version: None,
+                        },
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::WorkspaceNode,
+                            target_id: "node-2".to_string(),
+                            title: "surviving-note.md".to_string(),
+                            task_id: None,
+                            version: None,
+                        },
+                        crate::ports::types::ChatOutput {
+                            kind: crate::ports::types::ChatOutputKind::Artifact,
+                            target_id: "artifact-1".to_string(),
+                            title: "Launch brief".to_string(),
+                            task_id: Some("task-1".to_string()),
+                            version: Some(1),
+                        },
+                    ],
+                    chat_id: "main".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "I wrote both files.".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let history = |app: axum::Router| async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/company/chat/history")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let app = router(state);
+        let first = history(app.clone()).await;
+        let reply = first
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["text"] == "I wrote both files.")
+            .unwrap();
+        assert_eq!(reply["outputs"].as_array().unwrap().len(), 3);
+        assert_eq!(reply["outputs"][0]["targetId"], "node-1");
+        assert_eq!(reply["outputs"][1]["targetId"], "node-2");
+        assert_eq!(reply["outputs"][2]["kind"], "artifact");
+        assert_eq!(reply["outputs"][2]["taskId"], "task-1");
+        assert_eq!(reply["outputs"][2]["version"], 1);
+
+        runtime
+            .workspace()
+            .delete(&company, "node-1")
+            .await
+            .unwrap();
+        runtime
+            .artifacts()
+            .delete(&company, "artifact-1")
+            .await
+            .unwrap();
+
+        let reloaded = history(app).await;
+        let reply = reloaded
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["text"] == "I wrote both files.")
+            .unwrap();
+        let outputs = reply["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 1, "only live targets may rehydrate: {reply}");
+        assert_eq!(outputs[0]["targetId"], "node-2");
     }
 
     /// Issue #246: a reply that opened a board card must still say so after a
@@ -9906,6 +10542,7 @@ mode = "full"
                         mention_depth: 0,
                         parent: None,
                         task_id,
+                        outputs: Vec::new(),
                         chat_id: "main".to_string(),
                         agent_id: "ceo".to_string(),
                         text: text.to_string(),
@@ -10002,6 +10639,7 @@ mode = "full"
                             mention_depth: 0,
                             parent: None,
                             task_id: None,
+                            outputs: Vec::new(),
                             chat_id: "workflow-copilot:weekly_report".to_string(),
                             agent_id: "ceo".to_string(),
                             text: text.to_string(),
@@ -10054,6 +10692,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "General".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "kept".to_string(),
@@ -10635,6 +11274,7 @@ mode = "full"
                     mention_depth: 0,
                     parent: None,
                     task_id: None,
+                    outputs: Vec::new(),
                     chat_id: "operator".into(),
                     agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
                     text: "no admin has a mailbox".into(),
@@ -12711,6 +13351,7 @@ mode = "full"
                     channel_responses.push(crate::ports::types::OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: SLOW_TURN_REPLY.into(),
@@ -12892,6 +13533,7 @@ mode = "full"
                     channel_responses.push(crate::ports::types::OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: format!("answered: {text}"),
@@ -13675,6 +14317,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "shipped it".into(),
@@ -13723,6 +14366,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "@Ada @everyone".into(),
@@ -13753,6 +14397,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "operator".into(),
             agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
             text: "no admin has a mailbox".into(),
@@ -13802,6 +14447,7 @@ mode = "full"
             mention_depth: 0,
             parent: Some(EventSeq::new(4)),
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "in the thread".into(),
@@ -13982,6 +14628,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "hi".into(),
@@ -14007,6 +14654,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: Some("t-1".into()),
+            outputs: Vec::new(),
             chat_id: "t-1".into(),
             agent_id: "ceo".into(),
             text: "on it".into(),
@@ -15540,6 +16188,7 @@ mode = "full"
                         responses.push(crate::ports::types::OutboundMessage {
                             message_id: None,
                             task_id: None,
+                            outputs: Vec::new(),
                             channel: grant.agent.clone(),
                             agent: None,
                             text,
@@ -16183,6 +16832,7 @@ mode = "full"
                     channel_responses.push(crate::ports::types::OutboundMessage {
                         message_id: None,
                         task_id: None,
+                        outputs: Vec::new(),
                         channel: "operator".into(),
                         agent: None,
                         text: "cc @everyone on this".into(),
@@ -16728,6 +17378,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "operator".into(),
             agent_id: crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR.to_string(),
             text: "no admin has a mailbox".into(),
@@ -16746,6 +17397,7 @@ mode = "full"
             mention_depth: 0,
             parent: None,
             task_id: None,
+            outputs: Vec::new(),
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "ordinary reply".into(),
@@ -17058,6 +17710,7 @@ mode = "full"
                     text: "Here is the draft.".to_string(),
                     steps: Vec::new(),
                     task_id: None,
+                    outputs: Vec::new(),
                     parent: None,
                     mentions: Vec::new(),
                     mention_depth: 0,
