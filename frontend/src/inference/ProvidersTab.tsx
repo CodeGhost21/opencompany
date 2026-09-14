@@ -21,7 +21,7 @@ import type { RemovalIntent } from "./RemoveProviderDialog";
 import { isAzureEndpoint } from "./catalogue";
 import { MANAGED_OPTION_SLUG, defaultBrokenCopy, defaultNeedsModel, modelAskFromProbe, probeEndpoint } from "./connect";
 import { MANAGED_TARGET_LABEL, managedFallbackNote, nothingCanAnswer } from "./managed-copy";
-import { removalImpact } from "./removal";
+import { hasUsedBy, removalImpact } from "./removal";
 import { RoutesNotCarriedBanner } from "./RoutesNotCarriedBanner";
 import type { InferenceActions, InferenceState } from "./use-inference";
 import type { Provider } from "./types";
@@ -87,6 +87,15 @@ export function ProvidersTab({
   const [confirming, setConfirming] = useState<{
     intent: RemovalIntent;
     provider: Provider;
+    /**
+     * The legacy Managed row's confirm, synthesised from no real provider
+     * record (round-2 review, P0-1): both directions route through
+     * `actions.setManagedOn` rather than a provider write against a slug with
+     * no row behind it — detected by this flag, never by comparing
+     * `provider.slug` to {@link MANAGED_SLUG}, which a real `tinyhumans` row
+     * would collide with.
+     */
+    legacy?: boolean;
   } | null>(null);
   /**
    * A fresher `usedBy` and message than `confirming.provider.usedBy`, from a
@@ -127,15 +136,18 @@ export function ProvidersTab({
   const [defaultBusy, setDefaultBusy] = useState(false);
   const [defaultError, setDefaultError] = useState<string | null>(null);
   /**
-   * Whether the legacy managed row's own "Remove key" is awaiting confirmation.
+   * Invalidates a stale connect attempt (round-2 review, P0-2).
    *
-   * @deprecated keys-rework #2306: its own flag rather than a `confirming`
-   * entry, because `confirming` carries a `Provider` and the legacy managed
-   * row has no record — it is a chain, which is the same reason its row is
-   * rendered outside the list. Removable once item 10 drops the fallback
-   * chains and the legacy row with them.
+   * Bumped on every submit and every time the connect dialog is opened,
+   * closed, or moved back a step. A probe or write started under an earlier
+   * value checks it again once its promise settles and drops the result if it
+   * has changed — otherwise cancelling mid-probe and opening a **different**
+   * provider let the first one's late answer land in the second one's dialog
+   * (the previous provider's catalogue and error, an empty hidden key field,
+   * and a submit that could save the wrong model against the new provider).
    */
-  const [confirmingManaged, setConfirmingManaged] = useState(false);
+  const attempt = useRef(0);
+
   // Cleared on unmount, so a result that resolves after the page is gone does
   // not set state on a component nobody is looking at.
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -190,15 +202,29 @@ export function ProvidersTab({
     return <SectionUnreachable label="Couldn't read this company's model providers" />;
   }
 
-  const closeConnect = () => {
-    setConnecting(null);
-    setEditing(null);
+  /** Bumps {@link attempt} and clears everything a stale result could still write into. */
+  const resetConnectState = () => {
+    attempt.current += 1;
     setError(null);
     setProbeFailure(null);
     setModelAsk(null);
   };
 
+  const closeConnect = () => {
+    resetConnectState();
+    setConnecting(null);
+    setEditing(null);
+  };
+
+  /** Opens the connect dialog fresh — every caller that sets `connecting`/`editing` goes through this. */
+  const openConnect = (next: { connecting: string | null; editing: Provider | null }) => {
+    resetConnectState();
+    setConnecting(next.connecting);
+    setEditing(next.editing);
+  };
+
   async function submitConnect(draft: ConnectDraft) {
+    const myAttempt = ++attempt.current;
     setBusy(true);
     // Cleared on every retry, so an attempt that fails for an unrelated reason
     // does not still offer to skip verification.
@@ -212,6 +238,7 @@ export function ProvidersTab({
           key: draft.key,
           model: draft.model,
         });
+        if (myAttempt !== attempt.current) return;
       } else if (!modelAsk) {
         // **Ask before writing, not after refusing.** A model is always
         // required (D-model), and the only honest moment to ask is with that
@@ -224,6 +251,22 @@ export function ProvidersTab({
         const probe = url
           ? await actions.probeDraftEndpoint({ baseUrl: url, key: draft.key, kind: draft.kind })
           : null;
+        // Round-2 review, P0-2: a cancel (Escape, overlay click, or opening a
+        // different provider) bumps `attempt` — drop this probe's answer
+        // rather than let it land in whatever dialog is open by the time it
+        // resolves.
+        if (myAttempt !== attempt.current) return;
+        // Round-2 review, P1-8: a rejected key must not advance to the model
+        // step. The old behaviour opened it anyway, in free text, and only
+        // discovered the same rejection a second time when the add itself
+        // ran — by which point "Add anyway" was on offer for a credential
+        // that was never going to work. Stop here, on the field the operator
+        // can actually fix.
+        if (probe && !probe.ok && probe.class === "auth") {
+          setError(probe.message ? stripEnvelopePrefix(probe.message) : "The credential was rejected.");
+          setProbeFailure("auth");
+          return;
+        }
         setModelAsk(modelAskFromProbe(url, probe, isAzureEndpoint));
         return;
       } else {
@@ -235,9 +278,11 @@ export function ProvidersTab({
           model: draft.model ?? "",
           addAnyway: draft.addAnyway,
         });
+        if (myAttempt !== attempt.current) return;
       }
       closeConnect();
     } catch (err) {
+      if (myAttempt !== attempt.current) return;
       // The envelope's own `invalid request: ` prefix is machine vocabulary and
       // this sentence is read by a person standing in front of the field they
       // have to correct.
@@ -248,19 +293,26 @@ export function ProvidersTab({
         setProbeFailure("auth");
       }
     } finally {
-      setBusy(false);
+      if (myAttempt === attempt.current) setBusy(false);
     }
   }
 
   /**
-   * Runs a confirmed provider action, always asserting confirmation (keys
-   * rework, issue #2306's confirmation contract: the confirm dialog IS the
-   * confirmation, so its button always sends `confirmInUse: true`).
+   * Runs a confirmed provider action.
    *
-   * A `409 in_use` this still hits — the row's `usedBy` changed between the
-   * dialog opening and the click — re-opens the dialog with the refusal's own
-   * message and `usedBy` rather than closing on it; every other failure closes
-   * and toasts, the same as any other write.
+   * `confirmInUse` is decided by the caller from what the open dialog actually
+   * showed (round-2 review, P1-1) — never sent blind. Sending it unconditionally
+   * made the `409 in_use` re-open path below unreachable: the host always
+   * proceeds once told to, so a row whose `usedBy` changed after the dialog
+   * opened (an agent pinned in another tab, say) was stranded with no warning
+   * at all, exactly the case this contract exists to catch.
+   *
+   * A `409 in_use` this still hits — because the open dialog showed nothing
+   * used, or the host's `usedBy` changed again between this click and the
+   * request landing — re-opens the dialog with the refusal's own message and
+   * fresh `usedBy` rather than closing on it, so confirming there sends
+   * `confirmInUse: true` against what the operator was just told. Every other
+   * failure closes and toasts, the same as any other write.
    */
   async function confirmedWrite(run: () => Promise<unknown>) {
     try {
@@ -284,6 +336,29 @@ export function ProvidersTab({
     setSettingDefault(provider);
   };
 
+  /** Opens a confirm dialog on a real row, re-reading status so its `usedBy` is fresh (round-2 review, P1-1). */
+  const openConfirm = (intent: RemovalIntent, provider: Provider) => {
+    setConfirmRefusal(null);
+    setConfirming({ intent, provider });
+    void actions.reload().catch(() => {});
+  };
+
+  /** The legacy Managed row's own confirm — see the `confirming.legacy` doc above. */
+  const openManagedConfirm = (intent: RemovalIntent, provider: Provider) => {
+    setConfirmRefusal(null);
+    setConfirming({ intent, provider, legacy: true });
+  };
+
+  // Round-2 review, P1-1: the `usedBy` actually shown — the row's own, freshened
+  // by the `reload()` `openConfirm` fired when the dialog opened, or (once a
+  // 409 has already hit this same confirm) the refusal's own fresher answer.
+  // `confirmInUse` is sent only when this is non-empty, which is also exactly
+  // the condition under which the dialog has anything to show at all.
+  const shownUsedBy =
+    confirmRefusal?.usedBy ??
+    (confirming ? (state.providers.find((p) => p.slug === confirming.provider.slug)?.usedBy ?? confirming.provider.usedBy) : undefined);
+  const confirmInUseNow = hasUsedBy(shownUsedBy);
+
   const brokenDefault = defaultBrokenCopy(state.status?.defaultChoice, state.providers);
   const defaultRow = state.providers.find((p) => p.slug === state.status?.defaultChoice?.provider);
 
@@ -300,7 +375,14 @@ export function ProvidersTab({
           // enabled is the best guess at "choose a model for the row that
           // already resolves here"; otherwise fall back to Add.
           const named = (state.status?.routesNotCarried ?? [])
-            .map((r) => r.route.split(":")[0]?.trim())
+            .map((r) => {
+              const slug = r.route.split(":")[0]?.trim();
+              // The legacy `managed` chain resolves through the `tinyhumans`
+              // provider now (round-2 review, P3-4) — the route grammar's own
+              // slug for it never matched a row, so this always fell back to
+              // Add for a company whose unset routes named managed.
+              return slug === "managed" ? MANAGED_OPTION_SLUG : slug;
+            })
             .find((slug) => slug && state.providers.some((p) => p.slug === slug && p.enabled));
           const target = named ? state.providers.find((p) => p.slug === named) : undefined;
           if (target) openDefaultDialog(target);
@@ -369,7 +451,18 @@ export function ProvidersTab({
                 type="button"
                 variant="outline"
                 data-testid="inference-default-broken-choose"
-                onClick={() => setAdding(true)}
+                onClick={() => {
+                  // Round-2 review, P2-3: this opened the Add dialog, which
+                  // lists only providers this company does not have yet — so
+                  // an operator whose already-connected row should simply
+                  // become the default again had no way to say so from here.
+                  // The first enabled row is the same best guess the routes
+                  // banner above makes; "Set as default" on any other row's
+                  // own menu remains the way to choose a different one.
+                  const target = state.providers.find((p) => p.enabled);
+                  if (target) openDefaultDialog(target);
+                  else setAdding(true);
+                }}
               >
                 Choose a default
               </Button>
@@ -390,48 +483,46 @@ export function ProvidersTab({
             canManage={canManage}
             busySlug={state.busySlug}
             // Decision X3: every toggle confirms now, both directions.
-            onToggle={(p, enabled) =>
-              setConfirming({ intent: enabled ? "enable" : "disable", provider: p })
-            }
-            onEdit={(p) => {
-              setEditing(p);
-              setConnecting(p.kind);
+            onToggle={(p, enabled) => openConfirm(enabled ? "enable" : "disable", p)}
+            onEdit={(p) => openConnect({ connecting: p.kind, editing: p })}
+            // Round-2 review, P1-7c: entry zero and the row a bare-slug
+            // default names cannot go through the ordinary edit dialog — the
+            // host refuses entry zero's edit outright, and neither has
+            // anywhere else to write a model except `set_default`. Route
+            // those two through "Set as default" instead of `onEdit`.
+            onChooseModel={(p) => {
+              const choice = state.status?.defaultChoice;
+              if (p.origin === "entryZero" || (defaultNeedsModel(choice) && choice?.provider === p.slug)) {
+                openDefaultDialog(p);
+              } else {
+                openConnect({ connecting: p.kind, editing: p });
+              }
             }}
             onTest={(p) => runTest(p.slug, () => actions.test(p.slug))}
-            onRemove={(p) => setConfirming({ intent: "provider", provider: p })}
-            onRemoveKey={(p) => setConfirming({ intent: "key", provider: p })}
+            onRemove={(p) => openConfirm("provider", p)}
+            onRemoveKey={(p) => openConfirm("key", p)}
             // The same dialog the add flow opens, in edit mode: adding a key and
             // replacing one are one code path.
-            onReplaceKey={(p) => {
-              setEditing(p);
-              setConnecting(p.kind);
-            }}
+            onReplaceKey={(p) => openConnect({ connecting: p.kind, editing: p })}
             onMakeDefault={(p) => openDefaultDialog(p)}
             // The same handler the header's button uses, passed down rather
             // than reimplemented: one way to add a provider, not two.
             onAdd={() => setAdding(true)}
             onManagedToggle={(enabled) =>
-              setConfirming({
-                intent: enabled ? "enable" : "disable",
+              openManagedConfirm(enabled ? "enable" : "disable", {
                 // @deprecated keys-rework #2306: the legacy managed row has no
                 // provider record — synthesised just enough for the confirm
-                // dialog's copy. `onConfirm` below still calls the ordinary
-                // managed actions, never a real provider write against this.
-                provider: { id: MANAGED_SLUG, slug: MANAGED_SLUG, label: MANAGED_TARGET_LABEL, kind: "tinyhumans", baseUrl: "", models: {}, enabled: true, keyConfigured: true },
+                // dialog's copy. `onConfirm` below routes on `confirming.legacy`
+                // to `actions.setManagedOn`, never a real provider write
+                // against this synthesised slug (round-2 review, P0-1).
+                id: MANAGED_SLUG, slug: MANAGED_SLUG, label: MANAGED_TARGET_LABEL, kind: "tinyhumans", baseUrl: "", models: {}, enabled: true, keyConfigured: true,
               })
             }
             onManagedTest={() => runTest(MANAGED_SLUG, actions.testManagedChain)}
             // Decision X6: opens the ordinary TinyHumans catalogue add/edit
             // flow, never the deprecated `PUT …/inference/managed/key` route
             // directly.
-            onManagedReplaceKey={() => {
-              setEditing(null);
-              setConnecting(MANAGED_OPTION_SLUG);
-            }}
-            // @deprecated keys-rework #2306: confirmed, like every other row's
-            // Remove key. The one remaining caller of `saveManagedKey("")` —
-            // see its own doc in `use-inference.ts`.
-            onManagedRemoveKey={() => setConfirmingManaged(true)}
+            onManagedReplaceKey={() => openConnect({ connecting: MANAGED_OPTION_SLUG, editing: null })}
             testState={(slug) => tests[slug] ?? { kind: "idle" }}
           />
         </CardContent>
@@ -456,11 +547,7 @@ export function ProvidersTab({
         open={adding}
         onOpenChange={setAdding}
         providers={state.providers}
-        onChoose={(option) => {
-          setAdding(false);
-          setEditing(null);
-          setConnecting(option);
-        }}
+        onChoose={(option) => openConnect({ connecting: option, editing: null })}
       />
       {/* Keyed so the dialog is a fresh component per open. Its fields seed at
           mount from this row; without the key React would keep the previous
@@ -477,15 +564,16 @@ export function ProvidersTab({
         error={error}
         offerAddAnyway={probeFailure !== null}
         modelAsk={modelAsk}
+        // Decision X1 (round-2 review, P2-2): keyed on whether a default is
+        // already stored, not on whether this is the company's first row —
+        // a company with rows but no chosen default still gets the "this
+        // becomes the default" note on its next add.
+        noDefaultYet={state.status?.defaultChoice == null}
         replacesKey={
           connecting === MANAGED_OPTION_SLUG && editing === null && state.status?.managed?.source === "provider_key"
         }
         onCancel={closeConnect}
-        onBack={() => {
-          setModelAsk(null);
-          setError(null);
-          setProbeFailure(null);
-        }}
+        onBack={resetConnectState}
         onSubmit={(draft) => void submitConnect(draft)}
       />
       <DefaultModelDialog
@@ -493,17 +581,30 @@ export function ProvidersTab({
         client={client}
         company={company}
         provider={settingDefault}
+        providers={state.providers}
         defaultChoice={state.status?.defaultChoice}
         busy={defaultBusy}
         error={defaultError}
         onCancel={() => setSettingDefault(null)}
         onSubmit={(model) => {
           if (!settingDefault) return;
+          const slug = settingDefault.slug;
           setDefaultBusy(true);
           setDefaultError(null);
           void actions
-            .makeDefault(settingDefault.slug, model)
-            .then(() => setSettingDefault(null))
+            .makeDefault(slug, model)
+            .then((result) => {
+              // P1-2 (round-2 review): the backend at review time silently
+              // dropped this write — no body extractor on `set_default` — and
+              // a success toast still showed. Once `defaultChoice` ships this
+              // catches any host that still accepts the request and does not
+              // apply it, rather than reporting success on a no-op.
+              if (result.status.defaultChoice && (result.status.defaultChoice.provider !== slug || result.status.defaultChoice.model !== model)) {
+                setDefaultError("Saved, but the company default still does not show this pair. Try again.");
+                return;
+              }
+              setSettingDefault(null);
+            })
             .catch((err) =>
               setDefaultError(err instanceof ApiError ? stripEnvelopePrefix(err.message) : "That did not work."),
             )
@@ -515,10 +616,7 @@ export function ProvidersTab({
         label={confirming?.provider.label ?? ""}
         impact={
           confirming
-            ? {
-                ...removalImpact(confirming.provider, state.providers),
-                usedBy: confirmRefusal?.usedBy ?? confirming.provider.usedBy,
-              }
+            ? { ...removalImpact(confirming.provider, state.providers), usedBy: shownUsedBy }
             : { lastEnabled: false }
         }
         busy={busy}
@@ -526,13 +624,14 @@ export function ProvidersTab({
         // Offered only where it is genuinely the softer answer: turning a
         // provider off keeps its endpoint and its credential, which is what
         // somebody removing one usually wants. It is not an alternative to
-        // clearing a credential.
+        // clearing a credential. Never offered for the legacy row, which has
+        // no provider record to disable.
         onDisable={
-          confirming?.intent === "provider" && confirming.provider.enabled
+          confirming?.intent === "provider" && confirming.provider.enabled && !confirming.legacy
             ? () => {
                 const provider = confirming.provider;
                 setBusy(true);
-                void confirmedWrite(() => actions.setEnabled(provider.slug, false, true)).finally(() =>
+                void confirmedWrite(() => actions.setEnabled(provider.slug, false, confirmInUseNow)).finally(() =>
                   setBusy(false),
                 );
               }
@@ -544,44 +643,25 @@ export function ProvidersTab({
         }}
         onConfirm={() => {
           if (!confirming) return;
-          const { intent, provider } = confirming;
+          const { intent, provider, legacy } = confirming;
           setBusy(true);
           void confirmedWrite(() => {
+            // Round-2 review, P0-1: the legacy Managed row has no real
+            // provider record — both directions of its toggle go through the
+            // managed-chain action, never a provider write against a slug
+            // with no row behind it.
+            if (legacy) return actions.setManagedOn(intent === "enable");
             switch (intent) {
               case "disable":
-                return actions.setEnabled(provider.slug, false, true);
+                return actions.setEnabled(provider.slug, false, confirmInUseNow);
               case "enable":
-                // @deprecated keys-rework #2306: the legacy managed row's
-                // toggle has no real provider row — `provider.slug` here is
-                // the synthesised `MANAGED_SLUG` stand-in from `onManagedToggle`.
-                return provider.slug === MANAGED_SLUG && !state.providers.some((p) => p.slug === MANAGED_SLUG)
-                  ? actions.setManagedOn(true)
-                  : actions.setEnabled(provider.slug, true, true);
+                return actions.setEnabled(provider.slug, true, confirmInUseNow);
               case "key":
-                return actions.edit(provider.slug, { key: "", confirmInUse: true });
+                return actions.edit(provider.slug, { key: "", confirmInUse: confirmInUseNow });
               case "provider":
-                return actions.remove(provider.slug, true);
+                return actions.remove(provider.slug, confirmInUseNow);
             }
           }).finally(() => setBusy(false));
-        }}
-      />
-
-      {/* @deprecated keys-rework #2306: the legacy managed row's own
-          confirmation. The same dialog, because it is the same act — there is
-          no provider record to compute `usedBy` from, so this asks plainly
-          with no impact list. Removable with the row it belongs to. */}
-      <RemoveProviderDialog
-        intent={confirmingManaged ? "key" : null}
-        label={MANAGED_TARGET_LABEL}
-        impact={{ lastEnabled: false }}
-        busy={busy}
-        onCancel={() => setConfirmingManaged(false)}
-        onConfirm={() => {
-          setConfirmingManaged(false);
-          // An empty key is how the store clears a value — it has no delete —
-          // and it removes step 1 alone. The response re-reads the chain, so
-          // the row immediately says whichever step answers next.
-          fireAndForget(actions.saveManagedKey(""));
         }}
       />
     </div>

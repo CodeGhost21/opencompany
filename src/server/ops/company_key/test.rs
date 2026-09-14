@@ -308,13 +308,15 @@ async fn a_pasted_composio_token_still_outranks_the_company_key() {
 
     // The company key is still stored — the two are separate slots, and
     // clearing the Composio token falls back to the company's own identity
-    // rather than to nothing.
+    // rather than to nothing. Guarded while the company is on the managed
+    // route (in-use-guards.md §2); this test is about the fallback tier,
+    // not the guard, so it confirms.
     send(
         &state,
         "byo",
         "PUT",
         "/api/v1/company/composio/token",
-        Some(json!({ "token": "" })),
+        Some(json!({ "token": "", "confirmInUse": true })),
     )
     .await;
     let (_, dto, _) = send(&state, "byo", "GET", "/api/v1/company/composio", None).await;

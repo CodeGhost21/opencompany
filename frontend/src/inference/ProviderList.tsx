@@ -73,18 +73,51 @@ export function managedRow(source: ManagedState["source"] | undefined): string {
 }
 
 /**
+ * The legacy row's own sub-line, given what the host said (round-2 review,
+ * P1-3, decision X5): "Key added — choose a model" whenever
+ * `managed.needsModel` is set, never {@link managedRow}'s connected-sounding
+ * text — a chain with no chosen model is not "connected", the same rule an
+ * ordinary row's own {@link rowSubline} applies to `model`/`modelAmbiguous`.
+ *
+ * @deprecated keys-rework #2306: describes the legacy row only.
+ */
+export function legacyManagedSubline(managed: Pick<ManagedState, "source" | "needsModel">): string {
+  return managed.needsModel ? "Key added — choose a model" : managedRow(managed.source);
+}
+
+/**
+ * Whether the legacy row shows its live on/off switch, or the "Needs a
+ * model" affordance instead (round-2 review, P1-3). There is no live switch
+ * while there is no model to serve a turn with — switching a chain with
+ * nothing behind it "on" would be a control that cannot do what it claims.
+ *
+ * @deprecated keys-rework #2306: describes the legacy row only.
+ */
+export function legacyManagedShowsSwitch(managed: Pick<ManagedState, "needsModel">): boolean {
+  return !managed.needsModel;
+}
+
+/**
  * The sentence for a company nothing can answer for.
  *
  * It is the best sentence on this whole surface and **it could not render**: the
  * managed row is gated on `managed.configured`, the host derives that as
  * `source.resolves()`, so `source === "none"` implies no row — and the one state
  * that needed this sentence was the one state that could never show it. It is a
- * constant now so the dead-end states that *are* reachable can say it: the empty
- * list below, and the Routing tab's unset banner.
+ * constant now so the dead-end states that *are* reachable can say it — the
+ * empty list below is the one still standing; the Routing tab's own unset
+ * banner this comment used to also name is gone with the tab (phase 5b).
  */
 export const NO_CREDENTIAL_RESOLVES = "No credential resolves — agents cannot think";
 
-/** The managed row's name. */
+/**
+ * The legacy row's name.
+ *
+ * @deprecated keys-rework #2306: "Managed" is the legacy pre-row identity —
+ * deliberately distinct from "TinyHumans", the ordinary catalogue row this
+ * row's own credential moves into the moment one exists
+ * ({@link showsLegacyManagedRow}). Not a stray leftover string to rename.
+ */
 export const MANAGED_LABEL = "Managed";
 
 /** The slug its credential and its health are keyed on. */
@@ -182,6 +215,7 @@ export function ProviderList({
   busySlug,
   onToggle,
   onEdit,
+  onChooseModel,
   onTest,
   onRemove,
   onRemoveKey,
@@ -191,7 +225,6 @@ export function ProviderList({
   onManagedToggle,
   onManagedTest,
   onManagedReplaceKey,
-  onManagedRemoveKey,
   testState,
 }: {
   providers: readonly Provider[];
@@ -204,6 +237,15 @@ export function ProviderList({
   busySlug?: string | null;
   onToggle: (provider: Provider, enabled: boolean) => void;
   onEdit: (provider: Provider) => void;
+  /**
+   * The row's own "Needs a model" chip (round-2 review, P1-7c) — not the same
+   * as `onEdit`, because entry zero and the row a bare-slug default names
+   * cannot be reached through the ordinary edit dialog at all (entry zero's
+   * `providerMenu` offers no "Edit" for exactly this reason: the host refuses
+   * it with a 400, "changed through the inference config"). The caller routes
+   * those two cases to "Set as default" instead.
+   */
+  onChooseModel: (provider: Provider) => void;
   onTest: (provider: Provider) => void;
   onRemove: (provider: Provider) => void;
   onRemoveKey: (provider: Provider) => void;
@@ -219,14 +261,6 @@ export function ProviderList({
   onManagedTest: () => void;
   /** Open the managed key dialog, to add or replace step 1 of its chain. */
   onManagedReplaceKey: () => void;
-  /**
-   * Clear the key stored **for this row**.
-   *
-   * It removes step 1 and nothing else. If the company account or the instance
-   * identity still answer, managed stays on — and the row then says which,
-   * rather than going blank or claiming to be off.
-   */
-  onManagedRemoveKey: () => void;
   /** What each row's Test is doing, keyed by slug. */
   testState: (slug: string) => TestState;
 }) {
@@ -275,7 +309,7 @@ export function ProviderList({
           <span className="grid min-w-0 flex-1 leading-tight">
             <span className="truncate text-sm font-medium">{MANAGED_LABEL}</span>
             <span className="truncate text-xs text-muted-foreground">
-              {managedRow(managed.source)}
+              {legacyManagedSubline(managed)}
             </span>
           </span>
 
@@ -288,19 +322,46 @@ export function ProviderList({
             onTest={onManagedTest}
           />
 
-          {/* @deprecated keys-rework #2306, decision X3: once a `tinyhumans`
-              row exists this whole li is gone and the row's own ordinary
-              toggle (below, on every provider) is the one and only switch —
-              this one exists solely for the pre-row transitional state, and
-              `ProvidersTab` confirms before calling `onManagedToggle`, same as
-              every other provider's toggle. */}
-          <Switch
-            checked={managed.enabled !== false}
-            disabled={!canManage || busySlug === MANAGED_SLUG}
-            aria-label="Managed enabled"
-            data-testid="inference-provider-managed-toggle"
-            onCheckedChange={(next) => onManagedToggle(next)}
-          />
+          {!legacyManagedShowsSwitch(managed) ? (
+            // No live switch while there is no model to serve a turn with
+            // (round-2 review, P1-3) — the same "Needs a model" affordance an
+            // ordinary row shows, opening the ordinary TinyHumans add flow
+            // rather than the deprecated key route directly (X6).
+            canManage ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-6 border-status-blocked px-2 text-xs text-status-blocked-text"
+                data-testid="inference-provider-managed-needs-model"
+                onClick={onManagedReplaceKey}
+              >
+                Needs a model
+              </Button>
+            ) : (
+              <Badge
+                variant="outline"
+                className="border-status-blocked text-status-blocked-text"
+                data-testid="inference-provider-managed-needs-model"
+              >
+                Needs a model
+              </Badge>
+            )
+          ) : (
+            // @deprecated keys-rework #2306, decision X3: once a `tinyhumans`
+            // row exists this whole li is gone and the row's own ordinary
+            // toggle (below, on every provider) is the one and only switch —
+            // this one exists solely for the pre-row transitional state, and
+            // `ProvidersTab` confirms before calling `onManagedToggle`, same as
+            // every other provider's toggle.
+            <Switch
+              checked={managed.enabled !== false}
+              disabled={!canManage || busySlug === MANAGED_SLUG}
+              aria-label="Managed enabled"
+              data-testid="inference-provider-managed-toggle"
+              onCheckedChange={(next) => onManagedToggle(next)}
+            />
+          )}
 
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -324,23 +385,17 @@ export function ProviderList({
                   row every other provider connects through), never the deprecated
                   `PUT …/inference/managed/key` route directly — the console no
                   longer calls it to add or replace a key. */}
+              {/* Round-2 review, P1-4: the legacy "Remove key" item is gone —
+                  it was the one remaining console call to the deprecated
+                  `PUT …/inference/managed/key` route (decision X6 says never),
+                  and P1-3 already turns this row into "Needs a model" the
+                  moment its key has nothing chosen yet, which is every state
+                  this row renders in at all. There is no longer a state where
+                  removing the key without the ordinary add flow is the useful
+                  action here. */}
               <DropdownMenuItem onClick={onManagedReplaceKey}>
                 {managed.source === "provider_key" ? "Replace key" : "Add a key"}
               </DropdownMenuItem>
-              {/* Offered only when there is a key of this row's own to remove.
-                  The company account and the instance identity are not this
-                  row's to take away — and the copy says what actually happens,
-                  which is a fall back rather than a switch-off.
-                  @deprecated keys-rework #2306: this is the one remaining
-                  caller of the legacy key route (`setManagedKey("")`), kept
-                  because a pre-row credential has no ordinary row to attach an
-                  edit to. Removable once item 10 (dropping the fallback
-                  chains) makes this transitional row unreachable. */}
-              {managed.source === "provider_key" && (
-                <DropdownMenuItem variant="destructive" onClick={onManagedRemoveKey}>
-                  Remove key
-                </DropdownMenuItem>
-              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </li>
@@ -355,6 +410,7 @@ export function ProviderList({
           busy={busySlug === provider.slug}
           onToggle={onToggle}
           onEdit={onEdit}
+          onChooseModel={onChooseModel}
           onTest={onTest}
           onRemove={onRemove}
           onRemoveKey={onRemoveKey}
@@ -383,15 +439,22 @@ export function rowSubline(provider: Provider): string {
   // row said so.
   if (provider.origin === "entryZero") return "This company's original configuration";
   const category = categoryOf(provider.kind);
+  // Decision X5 (orchestrator, 2026-09-15): no category's row is ever shown as
+  // set without a model — never claim health or readiness a turn cannot
+  // actually get. Checked **before** the category sub-lines (round-2 review,
+  // P2-4: a local runtime or a keyless cloud row used to return early here,
+  // so "Runs on this machine" and a bare endpoint host both claimed "set" for
+  // a row with no model chosen yet). `modelAmbiguous` gets its own chip
+  // instead of this line, because "Needs a model" there already says it and
+  // doing both would repeat it.
+  if (!provider.model && !provider.modelAmbiguous) {
+    if (category === "local") return "Runs on this machine — choose a model";
+    if (category === "cli") return "Uses a login another CLI already holds — choose a model";
+    if (provider.keyConfigured) return "Key added — choose a model";
+    return "Choose a model";
+  }
   if (category === "local") return "Runs on this machine";
   if (category === "cli") return "Uses a login another CLI already holds";
-  // Decision X5 (orchestrator, 2026-09-15): a key with no chosen model is not
-  // "connected" — never claim health or readiness a turn cannot actually get.
-  // `modelAmbiguous` gets its own chip below rather than this line, because
-  // "Needs a model" there already says it and doing both would repeat it.
-  if (provider.keyConfigured && !provider.model && !provider.modelAmbiguous) {
-    return "Key added — choose a model";
-  }
   if (provider.keyConfigured) return "•••• configured";
   return endpointHost(provider.baseUrl) || "no key";
 }
@@ -403,6 +466,7 @@ function ProviderRow({
   busy,
   onToggle,
   onEdit,
+  onChooseModel,
   onTest,
   onRemove,
   onRemoveKey,
@@ -416,6 +480,7 @@ function ProviderRow({
   busy: boolean;
   onToggle: (provider: Provider, enabled: boolean) => void;
   onEdit: (provider: Provider) => void;
+  onChooseModel: (provider: Provider) => void;
   onTest: (provider: Provider) => void;
   onRemove: (provider: Provider) => void;
   onRemoveKey: (provider: Provider) => void;
@@ -473,7 +538,7 @@ function ProviderRow({
             size="sm"
             className="h-6 border-status-blocked px-2 text-xs text-status-blocked-text"
             data-testid={`inference-provider-${provider.slug}-needs-model`}
-            onClick={() => onEdit(provider)}
+            onClick={() => onChooseModel(provider)}
           >
             Needs a model
           </Button>

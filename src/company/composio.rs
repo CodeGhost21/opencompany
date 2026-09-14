@@ -6,10 +6,9 @@
 //! The per-tenant OAuth bearer token is **write-only**: it is set through the
 //! console `PUT …/composio/token` route, stored under [`TINYHUMANS_KEY_KEY`],
 //! and never returned. The read shape carries only a `tokenConfigured`
-//! boolean. The token
-//! has **no environment fallback** — a missing token means no tools (fail
-//! closed), never a borrowed identity. Only the backend URL may be overridden
-//! from the environment.
+//! boolean. The token has **no environment fallback** — a missing token
+//! means no tools (fail closed), never a borrowed identity. Only the backend
+//! URL may be overridden from the environment.
 
 use std::sync::Arc;
 
@@ -30,6 +29,12 @@ pub const TINYHUMANS_KEY_KEY: &str = "composio/tinyhumans/key";
 /// Pre-rename address of [`TINYHUMANS_KEY_KEY`] (issue #2306): its read fallback
 /// only, never [`BYOK_KEY_KEY`]'s. For one release every write to that key also
 /// stores the same value here, so a rolled-back binary keeps working.
+///
+/// DEPRECATED(keys-rework #2306): the pre-rename Composio token address;
+/// replaced by [`TINYHUMANS_KEY_KEY`]; removable when the release after
+/// #2306 stops the mirror write in [`write_both`]. Not `#[deprecated]`: the
+/// live mirror in [`write_both`] still writes this address on every save, and
+/// `clippy -D warnings` would fail on that usage.
 pub const LEGACY_TOKEN_KEY: &str = "composio/token";
 
 /// Reads `key`, falling back to `legacy_key` only when `key` holds nothing.
@@ -86,6 +91,12 @@ async fn write_both(
     secrets
         .set(company, key, SecretValue(value.to_string()))
         .await?;
+    // DEPRECATED(keys-rework #2306): this write is the compatibility mirror
+    // to the pre-rename address (`legacy_key`); replaced by the write above
+    // to `key`, the new address; removable when the release after #2306
+    // stops mirroring. Not `#[deprecated]`: this write is live and required
+    // on every save until then, and `clippy -D warnings` would fail on that
+    // usage.
     if let Err(err) = secrets
         .set(company, legacy_key, SecretValue(value.to_string()))
         .await
@@ -267,6 +278,12 @@ pub const BYOK_KEY_KEY: &str = "composio/byok/key";
 /// Pre-rename address of [`BYOK_KEY_KEY`] (issue #2306): its read fallback only,
 /// never [`TINYHUMANS_KEY_KEY`]'s. For one release every write to that key also
 /// stores the same value here, so a rolled-back binary keeps working.
+///
+/// DEPRECATED(keys-rework #2306): the pre-rename Composio BYOK-key address;
+/// replaced by [`BYOK_KEY_KEY`]; removable when the release after #2306
+/// stops the mirror write in [`write_both`]. Not `#[deprecated]`: the live
+/// mirror in [`write_both`] still writes this address on every save, and
+/// `clippy -D warnings` would fail on that usage.
 pub const LEGACY_API_KEY_KEY: &str = "composio/api_key";
 
 /// Storage + wire spelling of [`ComposioMode::Managed`].
@@ -623,50 +640,6 @@ pub async fn forget_connection(
     Ok(true)
 }
 
-/// Whether this company has any local, concrete evidence that Composio is
-/// actually in use — the signal a token clear or a mode switch would strand
-/// (keys rework, issue #2306; `docs/key-reworks/in-use-guards.md`).
-///
-/// ## Why `composio/defaults` and not the live connection list
-///
-/// Composio has no `default`/agent-pair concept the way an inference provider
-/// does (`docs/key-reworks/in-use-guards.md` §1: "only `surfaces`"), and this
-/// codebase has no per-agent "uses Composio" pairing to check either — every
-/// agent either has the `composio` tool namespace or does not, with nothing
-/// that names which *toolkit*. So the only thing worth asking is "did this
-/// company actually connect anything", and there are two candidate answers:
-///
-/// * `GET .../composio/connections` — the live, authoritative list. It is a
-///   network call to the Composio/TinyHumans backend, bounded by a
-///   multi-second timeout, and it can fail for reasons that have nothing to
-///   do with whether the company is "in use" (a slow upstream, a rejected
-///   credential). Calling it from inside a write path that must otherwise be
-///   near-instant would make clearing a token slower and less reliable than
-///   the destructive action it is guarding.
-/// * [`DEFAULTS_KEY`] — this company's per-toolkit connection **pins**
-///   (`set_default` / [`load_defaults`]). A single local secret-store read,
-///   no network, no timeout. It under-counts (a company can have live
-///   connections with nothing pinned) but it never over-counts, and a
-///   non-empty pin is unambiguous evidence: an operator went to the trouble
-///   of choosing which account a toolkit acts as. That pin's connection id is
-///   scoped to whichever backend/entity was live when it was set — the
-///   module's own `BYOK_NOTE` and `MANAGED_NOTE`
-///   (`src/server/ops/composio.rs`) already say, in prose, that a route
-///   switch strands the providers connected under the old one, and this is
-///   that same fact made cheaply checkable.
-///
-/// So this is the "cheaply-computed, concrete" signal the guard uses, at the
-/// cost of missing an unpinned-but-connected company (which sees no warning
-/// where a network read might have offered one). A store read error
-/// **propagates** rather than degrading to "not in use": a guard that fails
-/// open on an unreadable store is not a guard.
-pub async fn has_connected_integrations(
-    company: &CompanyId,
-    secrets: &dyn SecretStore,
-) -> Result<bool> {
-    Ok(!load_defaults(company, secrets).await?.is_empty())
-}
-
 async fn save_defaults(
     company: &CompanyId,
     secrets: &dyn SecretStore,
@@ -947,48 +920,6 @@ mod tests {
         let left = load_defaults(&company, &secrets).await.unwrap();
         assert_eq!(left.get("slack").map(String::as_str), Some("ca_workspace"));
         assert!(!left.contains_key("gmail"));
-    }
-
-    // ── in-use guards (#2306): has_connected_integrations ─────────────
-
-    #[tokio::test]
-    async fn a_company_with_no_pins_has_no_connected_integrations() {
-        let company = CompanyId::new("acme");
-        let secrets = MemSecrets::default();
-        assert!(
-            !has_connected_integrations(&company, &secrets)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_single_pin_counts_as_connected() {
-        let company = CompanyId::new("acme");
-        let secrets = MemSecrets::default();
-        set_default(&company, &secrets, "gmail", "ca_ops")
-            .await
-            .unwrap();
-        assert!(
-            has_connected_integrations(&company, &secrets)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn clearing_the_last_pin_returns_to_not_connected() {
-        let company = CompanyId::new("acme");
-        let secrets = MemSecrets::default();
-        set_default(&company, &secrets, "gmail", "ca_ops")
-            .await
-            .unwrap();
-        clear_default(&company, &secrets, "gmail").await.unwrap();
-        assert!(
-            !has_connected_integrations(&company, &secrets)
-                .await
-                .unwrap()
-        );
     }
 
     #[tokio::test]
@@ -1661,8 +1592,54 @@ mod tests {
         assert!(!credential.configured());
     }
 
-    /// Lands `store_api_key`/`store_token` exactly at their second write and
-    /// leaves the first write's result inspectable.
+    /// A blank new-address token AND a blank (whitespace-only) legacy address
+    /// must fall all the way through to the company's own TinyHumans key
+    /// (`company_key::resolve`) — never read as "not configured" and never
+    /// cross the two address pairs (P2-3). The legacy value is written as
+    /// whitespace rather than left absent, so this also proves trimming: an
+    /// unwritten slot and a whitespace-only one must resolve identically.
+    #[tokio::test]
+    async fn blank_new_and_blank_legacy_addresses_fall_through_to_the_company_key() {
+        use crate::company::credentials::CredentialSource;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, TINYHUMANS_KEY_KEY, SecretValue("".into()))
+            .await
+            .unwrap();
+        secrets
+            .set(&company, LEGACY_TOKEN_KEY, SecretValue("  ".into()))
+            .await
+            .unwrap();
+        company_key::store_key(&company, &secrets, "th-not-a-real-company-key")
+            .await
+            .unwrap();
+
+        let credential = resolve_credential(
+            &company,
+            &secrets,
+            Some(Arc::new(TinyhumansTokenSource::static_key(
+                "th-not-a-real-platform-identity",
+            ))),
+        )
+        .await
+        .unwrap();
+        assert!(credential.configured());
+        assert_eq!(credential.source(), CredentialSource::Company);
+        assert_eq!(
+            credential.current().await.unwrap().as_deref(),
+            Some("th-not-a-real-company-key"),
+            "the company key must win over the platform identity, exactly as \
+             company_key::resolve's own precedence says"
+        );
+    }
+
+    /// Lands `store_token` exactly at its second write (the legacy mirror)
+    /// and leaves the first write's result inspectable. `store_api_key`'s
+    /// equivalent failure is already covered by
+    /// `a_byok_set_whose_legacy_mirror_fails_leaves_a_managed_company_managed`
+    /// below, so it is not duplicated here.
     #[tokio::test]
     async fn a_failed_legacy_mirror_write_propagates() {
         let secrets = SecretsFailingToWrite {
@@ -1681,7 +1658,10 @@ mod tests {
             .unwrap();
 
         let err = store_token(&company, &secrets, "th-not-a-real-key-2").await;
-        assert!(err.is_err());
+        assert!(
+            matches!(err, Err(crate::error::OpenCompanyError::Store(_))),
+            "{err:?}"
+        );
         assert_eq!(
             raw(&secrets.inner, &company, TINYHUMANS_KEY_KEY).await,
             "th-not-a-real-key-2",
