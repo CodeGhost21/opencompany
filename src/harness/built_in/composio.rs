@@ -3046,11 +3046,24 @@ mod tests {
             .set(&company, TINYHUMANS_KEY_KEY, SecretValue(String::new()))
             .await
             .unwrap();
+        // Also blank the legacy address explicitly (P2-3): a whitespace-only
+        // `composio/token` must not itself be read as "the legacy address
+        // holds a value" and shadow the company key — it must fall through
+        // exactly as an unwritten legacy address does.
+        secrets
+            .set(
+                &company,
+                crate::company::composio::LEGACY_TOKEN_KEY,
+                SecretValue("   ".to_string()),
+            )
+            .await
+            .unwrap();
         let resolved =
             TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
                 .await
                 .expect("resolves");
         assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
+        assert_eq!(resolved.credential().source(), CredentialSource::Company);
 
         // Clearing the company key too falls all the way back to the instance.
         company_key::store_key(&company, &secrets, "")

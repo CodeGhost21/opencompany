@@ -119,7 +119,7 @@ path = "src/main.rs"
 # no way to hold" was also wrong about `composio` specifically, which is worth
 # recording so it is not re-derived. `company::composio::resolve_credential` is
 # always compiled and answers over *three* tiers, the platform identity being
-# the LAST: the BYO `composio/token` override wins, else the company's own
+# the LAST: the BYO `composio/tinyhumans/key` override wins, else the company's own
 # TinyHumans key, else this instance's platform identity. Tier one is precisely
 # what a desktop operator can hold, and the Connections card already asks them
 # for it.

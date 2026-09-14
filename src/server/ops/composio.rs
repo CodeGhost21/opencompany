@@ -56,10 +56,9 @@
 //! [`TINYHUMANS_KEY_KEY`](crate::company::composio::TINYHUMANS_KEY_KEY), and
 //! **never** echoed. The read shape carries only `credentialSource` plus
 //! non-secret routing (backend URL, toolkit allowlist) — never a token, and
-//! never a file path. A set / rotate
-//! / clear takes effect on the agents' **next turn** with no restart (the harness
-//! re-resolves the credential each turn and rebuilds the roster when the
-//! *identity* behind it changes).
+//! never a file path. A set / rotate / clear takes effect on the agents'
+//! **next turn** with no restart (the harness re-resolves the credential
+//! each turn and rebuilds the roster when the *identity* behind it changes).
 
 use axum::Json;
 use axum::Router;
@@ -329,11 +328,10 @@ struct ComposioStatusDto {
     /// `tokenConfigured`-shaped field was on this DTO once and was removed by
     /// issue #886: it answered "did somebody paste something into
     /// `composio/tinyhumans/key` (then `composio/token`)", which is one tier of
-    /// the chain, and it read `false`
-    /// for companies whose agents were calling `GITHUB_*` tools successfully in
-    /// the same session. Do not reintroduce one under any name. The question it
-    /// looked like it answered is answered here, by the tier that actually
-    /// resolves.
+    /// the chain, and it read `false` for companies whose agents were calling
+    /// `GITHUB_*` tools successfully in the same session. Do not reintroduce
+    /// one under any name. The question it looked like it answered is
+    /// answered here, by the tier that actually resolves.
     managed_credential_source: CredentialSource,
     /// Which host this company's Composio calls go to — `managed` (proxied
     /// through the OpenHuman backend, the default) or `byok` (straight to this
