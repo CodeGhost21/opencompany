@@ -122,38 +122,25 @@ pub async fn load_byok_key(
     read_with_legacy(company, secrets, BYOK_KEY_KEY, LEGACY_API_KEY_KEY).await
 }
 
-/// The explicit environment override for the Composio backend URL. Only the
-/// **URL** has an env path — the **token** deliberately does not (fail-closed
-/// isolation). When unset, resolution falls back to the tenant's shared API
-/// base ([`TINYHUMANS_API_URL_ENV`]) so staging Composio follows staging.
-pub const COMPOSIO_BACKEND_URL_ENV: &str = "OPENCOMPANY_COMPOSIO_BACKEND_URL";
-
 /// The tenant's shared TinyHumans API base URL (the same backend inference and
 /// the rest of the app already use). Used as the Composio backend fallback when
-/// [`COMPOSIO_BACKEND_URL_ENV`] is unset, so a staging tenant's Composio calls
-/// go to staging instead of the hardcoded prod default.
+/// `api_url` is unset, so a staging tenant's Composio calls go to staging
+/// instead of the hardcoded prod default.
 pub const TINYHUMANS_API_URL_ENV: &str = "TINYHUMANS_API_URL";
 
-/// Default backend base URL for the Composio routes when neither the explicit
-/// override nor the tenant API base is set. Mirrors the media backend's default
-/// host (prod).
+/// Default backend base URL for the Composio routes when the tenant API base
+/// is not set. Mirrors the media backend's default host (prod).
 pub const DEFAULT_BACKEND_URL: &str = "https://api.tinyhumans.ai";
 
-/// The effective Composio backend URL, resolved in this order (first non-empty,
-/// trimmed, wins):
-///
-/// 1. `env_override` — [`COMPOSIO_BACKEND_URL_ENV`], the explicit override.
-/// 2. `api_url` — [`TINYHUMANS_API_URL_ENV`], the tenant's shared backend base,
-///    so Composio follows staging/prod with the rest of the app.
-/// 3. [`DEFAULT_BACKEND_URL`] (prod) — last resort.
-///
-/// Credential-free — safe to surface on the console read plane.
-pub fn backend_url_or_default(env_override: Option<String>, api_url: Option<String>) -> String {
-    [env_override, api_url]
-        .into_iter()
-        .flatten()
+/// The effective Composio backend URL: [`TINYHUMANS_API_URL_ENV`] (the
+/// tenant's shared backend base) if set, else [`DEFAULT_BACKEND_URL`]. The
+/// explicit per-surface override (`OPENCOMPANY_COMPOSIO_BACKEND_URL`) was
+/// removed in phase 6a (issue #2306): Composio now always follows the
+/// tenant's shared API base, the same way media and search already do.
+pub fn backend_url_or_default(api_url: Option<String>) -> String {
+    api_url
         .map(|u| u.trim().to_string())
-        .find(|u| !u.is_empty())
+        .filter(|u| !u.is_empty())
         .unwrap_or_else(|| DEFAULT_BACKEND_URL.to_string())
 }
 
@@ -725,44 +712,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backend_url_prefers_override_then_api_url_then_default() {
+    fn backend_url_follows_api_url_then_default() {
         // Neither set → prod default.
-        assert_eq!(backend_url_or_default(None, None), DEFAULT_BACKEND_URL);
+        assert_eq!(backend_url_or_default(None), DEFAULT_BACKEND_URL);
 
-        // Explicit override wins over everything.
+        // api_url set → follow the tenant API base (the staging case).
         assert_eq!(
-            backend_url_or_default(
-                Some("https://custom.example".into()),
-                Some("https://staging-api.tinyhumans.ai".into())
-            ),
-            "https://custom.example"
-        );
-
-        // No override → follow the tenant API base (the staging case).
-        assert_eq!(
-            backend_url_or_default(None, Some("https://staging-api.tinyhumans.ai".into())),
-            "https://staging-api.tinyhumans.ai"
-        );
-
-        // Whitespace/empty override falls through to the api_url fallback.
-        assert_eq!(
-            backend_url_or_default(
-                Some("  ".into()),
-                Some("https://staging-api.tinyhumans.ai".into())
-            ),
+            backend_url_or_default(Some("https://staging-api.tinyhumans.ai".into())),
             "https://staging-api.tinyhumans.ai"
         );
 
         // Whitespace/empty api_url falls through to the prod default.
         assert_eq!(
-            backend_url_or_default(Some("".into()), Some("   ".into())),
+            backend_url_or_default(Some("   ".into())),
             DEFAULT_BACKEND_URL
         );
 
         // api_url is trimmed before use.
         assert_eq!(
-            backend_url_or_default(None, Some("  https://staging-api.tinyhumans.ai  ".into())),
+            backend_url_or_default(Some("  https://staging-api.tinyhumans.ai  ".into())),
             "https://staging-api.tinyhumans.ai"
+        );
+    }
+
+    /// `backend_url_or_default` takes only its one argument now — the explicit
+    /// per-surface override (`OPENCOMPANY_COMPOSIO_BACKEND_URL`) is gone
+    /// (issue #2306, phase 6a) and nothing replaced it with another env read.
+    /// Setting that removed variable, and the one the function's argument is
+    /// normally sourced from, in the *process* environment must have zero
+    /// effect: the function has no `EnvSource` to read them through.
+    #[test]
+    fn backend_url_or_default_reads_no_environment_variable() {
+        let _env = crate::test_support::EnvVarGuard::capture(&[
+            "OPENCOMPANY_COMPOSIO_BACKEND_URL",
+            TINYHUMANS_API_URL_ENV,
+        ]);
+        _env.set(
+            "OPENCOMPANY_COMPOSIO_BACKEND_URL",
+            "https://should-be-ignored.example",
+        );
+        _env.set(
+            TINYHUMANS_API_URL_ENV,
+            "https://also-should-be-ignored.example",
+        );
+
+        assert_eq!(
+            backend_url_or_default(Some("https://explicit-arg.example".into())),
+            "https://explicit-arg.example",
+            "the argument is the only input"
+        );
+        assert_eq!(
+            backend_url_or_default(None),
+            DEFAULT_BACKEND_URL,
+            "with no argument, the process environment must not fill in a value"
         );
     }
 
