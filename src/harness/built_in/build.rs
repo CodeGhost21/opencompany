@@ -100,8 +100,10 @@ use oh::tools::{
 };
 
 use crate::company::Agent as ManifestAgent;
+use crate::company::inference::store as inference_store;
 use crate::error::OpenCompanyError;
 use crate::harness::HarnessDeps;
+use crate::harness::built_in::provider::HarnessModel;
 #[cfg(feature = "mcp")]
 use crate::harness::mcp::{
     OcMcpCallTool, OcMcpListServersTool, capability_brief, granted_secrets, registry_for_agent,
@@ -1161,6 +1163,41 @@ pub fn build_agent(
         .clone()
         .unwrap_or_else(|| model_for_tier(manifest_agent.tier.as_deref()));
 
+    // Keys rework slice 3a (issue #2306): this agent's own `{provider, model}`
+    // pair, when it has one. Only `built_in` lanes reach `build_agent`, and
+    // `CompanyManifest::validate` refuses a pair on an `acp` agent, so no
+    // harness-kind check is needed here. `deps.provider.pinned` returns
+    // `None` for an implementation that cannot pin (test doubles) — falling
+    // back to the un-pinned provider rather than failing the whole roster
+    // build over a fixture that predates this field.
+    let pin = match (
+        manifest_agent.provider.as_deref(),
+        manifest_agent.model.as_deref(),
+    ) {
+        (Some(provider), Some(model))
+            if !provider.trim().is_empty() && !model.trim().is_empty() =>
+        {
+            Some(inference_store::ModelChoice {
+                provider: provider.trim().to_string(),
+                model: model.trim().to_string(),
+            })
+        }
+        _ => None,
+    };
+    let chat_model: Arc<dyn HarnessModel> = match &pin {
+        Some(choice) => deps
+            .provider
+            .pinned(&manifest_agent.id, choice)
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    agent = %manifest_agent.id,
+                    "this provider cannot pin; the agent pair is ignored"
+                );
+                deps.provider.clone()
+            }),
+        None => deps.provider.clone(),
+    };
+
     // Capability-tier seam (Cell A): one filtering pass over the fully assembled
     // tool vector, just before it is handed to the builder. Today `AllowAll` is
     // the only production variant (identity); a future capability-tier cell only
@@ -1201,8 +1238,7 @@ pub fn build_agent(
     // every turn is pinned to prompt-XML and a model that narrates prose instead
     // of the exact `<tool_call>` tag silently runs no tools (bug #1).
     use oh::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher};
-    let native_tools = deps
-        .provider
+    let native_tools = chat_model
         .profile()
         .map(|profile| profile.tool_calling)
         .unwrap_or(false);
@@ -1230,7 +1266,7 @@ pub fn build_agent(
     let mut agent = AgentBuilder::default()
         // `HarnessModel` upcasts to the tinyinference `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
-        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
+        .chat_model(chat_model.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
         .tool_dispatcher(tool_dispatcher)
