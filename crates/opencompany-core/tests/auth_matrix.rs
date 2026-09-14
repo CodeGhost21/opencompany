@@ -1818,8 +1818,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
 #[test]
 fn committed_snapshot_pins_every_expected_cell() {
     let actual = render_snapshot();
-    let snapshot =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/auth-matrix.txt");
+    let snapshot = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/auth-matrix.txt");
     if std::env::var_os("BLESS_AUTH_MATRIX").is_some() {
         std::fs::write(&snapshot, &actual).expect("write auth matrix snapshot");
         return;
