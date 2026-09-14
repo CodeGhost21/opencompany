@@ -106,12 +106,17 @@ point that can be fixed without taking everything that landed since. Fixes
 land on `release` as PRs and reach `main` through the back-merge, so neither
 branch loses them.
 
-**Pushes by the workflow do not trigger CI.** The bump commit and the
-promotion merge are pushed with `GITHUB_TOKEN`, which GitHub deliberately
-excludes from firing `push` workflows. The promotion dispatches `ci.yml`
-explicitly for that reason (and `ci.yml` forces every lane on a dispatch, since
-its path filter would otherwise see an empty diff). The bump commit is version
-numbers only and is verified by the cut itself.
+**The workflows push as the `tiny-humans-bot` App.** `main` and `release` are
+protected by branch rulesets (`.github/rulesets/`) that require a pull request
+for every push; the App is the one actor on their bypass list, so the bump
+commit, the promotion merge and the back-merge are pushed with a token minted
+from it (`actions/create-github-app-token`) rather than `GITHUB_TOKEN`, which
+the rulesets would reject. An App push also fires `push` workflows, which
+`GITHUB_TOKEN` deliberately does not: the promotion merge therefore gets a
+`ci.yml` run on `release` on its own (`ci.yml` forces every lane on a push to
+`release`, since its path filter would otherwise see an empty diff against
+`main`), and the bump commit carries `[skip ci]` because it is version numbers
+only and is verified by the cut itself.
 
 ## When something goes wrong
 
@@ -131,3 +136,11 @@ Repository secrets: the six `APPLE_*` values for signing and notarization,
 ([desktop-updates.md](desktop-updates.md#operator-setup)),
 and optionally `OPENAI_API_KEY` for polished notes. `build-desktop.yml`'s
 `guard` job fails in seconds, naming the missing one, before any build starts.
+
+A `Release-PR-Automation` environment, branch-policied to `main` and `release`,
+holding exactly two secrets: `XGITHUB_APP_ID` and `XGITHUB_APP_PRIVATE_KEY` for
+the `tiny-humans-bot` GitHub App. They live in an environment rather than at
+repository level so only the three pushing jobs can mint a token that bypasses
+the branch rulesets. Without them `prepare-build` fails at its first step. The
+rulesets themselves are applied with `scripts/ci/apply-rulesets.sh`
+([.github/rulesets/README.md](../../../.github/rulesets/README.md)).
