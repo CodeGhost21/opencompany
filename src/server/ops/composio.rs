@@ -72,8 +72,8 @@ use crate::AppState;
 // longer re-derives the credential tier from booleans, it asks the resolver
 // (`resolve_credential`) — see `credential_source_for` below.
 use crate::company::composio::{
-    CatalogEntry, ComposioMode, backend_url_or_default, has_connected_integrations, load_mode,
-    resolve_access, resolve_credential, store_api_key, store_token,
+    CatalogEntry, ComposioMode, backend_url_or_default, load_mode, resolve_access,
+    resolve_credential, store_api_key, store_token,
 };
 use crate::company::composio_probe::{ComposioProbeClass, classify, describe, describe_verdict};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
@@ -660,24 +660,45 @@ async fn get_status(company: ScopedCompany) -> Result<Json<ComposioStatusDto>, A
 }
 
 /// The `usedBy` a Composio credential clear or mode switch would carry, per
-/// `docs/key-reworks/in-use-guards.md` §1/§2: `surfaces: [Composio]` when
-/// [`has_connected_integrations`] says this company has pinned at least one
-/// toolkit connection, else `None` — the whole field is omitted rather than
-/// emitted empty, matching every other producer of this shape.
+/// `docs/key-reworks/in-use-guards.md` §2's `surfaces` table: `surfaces:
+/// [Composio]` iff `composio/mode` currently selects `slot` — the route the
+/// credential being cleared/switched belongs to — else `None`, the whole
+/// field omitted rather than emitted empty, matching every other producer of
+/// this shape.
+///
+/// `current_mode` is the mode the caller already read, passed in rather than
+/// re-read here: [`set_token`] reads it purely to call this, and
+/// [`set_api_key`] already needed it to decide whether the route is
+/// switching at all, so a second read here could only disagree with the
+/// caller's own under a concurrent write between them. `slot` names which
+/// route the touched credential belongs to —
+/// [`ComposioMode::Managed`] for `composio/tinyhumans/key`
+/// ([`TINYHUMANS_KEY_KEY`](crate::company::composio::TINYHUMANS_KEY_KEY)),
+/// [`ComposioMode::Byok`] for `composio/byok/key`
+/// ([`BYOK_KEY_KEY`](crate::company::composio::BYOK_KEY_KEY)) — so `mode ==
+/// slot` is exactly "a workload would actually lose tool access": the
+/// credential being touched is the one calls are currently resolving
+/// through.
+///
+/// This replaces the previous signal (`has_connected_integrations` reading
+/// `composio/defaults`, this company's pinned toolkit connections): cheap
+/// but imprecise, since a pin can exist under a route this mutation does not
+/// even touch, and it could not tell a clear on the *active* slot from one
+/// on the inactive one. The mode match is both cheaper (no secret-store read
+/// beyond the one the caller already made) and exact — it is the literal
+/// condition in-use-guards.md §2 states.
 ///
 /// Composio never populates `default` or `agents`: it has no default/pair
 /// concept of its own (§1: "only `surfaces`, since Composio has no
 /// default/agent-pair concept").
-async fn composio_used_by(
-    runtime: &CompanyRuntime,
-) -> Result<Option<crate::error::UsedBy>, ApiError> {
-    let in_use = has_connected_integrations(runtime.id(), runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
-    Ok(in_use.then(|| crate::error::UsedBy {
+fn composio_used_by(
+    current_mode: ComposioMode,
+    slot: ComposioMode,
+) -> Option<crate::error::UsedBy> {
+    (current_mode == slot).then(|| crate::error::UsedBy {
         surfaces: vec![crate::error::UsedBySurface::Composio],
         ..Default::default()
-    }))
+    })
 }
 
 /// §2's fixed sentence for "a key clear/disable with only `surfaces`":
@@ -719,9 +740,14 @@ async fn set_token(
     // non-empty token cannot strand anything this company already had — the
     // credential it presents only gets more likely to resolve. Computed
     // before the write, per §3, so a confirmed clear echoes exactly what it
-    // would have refused with.
+    // would have refused with. `composio/tinyhumans/key` only feeds a live
+    // call while the route is `managed` (§2's surfaces table) — under `byok`
+    // this clear touches nothing the agents are currently resolving through.
     let used_by = if clearing {
-        composio_used_by(runtime).await?
+        let mode = load_mode(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+        composio_used_by(mode, ComposioMode::Managed)
     } else {
         None
     };
@@ -813,15 +839,19 @@ async fn set_api_key(
     let before_mode = load_mode(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
-    // Guarded only when the ROUTE actually changes (in-use-guards.md §2/§6).
-    // Rotating a key already in use (byok → byok, or an empty-clear on a
-    // company that was already managed) leaves the connections pinned under
-    // the current route untouched — the console's own pre-existing switch
-    // warning makes exactly this argument for the managed→byok direction, and
-    // it holds symmetrically for byok→managed.
+    // Guarded only when the ROUTE actually changes (in-use-guards.md §2/§6):
+    // a rotate (byok → byok, or an empty-clear on a company that was already
+    // managed) is never a switch, so `switching` alone decides whether this
+    // is a guarded action at all. Separately, `composio_used_by` decides
+    // whether that switch has anything to report: `composio/byok/key` only
+    // feeds a live call while `before_mode` already reads `byok` — a switch
+    // FROM managed TO byok (`before_mode == Managed`) sets a key nothing was
+    // resolving through yet, so it reports nothing, matching §2's rule that
+    // `surfaces` fires only when the mode already selects the slot being
+    // touched.
     let switching = before_mode != requested_mode;
     let used_by = if switching {
-        composio_used_by(runtime).await?
+        composio_used_by(before_mode, ComposioMode::Byok)
     } else {
         None
     };
@@ -2033,7 +2063,10 @@ mod tests {
             "rotateco",
             "PUT",
             "/api/v1/company/composio/token",
-            Some(json!({ "token": "" })),
+            // The managed token clear is guarded while the company is on the
+            // managed route (in-use-guards.md §2) — this test is about
+            // catalog eviction, not the guard, so it confirms.
+            Some(json!({ "token": "", "confirmInUse": true })),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
@@ -2111,12 +2144,15 @@ mod tests {
         assert_eq!(dto["credentialSource"], "static");
         assert!(!raw.contains(TOKEN), "GET status leaked the token: {raw}");
 
-        // Clearing with "" reverts to whatever the instance offers — here nothing.
+        // Clearing with "" reverts to whatever the instance offers — here
+        // nothing. Guarded while the company is on the managed route
+        // (in-use-guards.md §2); this test is about credentialSource, not
+        // the guard, so it confirms.
         let (_, resp, _) = send(
             &state,
             "PUT",
             "/api/v1/company/composio/token",
-            Some(json!({ "token": "" })),
+            Some(json!({ "token": "", "confirmInUse": true })),
         )
         .await;
         assert_eq!(resp["status"]["credentialSource"], "none");
@@ -2171,12 +2207,14 @@ mod tests {
             "the GET status leaked the key: {raw}"
         );
 
-        // Clearing it returns the company to the managed route.
+        // Clearing it returns the company to the managed route. Guarded
+        // while the company is on BYOK (in-use-guards.md §2); this test is
+        // about the route round-trip, not the guard, so it confirms.
         let (_, resp, _) = send(
             &state,
             "PUT",
             "/api/v1/company/composio/api-key",
-            Some(json!({ "apiKey": "" })),
+            Some(json!({ "apiKey": "", "confirmInUse": true })),
         )
         .await;
         assert_eq!(resp["status"]["mode"], "managed");
@@ -2525,6 +2563,9 @@ mod tests {
         assert_eq!(code, StatusCode::OK, "{raw}");
 
         // Now make any probe destructive. The clear must still go through.
+        // Guarded while the company is on BYOK (in-use-guards.md §2); this
+        // test is about the probe never blocking a clear, not the guard, so
+        // it confirms.
         super::probe_override::set(
             "probeclear",
             Err("Composio answered 401 Unauthorized".to_string()),
@@ -2534,7 +2575,7 @@ mod tests {
             "probeclear",
             "PUT",
             "/api/v1/company/composio/api-key",
-            Some(json!({ "apiKey": "" })),
+            Some(json!({ "apiKey": "", "confirmInUse": true })),
         )
         .await;
         assert_eq!(code, StatusCode::OK, "{raw}");
@@ -2765,12 +2806,15 @@ mod tests {
             "the PUT leaked the token: {raw}"
         );
 
+        // Guarded while the company is on the managed route
+        // (in-use-guards.md §2); this test is about the mirror write, not
+        // the guard, so it confirms.
         let (code, _, raw) = send_for(
             &state,
             "legacytoken",
             "PUT",
             "/api/v1/company/composio/token",
-            Some(json!({ "token": "" })),
+            Some(json!({ "token": "", "confirmInUse": true })),
         )
         .await;
         assert_eq!(code, StatusCode::OK, "{raw}");
@@ -3013,11 +3057,14 @@ mod tests {
             "a set announces the new token: {set_note}"
         );
 
+        // Guarded while the company is on the managed route
+        // (in-use-guards.md §2); this test is about the note text, not the
+        // guard, so it confirms.
         let (_, resp, _) = send(
             &state,
             "PUT",
             "/api/v1/company/composio/token",
-            Some(json!({ "token": "" })),
+            Some(json!({ "token": "", "confirmInUse": true })),
         )
         .await;
         let clear_note = resp["note"].as_str().expect("a note").to_string();
@@ -3491,12 +3538,16 @@ mod tests {
         let home_dir = home();
         let state = state_with_manifest(home_dir.path(), GRANTED).await;
 
+        // `confirmInUse` is ignored on the set and needed on the clear (the
+        // company is on the managed route throughout, in-use-guards.md §2)
+        // — this test is about the journaled actor, not the guard, so both
+        // iterations confirm.
         for token in [TOKEN, ""] {
             let (status, _, raw) = send(
                 &state,
                 "PUT",
                 "/api/v1/company/composio/token",
-                Some(json!({ "token": token })),
+                Some(json!({ "token": token, "confirmInUse": true })),
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{raw}");
@@ -4030,29 +4081,34 @@ mod tests {
 
     // ── in-use guards (#2306): confirmInUse gates a clear/switch ──────
     //
-    // `has_connected_integrations` (`src/company/composio.rs`) is the signal:
-    // a non-empty `composio/defaults` pin. These tests seed or omit that pin
-    // to drive the guard, rather than a live connection, for the same reason
-    // the guard itself reads it instead of `GET .../connections` — no network.
+    // The signal is `composio/mode` (`src/company/composio.rs::MODE_KEY`),
+    // per in-use-guards.md §2's surfaces table: clearing
+    // `composio/tinyhumans/key` reports `surfaces: ["composio"]` iff the
+    // mode currently reads `"managed"`; clearing/switching
+    // `composio/byok/key` reports it iff the mode currently reads `"byok"`.
+    // A company connection pin (`composio/defaults`) is no longer the
+    // signal, so these tests drive the guard by setting the mode — directly,
+    // or through `store_token`/`store_api_key`, which are what set it in
+    // practice.
 
-    /// A managed-token clear is refused with `409 in_use` when this company
-    /// has at least one toolkit connection pinned, and nothing is written.
+    /// A managed-token clear is refused with `409 in_use` while the company
+    /// is still on the managed route (the default with nothing else
+    /// stored), and nothing is written.
     #[tokio::test]
-    async fn clearing_the_managed_token_while_pinned_is_refused_without_confirmation() {
+    async fn clearing_the_managed_token_while_mode_is_managed_is_refused_without_confirmation() {
         let home_dir = home();
         let state = state_with_manifest_id(home_dir.path(), "clearguard", GRANTED).await;
         let runtime = runtime_of(&state, "clearguard");
         crate::company::composio::store_token(runtime.id(), runtime.secrets().as_ref(), TOKEN)
             .await
             .unwrap();
-        crate::company::composio::set_default(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            "gmail",
-            "ca_ops",
-        )
-        .await
-        .unwrap();
+        assert_eq!(
+            crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            crate::company::composio::ComposioMode::Managed,
+            "managed is the default mode with nothing else stored"
+        );
 
         let (status, body, raw) = send_for(
             &state,
@@ -4095,14 +4151,6 @@ mod tests {
         crate::company::composio::store_token(runtime.id(), runtime.secrets().as_ref(), TOKEN)
             .await
             .unwrap();
-        crate::company::composio::set_default(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            "gmail",
-            "ca_ops",
-        )
-        .await
-        .unwrap();
 
         let (status, body, raw) = send_for(
             &state,
@@ -4127,20 +4175,29 @@ mod tests {
         );
     }
 
-    /// A clear on a company with nothing pinned needs no confirmation at all,
-    /// and the response carries no `usedBy` — omitted, not null or empty.
+    /// A managed-token clear needs no confirmation while the company is on
+    /// BYOK: `composio/mode` no longer selects the managed slot, so this
+    /// clear is not touching what any live call resolves through, and the
+    /// response carries no `usedBy` — omitted, not null or empty.
     #[tokio::test]
-    async fn clearing_the_managed_token_with_nothing_pinned_needs_no_confirmation() {
+    async fn clearing_the_managed_token_while_mode_is_byok_needs_no_confirmation() {
         let home_dir = home();
-        let state = state_with_manifest_id(home_dir.path(), "clearunpinned", GRANTED).await;
-        let runtime = runtime_of(&state, "clearunpinned");
+        let state = state_with_manifest_id(home_dir.path(), "clearunguarded", GRANTED).await;
+        let runtime = runtime_of(&state, "clearunguarded");
         crate::company::composio::store_token(runtime.id(), runtime.secrets().as_ref(), TOKEN)
             .await
             .unwrap();
+        crate::company::composio::store_api_key(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "ak_not_a_real_key_0123456789",
+        )
+        .await
+        .unwrap();
 
         let (status, body, raw) = send_for(
             &state,
-            "clearunpinned",
+            "clearunguarded",
             "PUT",
             "/api/v1/company/composio/token",
             Some(json!({ "token": "" })),
@@ -4156,21 +4213,12 @@ mod tests {
         );
     }
 
-    /// Setting or rotating a non-empty managed token is never guarded — only a
-    /// clear can strand a connected integration.
+    /// Setting or rotating a non-empty managed token is never guarded — only
+    /// a clear can strand anything the mode currently resolves through.
     #[tokio::test]
-    async fn setting_a_managed_token_is_never_guarded_even_while_pinned() {
+    async fn setting_a_managed_token_is_never_guarded_even_while_mode_is_managed() {
         let home_dir = home();
         let state = state_with_manifest_id(home_dir.path(), "setnoguard", GRANTED).await;
-        let runtime = runtime_of(&state, "setnoguard");
-        crate::company::composio::set_default(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            "gmail",
-            "ca_ops",
-        )
-        .await
-        .unwrap();
 
         let (status, body, raw) = send_for(
             &state,
@@ -4184,89 +4232,43 @@ mod tests {
         assert!(body.get("usedBy").is_none(), "a set is not guarded: {body}");
     }
 
-    /// The first move onto BYOK is a route switch: refused without
-    /// confirmation while a managed-route connection is pinned.
+    /// The first move onto BYOK needs no confirmation from Composio's own
+    /// guard: before the write `composio/mode` still reads `"managed"`, so
+    /// `composio/byok/key` is not the slot the mode currently selects, and
+    /// setting it strands nothing (in-use-guards.md §2 — the criterion is
+    /// the mode BEFORE the write, not the one the write is heading to). The
+    /// probe is forced clean so this does not depend on network access under
+    /// the `composio` feature.
     #[tokio::test]
-    async fn switching_to_byok_while_pinned_is_refused_without_confirmation() {
+    async fn switching_to_byok_while_mode_is_managed_needs_no_confirmation() {
         let home_dir = home();
-        let state = state_with_manifest_id(home_dir.path(), "byokswitchguard", GRANTED).await;
-        let runtime = runtime_of(&state, "byokswitchguard");
-        crate::company::composio::set_default(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            "gmail",
-            "ca_ops",
-        )
-        .await
-        .unwrap();
+        let state = state_with_manifest_id(home_dir.path(), "byokswitchunguarded", GRANTED).await;
+        let runtime = runtime_of(&state, "byokswitchunguarded");
+        super::probe_override::set("byokswitchunguarded", Ok(()));
 
         let (status, body, raw) = send_for(
             &state,
-            "byokswitchguard",
+            "byokswitchunguarded",
             "PUT",
             "/api/v1/company/composio/api-key",
             Some(json!({ "apiKey": "ak_not_a_real_key_0123456789" })),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
-        assert_eq!(body["code"], "in_use", "{body}");
-        assert_eq!(
-            body["usedBy"],
-            json!({ "surfaces": ["composio"] }),
-            "{body}"
-        );
-
-        // Refused: the company is still managed, and no key was stored.
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(body.get("usedBy").is_none(), "{body}");
         assert_eq!(
             crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
                 .await
                 .unwrap(),
-            crate::company::composio::ComposioMode::Managed
+            crate::company::composio::ComposioMode::Byok
         );
     }
 
-    /// The same switch, confirmed, lands and echoes `usedBy`. The probe is
-    /// forced clean so this does not depend on network access under the
-    /// `composio` feature.
+    /// Giving the managed route back while BYOK is active IS refused without
+    /// confirmation: `composio/mode` already reads `"byok"`, which is
+    /// exactly the slot `composio/byok/key` being cleared belongs to.
     #[tokio::test]
-    async fn a_confirmed_switch_to_byok_succeeds_and_echoes_used_by() {
-        let home_dir = home();
-        let state = state_with_manifest_id(home_dir.path(), "byokswitchconfirmed", GRANTED).await;
-        let runtime = runtime_of(&state, "byokswitchconfirmed");
-        crate::company::composio::set_default(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            "gmail",
-            "ca_ops",
-        )
-        .await
-        .unwrap();
-        super::probe_override::set("byokswitchconfirmed", Ok(()));
-
-        let (status, body, raw) = send_for(
-            &state,
-            "byokswitchconfirmed",
-            "PUT",
-            "/api/v1/company/composio/api-key",
-            Some(json!({
-                "apiKey": "ak_not_a_real_key_0123456789",
-                "confirmInUse": true
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{raw}");
-        assert_eq!(body["status"]["mode"], "byok", "{body}");
-        assert_eq!(
-            body["usedBy"],
-            json!({ "surfaces": ["composio"] }),
-            "{body}"
-        );
-    }
-
-    /// Giving the managed route back is the symmetric switch, guarded the
-    /// same way: refused unconfirmed while a connection is pinned.
-    #[tokio::test]
-    async fn switching_back_to_managed_while_pinned_is_refused_without_confirmation() {
+    async fn switching_back_to_managed_while_mode_is_byok_is_refused_without_confirmation() {
         let home_dir = home();
         let state = state_with_manifest_id(home_dir.path(), "managedswitchguard", GRANTED).await;
         let runtime = runtime_of(&state, "managedswitchguard");
@@ -4274,14 +4276,6 @@ mod tests {
             runtime.id(),
             runtime.secrets().as_ref(),
             "ak_not_a_real_key_0123456789",
-        )
-        .await
-        .unwrap();
-        crate::company::composio::set_default(
-            runtime.id(),
-            runtime.secrets().as_ref(),
-            "gmail",
-            "ca_ops",
         )
         .await
         .unwrap();
@@ -4296,6 +4290,11 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
         assert_eq!(body["code"], "in_use", "{body}");
+        assert_eq!(
+            body["usedBy"],
+            json!({ "surfaces": ["composio"] }),
+            "{body}"
+        );
 
         // Refused: the company is still on BYOK, key untouched.
         assert_eq!(
@@ -4306,15 +4305,14 @@ mod tests {
         );
     }
 
-    /// Rotating a key while staying on the SAME route is never guarded, even
-    /// while pinned — the connections under the current route are untouched
-    /// by a rotation, which is the argument the console's own pre-existing
-    /// managed→byok warning already makes for the opposite direction.
+    /// The same switch back to managed, confirmed, lands and echoes
+    /// `usedBy` (in-use-guards.md §3).
     #[tokio::test]
-    async fn rotating_an_already_byok_key_is_never_guarded_even_while_pinned() {
+    async fn a_confirmed_switch_back_to_managed_succeeds_and_echoes_used_by() {
         let home_dir = home();
-        let state = state_with_manifest_id(home_dir.path(), "byokrotate", GRANTED).await;
-        let runtime = runtime_of(&state, "byokrotate");
+        let state =
+            state_with_manifest_id(home_dir.path(), "managedswitchconfirmed", GRANTED).await;
+        let runtime = runtime_of(&state, "managedswitchconfirmed");
         crate::company::composio::store_api_key(
             runtime.id(),
             runtime.secrets().as_ref(),
@@ -4322,11 +4320,41 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::company::composio::set_default(
+
+        let (status, body, raw) = send_for(
+            &state,
+            "managedswitchconfirmed",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "", "confirmInUse": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(
+            body["usedBy"],
+            json!({ "surfaces": ["composio"] }),
+            "{body}"
+        );
+        assert_eq!(
+            crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            crate::company::composio::ComposioMode::Managed
+        );
+    }
+
+    /// Rotating a key while staying on the SAME route is never guarded — a
+    /// rotate is not a switch at all (in-use-guards.md §2), so the mode
+    /// match is never even consulted.
+    #[tokio::test]
+    async fn rotating_an_already_byok_key_is_never_guarded() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "byokrotate", GRANTED).await;
+        let runtime = runtime_of(&state, "byokrotate");
+        crate::company::composio::store_api_key(
             runtime.id(),
             runtime.secrets().as_ref(),
-            "gmail",
-            "ca_ops",
+            "ak_not_a_real_key_0123456789",
         )
         .await
         .unwrap();
