@@ -1,0 +1,18 @@
+{
+  "name": "Disallow creating branches",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [],
+      "exclude": ["refs/heads/main", "refs/heads/release"]
+    }
+  },
+  "rules": [
+    { "type": "non_fast_forward" },
+    { "type": "creation" },
+    { "type": "update" },
+    { "type": "deletion" }
+  ],
+  "bypass_actors": []
+}
