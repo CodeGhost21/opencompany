@@ -297,7 +297,12 @@ const PROBE_CATALOGUE_LIMIT: usize = 500;
 ///
 /// Sorted because a catalog's own order is whatever the endpoint felt like, and
 /// a select an operator has to scan is worth putting in one.
-fn catalogue_offer(models: &[String]) -> Vec<String> {
+///
+/// `pub(crate)` (keys rework, #2306, slice 4a): the account-key fan-out
+/// (`company::company_key::fan_out`) offers the same catalog shape on its own
+/// `needsModel` answer, and this is the one place "sort, dedupe, cap" is
+/// decided.
+pub(crate) fn catalogue_offer(models: &[String]) -> Vec<String> {
     let mut ids: Vec<String> = models.to_vec();
     ids.sort_unstable();
     ids.dedup();
@@ -421,6 +426,15 @@ async fn add_provider(
             .map(str::trim)
             .is_some_and(|k| !k.is_empty()),
     )?;
+    // Keys rework (#2306), slice 4a: the account-key fan-out
+    // (`company_key::fan_out`) reads and writes this exact slug's row and key
+    // under the same lock. Held only for the `tinyhumans` slug — every other
+    // add is untouched by the fan-out and needs no serialisation with it.
+    let _fan_out_guard = if plan.slug == crate::company::inference::MANAGED_SLUG {
+        Some(crate::company::company_key::slot_guard(runtime.id()).await)
+    } else {
+        None
+    };
     let existing = store::list_providers(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
@@ -1102,6 +1116,13 @@ async fn edit_provider(
 ) -> Result<Json<ProviderMutation>, ApiError> {
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
+    // Keys rework (#2306), slice 4a: held only for the `tinyhumans` slug —
+    // see `add_provider`'s own guard for why.
+    let _fan_out_guard = if params.slug == crate::company::inference::MANAGED_SLUG {
+        Some(crate::company::company_key::slot_guard(runtime.id()).await)
+    } else {
+        None
+    };
     let existing = require_provider(runtime, &params.slug).await?;
 
     if existing.origin == store::ProviderOrigin::EntryZero {
@@ -1361,6 +1382,13 @@ async fn delete_provider(
 ) -> Result<Json<ProviderMutation>, ApiError> {
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
+    // Keys rework (#2306), slice 4a: held only for the `tinyhumans` slug —
+    // see `add_provider`'s own guard for why.
+    let _fan_out_guard = if params.slug == crate::company::inference::MANAGED_SLUG {
+        Some(crate::company::company_key::slot_guard(runtime.id()).await)
+    } else {
+        None
+    };
     let provider = require_provider(runtime, &params.slug).await?;
 
     if provider.origin == store::ProviderOrigin::EntryZero {
@@ -2063,6 +2091,11 @@ async fn set_managed_key(
     Json(body): Json<SetManagedKey>,
 ) -> Result<Json<ProviderMutation>, ApiError> {
     let runtime = company.runtime.as_ref();
+    // Keys rework (#2306), slice 4a: this handler always writes the
+    // `tinyhumans` slug's key, so — unlike `add_provider`/`edit_provider`/
+    // `delete_provider`, which take the lock only for that one slug —
+    // it is held unconditionally.
+    let _fan_out_guard = crate::company::company_key::slot_guard(runtime.id()).await;
     let secrets = runtime.secrets().as_ref();
     let key = body.key.trim();
 
