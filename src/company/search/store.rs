@@ -465,20 +465,64 @@ pub async fn delete_provider(
     slug: &str,
 ) -> Result<()> {
     let _guard = index_guard(company).await;
-    let providers: Vec<SearchProvider> = list_providers(company, secrets)
+    delete_provider_locked(company, secrets, slug).await
+}
+
+/// Removes every connected provider under **one** hold of the index lock.
+///
+/// Disconnect all used to take a snapshot of the list and then remove each
+/// entry with its own lock. A connect landing after the snapshot was never
+/// visited: its row and credential survived a bulk removal that reported
+/// success, and the console announced "Disconnected" over a provider that was
+/// still answering. Holding the lock from the snapshot to the last removal
+/// makes the snapshot the truth — and a connect that claimed before it and is
+/// still writing its key is refused by [`store_key_if_connected`] when it gets
+/// there.
+pub async fn delete_all_providers(company: &CompanyId, secrets: &dyn SecretStore) -> Result<()> {
+    let _guard = index_guard(company).await;
+    for provider in list_providers(company, secrets).await? {
+        delete_provider_locked(company, secrets, &provider.slug).await?;
+    }
+    Ok(())
+}
+
+/// [`delete_provider`]'s body, for a caller that already holds the index lock.
+///
+/// # The order is clear-then-unlist, and it is the whole point
+///
+/// It used to unlist the row first and clear the credential second. A clear
+/// that failed after the index write — a transient store error is enough —
+/// returned an error with the row already gone and the secret still stored: an
+/// invisible credential the status route never reports and Disconnect all never
+/// visits, which is the orphaned-secret state this module exists to prevent.
+///
+/// Clearing first inverts which half can be left behind. If a clear fails, the
+/// row is still listed, visibly incomplete, and removing it again finishes the
+/// job. If the index write fails after the clears, the same is true. Nothing
+/// can end up stored and unlisted.
+///
+/// Both answers that depend on the flat keys — the list and whether this slug
+/// is entry zero — are read before anything is cleared, because clearing
+/// `search/provider` changes them.
+async fn delete_provider_locked(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+) -> Result<()> {
+    let is_entry_zero = entry_zero_slug(company, secrets).await?.as_deref() == Some(slug);
+    let remaining: Vec<SearchProvider> = list_providers(company, secrets)
         .await?
         .into_iter()
         .filter(|provider| provider.slug != slug)
         .collect();
-    save_index(company, secrets, &providers).await?;
 
     for key in [provider_key_key(slug), provider_endpoint_key(slug)] {
         if let Err(err) = write(company, secrets, &key, "").await {
             tracing::error!(
                 company = %company,
                 key = %key,
-                "[search] removing a provider could not clear its credential; a secret is now \
-                 orphaned at this address: {err}"
+                "[search] removing a provider could not clear its credential; the row is kept \
+                 so the removal can be retried: {err}"
             );
             return Err(err);
         }
@@ -486,19 +530,22 @@ pub async fn delete_provider(
 
     // Entry zero lives at the flat keys, so removing it has to clear those too —
     // which is exactly what `DELETE …/search/key` has always done.
-    if entry_zero_slug(company, secrets).await?.as_deref() == Some(slug) {
+    if is_entry_zero {
         for key in [API_KEY_SECRET, PROVIDER_SECRET, ENDPOINT_SECRET] {
             if let Err(err) = write(company, secrets, key, "").await {
                 tracing::error!(
                     company = %company,
                     key = %key,
-                    "[search] removing the legacy provider could not clear its flat credential; a \
-                     secret is now orphaned at this address: {err}"
+                    "[search] removing the legacy provider could not clear its flat credential; \
+                     the row is kept so the removal can be retried: {err}"
                 );
                 return Err(err);
             }
         }
     }
+
+    // Only once nothing of it is left stored.
+    save_index(company, secrets, &remaining).await?;
 
     if load_default_slug(company, secrets).await?.as_deref() == Some(slug) {
         clear_default_slug(company, secrets).await?;

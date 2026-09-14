@@ -300,6 +300,15 @@ pub fn guard_instance_url(url: &str) -> Result<(), String> {
 const EC2_IPV6_METADATA: std::net::Ipv6Addr =
     std::net::Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254);
 
+/// Alibaba Cloud's instance metadata address.
+///
+/// It sits in `100.64.0.0/10`, the carrier-grade NAT range — not link-local,
+/// not unspecified, not broadcast — so the IPv4 test below accepts it, and
+/// with it any hostname that resolves there. Named for the same reason
+/// [`EC2_IPV6_METADATA`] is: nothing about its shape gives it away, and refusing
+/// the whole CGNAT range would refuse ordinary carrier and overlay networks.
+const ALIBABA_METADATA: std::net::Ipv4Addr = std::net::Ipv4Addr::new(100, 100, 100, 200);
+
 /// Link-local and the cloud metadata services that live there.
 ///
 /// Loopback and RFC1918 are deliberately **absent**: both are ordinary places
@@ -307,7 +316,9 @@ const EC2_IPV6_METADATA: std::net::Ipv6Addr =
 /// `169.254.169.254`, and everybody's instance metadata service does.
 fn is_metadata_address(address: std::net::IpAddr) -> bool {
     match address {
-        std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast(),
+        std::net::IpAddr::V4(v4) => {
+            v4 == ALIBABA_METADATA || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
+        }
         std::net::IpAddr::V6(v6) => {
             // The one metadata address that is not link-local, so it has to be
             // named rather than derived.

@@ -543,13 +543,34 @@ async fn connect_provider(
         // it at an address the index does not hold — invisible in status,
         // skipped by Disconnect all — and this route would still answer
         // `saved: true` for a provider that is no longer connected.
-        if !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), &slug, key)
-            .await?
+        match store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), &slug, key)
+            .await
         {
-            return Err(invalid(format!(
-                "{} was disconnected while it was being connected — try again",
-                info.label
-            )));
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(invalid(format!(
+                    "{} was disconnected while it was being connected — try again",
+                    info.label
+                )));
+            }
+            // The claim above already wrote the row. Leaving it on a failed
+            // credential write reported the connect as failed while keeping an
+            // incomplete row behind — and the retry then failed with "already
+            // connected". Undo the claim so the operation is retryable, and say
+            // so loudly if even that fails.
+            Err(err) => {
+                if let Err(rollback) =
+                    store::delete_provider(runtime.id(), runtime.secrets().as_ref(), &slug).await
+                {
+                    tracing::error!(
+                        company = %runtime.id(),
+                        provider = %slug,
+                        "[search] a connect whose credential could not be stored also could not \
+                         undo its claim; the row is left incomplete: {rollback}"
+                    );
+                }
+                return Err(err.into());
+            }
         }
     }
 
@@ -971,8 +992,17 @@ async fn put_search(
     )
     .await?;
     if let Some(key) = supplied(body.api_key.as_deref()) {
-        store::store_provider_key(runtime.id(), runtime.secrets().as_ref(), &provider, &key)
-            .await?;
+        // Connected-only, for the same reason as the modern routes: the row was
+        // written a line ago and released its lock, and a removal landing in
+        // between would otherwise leave this key stored with no row to list it.
+        if !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), &provider, &key)
+            .await?
+        {
+            return Err(invalid(format!(
+                "{} was disconnected while it was being saved — try again",
+                info.label
+            )));
+        }
     }
     store::set_default_slug(runtime.id(), runtime.secrets().as_ref(), &provider).await?;
 
@@ -985,8 +1015,13 @@ async fn apply_to(
     slug: &str,
     body: &SearchConfigBody,
 ) -> Result<Json<SearchStatus>, ApiError> {
-    if let Some(key) = supplied(body.api_key.as_deref()) {
-        store::store_provider_key(runtime.id(), runtime.secrets().as_ref(), slug, &key).await?;
+    if let Some(key) = supplied(body.api_key.as_deref())
+        && !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), slug, &key)
+            .await?
+    {
+        // The slug was read from the index before this call; a removal since
+        // would otherwise leave this key stored with no row to list it.
+        return Err(invalid("that provider was disconnected — try again"));
     }
     if let Some(endpoint) = supplied(body.endpoint.as_deref()) {
         validate_endpoint(&endpoint).await?;
@@ -1024,9 +1059,11 @@ async fn delete_search(
     // "disconnect my own search", and leaving a second account's key behind
     // under a page that now says "managed" would be storing a credential the
     // operator believes they deleted.
-    for provider in store::list_providers(runtime.id(), runtime.secrets().as_ref()).await? {
-        store::delete_provider(runtime.id(), runtime.secrets().as_ref(), &provider.slug).await?;
-    }
+    //
+    // One hold of the index lock from the snapshot to the last removal. Taken
+    // per row, a connect landing after the snapshot survived a disconnect that
+    // reported success.
+    store::delete_all_providers(runtime.id(), runtime.secrets().as_ref()).await?;
     let cleared: Vec<(&str, String)> = [API_KEY_SECRET, PROVIDER_SECRET, ENDPOINT_SECRET]
         .into_iter()
         .map(|key| (key, String::new()))

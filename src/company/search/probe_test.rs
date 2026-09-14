@@ -178,6 +178,17 @@ fn the_metadata_service_is_refused_and_a_private_instance_is_not() {
     assert!(guard_instance_url("http://[fd00:ec2::254]/").is_err());
     assert!(guard_instance_url("http://[fd00:0ec2:0:0:0:0:0:254]/").is_err());
 
+    // Alibaba Cloud's metadata service lives in the CGNAT range, not at a
+    // link-local address, so it has to be named — and a neighbour in the same
+    // range is still an ordinary network.
+    assert!(guard_instance_url("http://100.100.100.200/").is_err());
+    assert!(guard_instance_url("http://100.64.0.10:8080").is_ok());
+    let alibaba: std::net::SocketAddr = "100.100.100.200:80".parse().unwrap();
+    assert!(
+        pick_address(&[alibaba]).is_err(),
+        "and by resolved name too"
+    );
+
     assert!(guard_instance_url("http://10.0.0.5:8080").is_ok());
     // And an ordinary IPv6 private network is still ordinary — refusing every
     // ULA would be the same mistake as refusing RFC1918.

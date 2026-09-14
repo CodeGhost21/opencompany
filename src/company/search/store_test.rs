@@ -746,3 +746,153 @@ async fn a_legacy_searxng_address_survives_the_slug_entering_the_index() {
         "{moved:?}"
     );
 }
+
+/// A store whose writes to one address fail, as a transient backend error would.
+#[derive(Default)]
+struct FailingSecrets {
+    inner: MemSecrets,
+    fail_on: std::sync::Mutex<Option<String>>,
+}
+
+#[async_trait::async_trait]
+impl SecretStore for FailingSecrets {
+    async fn get(&self, company: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
+        self.inner.get(company, key).await
+    }
+    async fn set(&self, company: &CompanyId, key: &str, value: SecretValue) -> Result<()> {
+        if self.fail_on.lock().unwrap().as_deref() == Some(key) {
+            return Err(crate::error::OpenCompanyError::InvalidRequest(
+                "the store is unavailable".to_string(),
+            ));
+        }
+        self.inner.set(company, key, value).await
+    }
+}
+
+#[tokio::test]
+async fn a_removal_whose_credential_clear_fails_keeps_the_row() {
+    // It used to unlist the row first. A clear that then failed returned an
+    // error with the row gone and the key still stored — invisible in status and
+    // skipped by Disconnect all. Clearing first means a failure leaves a visible,
+    // retryable row instead.
+    let secrets = FailingSecrets::default();
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "brave".to_string(),
+            enabled: true,
+            endpoint: None,
+        },
+    )
+    .await
+    .unwrap();
+    store_provider_key(&company(), &secrets, "brave", "brave-not-a-real-key")
+        .await
+        .unwrap();
+
+    *secrets.fail_on.lock().unwrap() = Some("search/provider/brave/key".to_string());
+    assert!(
+        delete_provider(&company(), &secrets, "brave")
+            .await
+            .is_err()
+    );
+
+    let still = list_providers(&company(), &secrets).await.unwrap();
+    assert_eq!(
+        still.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>(),
+        vec!["brave"],
+        "the row must stay listed while its credential is still stored"
+    );
+    assert!(
+        provider_key_configured(&company(), &secrets, "brave")
+            .await
+            .unwrap()
+    );
+
+    // And the retry, once the store recovers, finishes the job.
+    *secrets.fail_on.lock().unwrap() = None;
+    delete_provider(&company(), &secrets, "brave")
+        .await
+        .unwrap();
+    assert!(
+        list_providers(&company(), &secrets)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !provider_key_configured(&company(), &secrets, "brave")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn removing_a_legacy_entry_zero_provider_still_clears_the_flat_keys() {
+    // The reorder reads "is this entry zero" before clearing anything, because
+    // clearing `search/provider` changes the answer. If it read it after, the
+    // flat credential would be left behind.
+    let secrets = MemSecrets::default();
+    seed(
+        &secrets,
+        &[(PROVIDER_SECRET, "exa"), (API_KEY_SECRET, "exa-key")],
+    )
+    .await;
+
+    delete_provider(&company(), &secrets, "exa").await.unwrap();
+
+    assert!(
+        list_providers(&company(), &secrets)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for key in [PROVIDER_SECRET, API_KEY_SECRET, ENDPOINT_SECRET] {
+        assert_eq!(
+            secrets.map.lock().unwrap().get(key).cloned(),
+            Some(String::new()),
+            "{key}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disconnect_all_removes_what_is_connected_when_it_runs() {
+    let secrets = std::sync::Arc::new(SlowSecrets::default());
+    for slug in ["brave", "exa", "querit"] {
+        put_provider(
+            &company(),
+            secrets.as_ref(),
+            SearchProvider {
+                slug: slug.to_string(),
+                enabled: true,
+                endpoint: None,
+            },
+        )
+        .await
+        .unwrap();
+        store_provider_key(&company(), secrets.as_ref(), slug, "not-a-real-key")
+            .await
+            .unwrap();
+    }
+
+    delete_all_providers(&company(), secrets.as_ref())
+        .await
+        .unwrap();
+
+    assert!(
+        list_providers(&company(), secrets.as_ref())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for slug in ["brave", "exa", "querit"] {
+        assert!(
+            !provider_key_configured(&company(), secrets.as_ref(), slug)
+                .await
+                .unwrap(),
+            "{slug}"
+        );
+    }
+}
