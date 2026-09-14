@@ -88,7 +88,7 @@ Code references are on `upstream/main @ fcfb3e1bc` (2026-09-14).
 | A rejected key leaves a default pointing at a dead provider | Q6 rollback of what this request wrote | 4a auth-failure rollback test |
 | A failed write mid-plan half-applies | Ordered writes; each failure reported | 4a failing-writer test per step |
 | A key appears in a response, log or journal | Values compared in memory only | 4a no-key-anywhere test |
-| Composio legacy address read crosswise | 1a fixed mapping | 1a `legacy_addresses_are_never_crossed` |
+| Composio legacy address read crosswise | 1a fixed mapping | 1a `a_byok_value_is_never_presented_as_the_tinyhumans_bearer`, `a_tinyhumans_value_is_never_presented_as_the_byok_key` |
 | Rolling back past 1a loses a Composio key saved on the new binary | D-mirror | 1a `a_write_mirrors_to_the_legacy_address_for_one_release` |
 
 ## 7. Composio scope

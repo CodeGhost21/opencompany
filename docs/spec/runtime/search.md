@@ -72,13 +72,15 @@ to managed. Writes require an admin: which index reads a company's queries, and
 under whose retention policy, is not an ordinary member's edit. The console
 renders it at Settings → Search.
 
-Three secret-store keys, per company (`crate::company::search`):
+Secret-store keys, per company (`crate::company::search`):
 
 | Key | Read back? | Holds |
 | --- | --- | --- |
 | `search/provider` | yes | the selected slug |
 | `search/api_key` | **never** | the BYO key |
 | `search/endpoint` | yes | the SearXNG instance URL |
+| `search/providers` | yes | the connected providers, each `{slug, enabled, endpoint?}` |
+| `search/provider/<slug>/endpoint` | yes | fallback address, see data-model.md |
 
 There is deliberately **no environment fallback** for a company key: an ambient
 one could only ever be somebody else's account. A selected-but-incomplete

@@ -214,16 +214,14 @@ test("a member sees what is connected but is offered nothing that changes it", a
     // proved nothing.
     //
     // The LLM page gates by DISABLING, not hiding: `ProvidersTab` renders
-    // "Add a provider" for every viewer with `disabled={!canManage}`, and the
-    // Routing tab's controls do the same. So the member assertion is the one
-    // the code actually makes — the control is there, and it is disabled — plus
-    // the page's own read-only notice. Absence would be the wrong contract, and
-    // `toHaveCount(0)` on any of these ids would pass for a reason unrelated to
-    // authority.
+    // "Add a provider" for every viewer with `disabled={!canManage}`. So the
+    // member assertion is the one the code actually makes — the control is
+    // there, and it is disabled — plus the page's own read-only notice.
+    // Absence would be the wrong contract, and `toHaveCount(0)` on any of these
+    // ids would pass for a reason unrelated to authority.
     //
-    // A member does reach this render: `useInference` treats the member's `403`
-    // on the admin-only routes read as readable and still settles `ready`, so
-    // the tab is not replaced by its unreachable state.
+    // Per-workload routing was removed in the keys rework (issue #2306, phase
+    // 5b); there is one page now, with no separate Routing tab to gate.
     await openSettingsPage(memberPage, "inference");
     await expect(memberPage.getByTestId("inference-read-only")).toBeVisible({ timeout: 30_000 });
     const addProvider = memberPage.getByTestId("inference-add-open");
@@ -304,10 +302,9 @@ test("an admin is still offered every control across the four pages", async ({ p
   // fails closed until the role read answers, so `toBeEnabled` waits for the
   // resolved role rather than reading the first render.
   //
-  // "Add a provider" and not the Routing tab's Save (`inference-own-save`):
-  // that Save renders only when the company's routing mode is `own`, so it
-  // would pass or fail by the mode the harness company happens to boot in.
-  // "Add a provider" is on the default tab in every mode, on both lanes.
+  // "Add a provider" — the routing mode this comment used to worry about is
+  // gone with the Routing tab (keys rework, issue #2306, phase 5b). "Add a
+  // provider" is on the one page in every state, on both lanes.
   await openSettingsPage(page, "inference");
   await expect(page.getByTestId("inference-read-only")).toHaveCount(0, { timeout: 30_000 });
   await expect(page.getByTestId("inference-add-open")).toBeEnabled({ timeout: 30_000 });

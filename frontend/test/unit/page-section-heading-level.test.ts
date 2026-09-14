@@ -50,12 +50,13 @@ const PAGES = [
     // outline is exactly what a split changes, and this `h2` now heads under
     // this page's `h1` rather than the accounts page's.
     //
-    // ONE section, not two. `CompanyCredentialCard` was the other and no longer
-    // renders here: it asked for the company's TinyHumans key in its own
+    // ONE section, not two. The company-credential card was the other and no
+    // longer renders here: it asked for the company's TinyHumans key in its own
     // language directly above rows that report that same key, so the page put
     // one credential on screen twice. The Account page stopped rendering it
-    // too (#2279), so it has no caller left, and nothing here pins it — which
-    // is correct: this list is per-page outlines, and it is part of none.
+    // too (#2279), so it had no caller left and was deleted (#2306); nothing
+    // here pins it — which is correct: this list is per-page outlines, and it
+    // is part of none.
     view: "connections/ComposioView",
     sections: ["connections/ComposioSection"],
   },
@@ -68,12 +69,11 @@ const PAGES = [
     sections: ["connections/McpServersSection"],
   },
   {
-    // Two sections, one per tab, and both outside `views/` — hence the `../`.
-    // The single-provider form they replace was one section under this page's
-    // h1; the split means there are now two, and they are peers of each other
-    // rather than one nested in the other.
+    // One section, outside `views/` — hence the `../`. The Routing tab was
+    // removed in the keys rework (issue #2306, phase 5b); a company now has
+    // one default provider and model, and an agent may pin its own.
     view: "InferenceView",
-    sections: ["../inference/ProvidersTab", "../inference/RoutingTab"],
+    sections: ["../inference/ProvidersTab"],
   },
   {
     view: "FeedbackView",

@@ -98,8 +98,9 @@ selecting a mode, which is what the model actually says.
 
 ## What must not regress
 
-**The two credentials stay apart.** `composio/token` is a bearer the *TinyHumans
-backend* recognises; `composio/api_key` is a key *Composio* recognises. They
+**The two credentials stay apart.** `composio/tinyhumans/key` is a bearer the
+*TinyHumans backend* recognises; `composio/byok/key` is a key *Composio*
+recognises. They
 authenticate different hosts and are not interchangeable. Merging them into one
 slot would send a credential to the wrong API, where it fails in a way that reads
 like a bad credential.

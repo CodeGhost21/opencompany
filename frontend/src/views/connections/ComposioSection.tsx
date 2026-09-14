@@ -19,6 +19,7 @@ import {
 } from "@/composio/classify";
 import type { ComposioSubmitOutcome } from "@/composio/classify";
 import { ComposioRowList } from "@/composio/ComposioRowList";
+import { confirmInUseFor, guardedOutcome } from "@/composio/in-use";
 import { ProbeAdvisory } from "@/composio/ProbeAdvisory";
 import {
   composioForm,
@@ -36,6 +37,16 @@ import { grantStanding } from "@/lib/provider-grid";
 import { classifyLoadFailure } from "@/lib/section-load";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { GrantNamespace } from "@/components/grant-namespace";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -168,6 +179,34 @@ export function ComposioSection({
   // controls that write, and a check changes nothing.
   const [testingRow, setTestingRow] = useState<ComposioRowId | null>(null);
 
+  // ── In-use confirm dialogs (keys rework, issue #2306) ──────────────
+  //
+  // Two guarded, destructive row actions with no credential form of their
+  // own to render a warning inside: clearing the managed token, and giving
+  // the managed route back (the byok → managed switch — `useManaged`, which
+  // used to write immediately with no confirmation at all). Each gets its
+  // own `AlertDialog`, matching the pattern `ApiKeyView`'s account-key
+  // removal already established.
+  //
+  // The managed → byok direction (`confirmSwitch` above) keeps its own
+  // pre-existing inline confirmation inside the credential dialog rather than
+  // being folded into this shape: it already gates that switch behind an
+  // explicit click with fixed, load-bearing-accessible copy, so `submit`
+  // below always sends `confirmInUse: true` for it — see `submit`'s comment.
+  //
+  // Each is `undefined` while the dialog is closed, `null` once open with no
+  // host reason yet (the generic question), and a string once a first,
+  // unconfirmed attempt comes back `409 in_use` — the host's own sentence,
+  // shown in place of the generic question so a SECOND click can resend with
+  // `confirmInUse: true` (`@/composio/in-use`, `guardedOutcome` /
+  // `confirmInUseFor`).
+  const [clearTokenPrompt, setClearTokenPrompt] = useState<
+    string | null | undefined
+  >(undefined);
+  const [giveBackManagedPrompt, setGiveBackManagedPrompt] = useState<
+    string | null | undefined
+  >(undefined);
+
   const requestGeneration = useRef(0);
   // Focus in and back out of the switch confirmation. It is a labelled group
   // inside the credential dialog rather than a popup of its own, so nothing
@@ -213,6 +252,8 @@ export function ComposioSection({
     setSecret("");
     setOutcome(null);
     setConfirmSwitch(false);
+    setClearTokenPrompt(undefined);
+    setGiveBackManagedPrompt(undefined);
     setLoad("loading");
     void refresh();
   }, [refresh]);
@@ -306,6 +347,65 @@ export function ComposioSection({
   }
 
   /**
+   * Run a row action the host may refuse `409 in_use` on a first,
+   * uninformed attempt (in-use-guards.md §2) — clearing the managed token, or
+   * giving the managed route back. One implementation shared by both, so the
+   * "reopen with the host's reason, then resend confirmed" state machine
+   * cannot drift between the two dialogs; the decisions themselves live in
+   * `@/composio/in-use`, which is what is actually under test.
+   *
+   * `prompt` is the dialog's own state at the moment of THIS click —
+   * `undefined`/`null` on a first attempt, the host's sentence on a retry —
+   * and `setPrompt` is how this function reports what the dialog should show
+   * next: `undefined` closes it (the write landed, or failed for an ordinary
+   * reason reported through `reject` instead), a string reopens it.
+   */
+  async function runGuarded(
+    call: (confirmInUse: boolean) => Promise<ComposioMutation>,
+    fallback: string,
+    prompt: string | null | undefined,
+    setPrompt: (next: string | null | undefined) => void,
+  ) {
+    setBusy(true);
+    setOutcome(null);
+    const alreadyConfirmed = confirmInUseFor(prompt ?? null);
+    try {
+      settle(await call(alreadyConfirmed));
+      setPrompt(undefined);
+    } catch (err) {
+      const outcome = guardedOutcome(err, alreadyConfirmed);
+      if (outcome.action === "reopen") {
+        setPrompt(outcome.message);
+        return;
+      }
+      setPrompt(undefined);
+      reject(err, fallback);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Open the confirm dialog for clearing the token stored for the managed route. */
+  function requestClearManagedToken() {
+    setClearTokenPrompt(null);
+  }
+
+  /** Clear the Composio token stored for the managed route, falling back to whatever remains. */
+  function confirmClearManagedToken() {
+    void runGuarded(
+      (confirmInUse) => setComposioToken(client, company, "", confirmInUse),
+      "Could not clear the Composio token.",
+      clearTokenPrompt,
+      setClearTokenPrompt,
+    );
+  }
+
+  /** Open the confirm dialog for giving the managed route back. */
+  function requestGiveBackManaged() {
+    setGiveBackManagedPrompt(null);
+  }
+
+  /**
    * Move this company onto the managed route.
    *
    * One call, because on this host the mode is a consequence of the key rather
@@ -314,10 +414,13 @@ export function ComposioSection({
    * why the own-account row offers no "Remove key" — it would be this exact
    * call under a second name.
    */
-  function useManaged() {
-    void run(
-      () => setComposioApiKey(client, company, ""),
+  function confirmGiveBackManaged() {
+    void runGuarded(
+      (confirmInUse) =>
+        setComposioApiKey(client, company, "", false, confirmInUse),
       "Could not move this company to the TinyHumans-managed route.",
+      giveBackManagedPrompt,
+      setGiveBackManagedPrompt,
     );
   }
 
@@ -362,27 +465,30 @@ export function ComposioSection({
     }
   }
 
-  /** Clear the Composio token stored for the managed route, falling back to whatever remains. */
-  function clearManagedToken() {
-    void run(
-      () => setComposioToken(client, company, ""),
-      "Could not clear the Composio token.",
-    );
-  }
-
   /**
    * Store what is in the field.
    *
    * `skipVerify` is passed only from the "add anyway" affordance, which is
    * offered only after a typed refusal — never as a standing option, and never
    * after an advisory, where the key already landed.
+   *
+   * The API-key branch always sends `confirmInUse: true`. That is not a
+   * blanket opt-out of the guard: it is safe because this function's ONLY
+   * caller for that branch is `requestSubmit`, which already routes every
+   * switch-shaped save (the first move to BYOK) through `confirmSwitch`'s own
+   * warning before this ever runs — so by the time `submit` fires for the
+   * api-key credential, either the operator has just confirmed a switch, or
+   * the write is not a switch at all (rotating a key on the row that is
+   * already active), which the host never guards regardless of the flag. The
+   * token branch never sends it: setting or rotating a non-empty token is
+   * never guarded either.
    */
   function submit(skipVerify = false) {
     const value = secret.trim();
     if (!form || !value) return;
     if (form.credential === "composio-api-key") {
       void run(
-        () => setComposioApiKey(client, company, value, skipVerify),
+        () => setComposioApiKey(client, company, value, skipVerify, true),
         "Could not save the Composio API key.",
       );
     } else {
@@ -517,7 +623,7 @@ export function ComposioSection({
                 canManage={canManage}
                 busy={busy}
                 onSelect={(row) => {
-                  if (row.id === "managed") useManaged();
+                  if (row.id === "managed") requestGiveBackManaged();
                   // The own-account route cannot be chosen without the key that
                   // makes it resolve, so choosing it opens the field rather than
                   // writing anything.
@@ -526,7 +632,7 @@ export function ComposioSection({
                 onAddKey={(row) => openForm(row, "add")}
                 onReplaceKey={(row) => openForm(row, "replace")}
                 onRemoveKey={(row) => {
-                  if (row.id === "managed") clearManagedToken();
+                  if (row.id === "managed") requestClearManagedToken();
                 }}
                 onTest={(row) => void runTest(row)}
                 testingRow={testingRow}
@@ -806,6 +912,90 @@ export function ComposioSection({
                 )}
               </DialogContent>
             </Dialog>
+          )}
+
+          {/* Clearing the managed-route token. No credential form to render a
+              warning inside — the row's own "Remove token" control opens this
+              directly — so it is its own `AlertDialog`, the pattern
+              `ApiKeyView`'s account-key removal already established. */}
+          {canManage && (
+            <AlertDialog
+              open={clearTokenPrompt !== undefined}
+              onOpenChange={(next) => {
+                if (next || busy) return;
+                setClearTokenPrompt(undefined);
+              }}
+            >
+              <AlertDialogContent data-testid="composio-clear-token-dialog">
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Disconnect Composio?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {clearTokenPrompt ??
+                      "Clears the token stored for the managed route. Agents use whatever credential remains — a company key, the instance identity, or none — from their next turn."}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel disabled={busy}>
+                    Keep the token
+                  </AlertDialogCancel>
+                  <AlertDialogAction
+                    disabled={busy}
+                    data-testid="composio-clear-token-confirm"
+                    className="bg-destructive text-white hover:bg-destructive/90"
+                    onClick={(event) => {
+                      // Keep the dialog open on a stale-UI 409 so it can
+                      // reopen with the host's own reason — see
+                      // `AlertDialogAction`'s own docs. `runGuarded` closes it
+                      // itself on success or on an unrelated failure.
+                      event.preventBaseUIHandler();
+                      confirmClearManagedToken();
+                    }}
+                  >
+                    Disconnect Composio
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
+
+          {/* Giving the managed route back (byok → managed). `useManaged` used
+              to write immediately with no confirmation at all; this is the
+              gap the operator's mid-project ask closes for that direction —
+              see the state's own comment for why managed → byok keeps its
+              existing inline confirmation instead of moving here. */}
+          {canManage && (
+            <AlertDialog
+              open={giveBackManagedPrompt !== undefined}
+              onOpenChange={(next) => {
+                if (next || busy) return;
+                setGiveBackManagedPrompt(undefined);
+              }}
+            >
+              <AlertDialogContent data-testid="composio-use-managed-dialog">
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    Switch Composio to the TinyHumans-managed route?
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {giveBackManagedPrompt ??
+                      "Clears this company's own Composio API key. Providers connected through that account stay there — connect them again here, or add the key back to switch to it."}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    disabled={busy}
+                    data-testid="composio-use-managed-confirm"
+                    onClick={(event) => {
+                      event.preventBaseUIHandler();
+                      confirmGiveBackManaged();
+                    }}
+                  >
+                    Use TinyHumans-managed Composio
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           )}
         </>
       )}

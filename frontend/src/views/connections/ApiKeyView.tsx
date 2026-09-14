@@ -133,7 +133,7 @@ export function ApiKeyView({ client, company }: Props) {
   // Discards the result of a request that is no longer the latest one asked
   // for — a monotonic counter rather than "is this still the wanted company",
   // because a company can stay the same while `client` is reseated to another
-  // host (issue tracked alongside `CompanyCredentialCard`'s identical guard):
+  // host (the retired company-credential card carried the same guard):
   // comparing only `company` would let the old host's slower response land
   // last and overwrite the new host's credential status and balance.
   const requestGeneration = useRef(0);

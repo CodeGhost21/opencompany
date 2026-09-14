@@ -6,16 +6,18 @@ OpenCompany is a Rust 2024 Cargo workspace rooted at `Cargo.toml`, with one
 manifest per flavour under `crates/`:
 
 - `crates/opencompany-core`: the host — package `opencompany-core`, library
-  crate `opencompany`, binary `opencompany`. Its sources still live at the
-  repository root (`src/`, `tests/`, `benches/`, `examples/`, `build.rs`) and
-  the member manifest points at them; moving them under the crate is a
-  follow-up, deliberately deferred while many branches touch `src/`. Every
-  `src/...` path in this file and under `docs/` is that tree.
+  crate `opencompany`, binary `opencompany`. Its `src/`, `tests/`, `benches/`,
+  `examples/` and `build.rs` live beneath that manifest. Every `src/...` path
+  in this file and under `docs/` is short for `crates/opencompany-core/src/...`;
+  the data the crate embeds and reads (`companies/`, `globals/`, `skills/`,
+  `frontend/`, `vendor/`) stays at the repository root, `../..` from
+  `CARGO_MANIFEST_DIR`.
 - `crates/opencompany-app`: the Tauri desktop shell. Excluded from the
   workspace on purpose (its manifest says why); it has its own `Cargo.lock`.
 - `crates/opencompany-tui`: the terminal client, embedding the host.
 
-Rust source for the host lives under `src/`. Public module surfaces live in
+Rust source for the host lives under `crates/opencompany-core/src/`
+(`src/` below). Public module surfaces live in
 source module directories:
 
 - `src/app/`: runtime configuration and shared Axum state

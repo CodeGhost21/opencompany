@@ -105,7 +105,7 @@ caught in review.
 **When `managedCredentialSource` is `none`, the managed row offers no `Use
 this`** — switching to a route that resolves to nothing is an outage, not a
 choice. It offers `Add a token` instead, which is the only order that works:
-storing `composio/token` does not move the company off BYOK, so the credential
+storing `composio/tinyhumans/key` does not move the company off BYOK, so the credential
 is provisioned first and the switch taken second, once the route resolves. The
 sub-line says which payer failed to resolve while that is still true.
 

@@ -15,8 +15,8 @@ import { takeKeyLink, takeKeyLinkRefusal } from "@/lib/pending-key-link";
  * box that a reload empties. Whatever calls this hook is the only thing that
  * spends it — so a page must call it **unconditionally**, never behind state
  * that is null while the credential read is in flight or stays null when it
- * fails. The Account page calls it at the top of `ApiKeyView`; the Apps card
- * gets it through `ConnectTinyHumansButton`.
+ * fails. The Account page calls it at the top of `ApiKeyView`, which is its
+ * only caller.
  *
  * Returns whether a redemption is in flight.
  */

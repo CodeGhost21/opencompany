@@ -18,7 +18,7 @@ import type { ComposioPending } from "@/composio/types";
  * - **Selected-only** showed the card to a BYOK company that had merely clicked
  *   the managed tile. Its Clear calls the legacy `setComposioToken("")`, which
  *   erases the *preserved* backend-token override (issue #586) without touching
- *   `composio/api_key` or `composio/mode` at all — a button that looks like the
+ *   `composio/byok/key` or `composio/mode` at all — a button that looks like the
  *   way back to managed, silently destroying a token the design keeps
  *   specifically in order to restore, and leaving the company on BYOK anyway.
  * - **Persisted-only** showed it to a managed company that had clicked the BYOK
@@ -92,8 +92,8 @@ describe("exactly one credential surface, in either direction of the switch", ()
   });
 
   it("puts each row's form on the route that row actually writes", () => {
-    // The two credentials authenticate different hosts — `composio/token` is a
-    // bearer the TinyHumans backend recognises, `composio/api-key` is a key
+    // The two credentials authenticate different hosts — `composio/tinyhumans/key`
+    // is a bearer the TinyHumans backend recognises, `composio/byok/key` is a key
     // Composio itself recognises — so a form pointed at the wrong one would
     // store a live secret where nothing can use it.
     expect(

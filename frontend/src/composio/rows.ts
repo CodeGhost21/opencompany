@@ -188,9 +188,9 @@ export function composioRows(
   // construction.
   const byokKeyStored = !onManaged && status?.credentialSource !== "none";
 
-  // A token stored *for the managed route* — the `composio/token` override, a
-  // different credential from the BYOK key and stored through a different
-  // route. `static` is the only tier that means one exists.
+  // A token stored *for the managed route* — the `composio/tinyhumans/key`
+  // override, a different credential from the BYOK key and stored through a
+  // different route. `static` is the only tier that means one exists.
   const managedTokenStored = managedSource === "static";
 
   // Whether anything actually answers on each route. One boolean per row,
@@ -239,7 +239,7 @@ export function composioRows(
       // where `select` above is hidden, so without this the managed route is
       // unreachable in both directions at once — no "Use this" because it would
       // switch into an outage, and no way to store the token that would end the
-      // outage. Writing `composio/token` does not move the company off BYOK, so
+      // outage. Writing `composio/tinyhumans/key` does not move the company off BYOK, so
       // this provisions the prerequisite and leaves the active route alone;
       // `select` appears on the next status read.
       //

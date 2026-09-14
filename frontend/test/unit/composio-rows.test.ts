@@ -488,7 +488,7 @@ describe("composioRows — controls that cannot act are not offered", () => {
     // `none`, where `select` is hidden because switching would be an outage —
     // and that combination is the dead end it exists to open: no way in, and no
     // way to provision the credential that would create one. Writing
-    // `composio/token` does not move the company off BYOK, so it is not a
+    // `composio/tinyhumans/key` does not move the company off BYOK, so it is not a
     // control acting on the active route. The assertion below pins that it is
     // the ONLY such state, which is the half worth guarding.
     for (const mode of ["managed", "byok"] as const) {

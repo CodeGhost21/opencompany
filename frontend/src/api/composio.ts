@@ -14,6 +14,7 @@
 // `api/inference.ts`), so no change to `OpenCompanyClient` is needed.
 
 import type { OpenCompanyClient, RequestOptions } from "./client";
+import type { UsedBy } from "./types";
 
 /**
  * Where this company's Composio credential comes from.
@@ -202,6 +203,14 @@ export interface ComposioMutation {
   advisory?: string;
   /** Which class of failure {@link advisory} is about. Absent when there was none. */
   probeClass?: ComposioProbeClass;
+  /**
+   * Who depended on the credential this mutation just cleared or switched,
+   * echoed back on a **confirmed** in-use write (keys rework, issue #2306;
+   * `docs/key-reworks/in-use-guards.md` §3) — the shape computed before the
+   * write applied. Absent on every mutation that was not a guarded
+   * clear/switch, and on a guarded one that had nothing to warn about.
+   */
+  usedBy?: UsedBy;
 }
 
 /**
@@ -354,15 +363,21 @@ export function getComposioStatus(
  * Set / rotate / clear this company's own Composio token. A non-empty value
  * rotates it; an empty string clears it, reverting to the instance's identity
  * where there is one.
+ *
+ * A clear that would strand a connected integration is refused with a
+ * `409 in_use` `ApiError` carrying `usedBy` (in-use-guards.md §2) unless
+ * `confirmInUse` is `true`. Setting or rotating a non-empty token is never
+ * guarded, so `confirmInUse` matters only on an empty `token`.
  */
 export function setComposioToken(
   client: OpenCompanyClient,
   company: string | null,
   token: string,
+  confirmInUse = false,
 ): Promise<ComposioMutation> {
   return client.put<ComposioMutation>(
     `${client.scopeFor(company)}/composio/token`,
-    { token },
+    { token, confirmInUse },
   );
 }
 
@@ -384,6 +399,12 @@ export function setComposioToken(
  * the *TinyHumans backend* recognises and leaves the route managed; this one
  * stores a key *Composio* recognises and changes the route. They authenticate
  * different hosts.
+ *
+ * A write that actually **switches route** (a first move to BYOK, or a clear
+ * that gives the managed route back) is refused with a `409 in_use` `ApiError`
+ * carrying `usedBy` (in-use-guards.md §2/§6) when a connection is pinned,
+ * unless `confirmInUse` is `true`. Rotating a key while staying on the same
+ * route is never guarded — see `src/server/ops/composio.rs::set_api_key`.
  */
 export function setComposioApiKey(
   client: OpenCompanyClient,
@@ -399,12 +420,14 @@ export function setComposioApiKey(
    * caller that forgets the argument gets the verified path.
    */
   skipVerify = false,
+  confirmInUse = false,
 ): Promise<ComposioMutation> {
   return client.put<ComposioMutation>(
     `${client.scopeFor(company)}/composio/api-key`,
     {
       apiKey,
       skipVerify,
+      confirmInUse,
     },
   );
 }

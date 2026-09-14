@@ -122,6 +122,31 @@ the changes"). The Q-numbers are the questions in the Keys Rework Rundown.
 | F8 | CLI logins as LLM providers are out of scope. |
 | D-mirror | A renamed address (1a Composio keys, 1b search endpoint) is written at both the new and the legacy address for one release, so a rolled-back binary keeps working. Reads are new-first. Stopping the mirror is a later release. |
 
+### Gaps found by the test planner, closed 2026-09-15 (orchestrator, operator-delegated)
+
+The operator delegated these to the orchestrator, who delegated the build to
+the implementing agents ("just take the decision and make the changes"). They
+close gaps the test planner found in the slice files above; where one narrows
+or supersedes an earlier row (Q13), the later row wins.
+
+| Id | Decision |
+|---|---|
+| D-first-default (X1) | The first provider + model added always becomes the company default, in the backend, with no opt-out. If a default already exists, adding never changes it. |
+| D-managed-toggle (X3) | TinyHumans has no special on/off switch. A `tinyhumans` row's enabled state is the same per-row toggle every provider has, and it follows the in-use contract (`usedBy`, 409, `confirmInUse`). `inference/managed/enabled` is read only for the legacy Managed row's own chain, and every such read is marked `DEPRECATED(keys-rework #2306)`. |
+| D-key-without-row (X5) | `provider/tinyhumans/key` set with no `tinyhumans` row (e.g. the account-key fan-out, 4a) is **not** "set" (D-set is unchanged: set ⇔ a row exists). The status DTO says so explicitly rather than reading as connected/healthy — see `ManagedDto.needs_model` (2a). |
+| D-legacy-writes (X6) | `PUT …/inference/managed/key` and the legacy `PUT …/inference` (`set_config`) stay, for a manager or CLI that still calls them. Both handlers are marked `DEPRECATED(keys-rework #2306)` naming their replacement; the console stops calling them (Agent C); each keeps a passing back-compat test. |
+| D-never-clear-default (X14) | Disabling or deleting the provider a default or an agent pair names never clears or rewrites `inference/default` or the pair. This **supersedes** the pre-rework `clear_default_if_marked` calls on delete/disable, which are removed (2c). Turns fail closed with the D-copy sentence; status exposes that the default (or pair) points at a missing/off provider so the console can show a banner. |
+| D-names-in-errors (X7) | A user-facing turn-failure sentence names the agent's **display name**, not its id. |
+| D-attribution (X8) | Usage and cost book to the provider and model that actually served the turn, including a pinned agent's own pair (3a gotcha G8). Additive `provider`/`model` fields are added to a run/turn record where one exists and the addition is additive. |
+| D-copy (X9) | One shared set of turn-failure and save-refusal sentences, defined once (`src/company/inference/copy.rs`) and asserted by name in tests. See that module for the exact text. |
+| D-internal-passes (X12) | Internal passes (title, triage, planning, …) resolve: 1) the company default; 2) else the agent pair of the turn they serve; 3) else a non-essential pass degrades gracefully (e.g. title falls back to the message text) with a `warn!` log, and an essential pass fails with the D-copy "no model is chosen" sentence. Never a tier string, never another provider. **Supersedes Q13**, which had internal passes on the default only with no fallback. |
+| D-no-silent-echo (X13) | A company that had inference configured (routes, entry zero, or a provider row) never silently boots the echo brain once routing is removed (5b). If the routes table unanimously names one provider but its values are tier strings rather than real ids, 5a carries `DefaultChoice::ProviderOnly(slug)` into an empty default (not `Full`) — status then shows "choose a model" rather than nothing. Otherwise the 5a banner covers it. Turns fail closed with a D-copy sentence, never an echo reply. |
+
+`D-attribution`'s pinned-agent telemetry fix (G8) and `D-internal-passes`'s
+per-turn agent-pair fallback (step 2) are the two items in this table with the
+widest blast radius across the harness turn path; see the PR body for what
+shipped versus what is recorded as a follow-up.
+
 ## Shared naming contract
 
 Every slice uses these names. Do not invent synonyms.

@@ -113,7 +113,7 @@ the vendored runtime. Features left off, each on purpose:
 line above. The row that used to exclude them said the managed backends "need a
 platform credential the desktop has no way to hold", and that was never true of
 `composio`: `company::composio::resolve_credential` answers over three tiers and
-the platform identity is the *last* — the BYO `composio/token` override wins,
+the platform identity is the *last* — the BYO `composio/tinyhumans/key` override wins,
 then the company's own TinyHumans key. Tier one is exactly what a desktop
 operator can hold, and the Connections card already asks them for it. It also
 named a `search` feature, which does not exist; `search_in_build` derives from

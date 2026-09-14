@@ -41,10 +41,12 @@ managed chain and the BYOK short-circuit. Knows nothing about HTTP.
 
 **Tested by:** unit tests against an in-memory `SecretStore`. No host. The cases
 that must exist: each of the four managed tiers resolving in order; BYOK reading
-only `composio/api_key`; BYOK with no key resolving to `None` rather than falling
-through; a store read error propagating rather than degrading; `parse` mapping
-`direct` to BYOK and everything unknown to managed; and both write orderings in
-`store_api_key` leaving an inert state when the second write fails.
+only `composio/byok/key` (then `composio/api_key`); BYOK with no key resolving to
+`None` rather than falling through; a store read error propagating rather than
+degrading; `parse` mapping `direct` to BYOK and everything unknown to managed;
+both write orderings in `store_api_key` leaving an inert state when the second
+write fails; and the legacy fallback never crossed (a managed-address value is
+never presented as the BYOK key, and vice versa).
 
 ### `company/composio_probe` — IO at the edge, classification pure
 
