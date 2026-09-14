@@ -565,6 +565,7 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
     let store = FsCompanyStore::new(home.clone());
     let mut record = store.load(&id).await.unwrap().unwrap();
     record.overlay_agents.push(OverlayAgent {
+        provider: None,
         id: "jamie".to_string(),
         name: "Jamie".to_string(),
         role: "Growth".to_string(),
@@ -651,6 +652,7 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
 
     // Two overlay teammates carry the two override states.
     record.overlay_agents.push(OverlayAgent {
+        provider: None,
         id: "zeroed".to_string(),
         name: "Zeroed".to_string(),
         role: "Growth".to_string(),
@@ -660,6 +662,7 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         harness: None,
     });
     record.overlay_agents.push(OverlayAgent {
+        provider: None,
         id: "uncapped".to_string(),
         name: "Uncapped".to_string(),
         role: "Ops".to_string(),

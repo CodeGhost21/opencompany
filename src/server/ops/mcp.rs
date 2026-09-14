@@ -1083,6 +1083,7 @@ role = "Chief Executive"
         // every caller's pre-#1804 intent; a non-empty list is a narrowed grant.
         let tools: Vec<String> = tools.into_iter().map(str::to_string).collect();
         OverlayAgent {
+            provider: None,
             id: id.to_string(),
             name: id.to_string(),
             role: "Growth".to_string(),

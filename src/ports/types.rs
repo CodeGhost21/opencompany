@@ -3450,6 +3450,12 @@ pub struct OverlayAgent {
     /// unchanged from today's hardcoded behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// The provider half of this teammate's `{provider, model}` pair — see
+    /// [`Agent::provider`](crate::company::types::Agent::provider). `None`
+    /// (the default, and every record written before this field) means no
+    /// pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// An operator's runtime edit of a **manifest-declared** teammate.
@@ -3559,6 +3565,12 @@ pub struct AgentOverride {
     /// Cleared the same way as [`Self::model`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// The provider half of the pair, as an overlay on the blueprint.
+    ///
+    /// Cleared the same way as [`Self::model`]: `Some("")` is the stored
+    /// "cleared" form, `None` is "never edited".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -3879,6 +3891,7 @@ impl AgentOverride {
             && self.avatar.is_none()
             && self.model.is_none()
             && self.harness.is_none()
+            && self.provider.is_none()
     }
 }
 
@@ -5580,6 +5593,9 @@ impl CompanyRecord {
             if entry.harness.is_some() {
                 held.harness = entry.harness;
             }
+            if entry.provider.is_some() {
+                held.provider = entry.provider;
+            }
             return;
         }
         self.overlay_agent_edits.push(entry);
@@ -5683,6 +5699,15 @@ impl CompanyRecord {
         }
         if let Some(harness) = entry.harness.as_ref() {
             merged.harness = Some(harness.clone()).filter(|text| !text.is_empty());
+        }
+        // Same empty-means-cleared contract as `model`/`harness` above (keys
+        // rework slice 3a): the pair is edited as one unit, but this merge is
+        // per-field, so a cleared provider with a still-set blueprint model
+        // is possible for one merge pass — `resolve_for_turn`'s pair rule
+        // (provider+model together or neither) is enforced at write time in
+        // `team_agent.rs`, not here.
+        if let Some(provider) = entry.provider.as_ref() {
+            merged.provider = Some(provider.clone()).filter(|text| !text.is_empty());
         }
         std::borrow::Cow::Owned(merged)
     }
@@ -5871,6 +5896,7 @@ impl CompanyRecord {
                 || entry.avatar.is_some()
                 || entry.model.is_some()
                 || entry.harness.is_some()
+                || entry.provider.is_some()
         });
     }
 
@@ -7696,6 +7722,7 @@ mod test {
         let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "nova".into(),
             name: "Nova".into(),
             role: "Growth".into(),
@@ -7733,6 +7760,7 @@ mod test {
         // An explicit deny-all IS on the wire, as `tools: []` — it must NOT be
         // skipped, or it would read back as the standard grant (the inversion).
         let denied = OverlayAgent {
+            provider: None,
             id: "d".into(),
             name: "D".into(),
             role: "r".into(),
@@ -7753,6 +7781,7 @@ mod test {
 
         // A non-empty grant round-trips in order.
         let scoped = OverlayAgent {
+            provider: None,
             id: "s".into(),
             name: "S".into(),
             role: "r".into(),
@@ -7780,6 +7809,7 @@ mod test {
 
     fn add_overlay(record: &mut CompanyRecord, id: &str, name: &str) {
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: id.into(),
             name: name.into(),
             role: "Worker".into(),
@@ -7996,6 +8026,7 @@ mod test {
         let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "dana_designer".into(),
             name: "Dana Designer".into(),
             role: "Designer".into(),
@@ -8041,6 +8072,7 @@ mod test {
         let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "impostor".into(),
             name: "ceo".into(),
             role: "Growth".into(),
@@ -8063,6 +8095,7 @@ mod test {
         let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
         for id in ["dana_designer", "dana_designer_2"] {
             record.overlay_agents.push(OverlayAgent {
+                provider: None,
                 id: id.into(),
                 name: "Dana Designer".into(),
                 role: "Designer".into(),
@@ -8587,6 +8620,7 @@ mod test {
     fn an_overlay_teammate_can_be_capped() {
         let mut record = desk_record(BUDGET_ROSTER, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "shane".to_string(),
             name: "Shane".to_string(),
             role: "Growth".to_string(),
@@ -8807,6 +8841,7 @@ mod test {
     fn effective_avatar_answers_for_an_overlay_teammate() {
         let mut record = desk_record(PERSONA_ROSTER, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "alex".into(),
             name: "Alex".into(),
             role: "Writer".into(),

@@ -100,6 +100,13 @@ struct AgentFile {
     /// otherwise.
     #[serde(default)]
     model: Option<String>,
+    /// The provider half of this agent's `{provider, model}` pair (keys
+    /// rework slice 3a, issue #2306) — see
+    /// [`Agent::provider`](crate::company::Agent::provider). Cross-checked
+    /// alongside `model` in `CompanyManifest::validate`, for the same reason
+    /// as `model` above: this file cannot see the company's provider list.
+    #[serde(default)]
+    provider: Option<String>,
     /// Carried verbatim onto [`Agent::tools`](crate::company::Agent::tools),
     /// whose three-state contract (issue #1804) this mirrors: an absent `tools`
     /// key parses to `None` (inherit the standard grant — every `agents/*.toml`
@@ -271,6 +278,7 @@ fn parse_agent_file(
     }
 
     Ok(Agent {
+        provider: file.provider,
         id: stem,
         role,
         description: file.description,

@@ -210,6 +210,7 @@ mod tests {
 
     fn agent(role: &str) -> Agent {
         Agent {
+            provider: None,
             global: false,
             id: "a".into(),
             role: role.into(),

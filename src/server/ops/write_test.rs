@@ -3736,6 +3736,7 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     // A minted id, exactly as `POST …/team` gives an operator-added teammate —
     // the shape that used to reach the console's "Reachable by" line raw (#931).
     let overlay = crate::ports::types::OverlayAgent {
+        provider: None,
         id: "019fa75dbc9b-000000000001".to_string(),
         name: "Helper".to_string(),
         role: "Assistant".to_string(),

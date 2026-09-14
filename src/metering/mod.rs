@@ -142,6 +142,7 @@ mod tests {
     fn roster_uses_role_then_overlay_name() {
         let agents = vec![
             Agent {
+                provider: None,
                 global: false,
                 id: "strategy".into(),
                 role: "Strategy desk".into(),
@@ -162,6 +163,7 @@ mod tests {
                 model: None,
             },
             Agent {
+                provider: None,
                 global: false,
                 id: "creative".into(),
                 role: "Creative studio".into(),
@@ -183,6 +185,7 @@ mod tests {
             },
         ];
         let overlay = vec![OverlayAgent {
+            provider: None,
             id: "creative".into(),
             name: "Creative studio (renamed)".into(),
             role: "Creative".into(),
