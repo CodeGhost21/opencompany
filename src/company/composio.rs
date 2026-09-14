@@ -4,8 +4,9 @@
 //! feature-gated [`harness::composio`](crate::harness::composio).
 //!
 //! The per-tenant OAuth bearer token is **write-only**: it is set through the
-//! console `PUT …/composio/token` route, stored under [`TOKEN_KEY`], and never
-//! returned. The read shape carries only a `tokenConfigured` boolean. The token
+//! console `PUT …/composio/token` route, stored under [`TINYHUMANS_KEY_KEY`],
+//! and never returned. The read shape carries only a `tokenConfigured`
+//! boolean. The token
 //! has **no environment fallback** — a missing token means no tools (fail
 //! closed), never a borrowed identity. Only the backend URL may be overridden
 //! from the environment.
@@ -20,10 +21,106 @@ use crate::company::credentials::{Credential, TinyhumansTokenSource};
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
-/// The canonical per-company Composio credential key. The per-tenant OAuth
-/// bearer token is stored here (write-only via the console); the value is the
-/// raw token string.
-pub const TOKEN_KEY: &str = "composio/token";
+/// The TinyHumans bearer this company's **managed** Composio calls present — a
+/// credential the *TinyHumans backend* recognises. Written by
+/// `PUT …/composio/token` through [`store_token`]; read through
+/// [`load_tinyhumans_key`]. Write-only over the API, never echoed.
+pub const TINYHUMANS_KEY_KEY: &str = "composio/tinyhumans/key";
+
+/// Pre-rename address of [`TINYHUMANS_KEY_KEY`] (issue #2306): its read fallback
+/// only, never [`BYOK_KEY_KEY`]'s. For one release every write to that key also
+/// stores the same value here, so a rolled-back binary keeps working.
+pub const LEGACY_TOKEN_KEY: &str = "composio/token";
+
+/// Reads `key`, falling back to `legacy_key` only when `key` holds nothing.
+///
+/// "Holds nothing" is *absent or blank after trim*. The value returned is the
+/// stored string exactly as stored (not trimmed) — callers keep their own
+/// handling. Reads never write: nothing is migrated on read.
+///
+/// A read error on either address **propagates** (see [`resolve_credential`]:
+/// an unreadable store must not change which account a call is attributed to).
+/// The legacy address is not read at all when `key` holds a value.
+///
+/// Private on purpose: the only callers are [`load_tinyhumans_key`] and
+/// [`load_byok_key`], which fix the mapping so the two pairs can never be
+/// crossed.
+async fn read_with_legacy(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    key: &'static str,
+    legacy_key: &'static str,
+) -> Result<Option<String>> {
+    if let Some(SecretValue(value)) = secrets.get(company, key).await?
+        && !value.trim().is_empty()
+    {
+        return Ok(Some(value));
+    }
+    Ok(secrets
+        .get(company, legacy_key)
+        .await?
+        .map(|SecretValue(value)| value)
+        .filter(|value| !value.trim().is_empty()))
+}
+
+/// Writes `value` to `key`, then the same `value` to `legacy_key`. `value` may
+/// be `""`: a clear clears both.
+///
+/// The legacy write exists for **one release** (issue #2306): a rolled-back
+/// binary reads only `legacy_key`, and must find what this binary stored. A
+/// later release stops mirroring; that is a follow-up, not part of #2306.
+///
+/// Order is fixed: new address first, legacy second, so a failure between the
+/// two leaves the new value in place and winning on read. The legacy write is
+/// unconditional — no read first, so no check-then-write window. A failed
+/// legacy write is logged (key names only, never a value) and **propagated**,
+/// as `search::store::store_provider_key` does, so the caller reports a failed
+/// write and an admin can retry.
+async fn write_both(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    key: &'static str,
+    legacy_key: &'static str,
+    value: &str,
+) -> Result<()> {
+    secrets
+        .set(company, key, SecretValue(value.to_string()))
+        .await?;
+    if let Err(err) = secrets
+        .set(company, legacy_key, SecretValue(value.to_string()))
+        .await
+    {
+        tracing::error!(
+            company = %company,
+            key = key,
+            legacy_key = legacy_key,
+            "[composio] wrote the credential's new address but not its legacy address; \
+             reporting the write as failed so it can be retried: {err}"
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// The stored managed-Composio TinyHumans bearer: [`TINYHUMANS_KEY_KEY`], else
+/// [`LEGACY_TOKEN_KEY`]. `None` when both are absent or blank. Never reads
+/// [`BYOK_KEY_KEY`] or [`LEGACY_API_KEY_KEY`].
+pub async fn load_tinyhumans_key(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<Option<String>> {
+    read_with_legacy(company, secrets, TINYHUMANS_KEY_KEY, LEGACY_TOKEN_KEY).await
+}
+
+/// The stored BYOK Composio API key: [`BYOK_KEY_KEY`], else
+/// [`LEGACY_API_KEY_KEY`]. `None` when both are absent or blank. Never reads
+/// [`TINYHUMANS_KEY_KEY`] or [`LEGACY_TOKEN_KEY`].
+pub async fn load_byok_key(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<Option<String>> {
+    read_with_legacy(company, secrets, BYOK_KEY_KEY, LEGACY_API_KEY_KEY).await
+}
 
 /// The explicit environment override for the Composio backend URL. Only the
 /// **URL** has an env path — the **token** deliberately does not (fail-closed
@@ -68,9 +165,14 @@ pub async fn store_token(
     secrets: &dyn SecretStore,
     token: &str,
 ) -> Result<()> {
-    secrets
-        .set(company, TOKEN_KEY, SecretValue(token.trim().to_string()))
-        .await
+    write_both(
+        company,
+        secrets,
+        TINYHUMANS_KEY_KEY,
+        LEGACY_TOKEN_KEY,
+        token.trim(),
+    )
+    .await
 }
 
 /// The credential this company's Composio calls present, or [`Credential::None`]
@@ -87,8 +189,8 @@ pub async fn store_token(
 /// tier was added to one of them, which is exactly the failure issue #586 exists
 /// to remove.
 ///
-/// Precedence: the company's own Composio token ([`TOKEN_KEY`], the BYO escape
-/// hatch) wins; otherwise the shared brokered-credential seam
+/// Precedence: the company's own Composio token ([`TINYHUMANS_KEY_KEY`], the BYO
+/// escape hatch) wins; otherwise the shared brokered-credential seam
 /// [`company_key::resolve`] answers — the company's own TinyHumans key, else this
 /// instance's platform identity, else nothing.
 ///
@@ -100,8 +202,8 @@ pub async fn resolve_credential(
     secrets: &dyn SecretStore,
     token_source: Option<Arc<TinyhumansTokenSource>>,
 ) -> Result<Credential> {
-    let byo = match secrets.get(company, TOKEN_KEY).await? {
-        Some(SecretValue(token)) => Credential::from_value(token),
+    let byo = match load_tinyhumans_key(company, secrets).await? {
+        Some(token) => Credential::from_value(token),
         None => Credential::None,
     };
     Ok(match byo {
@@ -114,13 +216,13 @@ pub async fn resolve_credential(
     })
 }
 
-/// Whether a non-empty **BYO override** token is stored under [`TOKEN_KEY`] —
-/// never the token itself.
+/// Whether a non-empty **BYO override** token is stored under
+/// [`TINYHUMANS_KEY_KEY`] — never the token itself.
 ///
 /// ## This is not "can this company reach Composio" (issue #886)
 ///
 /// It answers exactly one question about exactly one secret slot: did somebody
-/// paste a token into the company's own [`TOKEN_KEY`]. That is the *first* tier
+/// paste a token into the company's own [`TINYHUMANS_KEY_KEY`]. That is the *first* tier
 /// of three. [`resolve_credential`] falls through it to the company's own
 /// TinyHumans key and then to this instance's platform identity, and on a hosted
 /// tenant it is the third tier that answers — nobody pastes a BYO token there.
@@ -138,11 +240,7 @@ pub async fn resolve_credential(
 /// only where the BYO slot itself is the subject — a console field that says
 /// whether *this company pasted a token*, not whether it has one.
 pub async fn token_configured(company: &CompanyId, secrets: &dyn SecretStore) -> Result<bool> {
-    Ok(secrets
-        .get(company, TOKEN_KEY)
-        .await?
-        .map(|SecretValue(token)| !token.trim().is_empty())
-        .unwrap_or(false))
+    Ok(load_tinyhumans_key(company, secrets).await?.is_some())
 }
 
 // ── Routing mode: OpenHuman-managed, or the company's own Composio account ──
@@ -171,14 +269,18 @@ pub async fn token_configured(company: &CompanyId, secrets: &dyn SecretStore) ->
 /// console report the mode without reading a secret slot at all.
 pub const MODE_KEY: &str = "composio/mode";
 
-/// The [`SecretStore`] key holding this company's **own** Composio API key
-/// (`ak_…`), written by the console's Composio settings and read only to sign a
-/// call. Write-only over the API — never echoed back.
+/// This company's **own** Composio API key (`ak_…`) — a credential *Composio*
+/// recognises. Written by `PUT …/composio/api-key` through [`store_api_key`];
+/// read through [`load_byok_key`]. Write-only over the API, never echoed.
 ///
-/// Distinct from [`TOKEN_KEY`], and not interchangeable with it: that one is a
-/// bearer the *TinyHumans backend* recognises, this one is a key *Composio*
-/// recognises. They authenticate different hosts.
-pub const API_KEY_KEY: &str = "composio/api_key";
+/// Distinct from [`TINYHUMANS_KEY_KEY`], and not interchangeable with it: they
+/// authenticate different hosts.
+pub const BYOK_KEY_KEY: &str = "composio/byok/key";
+
+/// Pre-rename address of [`BYOK_KEY_KEY`] (issue #2306): its read fallback only,
+/// never [`TINYHUMANS_KEY_KEY`]'s. For one release every write to that key also
+/// stores the same value here, so a rolled-back binary keeps working.
+pub const LEGACY_API_KEY_KEY: &str = "composio/api_key";
 
 /// Storage + wire spelling of [`ComposioMode::Managed`].
 pub const MANAGED_MODE: &str = "managed";
@@ -200,8 +302,8 @@ pub const DIRECT_BASE_URL: &str = "https://backend.composio.dev";
 /// OpenCompany companies sharing one key — but it would also hide every
 /// connection the operator already made in that account, which is the first
 /// thing a BYOK operator looks for. The shared-account caveat is the same one
-/// [`TOKEN_KEY`] already carries: two companies pasting one credential share
-/// one entity, and that cannot be prevented from this side.
+/// [`TINYHUMANS_KEY_KEY`] already carries: two companies pasting one credential
+/// share one entity, and that cannot be prevented from this side.
 pub const DIRECT_ENTITY_ID: &str = "default";
 
 /// How this company reaches Composio.
@@ -209,7 +311,7 @@ pub const DIRECT_ENTITY_ID: &str = "default";
 /// Not a [`CredentialSource`](crate::company::credentials::CredentialSource):
 /// that names *whose identity* a call presents, this names *which host* it is
 /// presented to. A BYOK company is `Static`-sourced and `Byok`-routed; a
-/// company that pasted a [`TOKEN_KEY`] override is `Static`-sourced and
+/// company that pasted a [`TINYHUMANS_KEY_KEY`] override is `Static`-sourced and
 /// `Managed`-routed. Collapsing the two would make either question
 /// unanswerable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
@@ -253,8 +355,8 @@ impl ComposioMode {
     /// specific way this whole surface refuses: a company that asked to act
     /// through its own Composio account would act through the platform's
     /// instead. (It would not *leak* the key — managed resolution reads
-    /// [`TOKEN_KEY`] and the company key, never [`API_KEY_KEY`], so the stored
-    /// Composio key would simply go unread — but the routing surprise is the
+    /// [`TINYHUMANS_KEY_KEY`] and the company key, never [`BYOK_KEY_KEY`], so the
+    /// stored Composio key would simply go unread — but the routing surprise is the
     /// part that matters.) Nothing is gained by making the org's own other
     /// spelling of "the company's own account" mean its opposite here.
     ///
@@ -307,7 +409,7 @@ pub async fn load_mode(company: &CompanyId, secrets: &dyn SecretStore) -> Result
 ///
 /// Selecting BYOK writes the key first. If the mode write then fails, the
 /// company is still `Managed` holding an unread key — inert, since managed
-/// resolution never looks at [`API_KEY_KEY`].
+/// resolution never looks at [`BYOK_KEY_KEY`].
 ///
 /// Clearing writes the mode first. A fixed key-then-mode order would write the
 /// *empty* key first here — and if the mode write then failed, the company
@@ -329,19 +431,21 @@ pub async fn store_api_key(
         ComposioMode::Byok
     };
     if mode.is_byok() {
-        secrets
-            .set(company, API_KEY_KEY, SecretValue(api_key.to_string()))
-            .await?;
+        // 1. BYOK_KEY_KEY = key   2. LEGACY_API_KEY_KEY = key   3. MODE_KEY = "byok"
+        // The mode flip is LAST: until it lands the company is still on its old
+        // route, so a failure at 1 or 2 leaves a managed company managed.
+        write_both(company, secrets, BYOK_KEY_KEY, LEGACY_API_KEY_KEY, api_key).await?;
         secrets
             .set(company, MODE_KEY, SecretValue(mode.as_str().to_string()))
             .await?;
     } else {
+        // 1. MODE_KEY = "managed"   2. BYOK_KEY_KEY = ""   3. LEGACY_API_KEY_KEY = ""
+        // The mode flip is FIRST: a failure at 2 or 3 leaves a managed company
+        // holding a stale BYOK key, which managed resolution never reads.
         secrets
             .set(company, MODE_KEY, SecretValue(mode.as_str().to_string()))
             .await?;
-        secrets
-            .set(company, API_KEY_KEY, SecretValue(api_key.to_string()))
-            .await?;
+        write_both(company, secrets, BYOK_KEY_KEY, LEGACY_API_KEY_KEY, "").await?;
     }
     Ok(mode)
 }
@@ -379,10 +483,11 @@ impl ComposioAccess {
 /// then the company's TinyHumans key, then the instance identity — so nothing
 /// about the default path changes by adding this.
 ///
-/// **BYOK** reads [`API_KEY_KEY`] and nothing else. It deliberately does *not*
-/// fall back to the managed tiers when the key is missing or blank: a company
-/// that asked to act through its own Composio account and silently acted
-/// through the platform's instead would connect providers into the wrong tenant
+/// **BYOK** reads [`BYOK_KEY_KEY`] (falling back to [`LEGACY_API_KEY_KEY`]) and
+/// nothing else. It deliberately does *not* fall back to the managed tiers when
+/// the key is missing or blank: a company that asked to act through its own
+/// Composio account and silently acted through the platform's instead would
+/// connect providers into the wrong tenant
 /// and bill the wrong party. [`Credential::None`] here means no tools this
 /// cycle, which is the same fail-closed answer an absent managed credential
 /// gets.
@@ -398,8 +503,8 @@ pub async fn resolve_access(
     let mode = load_mode(company, secrets).await?;
     let credential = match mode {
         ComposioMode::Managed => resolve_credential(company, secrets, token_source).await?,
-        ComposioMode::Byok => match secrets.get(company, API_KEY_KEY).await? {
-            Some(SecretValue(key)) => Credential::from_value(key),
+        ComposioMode::Byok => match load_byok_key(company, secrets).await? {
+            Some(key) => Credential::from_value(key),
             None => Credential::None,
         },
     };
@@ -422,8 +527,9 @@ pub async fn resolve_access(
 /// *preference*, not a secret — the ids in it are already handed to the console
 /// by `GET …/composio/connections`, and are useless without the bearer that
 /// scopes them. It lives in the secret store because that is the one per-company
-/// key/value plane this repo has, and because keeping it beside [`TOKEN_KEY`]
-/// means a company's Composio state moves, backs up and is deleted as one thing.
+/// key/value plane this repo has, and because keeping it beside
+/// [`TINYHUMANS_KEY_KEY`] means a company's Composio state moves, backs up and
+/// is deleted as one thing.
 pub const DEFAULTS_KEY: &str = "composio/defaults";
 
 /// This company's chosen connection per toolkit: `gmail` → a Composio connection
@@ -557,7 +663,7 @@ async fn save_defaults(
 ///
 /// It is produced by `harness::composio::list_catalog_toolkits` and consumed by
 /// the always-compiled status route, and the harness compiles only under the
-/// `openhuman` feature. Same reason [`TOKEN_KEY`] and
+/// `openhuman` feature. Same reason [`TINYHUMANS_KEY_KEY`] and
 /// [`backend_url_or_default`] live here: the console plane must keep working in
 /// a default build that links none of the live tools.
 ///
@@ -679,6 +785,17 @@ mod tests {
             self.map.lock().unwrap().insert(key.to_string(), value.0);
             Ok(())
         }
+    }
+
+    /// Raw slot contents, blank-or-absent collapsed to `""`, so an assertion holds
+    /// on a backend that stores `""` and on one that treats it as absent.
+    async fn raw(secrets: &dyn SecretStore, company: &CompanyId, key: &str) -> String {
+        secrets
+            .get(company, key)
+            .await
+            .unwrap()
+            .map(|SecretValue(v)| v)
+            .unwrap_or_default()
     }
 
     #[tokio::test]
@@ -880,7 +997,7 @@ mod tests {
         // block this test exists to trigger before the test has even started.
         secrets
             .inner
-            .set(&company, API_KEY_KEY, SecretValue("ak_live".into()))
+            .set(&company, BYOK_KEY_KEY, SecretValue("ak_live".into()))
             .await
             .unwrap();
         secrets
@@ -909,22 +1026,22 @@ mod tests {
 
     /// A clear that dies on its **second** write (the key) must still have
     /// landed the mode: the company reads back as `Managed`, with a stale
-    /// unused key sitting inert in `API_KEY_KEY` — never consulted once the
+    /// unused key sitting inert in `BYOK_KEY_KEY` — never consulted once the
     /// mode says managed.
     #[tokio::test]
     async fn a_clear_that_fails_on_the_key_write_still_lands_managed() {
         let company = CompanyId::new("acme");
         let secrets = SecretsFailingToWrite {
             inner: MemSecrets::default(),
-            blocked_key: API_KEY_KEY,
+            blocked_key: BYOK_KEY_KEY,
         };
         // Seeded directly on `inner` for the same reason as the sibling test
-        // above: this test's block is `API_KEY_KEY`, and `store_api_key`'s set
+        // above: this test's block is `BYOK_KEY_KEY`, and `store_api_key`'s set
         // direction writes that key first — routing the initial BYOK selection
         // through the wrapper would block before there was anything to clear.
         secrets
             .inner
-            .set(&company, API_KEY_KEY, SecretValue("ak_live".into()))
+            .set(&company, BYOK_KEY_KEY, SecretValue("ak_live".into()))
             .await
             .unwrap();
         secrets
@@ -959,8 +1076,22 @@ mod tests {
         let secrets = MemSecrets::default();
         // A managed-tier credential that *would* answer, so the test proves the
         // BYOK arm ignores it rather than that there was nothing to fall back to.
+        // Seeded at both the new and legacy managed addresses, so the test also
+        // proves neither managed address leaks into BYOK (#2306).
         secrets
-            .set(&company, TOKEN_KEY, SecretValue("backend-bearer".into()))
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("backend-bearer".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
             .await
             .unwrap();
         secrets
@@ -983,7 +1114,11 @@ mod tests {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
         secrets
-            .set(&company, TOKEN_KEY, SecretValue("backend-bearer".into()))
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("backend-bearer".into()),
+            )
             .await
             .unwrap();
         store_api_key(&company, &secrets, "ak_live").await.unwrap();
@@ -1110,14 +1245,18 @@ mod tests {
         let company = CompanyId::new("acme");
         let secrets = SecretsFailingToRead {
             inner: MemSecrets::default(),
-            blocked_key: TOKEN_KEY,
+            blocked_key: TINYHUMANS_KEY_KEY,
         };
         // A managed-tier credential that *would* answer if resolution fell
         // through to it — proving the error surfaces rather than that there
         // was nothing to fall back to.
         secrets
             .inner
-            .set(&company, TOKEN_KEY, SecretValue("unreachable".into()))
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("unreachable".into()),
+            )
             .await
             .unwrap();
 
@@ -1127,6 +1266,631 @@ mod tests {
         assert!(
             matches!(err, crate::error::OpenCompanyError::Store(_)),
             "expected the store error to propagate untouched, got {err:?}"
+        );
+    }
+
+    // ── Storage addresses and the legacy fallback (#2306) ──────────────
+
+    #[test]
+    fn the_storage_addresses_are_pinned() {
+        assert_eq!(TINYHUMANS_KEY_KEY, "composio/tinyhumans/key");
+        assert_eq!(LEGACY_TOKEN_KEY, "composio/token");
+        assert_eq!(BYOK_KEY_KEY, "composio/byok/key");
+        assert_eq!(LEGACY_API_KEY_KEY, "composio/api_key");
+        assert_eq!(MODE_KEY, "composio/mode");
+        assert_eq!(DEFAULTS_KEY, "composio/defaults");
+    }
+
+    #[tokio::test]
+    async fn a_legacy_only_tinyhumans_key_is_still_presented() {
+        use crate::company::credentials::CredentialSource;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let credential = resolve_credential(&company, &secrets, None).await.unwrap();
+        assert_eq!(
+            credential.current().await.unwrap().as_deref(),
+            Some("th-not-a-real-key")
+        );
+        assert_eq!(credential.source(), CredentialSource::Static);
+        assert!(token_configured(&company, &secrets).await.unwrap());
+        assert_eq!(
+            load_tinyhumans_key(&company, &secrets).await.unwrap(),
+            Some("th-not-a-real-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_only_byok_key_is_still_presented() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Byok);
+        assert_eq!(
+            access.credential.current().await.unwrap().as_deref(),
+            Some("ak-not-a-real-key")
+        );
+        assert_eq!(
+            load_byok_key(&company, &secrets).await.unwrap(),
+            Some("ak-not-a-real-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_new_address_wins_over_the_legacy_one() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("th-not-a-real-key-2".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                BYOK_KEY_KEY,
+                SecretValue("ak-not-a-real-key-2".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            load_tinyhumans_key(&company, &secrets).await.unwrap(),
+            Some("th-not-a-real-key-2".to_string())
+        );
+        assert_eq!(
+            load_byok_key(&company, &secrets).await.unwrap(),
+            Some("ak-not-a-real-key-2".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_new_address_falls_back_to_a_non_empty_legacy_one() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, TINYHUMANS_KEY_KEY, SecretValue("   ".into()))
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(&company, BYOK_KEY_KEY, SecretValue("".into()))
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            load_tinyhumans_key(&company, &secrets).await.unwrap(),
+            Some("th-not-a-real-key".to_string())
+        );
+        assert_eq!(
+            load_byok_key(&company, &secrets).await.unwrap(),
+            Some("ak-not-a-real-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_byok_value_is_never_presented_as_the_tinyhumans_bearer() {
+        use crate::company::credentials::CredentialSource;
+
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                BYOK_KEY_KEY,
+                SecretValue("ak-not-a-real-key-2".into()),
+            )
+            .await
+            .unwrap();
+
+        let credential = resolve_credential(&company, &secrets, None).await.unwrap();
+        assert!(!credential.configured());
+        assert_eq!(credential.source(), CredentialSource::None);
+        assert!(!token_configured(&company, &secrets).await.unwrap());
+        assert_eq!(load_tinyhumans_key(&company, &secrets).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_tinyhumans_value_is_never_presented_as_the_byok_key() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("th-not-a-real-key-2".into()),
+            )
+            .await
+            .unwrap();
+
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Byok);
+        assert!(!access.credential.configured());
+        assert_eq!(load_byok_key(&company, &secrets).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_write_mirrors_to_the_legacy_address_for_one_release() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        store_token(&company, &secrets, " th-not-a-real-key-2 ")
+            .await
+            .unwrap();
+        assert_eq!(
+            raw(&secrets, &company, TINYHUMANS_KEY_KEY).await,
+            "th-not-a-real-key-2"
+        );
+        assert_eq!(
+            raw(&secrets, &company, LEGACY_TOKEN_KEY).await,
+            "th-not-a-real-key-2"
+        );
+        assert_eq!(raw(&secrets, &company, BYOK_KEY_KEY).await, "");
+        assert_eq!(
+            raw(&secrets, &company, LEGACY_API_KEY_KEY).await,
+            "ak-not-a-real-key",
+            "the BYOK addresses are untouched by a token write"
+        );
+
+        let mode = store_api_key(&company, &secrets, "ak-not-a-real-key-2")
+            .await
+            .unwrap();
+        assert_eq!(mode, ComposioMode::Byok);
+        assert_eq!(
+            raw(&secrets, &company, BYOK_KEY_KEY).await,
+            "ak-not-a-real-key-2"
+        );
+        assert_eq!(
+            raw(&secrets, &company, LEGACY_API_KEY_KEY).await,
+            "ak-not-a-real-key-2"
+        );
+        assert_eq!(raw(&secrets, &company, MODE_KEY).await, BYOK_MODE);
+        assert_eq!(
+            raw(&secrets, &company, TINYHUMANS_KEY_KEY).await,
+            "th-not-a-real-key-2",
+            "the token addresses are untouched by an API-key write"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_the_token_clears_both_addresses() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("th-not-a-real-key-2".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        store_token(&company, &secrets, "").await.unwrap();
+        assert_eq!(raw(&secrets, &company, TINYHUMANS_KEY_KEY).await, "");
+        assert_eq!(raw(&secrets, &company, LEGACY_TOKEN_KEY).await, "");
+        assert!(!token_configured(&company, &secrets).await.unwrap());
+        let credential = resolve_credential(&company, &secrets, None).await.unwrap();
+        assert!(!credential.configured());
+    }
+
+    /// Lands `store_api_key`/`store_token` exactly at their second write and
+    /// leaves the first write's result inspectable.
+    #[tokio::test]
+    async fn a_failed_legacy_mirror_write_propagates() {
+        let secrets = SecretsFailingToWrite {
+            inner: MemSecrets::default(),
+            blocked_key: LEGACY_TOKEN_KEY,
+        };
+        let company = CompanyId::new("acme");
+        secrets
+            .inner
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let err = store_token(&company, &secrets, "th-not-a-real-key-2").await;
+        assert!(err.is_err());
+        assert_eq!(
+            raw(&secrets.inner, &company, TINYHUMANS_KEY_KEY).await,
+            "th-not-a-real-key-2",
+            "the new address is written first and keeps the new value"
+        );
+        assert_eq!(
+            raw(&secrets.inner, &company, LEGACY_TOKEN_KEY).await,
+            "th-not-a-real-key"
+        );
+        assert_eq!(
+            load_tinyhumans_key(&company, &secrets).await.unwrap(),
+            Some("th-not-a-real-key-2".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_legacy_clear_keeps_the_old_value_readable() {
+        let secrets = SecretsFailingToWrite {
+            inner: MemSecrets::default(),
+            blocked_key: LEGACY_TOKEN_KEY,
+        };
+        let company = CompanyId::new("acme");
+        secrets
+            .inner
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("th-not-a-real-key-2".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .inner
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let err = store_token(&company, &secrets, "").await;
+        assert!(err.is_err());
+        assert_eq!(
+            load_tinyhumans_key(&company, &secrets).await.unwrap(),
+            Some("th-not-a-real-key".to_string()),
+            "the legacy address still holds the pre-clear value until a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_the_byok_key_clears_both_addresses() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                BYOK_KEY_KEY,
+                SecretValue("ak-not-a-real-key-2".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let mode = store_api_key(&company, &secrets, "").await.unwrap();
+        assert_eq!(mode, ComposioMode::Managed);
+        assert_eq!(raw(&secrets, &company, BYOK_KEY_KEY).await, "");
+        assert_eq!(raw(&secrets, &company, LEGACY_API_KEY_KEY).await, "");
+        assert_eq!(raw(&secrets, &company, MODE_KEY).await, MANAGED_MODE);
+    }
+
+    #[tokio::test]
+    async fn byok_with_blank_new_and_blank_legacy_keys_withholds_tools() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+        secrets
+            .set(&company, BYOK_KEY_KEY, SecretValue("".into()))
+            .await
+            .unwrap();
+        secrets
+            .set(&company, LEGACY_API_KEY_KEY, SecretValue("  ".into()))
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                TINYHUMANS_KEY_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let access = resolve_access(
+            &company,
+            &secrets,
+            Some(Arc::new(TinyhumansTokenSource::static_key(
+                "platform-identity",
+            ))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(access.mode, ComposioMode::Byok);
+        assert!(!access.credential.configured());
+    }
+
+    #[tokio::test]
+    async fn a_byok_set_whose_legacy_mirror_fails_leaves_a_managed_company_managed() {
+        let secrets = SecretsFailingToWrite {
+            inner: MemSecrets::default(),
+            blocked_key: LEGACY_API_KEY_KEY,
+        };
+        let company = CompanyId::new("acme");
+        secrets
+            .inner
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let err = store_api_key(&company, &secrets, "ak-not-a-real-key-2").await;
+        assert!(err.is_err());
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Managed
+        );
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Managed);
+        assert_eq!(
+            raw(&secrets.inner, &company, MODE_KEY).await,
+            "",
+            "the mode write never ran"
+        );
+        assert_eq!(
+            raw(&secrets.inner, &company, BYOK_KEY_KEY).await,
+            "ak-not-a-real-key-2",
+            "inert: written but never selected"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_byok_clear_whose_legacy_clear_fails_still_lands_managed() {
+        let secrets = SecretsFailingToWrite {
+            inner: MemSecrets::default(),
+            blocked_key: LEGACY_API_KEY_KEY,
+        };
+        let company = CompanyId::new("acme");
+        secrets
+            .inner
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+        secrets
+            .inner
+            .set(
+                &company,
+                BYOK_KEY_KEY,
+                SecretValue("ak-not-a-real-key-2".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .inner
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let err = store_api_key(&company, &secrets, "").await;
+        assert!(err.is_err());
+        assert_eq!(
+            load_mode(&company, &secrets).await.unwrap(),
+            ComposioMode::Managed
+        );
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(access.mode, ComposioMode::Managed);
+        assert_eq!(raw(&secrets.inner, &company, BYOK_KEY_KEY).await, "");
+        assert_eq!(
+            raw(&secrets.inner, &company, LEGACY_API_KEY_KEY).await,
+            "ak-not-a-real-key",
+            "inert: the mode already says managed"
+        );
+    }
+
+    /// A read error on the legacy address must fail resolution outright — never
+    /// fall through to [`company_key::resolve`], which would let an unreadable
+    /// store silently change which account a call is attributed to.
+    #[tokio::test]
+    async fn a_store_read_error_on_the_legacy_token_propagates() {
+        let secrets = SecretsFailingToRead {
+            inner: MemSecrets::default(),
+            blocked_key: LEGACY_TOKEN_KEY,
+        };
+        let company = CompanyId::new("acme");
+
+        let err = resolve_credential(&company, &secrets, None)
+            .await
+            .expect_err("an unreadable legacy address must not resolve to any credential");
+        assert!(matches!(err, crate::error::OpenCompanyError::Store(_)));
+    }
+
+    #[tokio::test]
+    async fn a_non_empty_new_address_does_not_read_the_legacy_one() {
+        let secrets = SecretsFailingToRead {
+            inner: MemSecrets::default(),
+            blocked_key: LEGACY_API_KEY_KEY,
+        };
+        let company = CompanyId::new("acme");
+        secrets
+            .inner
+            .set(
+                &company,
+                BYOK_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .inner
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+
+        let access = resolve_access(&company, &secrets, None).await.unwrap();
+        assert_eq!(
+            access.credential.current().await.unwrap().as_deref(),
+            Some("ak-not-a-real-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_never_writes_either_address() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company,
+                LEGACY_TOKEN_KEY,
+                SecretValue("th-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .set(&company, MODE_KEY, SecretValue(BYOK_MODE.into()))
+            .await
+            .unwrap();
+        secrets
+            .set(
+                &company,
+                LEGACY_API_KEY_KEY,
+                SecretValue("ak-not-a-real-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let _ = resolve_access(&company, &secrets, None).await.unwrap();
+        let _ = resolve_credential(&company, &secrets, None).await.unwrap();
+        let _ = token_configured(&company, &secrets).await.unwrap();
+        let _ = load_tinyhumans_key(&company, &secrets).await.unwrap();
+        let _ = load_byok_key(&company, &secrets).await.unwrap();
+
+        assert!(
+            secrets
+                .get(&company, TINYHUMANS_KEY_KEY)
+                .await
+                .unwrap()
+                .is_none(),
+            "a read must never write the new address, not even as an empty value"
+        );
+        assert!(secrets.get(&company, BYOK_KEY_KEY).await.unwrap().is_none());
+        assert_eq!(
+            raw(&secrets, &company, LEGACY_TOKEN_KEY).await,
+            "th-not-a-real-key"
+        );
+        assert_eq!(
+            raw(&secrets, &company, LEGACY_API_KEY_KEY).await,
+            "ak-not-a-real-key"
         );
     }
 }
