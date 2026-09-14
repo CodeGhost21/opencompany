@@ -2176,9 +2176,6 @@ export interface UsedBy {
 /**
  * Error envelope shape: `{ error, code }`, plus `problems` on a refusal that
  * has them.
- *
- * `problems` is additive and scoped to `workflow_invalid` on the host side, so
- * it is absent from every other error and must stay optional here.
  */
 export interface ApiErrorBody {
   error: string;
