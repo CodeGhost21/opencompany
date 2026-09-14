@@ -5,14 +5,16 @@ import { expect, test } from "@playwright/test";
  *
  * `test/e2e/inference.spec.ts` drives a real host and real (fake-keyed)
  * credentials; it cannot stage a `409 in_use` refusal, a slow probe worth
- * cancelling mid-flight, or a host that already speaks the keys-rework
- * contract (`defaultChoice`, `providers[].model`, `usedBy`) ahead of the
- * backend actually shipping it. This file is the round-2 review's own
- * request for exactly those three (P0-1, P0-2, P1-1), following
- * `composio-mode-switch.spec.ts`'s pattern: a running host
- * (`playwright.config.ts` brings one up), with the handful of routes under
- * test answered by this file instead. No real credential anywhere — every
- * key below is obviously fake (`sk-not-a-real-key`).
+ * cancelling mid-flight, a probe that actually succeeds with a catalogue (its
+ * only reachable endpoint is `UNREACHABLE`, so every one of its specs lands on
+ * the free-text field, never the combobox), or a host that already speaks the
+ * keys-rework contract (`defaultChoice`, `providers[].model`, `usedBy`) ahead
+ * of the backend actually shipping it. This file is the round-2 review's own
+ * request for exactly those four (P0-1, P0-2, P1-1, and the untested catalogue
+ * combobox from P2-6), following `composio-mode-switch.spec.ts`'s pattern: a
+ * running host (`playwright.config.ts` brings one up), with the handful of
+ * routes under test answered by this file instead. No real credential
+ * anywhere — every key below is obviously fake (`sk-not-a-real-key`).
  */
 
 type Page = import("@playwright/test").Page;
@@ -298,5 +300,67 @@ test.describe("P1-1: confirmInUse is sent only when the dialog actually showed a
     await page.getByTestId("inference-remove-confirm").click();
     await confirmedRetry;
     await expect(dialog).toBeHidden({ timeout: 10_000 });
+  });
+});
+
+test.describe("the catalogue combobox, once a probe actually succeeds", () => {
+  // Round-2 review, P2-6: every add spec in `inference.spec.ts` probes
+  // `UNREACHABLE`, so `pickModel` there always lands on free text and the
+  // combobox itself — the select-and-filter path `ModelCombobox` renders —
+  // has never been driven through a browser.
+  test("a successful probe opens the model list, and picking one from it is what gets saved", async ({
+    page,
+  }) => {
+    await stubStatus(page, status({ providers: [] }));
+    await openInference(page);
+
+    await page.route(isProbe, async (route) => {
+      await route.fulfill({
+        json: { ok: true, modelCount: 3, models: ["groq/model-a", "groq/model-b", "groq/model-c"] },
+      });
+    });
+
+    await page.getByTestId("inference-add-open").click();
+    await page.locator("#inference-add-cloud").click();
+    await page.getByRole("option", { name: /^Groq/ }).click();
+    await page.locator("#inference-connect-key").fill("sk-not-a-real-key-groq");
+    await page.getByTestId("inference-connect-submit").click();
+    await expect(page.getByTestId("inference-connect-model-step")).toBeVisible({ timeout: 10_000 });
+
+    // A closed list of real ids: the combobox trigger, not the free-text
+    // input — `showsCatalogSelect` only offers this once a catalogue with
+    // something in it has actually loaded.
+    const trigger = page.locator("#inference-connect-model");
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveText("Choose a model");
+    await trigger.click();
+    await page.getByRole("listbox", { name: "Models" }).getByRole("option", { name: "groq/model-b" }).click();
+    await expect(trigger).toHaveText("groq/model-b");
+
+    const added = page.waitForRequest(
+      (request) =>
+        /\/inference\/providers$/.test(new URL(request.url()).pathname) &&
+        request.method() === "POST" &&
+        (request.postDataJSON() as { model?: string }).model === "groq/model-b",
+    );
+    await page.route(
+      (url) => /\/inference\/providers$/.test(url.pathname),
+      async (route: Route) => {
+        if (route.request().method() !== "POST") return route.fallback();
+        await route.fulfill({
+          json: {
+            status: status({
+              providers: [
+                { id: "prv_groq", slug: "groq", label: "Groq", kind: "groq", baseUrl: "https://api.groq.com/openai/v1", models: {}, model: "groq/model-b", modelAmbiguous: false, enabled: true, keyConfigured: true, origin: "indexed", isDefault: true },
+              ],
+            }),
+            note: "Groq connected.",
+          },
+        });
+      },
+    );
+    await page.getByTestId("inference-connect-submit").click();
+    await added;
+    await expect(page.getByTestId("inference-provider-groq")).toBeVisible({ timeout: 10_000 });
   });
 });
