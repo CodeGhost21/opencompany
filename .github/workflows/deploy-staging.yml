@@ -415,17 +415,48 @@ jobs:
           # A `rollout restart` therefore does NOT move a tenant to a new image:
           # it recreates the pod from the same spec. Refreshing means patching the
           # image on the StatefulSet itself.
+
+          # One enumeration, shared by the patch loop and the report below so
+          # the two can never disagree about the fleet. The fourth column says
+          # whether the StatefulSet actually runs a container named
+          # `opencompany`: a tenant namespace also holds manager-provisioned
+          # sidecars (cortexdb) that carry the same object label but run an
+          # image this pipeline neither builds nor pushes. Readiness applies to
+          # all of them; image identity applies only to the app.
+          tenant_rows=$(kubectl get statefulset -A -l app=opencompany -o json | jq -r '
+            .items[]
+            | [ .metadata.namespace,
+                .metadata.name,
+                ((.spec.replicas // 0) | tostring),
+                (if any(.spec.template.spec.containers[]?; .name == "opencompany")
+                 then "yes" else "no" end)
+              ] | @tsv')
+          # `grep -c` exits 1 on no match, which `pipefail` would turn into a
+          # failed deploy on an empty fleet.
+          app_statefulsets=$(awk -F'\t' '$4 == "yes"' <<< "${tenant_rows}" | wc -l | tr -d ' ')
+
           if [ "${REFRESH_ALL}" = "true" ]; then
             echo "Moving all tenants onto ${IMAGE} (requested)..."
+            # `has_app` is a switch that turns checks OFF, so it must not be
+            # able to turn them all off quietly. If a container rename ever
+            # makes every row `no`, this patches nothing and the image check
+            # below asserts nothing, and the deploy is green on neither.
+            if [ -n "${tenant_rows}" ] && [ "${app_statefulsets}" = 0 ]; then
+              echo "ERROR: refresh_all_tenants=true but no tenant StatefulSet has a container named opencompany" >&2
+              echo "       nothing would be patched and the image check below would assert nothing" >&2
+              exit 1
+            fi
             # `kubectl set image` has no -A/--all-namespaces (only `get` does), so
             # enumerate first and patch each in its own namespace.
-            kubectl get statefulset -A -l app=opencompany \
-              -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
-            | while read -r ns name; do
-                [ -n "${ns}" ] || continue
-                echo "  ${ns}/${name} -> ${IMAGE}"
-                kubectl -n "${ns}" set image "statefulset/${name}" "opencompany=${IMAGE}"
-              done
+            while IFS=$'\t' read -r ns name _ has_app; do
+              [ -n "${ns}" ] || continue
+              if [ "${has_app}" != yes ]; then
+                echo "  ${ns}/${name} -> skipped (no opencompany container)"
+                continue
+              fi
+              echo "  ${ns}/${name} -> ${IMAGE}"
+              kubectl -n "${ns}" set image "statefulset/${name}" "opencompany=${IMAGE}"
+            done <<< "${tenant_rows}"
           else
             echo "Running tenants keep their current image; re-run with refresh_all_tenants=true to move them."
           fi
@@ -443,9 +474,7 @@ jobs:
             fi
             failure_detail="${failure_detail}$1"
           }
-          tenant_rows=$(kubectl get statefulset -A -l app=opencompany \
-            -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.replicas}{"\n"}{end}')
-          while IFS=$'\t' read -r ns name replicas; do
+          while IFS=$'\t' read -r ns name replicas has_app; do
             [ -n "${ns}" ] || continue
 
             if [ "${replicas}" = "0" ]; then
@@ -507,7 +536,7 @@ jobs:
               if [ -n "${pod_reason}" ]; then
                 append_failure_detail "pod ${pod_name}: ${pod_reason}"
               fi
-              if [ "${REFRESH_ALL}" = true ] && [ "${pod_image}" != "${IMAGE}" ]; then
+              if [ "${REFRESH_ALL}" = true ] && [ "${has_app}" = yes ] && [ "${pod_image}" != "${IMAGE}" ]; then
                 append_failure_detail 'pod did not land on the requested image'
               fi
             fi
