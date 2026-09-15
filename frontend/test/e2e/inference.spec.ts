@@ -221,11 +221,13 @@ test("the legacy Managed row is a connected row only when its chain actually res
   page,
 }) => {
   // Managed is not a record, so the row is keyed on whether the chain answers
-  // rather than on anything having been stored. Both states are asserted here
-  // on purpose: the default lane's host serves a company with no managed
-  // credential anywhere in the chain and the live-brain lane's has one, so a
-  // test that assumed either would be red on the other — and one that simply
-  // returned early on the state it did not expect would be quietly vacuous.
+  // rather than on anything having been stored. Three states are asserted
+  // here on purpose: the default lane's host serves a company with no managed
+  // credential anywhere in the chain, the live-brain lane's has a key but no
+  // chosen model (needsModel — D-model, keys rework issue #2306), and a fully
+  // resolved chain is the third. A test that assumed only one of these would
+  // be red on the others — and one that simply returned early on whichever
+  // state it did not expect would be quietly vacuous.
   //
   // Decision Q3 (keys rework, issue #2306, slice 2a): once a `tinyhumans` row
   // exists this legacy row must never render beside it — that is the
@@ -245,7 +247,20 @@ test("the legacy Managed row is a connected row only when its chain actually res
     return;
   }
 
-  // It resolves, so the row says which step answers and who it bills.
+  const needsModel = page.getByTestId("inference-provider-managed-needs-model");
+  if ((await needsModel.count()) > 0) {
+    // The chain has a credential but no chosen model yet (keys rework,
+    // decision X5 / P1-3): the row is honest that it is not serving turns —
+    // "Key added — choose a model", the affordance in place of a live switch,
+    // and never the connected-sounding "Billed to" text a resolved chain gets.
+    await expect(managed).toContainText("Key added — choose a model");
+    await expect(needsModel).toContainText("Needs a model");
+    await expect(managed.locator("[role='switch']")).toHaveCount(0);
+    return;
+  }
+
+  // It resolves and a model is chosen, so the row says which step answers and
+  // who it bills.
   await expect(managed).toContainText("Billed to");
   await expect(managed.locator("[role='switch']")).toHaveAttribute("aria-checked", "true");
   await expect(managed.locator("[role='switch']")).toBeEnabled();
