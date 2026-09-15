@@ -82,7 +82,8 @@ impl EffectiveSkills {
     ///
     /// `source_dir` is the company's source directory (`companies/<name>`); its
     /// `skills/` subtree supplies the committed bundles. `registry` is the
-    /// repo-level shared skill library (empty in platform-provisioned mode).
+    /// skill registry — every shipped bundle's `skills/` (empty in
+    /// platform-provisioned mode).
     /// `deltas` are the operator overrides from the
     /// [`SkillStateStore`](crate::ports::SkillStateStore).
     ///

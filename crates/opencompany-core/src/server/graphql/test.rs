@@ -1489,7 +1489,8 @@ async fn finances_fold_the_ledger() {
 
 /// On the serve path a company has an on-disk source dir; `Company.skills`,
 /// `Company.workflow`, and the top-level `skillRegistry` resolve their content
-/// from it (and the repo-level `skills/` root) rather than the empty bundle.
+/// from it (and the `companies/` tree behind `skills_root`) rather than the
+/// empty bundle.
 #[tokio::test]
 async fn skills_and_workflows_resolve_from_source_dir() {
     let home_dir = home();
@@ -1588,7 +1589,7 @@ async fn skills_and_workflows_resolve_from_source_dir() {
     // Company.workflow reads the graph from the source dir.
     assert_eq!(company["workflow"]["name"], "Test Flow");
     assert_eq!(company["workflow"]["nodes"].as_array().unwrap().len(), 1);
-    // skillRegistry reads the repo-level shared library.
+    // skillRegistry reads the bundle catalog behind `skills_root`.
     let registry = value["data"]["skillRegistry"].as_array().unwrap();
     assert!(registry.iter().any(|s| s["id"] == "web-research"));
 }

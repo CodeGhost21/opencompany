@@ -181,7 +181,7 @@ global ids would break on the next global added, silently.
 ## Adding to the baseline
 
 1. Add the file under `companies/_globals/agents/` or `companies/_globals/workflows/`, or the slug to
-   `[skills].always` (its `SKILL.md` must exist in `skills/`).
+   `[skills].always` (its `SKILL.md` must exist in `companies/_globals/skills/`).
 2. An agent node in a global workflow may only name a **global** agent — the
    graph runs in companies whose rosters it has never seen. A test enforces it.
 3. Run `cargo test --features openhuman globals::` — the baseline's own tests

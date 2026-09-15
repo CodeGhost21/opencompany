@@ -112,8 +112,9 @@ impl QueryRoot {
         Ok(Some(CompanyGql::new(company, runtime)))
     }
 
-    /// The repo-level shared skill registry (`skills/*/SKILL.md`), installable
-    /// into any company. Unscoped — the library is the same for every caller.
+    /// The skill registry (`companies/*/skills/*/SKILL.md`, the baseline's
+    /// included), installable into any company. Unscoped — the registry is the
+    /// same for every caller.
     async fn skill_registry(
         &self,
         ctx: &Context<'_>,

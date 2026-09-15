@@ -552,7 +552,7 @@ fn activation_gate_bypass_enabled(value: Option<&str>) -> bool {
 /// Assembles the `RuntimeBuilder` for one company with this host's full boot
 /// wiring: the OpenHuman RPC transport, the harness pool and its managed
 /// backends, feedback routing, the opened storage backend and memory overlay,
-/// the shared skill library, and the manager-injected per-tenant mailbox.
+/// the skill registry, and the manager-injected per-tenant mailbox.
 ///
 /// Extracted from [`register_company`] so an in-place rebuild (issue #290) runs
 /// the *same* wiring boot ran. A rebuild that assembled its own would drift from
