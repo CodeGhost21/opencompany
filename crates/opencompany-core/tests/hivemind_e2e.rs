@@ -368,7 +368,9 @@ summary = "Proves a desk deliberates."
 [inference]
 provider = "ollama"
 base_url = "{base_url}"
-model = "llama3"
+
+[inference.models]
+chat-v1 = "llama3"
 
 [policy]
 mode = "full"
