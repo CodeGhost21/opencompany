@@ -486,7 +486,17 @@ impl<'a> EpisodeDriver<'a> {
                     // the transcript path stays honest while the board does not.
                     // A pin from an earlier round sits below the boundary and
                     // still arrives; at width one nothing is above it at all.
-                    Some(turn.round_start),
+                    //
+                    // `+ 1` because the two bounds are not the same shape.
+                    // `readable` keeps a row **at** the boundary
+                    // (`sequence <= round_start`) while `EventLog::read_before`
+                    // is strictly exclusive (`seq < before`), so passing
+                    // `round_start` unchanged would hide the boundary row from
+                    // the board alone — a `!pin` on the last row of the
+                    // previous round would reach the transcript and not the
+                    // prompt, and would only reappear once some later row moved
+                    // the boundary past it.
+                    Some(Sequence(turn.round_start.0.saturating_add(1))),
                 )
                 .await
                 {
@@ -523,7 +533,7 @@ impl<'a> EpisodeDriver<'a> {
                     } else {
                         Vec::new()
                     };
-                let elsewhere = self.elsewhere_for(&turn.agent_id).await;
+                let elsewhere = self.elsewhere_for(&turn.agent_id, turn.round_start).await;
                 let prompt =
                     EpisodePrompt::new(member, &self.desk, &self.task, policy.quorum, &pins)
                         .with_recall(&recall)
@@ -978,6 +988,7 @@ impl<'a> EpisodeDriver<'a> {
     async fn elsewhere_for(
         &self,
         agent_id: &str,
+        round_start: Sequence,
     ) -> Vec<(String, Vec<tinyhivemind_hive::SessionMessage>)> {
         // Unset is the default, and a caller that never named the company's desks
         // gets exactly the prompt it got before this existed — including no read
@@ -1074,7 +1085,19 @@ impl<'a> EpisodeDriver<'a> {
                         thread_root: None,
                     },
                     viewer: viewer.clone(),
-                    before: None,
+                    // Frozen at the round boundary, for the reason the pinboard
+                    // read above is. These are *other* desks, but a round-mate
+                    // can reach them within this round — a synchronous desk
+                    // referral journals its answer on the target desk before
+                    // this loop reaches the next member — and an unbounded read
+                    // would hand that answer to a speaker who, by the round's
+                    // definition, cannot have read it. Left unbounded, what a
+                    // member sees would depend on the host's serial iteration
+                    // order, which is the one thing a round is supposed to make
+                    // irrelevant. `+ 1` for the same off-by-one as the board:
+                    // `before` is an exclusive upper bound and `round_start` is
+                    // the last row the round may see.
+                    before: Some(Sequence(round_start.0.saturating_add(1))),
                     window: SESSION_WINDOW,
                 },
             )
