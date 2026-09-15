@@ -92,6 +92,24 @@ async function stubSaves(page: Page, responses: Record<string, unknown>[]): Prom
   });
 }
 
+/**
+ * The same queue as {@link stubSaves}, but each entry names its own HTTP
+ * status — for KR-L3-01's stale-then-`409` case, where the first `PUT` must
+ * answer the host's real `in_use` refusal rather than a 200.
+ */
+async function stubSavesWithStatus(
+  page: Page,
+  responses: { status?: number; json: Record<string, unknown> }[],
+): Promise<void> {
+  let call = 0;
+  await page.route(isCredential, async (route: Route) => {
+    if (route.request().method() !== "PUT") return route.fallback();
+    const response = responses[Math.min(call, responses.length - 1)];
+    call += 1;
+    await route.fulfill({ status: response.status ?? 200, json: response.json });
+  });
+}
+
 /** Open the Account page with the first-run tour out of the way. */
 async function openAccount(page: Page): Promise<void> {
   await page.goto("/#/connections/api-key");
@@ -335,6 +353,132 @@ test("clearing removes only the copies still equal to the old key — a custom k
   await expect(message).toBeVisible({ timeout: 10_000 });
   await expect(message).toContainText("Composio's copy was removed too.");
   await expect(message).toContainText("LLM keeps the TinyHumans key set on its own page.");
+});
+
+test.describe("KR-L3-01: the Remove-key dialog names dependents and honors confirmInUse", () => {
+  // Bug KR-L3-01: "Remove key" could not finish once anything depended on the
+  // account key — the frontend never sent `confirmInUse`, there was no
+  // reopen-with-reason flow, and the dialog's text never named what depends
+  // on the key. This covers the two paths the fix adds: known up front (from
+  // the status the page already read, no round trip), and the stale case
+  // (nothing known at open, but the host answers `409 in_use` on submit).
+
+  test("in-use at open: the dialog names dependents with no round trip, and confirms with confirmInUse", async ({
+    page,
+  }) => {
+    await stubStatus(
+      page,
+      status({
+        configured: true,
+        source: "company",
+        inferenceHasOwnKey: false,
+        composioHasOwnKey: false,
+        defaultSet: true,
+        usedBy: { surfaces: ["llm", "composio"] },
+      }),
+    );
+    await stubSaves(page, [
+      mutation({
+        status: status({ configured: false, source: "none" }),
+        note: "Key removed. Composio's copy was removed too.",
+        slots: [
+          slotReport("composio", "cleared"),
+          slotReport("inference", "cleared"),
+          slotReport("provider", "skipped", "keyCleared"),
+          slotReport("default", "skipped", "keyCleared"),
+          slotReport("health", "skipped", "keyCleared"),
+        ],
+        needsModel: false,
+        setsDefault: false,
+        usedBy: { surfaces: ["llm", "composio"] },
+      }),
+    ]);
+
+    await openAccount(page);
+    await page.getByTestId("account-row-menu").click();
+    await page.getByTestId("account-remove-key").click();
+
+    // Named the moment the dialog opens — no `PUT` has happened yet.
+    await expect(page.getByTestId("account-remove-key-reason")).toHaveText(
+      "The TinyHumans account key's copies are used by LLM, Composio.",
+    );
+
+    const cleared = page.waitForRequest(
+      (request) => isCredential(new URL(request.url())) && request.method() === "PUT",
+    );
+    await page.getByTestId("account-remove-key-confirm").click();
+    const request = await cleared;
+    expect(request.postDataJSON()).toEqual({ key: "", confirmInUse: true });
+
+    await expect(
+      page.getByRole("heading", { name: "Remove this company's account key?" }),
+    ).toHaveCount(0);
+    const message = toasts(page).first();
+    await expect(message).toBeVisible({ timeout: 10_000 });
+    await expect(message).toContainText("Composio's copy was removed too.");
+  });
+
+  test("stale at open: a 409 on submit reopens the dialog with the server's reason, then clears on confirm", async ({
+    page,
+  }) => {
+    // Nothing depends on the key when the dialog opens — no `usedBy` on the
+    // status the page read — but something else started depending on it
+    // (a Composio connection made from another tab, say) before the confirm
+    // reaches the host.
+    await stubStatus(
+      page,
+      status({ configured: true, source: "company", defaultSet: true }),
+    );
+    await stubSavesWithStatus(page, [
+      {
+        status: 409,
+        json: {
+          error: "The TinyHumans account key's copies are used by Composio.",
+          code: "in_use",
+          usedBy: { surfaces: ["composio"] },
+        },
+      },
+      {
+        json: mutation({
+          status: status({ configured: false, source: "none" }),
+          note: "Key removed.",
+          usedBy: { surfaces: ["composio"] },
+        }),
+      },
+    ]);
+
+    await openAccount(page);
+    await page.getByTestId("account-row-menu").click();
+    await page.getByTestId("account-remove-key").click();
+    await expect(page.getByTestId("account-remove-key-reason")).toHaveCount(0);
+
+    const firstAttempt = page.waitForRequest(
+      (request) => isCredential(new URL(request.url())) && request.method() === "PUT",
+    );
+    await page.getByTestId("account-remove-key-confirm").click();
+    const first = await firstAttempt;
+    expect(first.postDataJSON()).toEqual({ key: "" });
+
+    // Refused, uninformed — the dialog reopens with the host's own reason
+    // rather than closing on a bare toast (the bug this dispatch fixes).
+    await expect(
+      page.getByRole("heading", { name: "Remove this company's account key?" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("account-remove-key-reason")).toHaveText(
+      "The TinyHumans account key's copies are used by Composio.",
+    );
+
+    const secondAttempt = page.waitForRequest(
+      (request) => isCredential(new URL(request.url())) && request.method() === "PUT",
+    );
+    await page.getByTestId("account-remove-key-confirm").click();
+    const second = await secondAttempt;
+    expect(second.postDataJSON()).toEqual({ key: "", confirmInUse: true });
+
+    await expect(
+      page.getByRole("heading", { name: "Remove this company's account key?" }),
+    ).toHaveCount(0);
+  });
 });
 
 test("never overwrites a key set on another page — both derived slots are kept", async ({

@@ -419,6 +419,123 @@ describe("ApiKeyView confirms before clearing a credential", () => {
   });
 });
 
+describe("ApiKeyView's Remove-key dialog names dependents (KR-L3-01)", () => {
+  /** A client whose `PUT …/credential` answers from a fixed queue, one
+   * response per call — some entries `throw` to model a refused attempt. */
+  function queuedRemoveClient(
+    writes: unknown[],
+    responses: (unknown | (() => never))[],
+    status: CompanyCredentialStatus,
+  ): OpenCompanyClient {
+    let call = 0;
+    return {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) return status;
+        throw new Error(`unexpected GET ${path}`);
+      },
+      put: async (_path: string, body: unknown) => {
+        writes.push(body);
+        const response = responses[Math.min(call, responses.length - 1)];
+        call += 1;
+        if (typeof response === "function") return (response as () => never)();
+        return response;
+      },
+    } as unknown as OpenCompanyClient;
+  }
+
+  // State 1: nothing depends on the key when the dialog opens. The generic
+  // two sentences show, no reason line renders, and the confirm sends no
+  // `confirmInUse` at all — this is `api-key-view.test.ts`'s pre-existing
+  // "offers Remove key as a confirmation" test, restated here to pin the
+  // absence of the reason element alongside it.
+  it("plain remove: no reason known, confirms with no confirmInUse", async () => {
+    const writes: unknown[] = [];
+    await mount(
+      queuedRemoveClient(writes, [{ status: credential({ source: "none" }), note: "Key removed." }], credential({
+        source: "company",
+      })),
+    );
+
+    await press('[data-testid="account-row-menu"]');
+    await press('[data-testid="account-remove-key"]');
+    expect(document.querySelector('[data-testid="account-remove-key-reason"]')).toBeNull();
+
+    await press('[data-testid="account-remove-key-confirm"]');
+    expect(writes).toEqual([{ key: "" }]);
+    // The dialog closes on a landed, unconfirmed clear.
+    expect(document.body.textContent ?? "").not.toContain("Remove this company's account key?");
+  });
+
+  // State 2: the status the page already read carries `usedBy` — the dialog
+  // names dependents the moment it opens, with no round trip, and the first
+  // (and only) press already sends `confirmInUse: true`.
+  it("in-use, known up front: names dependents on open and confirms with confirmInUse", async () => {
+    const writes: unknown[] = [];
+    await mount(
+      queuedRemoveClient(
+        writes,
+        [{ status: credential({ source: "none" }), note: "Key removed.", usedBy: { surfaces: ["llm", "composio"] } }],
+        credential({ source: "company", usedBy: { surfaces: ["llm", "composio"] } }),
+      ),
+    );
+
+    await press('[data-testid="account-row-menu"]');
+    await press('[data-testid="account-remove-key"]');
+    expect(document.querySelector('[data-testid="account-remove-key-reason"]')?.textContent).toBe(
+      "The TinyHumans account key's copies are used by LLM, Composio.",
+    );
+
+    await press('[data-testid="account-remove-key-confirm"]');
+    expect(writes).toEqual([{ key: "", confirmInUse: true }]);
+  });
+
+  // State 3: nothing known at open — the generic text shows, no reason line —
+  // but something starts depending on the key before the confirm reaches the
+  // host. The stale, uninformed first attempt is refused `409 in_use`; the
+  // dialog must reopen with the server's own reason (KR-L3-01's actual bug)
+  // rather than closing on a toast, and a second press then sends
+  // `confirmInUse: true` and lands.
+  it("stale then 409: reopens with the server's reason, then confirms and clears", async () => {
+    const writes: unknown[] = [];
+    const refusal = () => {
+      throw new ApiError(
+        409,
+        "in_use",
+        "The TinyHumans account key's copies are used by Composio.",
+        true,
+      );
+    };
+    await mount(
+      queuedRemoveClient(
+        writes,
+        [refusal, { status: credential({ source: "none" }), note: "Key removed." }],
+        credential({ source: "company" }),
+      ),
+    );
+
+    await press('[data-testid="account-row-menu"]');
+    await press('[data-testid="account-remove-key"]');
+    expect(document.querySelector('[data-testid="account-remove-key-reason"]')).toBeNull();
+
+    // First, uninformed press: refused, and the dialog stays open and now
+    // shows the host's own reason instead of closing with a bare toast.
+    await press('[data-testid="account-remove-key-confirm"]');
+    expect(writes).toEqual([{ key: "" }]);
+    expect(document.body.textContent ?? "").toContain("Remove this company's account key?");
+    expect(document.querySelector('[data-testid="account-remove-key-reason"]')?.textContent).toBe(
+      "The TinyHumans account key's copies are used by Composio.",
+    );
+
+    // Second, now-informed press: confirms, and lands.
+    await press('[data-testid="account-remove-key-confirm"]');
+    expect(writes).toEqual([{ key: "" }, { key: "", confirmInUse: true }]);
+    expect(document.body.textContent ?? "").not.toContain("Remove this company's account key?");
+  });
+});
+
 describe("ApiKeyView never renders an unreadable store as an empty one", () => {
   // `company_key::resolve` propagates a secret-store read error rather than
   // falling through to the instance identity, because a connection made under

@@ -12,6 +12,11 @@ import {
   type CompanyCredentialStatus,
 } from "@/api/credential";
 import { accountFills } from "@/views/connections/account-fill";
+import {
+  accountKeyUsedByMessage,
+  confirmInUseFor,
+  guardedOutcome,
+} from "@/views/connections/account-in-use";
 import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
 import {
@@ -129,6 +134,15 @@ export function ApiKeyView({ client, company }: Props) {
   const [keyError, setKeyError] = useState<string | null>(null);
   /** Whether the Remove-key confirmation is open. */
   const [removing, setRemoving] = useState(false);
+  /**
+   * The Remove-key dialog's own reason for showing more than the generic
+   * question — `null` before anything has said the key is in use, and the
+   * host's sentence once either the status read at open time or a refused
+   * attempt has (KR-L3-01; `@/views/connections/account-in-use`). Reopening
+   * the dialog after a `409` sets this rather than closing it, which is
+   * exactly the flow the old fixed-text dialog never had.
+   */
+  const [removeReason, setRemoveReason] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /**
    * The key already saved by step one, waiting on step two's model
@@ -227,13 +241,22 @@ export function ApiKeyView({ client, company }: Props) {
     };
   }, [client, company]);
 
-  /** Set, rotate or (with an empty value) clear the company's key. */
+  /**
+   * Set, rotate or (with an empty value) clear the company's key.
+   *
+   * `confirmInUse` matters only on a clear (`mode === "clear"`): it is what
+   * `confirmInUseFor(removeReason)` decided at the moment of THIS click —
+   * `true` once the dialog has actually shown a reason, from the status read
+   * at open time or from a prior refusal, `false` on an uninformed first
+   * attempt. A save/rotate never sends it (KR-L3-01; the fix does not touch
+   * the never-guarded set/rotate path).
+   */
   const write = useCallback(
-    async (key: string, mode: "save" | "clear") => {
+    async (key: string, mode: "save" | "clear", confirmInUse = false) => {
       setBusy(true);
       setKeyError(null);
       try {
-        const result = await setCompanyCredential(client, company, key);
+        const result = await setCompanyCredential(client, company, key, undefined, confirmInUse);
         // The fan-out (keys rework #2306, slice 4a) could not create a
         // `tinyhumans` row for want of a model. The key itself already saved
         // — `setGeneration` reflects that on the page underneath — but the
@@ -255,17 +278,30 @@ export function ApiKeyView({ client, company }: Props) {
           description: result.note,
         });
         setEditing(false);
+        setRemoving(false);
+        setRemoveReason(null);
         setGeneration((n) => n + 1);
       } catch (err) {
         // The host's own reason where it sent one — an admin-only refusal or a
         // store failure says something specific, and a generic "couldn't save"
         // throws away the only actionable part. A failed save stays in the
         // dialog, beside the key that was refused; a failed removal has no
-        // dialog left open to hold it.
+        // dialog left open to hold it, UNLESS it is a stale-UI `409 in_use`
+        // that this attempt had not yet confirmed — that reopens the dialog
+        // with the host's own reason instead (KR-L3-01), the same recovery
+        // Composio's and Search's own guarded dialogs already give every
+        // other in-use mutation on this host.
         if (mode === "save") {
           setKeyError(err instanceof ApiError ? err.message : "Couldn't save the key.");
         } else {
-          toast.error(err instanceof ApiError ? err.message : "Couldn't remove the key.");
+          const outcome = guardedOutcome(err, confirmInUse);
+          if (outcome.action === "reopen") {
+            setRemoveReason(outcome.message);
+          } else {
+            setRemoving(false);
+            setRemoveReason(null);
+            toast.error(err instanceof ApiError ? err.message : "Couldn't remove the key.");
+          }
         }
       } finally {
         setBusy(false);
@@ -320,6 +356,36 @@ export function ApiKeyView({ client, company }: Props) {
       setModelStep(null);
     }
   }, []);
+
+  /**
+   * Opens the Remove-key dialog, seeded with whatever the page already knows
+   * about who depends on the key — `status.usedBy`, read alongside the row
+   * this dialog opens from, at no extra request (KR-L3-01, choice (a) in the
+   * dispatch: the field is a small, clean addition to the existing status DTO
+   * rather than a reliance on the 409-only recovery every other guarded
+   * dialog on this host uses). A stale answer (something starts depending on
+   * the key between this open and the confirm click) is still caught by
+   * `write`'s own reopen-on-409 handling below.
+   */
+  const openRemoveDialog = useCallback(() => {
+    setRemoveReason(accountKeyUsedByMessage(status?.usedBy));
+    setRemoving(true);
+  }, [status]);
+
+  /** The dialog's own `onOpenChange` — closing (never while busy) forgets the reason. */
+  const closeRemoveDialog = useCallback(
+    (next: boolean) => {
+      if (next || busy) return;
+      setRemoving(false);
+      setRemoveReason(null);
+    },
+    [busy],
+  );
+
+  /** Confirm click: sends `confirmInUse` exactly when the dialog is already showing a reason. */
+  const confirmRemoveKey = useCallback(() => {
+    void write("", "clear", confirmInUseFor(removeReason));
+  }, [write, removeReason]);
 
   const shape = accountShape(load, status);
   const removable = canRemoveKey(status);
@@ -496,7 +562,7 @@ export function ApiKeyView({ client, company }: Props) {
                       {removable && (
                         <DropdownMenuItem
                           variant="destructive"
-                          onClick={() => setRemoving(true)}
+                          onClick={openRemoveDialog}
                           data-testid="account-remove-key"
                         >
                           Remove key
@@ -576,16 +642,29 @@ export function ApiKeyView({ client, company }: Props) {
         />
 
         {/* Names what actually depends on the key, and what happens next rather
-            than only what is lost. The two sentences live in `account.ts` with
-            a test each: they are the page's one irreversible claim, and the
-            reasoning behind each half — why both fallbacks are offered rather
-            than one guessed at, and why the removal is not allowed to promise
-            that the billing stops — belongs next to the assertion that holds
-            it. */}
-        <AlertDialog open={removing} onOpenChange={setRemoving}>
+            than only what is lost. The generic two sentences live in
+            `account.ts` with a test each: they are the page's one
+            irreversible claim, and the reasoning behind each half — why both
+            fallbacks are offered rather than one guessed at, and why the
+            removal is not allowed to promise that the billing stops —
+            belongs next to the assertion that holds it.
+
+            `removeReason`, above them, is KR-L3-01's fix: the one sentence
+            naming who actually depends on the key right now — Composio, the
+            LLM page's TinyHumans row, or both — from `status.usedBy` at open
+            time, or from the host's own `409 in_use` message if a stale
+            attempt gets refused. Nothing before this dispatch ever told the
+            operator that; the dialog only ever showed the two generic
+            sentences below, whatever actually used the key. */}
+        <AlertDialog open={removing} onOpenChange={closeRemoveDialog}>
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>Remove this company&apos;s account key?</AlertDialogTitle>
+              {removeReason && (
+                <AlertDialogDescription data-testid="account-remove-key-reason">
+                  {removeReason}
+                </AlertDialogDescription>
+              )}
               <AlertDialogDescription>{REMOVAL_CONSEQUENCE}</AlertDialogDescription>
               <AlertDialogDescription>{REMOVAL_AND_THINKING}</AlertDialogDescription>
               <AlertDialogDescription>
@@ -594,9 +673,18 @@ export function ApiKeyView({ client, company }: Props) {
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>Keep the key</AlertDialogCancel>
+              <AlertDialogCancel disabled={busy}>Keep the key</AlertDialogCancel>
               <AlertDialogAction
-                onClick={() => void write("", "clear")}
+                disabled={busy}
+                onClick={(event) => {
+                  // Keep the dialog open on a stale-UI 409 so it can reopen
+                  // with the host's own reason — see `AlertDialogAction`'s own
+                  // docs, and `@/composio/in-use`'s identical use of this
+                  // escape hatch. `write` closes the dialog itself on success
+                  // or on an unrelated failure.
+                  event.preventBaseUIHandler();
+                  confirmRemoveKey();
+                }}
                 className="bg-destructive text-white hover:bg-destructive/90"
                 data-testid="account-remove-key-confirm"
               >

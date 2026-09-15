@@ -146,6 +146,14 @@ struct CredentialStatusDto {
     composio_has_own_key: bool,
     /// `inference/default` is set (`ProviderOnly` or `Full`).
     default_set: bool,
+    /// What a **clear** of this key would strand right now — the same
+    /// [`account_key_used_by`] computation [`set_key`]'s guard runs, exposed
+    /// here so the Remove-key dialog can name dependents the moment it opens
+    /// rather than only after a refused, uninformed attempt
+    /// (`docs/key-reworks/in-use-guards.md` §1-2; keys rework #2306, KR-L3-01).
+    /// `None` when the key is unset or nothing would be stranded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    used_by: Option<UsedBy>,
 }
 
 /// The two account pages the console links out to.
@@ -426,6 +434,7 @@ async fn effective_status(
     let facts = company_key::slot_facts(runtime.id(), secrets.as_ref())
         .await
         .map_err(ApiError)?;
+    let used_by = account_key_used_by(runtime).await?;
     Ok(CredentialStatusDto {
         configured,
         source,
@@ -442,6 +451,7 @@ async fn effective_status(
         inference_has_own_key: facts.inference_has_own_key,
         composio_has_own_key: facts.composio_has_own_key,
         default_set: facts.default_set,
+        used_by,
     })
 }
 

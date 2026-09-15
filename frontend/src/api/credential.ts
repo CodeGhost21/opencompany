@@ -87,6 +87,17 @@ export interface CompanyCredentialStatus {
   composioHasOwnKey?: boolean;
   /** `inference/default` is set (`ProviderOnly` or `Full`) — never overwritten by a save. */
   defaultSet?: boolean;
+  /**
+   * What a **clear** of this key would strand right now — the same shape a
+   * refused clear's `409 in_use` echoes (`docs/key-reworks/in-use-guards.md`
+   * §1-2). Carried on the status the page already reads so the Remove-key
+   * dialog can name dependents the moment it opens, without waiting for a
+   * stale, uninformed attempt to be refused first (keys rework #2306,
+   * KR-L3-01). Absent when the key is unset or nothing would be stranded —
+   * `"usedBy" in status` is itself the in-use check, same as every other DTO
+   * this contract covers.
+   */
+  usedBy?: UsedBy;
 }
 
 /** The two hub pages the console links out to. */
@@ -163,17 +174,29 @@ export function getCompanyCredential(
  * second step sends this on the follow-up save once the host has answered
  * `needsModel`. Omitted (never sent as `""`) while clearing or on the first
  * save, so an older host sees exactly the body it always has.
+ *
+ * A **clear** that would strand a dependent is refused with a `409 in_use`
+ * `ApiError` carrying `usedBy` (in-use-guards.md §2) unless `confirmInUse` is
+ * `true`. Setting or rotating a non-empty key is never guarded, so
+ * `confirmInUse` matters only on an empty `key`. Omitted from the body
+ * (rather than always sent as `false`, unlike Composio's equivalent calls)
+ * when `false`, so every existing save/rotate body is unchanged — the
+ * Remove-key dialog is the only caller that ever passes `true`, and only once
+ * it has actually shown the operator a reason (`@/views/connections/
+ * account-in-use`'s `confirmInUseFor`).
  */
 export function setCompanyCredential(
   client: OpenCompanyClient,
   company: string | null,
   key: string,
   model?: string,
+  confirmInUse = false,
 ): Promise<CompanyCredentialMutation> {
-  return client.put<CompanyCredentialMutation>(
-    `${client.scopeFor(company)}/credential`,
-    model ? { key, model } : { key },
-  );
+  return client.put<CompanyCredentialMutation>(`${client.scopeFor(company)}/credential`, {
+    key,
+    ...(model ? { model } : {}),
+    ...(confirmInUse ? { confirmInUse: true } : {}),
+  });
 }
 
 /**
