@@ -291,8 +291,19 @@ fn sandbox_brief_flags(
 // bundling them into a struct would only relocate the surface. (Pre-existing —
 // surfaced only under the full `openhuman,mcp` clippy combo, which CI
 // does not build; see the OpenCompany full-feature CI-gap note.)
+//
+// Returns the [`Agent`] alongside the [`HarnessModel`] it was actually wired
+// to — `deps.provider` for an unpinned agent, or the per-agent
+// [`TenantProvider`](crate::harness::built_in::provider::TenantProvider)
+// [`pinned`](HarnessModel::pinned) minted when the manifest names a
+// `{provider, model}` pair (issue #2306 / Codex round 2, comment 4012457318).
+// A pinned agent's own `TenantProvider` carries telemetry cells the shared
+// `deps.provider` never sees, so metering a pinned turn from `deps.provider`
+// silently books it to the company default. The caller that goes on to meter
+// this agent's turns must keep this exact `Arc` — not re-resolve the pin —
+// so it reads the same telemetry cells the turn actually wrote.
 #[allow(clippy::too_many_arguments)]
-pub fn build_agent(
+pub fn build_agent_with_model(
     company: &CompanyId,
     company_name: &str,
     manifest_agent: &ManifestAgent,
@@ -311,7 +322,7 @@ pub fn build_agent(
     // handing it the whole manifest so it could re-derive one flag would give
     // it a second, drifting opinion about the company.
     speech_enabled: bool,
-) -> crate::Result<Agent> {
+) -> crate::Result<(Agent, Arc<dyn HarnessModel>)> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
         company.clone(),
         manifest_agent.id.clone(),
@@ -1231,26 +1242,35 @@ pub fn build_agent(
         }
         _ => None,
     };
-    let chat_model: Arc<dyn HarnessModel> = match &pin {
-        Some(choice) => deps
-            .provider
-            .pinned(
-                &manifest_agent.id,
-                manifest_agent
-                    .name
-                    .as_deref()
-                    .unwrap_or(manifest_agent.role.as_str()),
-                choice,
-            )
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    agent = %manifest_agent.id,
-                    "this provider cannot pin; the agent pair is ignored"
-                );
-                deps.provider.clone()
-            }),
-        None => deps.provider.clone(),
-    };
+    // `Some` only when `pin` names a pair AND `deps.provider` can actually
+    // mint a sibling for it — never a synthetic pin that turns out to be
+    // `deps.provider` itself. Auxiliary per-agent passes (issue #2306, X12;
+    // round-2 review comment 4012457329) key their own default-first
+    // fallback on this being a genuinely distinct provider — see
+    // [`crate::harness::built_in::pass_model`].
+    let pinned_model: Option<Arc<dyn HarnessModel>> = pin.as_ref().and_then(|choice| {
+        deps.provider.pinned(
+            &manifest_agent.id,
+            manifest_agent
+                .name
+                .as_deref()
+                .unwrap_or(manifest_agent.role.as_str()),
+            choice,
+        )
+    });
+    if pin.is_some() && pinned_model.is_none() {
+        tracing::warn!(
+            agent = %manifest_agent.id,
+            "this provider cannot pin; the agent pair is ignored"
+        );
+    }
+    // The primary chat model: the agent's own pin, fails closed on its own
+    // terms (X8/F6) rather than falling back to `deps.provider` — the
+    // `unwrap_or_else` below only covers the "this provider cannot pin"
+    // case above, never a *working* pin that later fails at turn time.
+    let chat_model: Arc<dyn HarnessModel> = pinned_model
+        .clone()
+        .unwrap_or_else(|| deps.provider.clone());
 
     // Capability-tier seam (Cell A): one filtering pass over the fully assembled
     // tool vector, just before it is handed to the builder. Today `AllowAll` is
@@ -1353,8 +1373,16 @@ pub fn build_agent(
         // multi-tenancy), so `PayloadExtractor` serves the same trait with one
         // bounded model call — built `from_deps` like every other one-shot pass
         // here, so it spends the company's own credential and meters against it.
+        // `pinned_model.clone()` (issue #2306, X12; round-2 review comment
+        // 4012457329) so this agent's own pair is reachable when the company
+        // default cannot serve the call, instead of always failing extraction
+        // for a company configured solely through agent pins.
         .payload_summarizer(std::sync::Arc::new(
-            crate::harness::payload_extract::PayloadExtractor::from_deps(deps, company),
+            crate::harness::payload_extract::PayloadExtractor::from_deps(
+                deps,
+                company,
+                pinned_model.clone(),
+            ),
         ))
         .model_name(model)
         .workspace_dir(workspace)
@@ -1389,7 +1417,45 @@ pub fn build_agent(
     // [`MAX_TOOL_ITERATIONS`] for why 25, and why this is the only lever that
     // works on this construction path.
     agent.set_max_tool_iterations(MAX_TOOL_ITERATIONS);
-    Ok(agent)
+    Ok((agent, chat_model))
+}
+
+/// [`build_agent_with_model`], discarding the [`HarnessModel`] it resolved.
+///
+/// For every caller that only wants the [`Agent`] — every test in this crate
+/// that builds one to exercise its tools/prompt/policy, plus any future
+/// non-metering caller. The roster construction path that meters this agent's
+/// turns must call [`build_agent_with_model`] directly and keep the model it
+/// returns; see that function's doc comment for why the pinned `Arc` cannot be
+/// re-resolved after the fact.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent(
+    company: &CompanyId,
+    company_name: &str,
+    manifest_agent: &ManifestAgent,
+    policy: ApprovalPolicy,
+    deps: &HarnessDeps,
+    grants: &[String],
+    skill_deltas: &[SkillState],
+    routed_context: &[(String, String)],
+    instructions: Option<&str>,
+    is_orchestrator: bool,
+    speech_enabled: bool,
+) -> crate::Result<Agent> {
+    build_agent_with_model(
+        company,
+        company_name,
+        manifest_agent,
+        policy,
+        deps,
+        grants,
+        skill_deltas,
+        routed_context,
+        instructions,
+        is_orchestrator,
+        speech_enabled,
+    )
+    .map(|(agent, _chat_model)| agent)
 }
 
 /// The intrinsic deliberate-memory tools (`memory_store` / `memory_recall` /
