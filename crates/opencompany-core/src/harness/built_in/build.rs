@@ -2232,6 +2232,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.events = Some(Arc::new(crate::store::FsEventLog::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "designer".to_string(),
             role: "Designer".to_string(),
@@ -2310,6 +2311,7 @@ mod tests {
             "this test exercises the no-journal case; pin_deps must still default to it"
         );
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "designer".to_string(),
             role: "Designer".to_string(),

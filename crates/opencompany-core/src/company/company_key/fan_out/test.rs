@@ -1023,11 +1023,10 @@ async fn matrix_c1() {
         "the default stays"
     );
     assert!(
-        inference_store::load_health(&cid, &secrets)
+        !inference_store::load_health(&cid, &secrets)
             .await
             .unwrap()
-            .get("tinyhumans")
-            .is_none(),
+            .contains_key("tinyhumans"),
         "health is forgotten"
     );
 

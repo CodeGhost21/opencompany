@@ -1784,7 +1784,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        469,
+        471,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1792,10 +1792,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        372,
+        374,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 3_283);
+    assert_eq!(render_snapshot().lines().count(), 3_297);
     assert_eq!(
         all_routes()
             .map(|route| {

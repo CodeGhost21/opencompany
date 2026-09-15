@@ -20,8 +20,16 @@ use crate::app::config::{AuthMode, BrainMode};
 use crate::brain::medulla::MedullaTransport;
 use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::brain::{EchoBrain, HostedMedullaBrain};
+// `inference` (the module path) is needed unconditionally by `agent_pairs`
+// and `any_agent_pair_resolves` below (keys rework, issue #2306, slice 3a) —
+// pure/read-only helpers that must build in the default feature set, even
+// though every other use of this module in this file sits behind
+// `openhuman`. `EnvDefault` stays gated: it is only ever named inside the
+// `openhuman`-only harness-brain wiring, so importing it unconditionally
+// would be an unused-import warning with `openhuman` off.
+use crate::company::inference;
 #[cfg(feature = "openhuman")]
-use crate::company::inference::{self, EnvDefault};
+use crate::company::inference::EnvDefault;
 use crate::company::runtime::{CompanyMail, CompanyRuntime, OpsStores};
 use crate::company::{CompanyManifest, GroupChat, Policy, Tools};
 use crate::feedback::github::{GitHubClient, RateLimiter};
@@ -4674,6 +4682,13 @@ pub(crate) fn agent_harness_kind(
 /// needs no full roster build. An `acp`-bound agent is skipped: validation
 /// refuses a pair there, but an unvalidated manifest (loaded before
 /// `RuntimeBuilder::build`'s own checks) must not be trusted to have run it.
+///
+/// Its only production caller is `any_agent_pair_resolves`, gated on
+/// `openhuman`; with the feature off this is reachable only from its own
+/// `agent_pairs_apply_edits_and_skip_acp_agents` unit test, which is why the
+/// dead-code lint needs silencing there and not by gating the function
+/// itself — the test still exercises it on every build.
+#[cfg_attr(not(feature = "openhuman"), allow(dead_code))]
 fn agent_pairs(
     manifest: &CompanyManifest,
     edits: &[AgentOverride],
@@ -4736,6 +4751,12 @@ fn agent_pairs(
 /// propagated — the harness brain still boots (on the echo brain if nothing
 /// else resolves either), and the affected agent's own turns fail closed,
 /// naming it, at `TenantProvider::resolve` time.
+///
+/// Gated on `openhuman`: its only caller is the harness-brain wiring above,
+/// which is itself `openhuman`-only, so without the feature this is dead
+/// code — `agent_pairs` above stays unconditional because its own test
+/// (`agent_pairs_apply_edits_and_skip_acp_agents`) is not feature-gated.
+#[cfg(feature = "openhuman")]
 async fn any_agent_pair_resolves(
     id: &CompanyId,
     manifest: &CompanyManifest,

@@ -5023,17 +5023,19 @@ mod tests {
         }
     }
 
+    /// Each request's `(model, Authorization header)`, in arrival order, as
+    /// [`spawn_capturing_stub`] records them.
+    type Seen = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
     /// An OpenAI-compatible stub that records every request's `model` field
     /// and `Authorization` header, in arrival order.
-    async fn spawn_capturing_stub() -> (String, Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>)
-    {
+    async fn spawn_capturing_stub() -> (String, Seen) {
         use axum::Router;
         use axum::extract::Json as JsonExtract;
         use axum::http::HeaderMap;
         use axum::routing::post;
 
-        let seen: Arc<std::sync::Mutex<Vec<(String, Option<String>)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen: Seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let capture = Arc::clone(&seen);
         let app = Router::new().route(
             "/chat/completions",
