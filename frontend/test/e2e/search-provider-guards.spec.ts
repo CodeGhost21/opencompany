@@ -209,22 +209,17 @@ test.describe("removing the search default needs confirmation", () => {
     );
   });
 
-  test("opens a confirm dialog, re-opens on a stale-UI 409, and succeeds once confirmed", async ({
+  test("shows the search default's own usage up front, and the first click already confirms (round-3 review, P1-2)", async ({
     page,
   }) => {
     await page.route(
       (url) => isSearchProviderSlug(url, "searxng"),
       async (route: Route) => {
         if (route.request().method() !== "DELETE") return route.fallback();
-        const confirmed = new URL(route.request().url()).searchParams.get(
-          "confirmInUse",
-        );
-        if (confirmed !== "true") {
-          await route.fulfill({ status: 409, json: IN_USE_BODY });
-          return;
-        }
-        const after = emptyStatus();
-        await route.fulfill({ json: after });
+        // Answers success unconditionally: with usage shown up front, the
+        // FIRST request already carries `confirmInUse=true` — there is no
+        // 409 round trip in this scenario at all.
+        await route.fulfill({ json: emptyStatus() });
       },
     );
 
@@ -236,29 +231,88 @@ test.describe("removing the search default needs confirmation", () => {
     const dialog = page.getByTestId("search-confirm");
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("heading", { name: "Remove SearXNG?" })).toBeVisible();
-    // The generic question — this UI has not yet been told anything depends
-    // on the row.
-    await expect(dialog).not.toContainText(IN_USE_ERROR);
+    // Named on the very first open — the row's own `usedBy` from the status
+    // this page already read, not only after a refusal.
+    await expect(dialog).toContainText("Used by the company default.");
 
-    const confirm = page.getByTestId("search-confirm-action");
-
-    // First click: no `confirmInUse` yet, so the stub answers 409. The
-    // dialog must stay open and now show the host's own reason rather than a
-    // generic error toast.
-    await confirm.click();
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(IN_USE_ERROR);
-
-    // Second click, now informed: this one sends `?confirmInUse=true`, the
-    // stub answers 200, and the dialog closes.
-    const confirmed = page.waitForRequest(
+    const confirmedFirstTry = page.waitForRequest(
       (request) =>
         isSearchProviderSlug(new URL(request.url()), "searxng") &&
         request.method() === "DELETE" &&
         new URL(request.url()).searchParams.get("confirmInUse") === "true",
     );
-    await confirm.click();
-    await confirmed;
+    await page.getByTestId("search-confirm-action").click();
+    await confirmedFirstTry;
+    await expect(dialog).toBeHidden({ timeout: 10_000 });
+  });
+
+  test("a stale read: an agent pinned after the page loaded still gets a 409, the dialog reopens naming it, and the confirmed retry succeeds", async ({
+    page,
+  }) => {
+    // Overrides the `beforeEach` stub above with a status whose row shows NO
+    // usage at all — the stale-UI case this test is actually about, where
+    // nothing the console has read yet says anything depends on the row.
+    await page.route(
+      (url) => isSearchStatus(url),
+      async (route: Route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        const stale = searxngStatus();
+        stale.providers[0].usedBy = undefined;
+        await route.fulfill({ json: stale });
+      },
+    );
+
+    const AGENT_IN_USE_BODY = {
+      error: "SearXNG is pinned by an agent.",
+      code: "in_use",
+      usedBy: { agents: [{ id: "a1", name: "Researcher" }] },
+    };
+
+    await page.route(
+      (url) => isSearchProviderSlug(url, "searxng"),
+      async (route: Route) => {
+        if (route.request().method() !== "DELETE") return route.fallback();
+        const confirmed = new URL(route.request().url()).searchParams.get("confirmInUse");
+        if (confirmed !== "true") {
+          await route.fulfill({ status: 409, json: AGENT_IN_USE_BODY });
+          return;
+        }
+        await route.fulfill({ json: emptyStatus() });
+      },
+    );
+
+    await openSearch(page);
+
+    await page.getByTestId("search-provider-searxng-menu").click();
+    await page.getByRole("menuitem", { name: "Remove" }).click();
+
+    const dialog = page.getByTestId("search-confirm");
+    await expect(dialog).toBeVisible();
+    // Nothing shown as used yet — every read this test controls says so.
+    await expect(dialog).not.toContainText("Used by");
+
+    // First click: `shownUsedBy` is empty, so this attempt sends no
+    // `confirmInUse` at all. The stub answers 409, and the dialog must stay
+    // open, now naming the agent the host found.
+    const firstAttempt = page.waitForRequest(
+      (request) =>
+        isSearchProviderSlug(new URL(request.url()), "searxng") && request.method() === "DELETE",
+    );
+    await page.getByTestId("search-confirm-action").click();
+    const first = await firstAttempt;
+    expect(new URL(first.url()).searchParams.get("confirmInUse")).not.toBe("true");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Used by 1 agent: Researcher.");
+
+    // Second click, now informed: sends `confirmInUse=true` and succeeds.
+    const confirmedRetry = page.waitForRequest(
+      (request) =>
+        isSearchProviderSlug(new URL(request.url()), "searxng") &&
+        request.method() === "DELETE" &&
+        new URL(request.url()).searchParams.get("confirmInUse") === "true",
+    );
+    await page.getByTestId("search-confirm-action").click();
+    await confirmedRetry;
     await expect(dialog).toBeHidden({ timeout: 10_000 });
   });
 

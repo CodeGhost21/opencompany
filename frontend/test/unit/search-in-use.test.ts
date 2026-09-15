@@ -46,6 +46,16 @@ describe("guardedOutcome", () => {
     });
   });
 
+  it("carries the refusal's own usedBy through, fresher than whatever the dialog opened with (round-3 review, P1-2)", () => {
+    const err = new ApiError(409, "in_use", "Exa is the search default.", true);
+    err.usedBy = { default: true };
+    expect(guardedOutcome(err, false)).toEqual({
+      action: "reopen",
+      message: "Exa is the search default.",
+      usedBy: { default: true },
+    });
+  });
+
   it("closes when a CONFIRMED attempt is refused in_use again", () => {
     // The confirmed write itself failed — this is not the stale-UI case the
     // reopen exists for, so it must not loop forever showing the same notice.
