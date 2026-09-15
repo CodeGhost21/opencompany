@@ -859,7 +859,6 @@ async fn edit_agent(
         .harness
         .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
 
-
     // A coding CLI this build drives is bindable without any `[[harness]]`
     // naming it, and `GET {scope}/harnesses` offers exactly those ids in the
     // picker. But `harness_by_id` resolves an `ACP_AGENTS` id on *any* build
