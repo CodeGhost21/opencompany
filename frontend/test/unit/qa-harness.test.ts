@@ -39,7 +39,7 @@ import type {
 } from "@/api/workflows";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const SCRIPT = resolve(here, "../../../qa/oc-qa.js");
+const SCRIPT = resolve(here, "../../../scripts/qa/oc-qa.js");
 
 /** One reported check, as the script emits it. */
 interface Row {
