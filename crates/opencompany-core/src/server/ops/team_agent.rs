@@ -902,6 +902,20 @@ async fn edit_agent(
         .clone()
         .unwrap_or_else(|| declared_provider(&record, &agent_id));
 
+    // Keys rework (#2306), round-3a review P2-2: held from the provider
+    // check below through the record save (`record.upsert_agent_override` /
+    // `agent.provider = …` and `store().save(&record)`), so a concurrent
+    // provider delete, disable or key clear cannot pass its own `usedBy`
+    // check against a pair this request is about to write — every provider
+    // mutation that could strand this pair now takes the same lock.
+    // `write_lock` (the roster lock, taken above) always outranks it here:
+    // this is the only site that holds both, and it always acquires
+    // `write_lock` first — see `index_lock`'s own lock-order note in
+    // `company/inference/store.rs`. Never held across a network call: the
+    // check below is a secret-store read, and the ACP branch above returns
+    // before ever reaching here.
+    let _index_guard = crate::company::inference::store::index_lock(company.id()).await;
+
     if on_acp {
         // An ACP agent brings its own credential — a provider naming a
         // console-managed one has nowhere to go, independent of `model`.
@@ -1124,12 +1138,14 @@ async fn edit_agent(
 
     company.runtime.store().save(&record).await?;
 
-    // Release the write lock before the possible rebuild below (PR #1875
-    // review finding): `rebuild_company` now serializes its own
-    // load-through-save of the record on this same lock, and this task
-    // holding it while calling in would deadlock a non-reentrant
-    // `tokio::sync::Mutex` against itself. The save above already landed
-    // under the lock; nothing past this point still needs it held.
+    // Release both locks before the possible rebuild below (PR #1875 review
+    // finding): `rebuild_company` now serializes its own load-through-save of
+    // the record on this same write lock, and this task holding it while
+    // calling in would deadlock a non-reentrant `tokio::sync::Mutex` against
+    // itself. The save above already landed under both locks; nothing past
+    // this point still needs either held. Released in acquisition-reverse
+    // order (`index_lock`, taken second, drops first).
+    drop(_index_guard);
     drop(_lock);
 
     // A harness or model change needs the runtime rebuilt, not just saved.

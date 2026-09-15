@@ -2083,6 +2083,12 @@ pub struct TenantProvider {
 /// takes one, not an id.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentPin {
+    // Not yet read anywhere: round-3a review P1-1 (the pin-failure sentences
+    // wired to `copy::pair_broken`, which is where the structured id this
+    // travels with `agent_name` for gets consumed) is still open. Kept rather
+    // than removed so that fix does not have to re-add it; `#[allow]` rather
+    // than a leading underscore so it stays the field name that fix expects.
+    #[allow(dead_code)]
     pub agent_id: String,
     pub agent_name: String,
     pub choice: inference::store::ModelChoice,

@@ -99,6 +99,12 @@ pub const PROVIDER_INDEX_KEY: &str = "inference/providers";
 /// second. No path here takes `slot_guard` at all, so that order is the only
 /// one that can ever be built; keep it that way rather than introducing a
 /// second acquisition order two call sites could deadlock on.
+///
+/// `server::ops::team_agent::edit_agent` also holds its own per-company
+/// roster write lock (`company_write_lock`) across the same span. It always
+/// takes that lock first and this one second — the reverse never happens
+/// anywhere in this codebase, so keep it that way rather than building a
+/// second order those two locks could deadlock on.
 static INDEX_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(Mutex::default);
 
@@ -1337,6 +1343,62 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), index_lock(&b))
             .await
             .expect("a different company's lock must not wait on this one");
+    }
+
+    /// Round-3a review P2-2's exact scenario, reproduced directly: "a
+    /// concurrent PATCH that pins `acme` and a DELETE of `acme` can both pass
+    /// their checks." Two different guarded mutations — not two holders of
+    /// the same shape, which [`index_lock_serialises_two_holders_on_the_same_company`]
+    /// already covers — each doing a check, a yield (so a race would need to
+    /// interleave right here to go unnoticed), then a write. If the lock
+    /// wired into both call sites actually serialises them, the delete's read
+    /// of the row always happens either wholly before or wholly after the
+    /// pin's check-and-write, never in between it.
+    #[tokio::test]
+    async fn a_pin_and_a_delete_of_the_same_provider_never_interleave() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let company = CompanyId::new("acme-co");
+        let row_present = Arc::new(AtomicBool::new(true));
+        let pin_saw_row_gone_mid_write = Arc::new(AtomicBool::new(false));
+
+        let pin_row_present = row_present.clone();
+        let pin_saw_gone = pin_saw_row_gone_mid_write.clone();
+        let pin_company = company.clone();
+        let pin = tokio::spawn(async move {
+            let _guard = index_lock(&pin_company).await;
+            // Check: the pin validates the row exists, exactly as
+            // `server::ops::team_agent::edit_agent` does under this lock.
+            let existed = pin_row_present.load(Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            // Write: only meaningful if the row was still there when checked —
+            // a delete that ran inside this critical section would make this
+            // pin write against a row it never actually validated.
+            if existed && !pin_row_present.load(Ordering::SeqCst) {
+                pin_saw_gone.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let delete_row_present = row_present.clone();
+        let delete_company = company.clone();
+        let delete = tokio::spawn(async move {
+            let _guard = index_lock(&delete_company).await;
+            // Check: the delete reads `usedBy`, exactly as
+            // `server::ops::inference::providers::delete_provider` does under
+            // this lock.
+            let _used_by_snapshot = delete_row_present.load(Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            // Write: the row goes.
+            delete_row_present.store(false, Ordering::SeqCst);
+        });
+
+        pin.await.unwrap();
+        delete.await.unwrap();
+        assert!(
+            !pin_saw_row_gone_mid_write.load(Ordering::SeqCst),
+            "the pin's check and write must never straddle the delete's write — the lock \
+             wired into both handlers should have serialised them"
+        );
     }
 
     // ---- check_model_id (keys rework, issue #2306, slice 2c) ---------------
