@@ -400,7 +400,7 @@ test.describe("KR-L3-01: the Remove-key dialog names dependents and honors confi
 
     // Named the moment the dialog opens — no `PUT` has happened yet.
     await expect(page.getByTestId("account-remove-key-reason")).toHaveText(
-      "The TinyHumans account key's copies are used by LLM, Composio.",
+      "Used by TinyHumans on the LLM page and by Composio.",
     );
 
     const cleared = page.waitForRequest(
@@ -433,7 +433,7 @@ test.describe("KR-L3-01: the Remove-key dialog names dependents and honors confi
       {
         status: 409,
         json: {
-          error: "The TinyHumans account key's copies are used by Composio.",
+          error: "Used by Composio.",
           code: "in_use",
           usedBy: { surfaces: ["composio"] },
         },
@@ -465,7 +465,7 @@ test.describe("KR-L3-01: the Remove-key dialog names dependents and honors confi
       page.getByRole("heading", { name: "Remove this company's account key?" }),
     ).toBeVisible();
     await expect(page.getByTestId("account-remove-key-reason")).toHaveText(
-      "The TinyHumans account key's copies are used by Composio.",
+      "Used by Composio.",
     );
 
     const secondAttempt = page.waitForRequest(

@@ -310,22 +310,25 @@ async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>,
     }))
 }
 
-/// §2's fixed sentence for "a key clear/disable with only `surfaces`":
-/// `"<Label>'s key is used by <surfaces, comma-joined>."`, applied to the
-/// account key itself — there is no better subject noun than the thing being
-/// cleared, the same shape [`super::composio`]'s own token guard takes for
-/// Composio's key.
+/// One plain sentence naming every surface a clear would strand, e.g. "Used
+/// by TinyHumans on the LLM page and by Composio." or, with one surface,
+/// "Used by Composio." Matches the operator's pattern (2026-09-15 review) —
+/// the upfront copy in `CredentialStatusDto.used_by` and this 409 message are
+/// built from the same phrases so they can never disagree.
 fn account_key_in_use_message(surfaces: &[UsedBySurface]) -> String {
-    let names = surfaces
+    let phrases: Vec<&str> = surfaces
         .iter()
         .map(|s| match s {
-            UsedBySurface::Llm => "LLM",
+            UsedBySurface::Llm => "TinyHumans on the LLM page",
             UsedBySurface::Composio => "Composio",
             UsedBySurface::Search => "Search",
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("The TinyHumans account key's copies are used by {names}.")
+        .collect();
+    match phrases.split_last() {
+        None => String::new(),
+        Some((last, [])) => format!("Used by {last}."),
+        Some((last, rest)) => format!("Used by {} and by {last}.", rest.join(", ")),
+    }
 }
 
 /// The real inference prober in production, or a per-company override in

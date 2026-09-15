@@ -71,9 +71,9 @@ export function confirmInUseFor(reason: string | null): boolean {
   return reason !== null;
 }
 
-/** Display names for `UsedBy.surfaces` — never the raw wire id (in-use-guards.md §2, X7). */
-const SURFACE_LABELS: Record<"llm" | "composio" | "search", string> = {
-  llm: "LLM",
+/** Display phrases for `UsedBy.surfaces` — never the raw wire id (in-use-guards.md §2, X7). */
+const SURFACE_PHRASES: Record<"llm" | "composio" | "search", string> = {
+  llm: "TinyHumans on the LLM page",
   composio: "Composio",
   search: "Search",
 };
@@ -82,10 +82,13 @@ const SURFACE_LABELS: Record<"llm" | "composio" | "search", string> = {
  * The account key's own in-use sentence, for the one shape its `usedBy` ever
  * takes: `surfaces` only (`account_key_used_by`, `src/server/ops/
  * company_key.rs`, never populates `default` or `agents` — those describe an
- * inference *provider* row, which the account key is not). Mirrors that
- * function's own `account_key_in_use_message` wording exactly, so the text
- * shown from the upfront status read cannot disagree with the text a later
- * `409` would answer with for the same `usedBy`.
+ * inference *provider* row, which the account key is not). One plain
+ * sentence naming every surface, e.g. "Used by TinyHumans on the LLM page and
+ * by Composio." or, with one surface, "Used by Composio." (operator pattern,
+ * 2026-09-15 review). Mirrors that function's own `account_key_in_use_message`
+ * wording exactly, so the text shown from the upfront status read cannot
+ * disagree with the text a later `409` would answer with for the same
+ * `usedBy`.
  *
  * `null` when nothing depends on the key — the dialog's cue to fall back to
  * the page's generic {@link REMOVAL_CONSEQUENCE} text (`./account.ts`).
@@ -93,6 +96,8 @@ const SURFACE_LABELS: Record<"llm" | "composio" | "search", string> = {
 export function accountKeyUsedByMessage(usedBy: UsedBy | undefined | null): string | null {
   const surfaces = usedBy?.surfaces;
   if (!surfaces?.length) return null;
-  const names = surfaces.map((surface) => SURFACE_LABELS[surface]).join(", ");
-  return `The TinyHumans account key's copies are used by ${names}.`;
+  const phrases = surfaces.map((surface) => SURFACE_PHRASES[surface]);
+  const last = phrases[phrases.length - 1];
+  const rest = phrases.slice(0, -1);
+  return rest.length === 0 ? `Used by ${last}.` : `Used by ${rest.join(", ")} and by ${last}.`;
 }

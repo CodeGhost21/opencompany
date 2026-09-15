@@ -485,7 +485,7 @@ describe("ApiKeyView's Remove-key dialog names dependents (KR-L3-01)", () => {
     await press('[data-testid="account-row-menu"]');
     await press('[data-testid="account-remove-key"]');
     expect(document.querySelector('[data-testid="account-remove-key-reason"]')?.textContent).toBe(
-      "The TinyHumans account key's copies are used by LLM, Composio.",
+      "Used by TinyHumans on the LLM page and by Composio.",
     );
 
     await press('[data-testid="account-remove-key-confirm"]');
@@ -504,7 +504,7 @@ describe("ApiKeyView's Remove-key dialog names dependents (KR-L3-01)", () => {
       throw new ApiError(
         409,
         "in_use",
-        "The TinyHumans account key's copies are used by Composio.",
+        "Used by Composio.",
         true,
       );
     };
@@ -526,7 +526,7 @@ describe("ApiKeyView's Remove-key dialog names dependents (KR-L3-01)", () => {
     expect(writes).toEqual([{ key: "" }]);
     expect(document.body.textContent ?? "").toContain("Remove this company's account key?");
     expect(document.querySelector('[data-testid="account-remove-key-reason"]')?.textContent).toBe(
-      "The TinyHumans account key's copies are used by Composio.",
+      "Used by Composio.",
     );
 
     // Second, now-informed press: confirms, and lands.

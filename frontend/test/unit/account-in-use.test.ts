@@ -24,7 +24,7 @@ describe("isInUseRefusal", () => {
     const err = new ApiError(
       409,
       "in_use",
-      "The TinyHumans account key's copies are used by LLM.",
+      "Used by TinyHumans on the LLM page.",
       true,
     );
     expect(isInUseRefusal(err)).toBe(true);
@@ -44,12 +44,12 @@ describe("isInUseRefusal", () => {
 
 describe("guardedOutcome", () => {
   const inUse = () =>
-    new ApiError(409, "in_use", "The TinyHumans account key's copies are used by LLM.", true);
+    new ApiError(409, "in_use", "Used by TinyHumans on the LLM page.", true);
 
   it("reopens with the host's message on a first, unconfirmed in-use refusal", () => {
     expect(guardedOutcome(inUse(), false)).toEqual({
       action: "reopen",
-      message: "The TinyHumans account key's copies are used by LLM.",
+      message: "Used by TinyHumans on the LLM page.",
     });
   });
 
@@ -82,7 +82,7 @@ describe("confirmInUseFor", () => {
   });
 
   it("is true once the dialog is showing a reason, from either source", () => {
-    expect(confirmInUseFor("The TinyHumans account key's copies are used by LLM.")).toBe(true);
+    expect(confirmInUseFor("Used by TinyHumans on the LLM page.")).toBe(true);
   });
 
   it("is true even for an empty-string reason — presence, not content, decides", () => {
@@ -102,13 +102,13 @@ describe("accountKeyUsedByMessage", () => {
 
   it("names one surface", () => {
     expect(accountKeyUsedByMessage({ surfaces: ["composio"] })).toBe(
-      "The TinyHumans account key's copies are used by Composio.",
+      "Used by Composio.",
     );
   });
 
   it("names every surface, in the wire order, with display labels rather than the raw ids", () => {
     expect(accountKeyUsedByMessage({ surfaces: ["llm", "composio"] })).toBe(
-      "The TinyHumans account key's copies are used by LLM, Composio.",
+      "Used by TinyHumans on the LLM page and by Composio.",
     );
   });
 });
