@@ -9,11 +9,22 @@ The same two images deploy everywhere below; only the wiring differs.
 
 ## Local / any Docker host — Compose
 
+Everything Docker lives in this directory: `Dockerfile` (built with the
+repository root as its context, so run it as `docker build -f deploy/Dockerfile .`
+— BuildKit reads `Dockerfile.dockerignore` beside it), `entrypoint.sh`,
+`docker-compose.yml`, the `docker-compose.dev.yml` hot-reload overlay and
+`.env.example`.
+
 ```sh
+cd deploy
 cp .env.example .env
 # set OPENCOMPANY_COMPANY to the module you want, then:
 docker compose up --build
 ```
+
+From the repository root, `docker compose -f deploy/docker-compose.yml up --build`
+is the same thing — Compose reads `.env` from the compose file's directory
+either way.
 
 - Console → http://localhost:5173 (proxies the API, so it's same-origin).
 - Host API → http://localhost:8080 (e.g. `/healthz`, `/api/v1/companies`).
@@ -25,7 +36,7 @@ Switch companies by editing `OPENCOMPANY_COMPANY` in `.env` and re-running
 For a selectable memory engine, add `tinymemory` (hosted engines —
 Supermemory, Mem0, Cognee — plus the `null` driver) and `tinymemory-embedded`
 (the durable in-pod `namespace` store) to `OPENCOMPANY_FEATURES`, then select
-one with the `OPENCOMPANY_MEMORY*` variables (`.env.example` has the block;
+one with the `OPENCOMPANY_MEMORY*` variables (`deploy/.env.example` has the block;
 `docs/spec/runtime/memory-engine.md` has the full guide and the
 engine-switch runbook).
 

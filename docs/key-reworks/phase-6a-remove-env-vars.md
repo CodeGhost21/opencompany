@@ -99,7 +99,7 @@ Frontend and fixtures: `frontend/playwright.config.ts:198-243`,
 Docs and examples: part 2 §9. Tests: part 2 §10.
 
 Not affected (verified): `docker-compose.yml:28` and `.env.example:24` pass only
-`TINYHUMANS_API_KEY`; `docker/entrypoint.sh` and `.github/workflows/` name none
+`TINYHUMANS_API_KEY`; `deploy/entrypoint.sh` and `.github/workflows/` name none
 of the four.
 
 ## 2. Current code

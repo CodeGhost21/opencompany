@@ -1074,7 +1074,7 @@ jobs:
         run: scripts/ci/init-vendored-submodules.sh
 
       # `--features openhuman` links system libraries the default build does not.
-      # Mirrors the builder stage of the repo `Dockerfile`: OpenSSL headers
+      # Mirrors the builder stage of `deploy/Dockerfile`: OpenSSL headers
       # (native-tls → openssl-sys, via `motosan-ai-oauth` → `hyper-tls` in the
       # vendored openhuman tree) and the X11 dev libs that openhuman's
       # unconditional `rdev`/`arboard` deps link against even in a headless

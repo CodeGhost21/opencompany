@@ -1265,7 +1265,7 @@ impl CompanyRuntime {
             // `#[cfg(feature = "openhuman")]`, so in a default-feature build
             // naming it sends the operator looking for a method that is not
             // compiled into their binary — and that build is not hypothetical:
-            // `Dockerfile`'s `ARG FEATURES=""` ships it as a first-class
+            // `deploy/Dockerfile`'s `ARG FEATURES=""` ships it as a first-class
             // configuration, and Cargo.toml describes the default as offline
             // and echo-brained. There the thing that would actually help is to
             // rebuild with the feature.
@@ -1280,7 +1280,7 @@ impl CompanyRuntime {
             #[cfg(not(feature = "openhuman"))]
             const REMEDY: &str = "This binary was built without the `openhuman` feature, so it \
                  has no harness to wire — rebuild with `--features openhuman` (the `FEATURES` \
-                 build arg in `Dockerfile`), or move the card by hand.";
+                 build arg in `deploy/Dockerfile`), or move the card by hand.";
             tracing::warn!(
                 company = %self.id,
                 task = %task.id,

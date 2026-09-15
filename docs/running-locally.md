@@ -80,9 +80,9 @@ company. Each company uses a separate Compose project and persistent data
 volume. `down` removes its containers and network but keeps that volume;
 `down -v` deletes the volume and its data too.
 
-For custom ports, credentials, or feature flags, copy `.env.example` to `.env`
+For custom ports, credentials, or feature flags, copy `deploy/.env.example` to `deploy/.env`
 before launching. For production-like images without source mounts or hot
-reload, run `OPENCOMPANY_COMPANY=marketing docker compose up --build` directly.
+reload, run `OPENCOMPANY_COMPANY=marketing docker compose -f deploy/docker-compose.yml up --build` directly.
 
 ## Feature flags
 

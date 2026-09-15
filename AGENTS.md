@@ -163,7 +163,7 @@ injects its environment. When developing hosted behavior, know the seams:
   `OPENHUMAN_WORKSPACE`, because the vendored runtime otherwise defaults its
   durable agent journal into `$HOME` — the read-only root filesystem in a tenant
   (issue #446). An unwritable journal root aborts boot; see
-  `docs/spec/runtime/storage.md`. `docker/entrypoint.sh`
+  `docs/spec/runtime/storage.md`. `deploy/entrypoint.sh`
   additionally forwards it as `--home "$OPENCOMPANY_DATA_DIR"`, which resolves
   identically (the flag outranks the variable). Locally it is the only knob that
   isolates two `serve` processes from each other — see

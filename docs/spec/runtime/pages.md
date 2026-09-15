@@ -70,7 +70,7 @@ token-budget pressure.
 `pages_write` compiles `page.tsx` synchronously, whenever `source` is given,
 using [`swc_core`](https://github.com/swc-project/swc) — a pure-Rust
 TypeScript/JSX compiler, chosen specifically because the runtime image has no
-Node (`Dockerfile`'s builder stage; only the separate frontend Docker build
+Node (`deploy/Dockerfile`'s builder stage; only the separate frontend Docker build
 stage does). Compilation therefore has to be a Rust-native step, done inside
 this binary, at request time.
 
