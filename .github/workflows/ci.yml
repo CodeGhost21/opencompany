@@ -247,9 +247,9 @@ jobs:
               # bare cargo lines below.
               - 'crates/opencompany-core/**'
               - 'crates/opencompany-tui/**'
-              # build.rs embeds these and declares rerun-if-changed on them.
+              # build.rs embeds every bundle's agents/ and the global baseline
+              # at companies/_globals, and declares rerun-if-changed on them.
               - 'companies/**'
-              - 'globals/**'
               # Read relative to CARGO_MANIFEST_DIR at test time.
               - 'skills/**'
               - 'vendor/**'

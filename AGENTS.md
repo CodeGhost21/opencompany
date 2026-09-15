@@ -9,7 +9,7 @@ manifest per flavour under `crates/`:
   crate `opencompany`, binary `opencompany`. Its `src/`, `tests/`, `benches/`,
   `examples/` and `build.rs` live beneath that manifest. Every `src/...` path
   in this file and under `docs/` is short for `crates/opencompany-core/src/...`;
-  the data the crate embeds and reads (`companies/`, `globals/`, `skills/`,
+  the data the crate embeds and reads (`companies/` — the baseline at `companies/_globals/` included — `skills/`,
   `frontend/`, `vendor/`) stays at the repository root, `../..` from
   `CARGO_MANIFEST_DIR`.
 - `crates/opencompany-app`: the Tauri desktop shell. Excluded from the
@@ -26,7 +26,7 @@ source module directories:
   and the `derived/` folder they render into (`docs/spec/runtime/ledgers.md`)
 - `src/globals/`: the global baseline — the agents, workflows, skills and
   starting tool belt every company gets whichever vertical it started from,
-  authored in `globals/` and embedded at build time
+  authored in `companies/_globals/` and embedded at build time
   (`docs/spec/runtime/globals.md`)
 - `src/openhuman/`: launcher and integration seams for the vendored OpenHuman checkout
 - `src/tiny/`: optional TinyAgents crate feature/status surface
@@ -35,7 +35,7 @@ The command-line entrypoint lives in `src/bin/opencompany.rs`. Business types
 are data-only definitions under `companies/` (a `company.toml` manifest plus a
 `README.md` — not Cargo crates), loaded at runtime via `opencompany serve
 --company companies/<name>`. What every company has regardless of which of
-those it started from is authored beside them in `globals/`. The operator
+those it started from is authored beside them in `companies/_globals/`. The operator
 console is a Vite/React app under `frontend/`. Design notes and module specifications live in `docs/`, with
 `docs/spec/README.md` as the top-level architecture reference and
 `docs/modules/` holding per-surface design docs.

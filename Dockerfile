@@ -41,7 +41,7 @@ RUN apt-get update \
 # `build.rs` embeds the shipped company agents and `src/desktop.rs` (both under
 # `crates/opencompany-core/`) embeds each
 # preset manifest, so the complete companies tree remains a real build input;
-# it also embeds the global baseline (`globals/`) and the shared skills library
+# it also embeds the global baseline (`companies/_globals/`) and the shared skills library
 # (`skills/`), which a hosted tenant has no checkout to read from disk.
 # `vendor/` backs the path dependencies and Cargo patch table.
 #
@@ -55,7 +55,6 @@ COPY crates/opencompany-core ./crates/opencompany-core
 COPY crates/opencompany-tui ./crates/opencompany-tui
 COPY vendor ./vendor
 COPY companies ./companies
-COPY globals ./globals
 COPY skills ./skills
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

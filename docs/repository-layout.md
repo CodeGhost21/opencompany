@@ -71,7 +71,7 @@ vendor/openhuman/vendor/tinyagents/
 | `server` | The Axum router |
 | `openhuman` | Launcher seams |
 | `tiny` | Vendored TinyAgents status |
-| `globals` | The global baseline every company starts from |
+| `companies/_globals` | The global baseline every company starts from |
 | `ledger` | Dynamic ledgers and the append-only fold |
 | `economy` | tiny.place identity, Agent Cards, SIWX auth, x402 payments |
 | `ingest` | Dropped files and links into memory |

@@ -29,7 +29,7 @@ Every folder follows the same shape:
   [`../docs/spec/runtime/tools.md`](../docs/spec/runtime/tools.md).
 - `tasks.toml` — the setup work this vertical starts with, seeded onto the
   board in To-do at first boot, on top of the baseline's own cards in
-  [`../globals/tasks.toml`](../globals/tasks.toml). Seeded cards never enter a
+  [`_globals/tasks.toml`](_globals/tasks.toml). Seeded cards never enter a
   column that dispatches a run.
 
 Adding a business is a new folder, not a new crate. The behavior lives entirely
