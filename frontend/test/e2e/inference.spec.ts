@@ -256,20 +256,27 @@ test("a second provider holds a credential of its own", async ({ page }) => {
   // only slot there was.
   await openInference(page);
 
-  for (const name of ["E2E One", "E2E Two"]) {
-    await addCustom(page);
-    await page.locator("#inference-connect-name").fill(name);
-    await page.locator("#inference-connect-url").fill(UNREACHABLE);
-    await page.locator("#inference-connect-key").fill(`pw-e2e-${name}-${Date.now()}`);
-    await page.getByTestId("inference-connect-submit").click();
-    await pickModel(page, "e2e-model");
-    await expect(page.getByTestId("inference-connect-provider")).toHaveCount(0, {
-      timeout: 30_000,
-    });
-  }
+  try {
+    for (const name of ["E2E One", "E2E Two"]) {
+      await addCustom(page);
+      await page.locator("#inference-connect-name").fill(name);
+      await page.locator("#inference-connect-url").fill(UNREACHABLE);
+      await page.locator("#inference-connect-key").fill(`pw-e2e-${name}-${Date.now()}`);
+      await page.getByTestId("inference-connect-submit").click();
+      await pickModel(page, "e2e-model");
+      await expect(page.getByTestId("inference-connect-provider")).toHaveCount(0, {
+        timeout: 30_000,
+      });
+    }
 
-  await expect(page.getByTestId("inference-provider-e2e-one")).toContainText("•••• configured");
-  await expect(page.getByTestId("inference-provider-e2e-two")).toContainText("•••• configured");
+    await expect(page.getByTestId("inference-provider-e2e-one")).toContainText("•••• configured");
+    await expect(page.getByTestId("inference-provider-e2e-two")).toContainText("•••• configured");
+  } finally {
+    // Two enabled, unreachable providers left behind is twice the hazard of
+    // one (see `deleteProvider`) — clear both, whatever the assertions found.
+    await deleteProvider(page, "e2e-one");
+    await deleteProvider(page, "e2e-two");
+  }
 });
 
 test("the add dialog stops offering a provider once it is connected", async ({ page }) => {
