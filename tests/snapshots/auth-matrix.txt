@@ -1804,6 +1804,13 @@ POST /api/v1/companies/{id}/composio/authorize must-change-password-admin refuse
 POST /api/v1/companies/{id}/composio/authorize platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/companies/{id}/composio/authorize tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/companies/{id}/composio/authorize tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/composio/tinyhumans/key/from-account admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/composio/tinyhumans/key/from-account anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/composio/tinyhumans/key/from-account member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/composio/tinyhumans/key/from-account must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/composio/tinyhumans/key/from-account platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/composio/tinyhumans/key/from-account tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/composio/tinyhumans/key/from-account tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/companies/{id}/connections/{provider}/disconnect admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/companies/{id}/connections/{provider}/disconnect anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/companies/{id}/connections/{provider}/disconnect member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
@@ -2350,6 +2357,13 @@ POST /api/v1/company/composio/authorize must-change-password-admin refused:403:p
 POST /api/v1/company/composio/authorize platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/company/composio/authorize tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/company/composio/authorize tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/composio/tinyhumans/key/from-account admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/composio/tinyhumans/key/from-account anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/composio/tinyhumans/key/from-account member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/composio/tinyhumans/key/from-account must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/composio/tinyhumans/key/from-account platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/composio/tinyhumans/key/from-account tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/composio/tinyhumans/key/from-account tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/company/connections/{provider}/disconnect admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/company/connections/{provider}/disconnect anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
 POST /api/v1/company/connections/{provider}/disconnect member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-

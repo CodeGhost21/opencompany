@@ -59,8 +59,8 @@ mod fan_out;
 mod types;
 
 pub use fan_out::{
-    CopyDecision, InferenceProber, LiveProber, SlotFacts, decide_copy, fan_out, fan_out_note,
-    slot_facts, slot_guard,
+    CopyDecision, InferenceProber, LiveProber, SlotFacts, copy_account_key_to_composio,
+    decide_copy, fan_out, fan_out_note, slot_facts, slot_guard,
 };
 pub use types::{FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport};
 

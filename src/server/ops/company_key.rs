@@ -192,59 +192,10 @@ struct MutationResponse {
     used_by: Option<UsedBy>,
 }
 
-/// Wire spelling of one [`company_key::SlotReport`]
-/// (`docs/key-reworks/phase-4a-account-key-fanout.md` §3.1): `outcome` is
-/// `filled | rotated | cleared | rolledBack | kept | skipped | failed | ok`;
-/// `detail` is the camelCase [`company_key::SkipReason`], the fixed string
-/// `"store"` for a plain [`company_key::SlotOutcome::Failed`], or the probe
-/// class (`auth`, `endpoint`, …) for a health-slot failure.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SlotReportDto {
-    slot: company_key::Slot,
-    outcome: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<&'static str>,
-}
-
-impl From<&company_key::SlotReport> for SlotReportDto {
-    fn from(report: &company_key::SlotReport) -> Self {
-        use company_key::SlotOutcome;
-        let (outcome, detail) = match report.outcome {
-            SlotOutcome::Filled => ("filled", None),
-            SlotOutcome::Rotated => ("rotated", None),
-            SlotOutcome::Cleared => ("cleared", None),
-            SlotOutcome::RolledBack => ("rolledBack", None),
-            SlotOutcome::Kept(reason) => ("kept", Some(skip_reason_str(reason))),
-            SlotOutcome::Skipped(reason) => ("skipped", Some(skip_reason_str(reason))),
-            SlotOutcome::Failed => ("failed", Some("store")),
-            SlotOutcome::HealthOk => ("ok", None),
-            SlotOutcome::HealthFailed(class) => ("failed", Some(class.as_str())),
-        };
-        Self {
-            slot: report.slot,
-            outcome,
-            detail,
-        }
-    }
-}
-
-/// The camelCase wire spelling of a [`company_key::SkipReason`].
-fn skip_reason_str(reason: company_key::SkipReason) -> &'static str {
-    use company_key::SkipReason;
-    match reason {
-        SkipReason::AlreadyCurrent => "alreadyCurrent",
-        SkipReason::CustomKey => "customKey",
-        SkipReason::AlreadyEmpty => "alreadyEmpty",
-        SkipReason::RowExists => "rowExists",
-        SkipReason::LegacyManagedConfig => "legacyManagedConfig",
-        SkipReason::NeedsModel => "needsModel",
-        SkipReason::DefaultAlreadySet => "defaultAlreadySet",
-        SkipReason::InferenceNotWritten => "inferenceNotWritten",
-        SkipReason::InferenceRejected => "inferenceRejected",
-        SkipReason::KeyCleared => "keyCleared",
-    }
-}
+/// Wire spelling of one [`company_key::SlotReport`] — moved to
+/// [`super::slot_report`] (keys rework #2306, slice 4c) so the Composio route
+/// serialises the same shape rather than a second copy of it.
+use super::slot_report::SlotReportDto;
 
 /// Whether a slot's outcome actually changed stored state — the same test a
 /// catalog-cache eviction and a journal line both apply (keys rework #2306,

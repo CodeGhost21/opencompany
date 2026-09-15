@@ -87,6 +87,10 @@ pub mod search;
 /// each teammate through [`team`], so setup has no second write path.
 pub mod setup;
 pub mod skills;
+/// The wire shape of one account-key fan-out slot report, shared by every
+/// route that answers with one (keys rework #2306, slices 4a and 4c). See
+/// [`slot_report`].
+mod slot_report;
 pub mod smtp;
 mod task_cost;
 pub mod task_export;
