@@ -207,6 +207,21 @@ struct TurnScratch {
     aside: Option<String>,
 }
 
+/// Whether two lines say the same thing, for the continuation guard.
+///
+/// Collapsed whitespace and nothing cleverer. The failure this catches is a
+/// seat re-emitting its own committed line verbatim, so anything fuzzier would
+/// risk swallowing a real conclusion that happens to quote the question.
+fn same_line(one: &str, two: &str) -> bool {
+    let words = |text: &str| {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    words(one) == words(two)
+}
+
 impl<'a> EpisodeDriver<'a> {
     /// Open a driver over `desk`, answering `task`.
     #[must_use]
@@ -344,6 +359,10 @@ impl<'a> EpisodeDriver<'a> {
         }];
         let retired: Vec<String> = Vec::new();
         let policy = self.desk.policy();
+        // Held separately because the referral block below binds its own
+        // `policy` (a `ReferralPolicy`), and the continuation inside it still
+        // renders a prompt for THIS room.
+        let episode_quorum = policy.quorum;
 
         let mut state = EpisodeState::opened(conversation.clone(), Sequence(trigger.value()));
         let mut turns = 0_u32;
@@ -385,7 +404,7 @@ impl<'a> EpisodeDriver<'a> {
                         thread_root: self.thread_root.map(EventSeq::value),
                     },
                     federation,
-                    self.desk.config.referral.peer_cap(),
+                    &self.desk.config.referral,
                     Arc::clone(&scope),
                 ),
                 self.desk.config.referral.policy(),
@@ -724,6 +743,15 @@ impl<'a> EpisodeDriver<'a> {
                 if moves::line_kind(&line).is_some()
                     && let Some((federation, queue, policy)) = referrals.as_ref()
                 {
+                    // Counted before and after, because the ledger is the
+                    // host's own record of which crossings actually ran a turn
+                    // on another desk. A crossing that FAILED also journals a
+                    // `hive-referral` row — "did not answer the question" — so
+                    // recognising an answer by its author would read a failure
+                    // notice as an answer and hand the asker a second turn to
+                    // respond to nothing. `asked` grows only on a real one;
+                    // `failed` and `declined` are counted apart from it.
+                    let answered_before = queue.ledger().await.asked.len();
                     super::referral::consider(
                         queue,
                         *policy,
@@ -737,6 +765,107 @@ impl<'a> EpisodeDriver<'a> {
                         seq,
                     )
                     .await;
+                    let answered = queue.ledger().await.asked.len() > answered_before;
+                    // **The asker's turn continues on the answer it paid for.**
+                    //
+                    // Landing the answer before the *next* speaker is chosen
+                    // stops the room voting past it, but it still leaves the one
+                    // member that spent its turn asking unable to use what came
+                    // back: its line was the question, and the reply is read by
+                    // whoever speaks after. Observed live on
+                    // `companies/retail_co` — `cancellations` asked `@#returns`,
+                    // the answer came home two rows later, and the room spent
+                    // seven of eleven turns re-asking a question that had
+                    // already been answered.
+                    //
+                    // So when a crossing answered, the same member speaks again
+                    // with it in context: one turn, two rows, which is the shape
+                    // ADR 0011 already accepted for an aside riding alongside a
+                    // move. The room's budget is untouched — `turns` counts the
+                    // round, not the rows — and a second pass is taken at most
+                    // once, so a continuation that asks again cannot regress.
+                    if let Some(transcript) = self.refolded(&conversation, answered).await {
+                        let visible = project_for(&turn, &transcript);
+                        let prompt = EpisodePrompt::new(
+                            member,
+                            &self.desk,
+                            &self.task,
+                            episode_quorum,
+                            &pins,
+                        )
+                        .with_recall(&recall)
+                        .with_elsewhere(&elsewhere)
+                        .with_unspoken(&unspoken)
+                        .with_peers(peers.clone())
+                        .with_trigger(Sequence(trigger.value()))
+                        .continuing()
+                        .render(&turn, &visible);
+                        scratch.aside = None;
+                        match self
+                            .line_from(&turn.agent_id, &prompt, &visible, &mut scratch)
+                            .await
+                        {
+                            // **A continuation that repeats the line is not a
+                            // second row.**
+                            //
+                            // The prompt now says what a continuation is for
+                            // (`EpisodePrompt::continuing`), which is the fix;
+                            // this is the guarantee. A seat that answers with
+                            // the line it already committed has added nothing,
+                            // and journaling it put the identical row on the
+                            // desk twice — visible in the console as one member
+                            // saying the same thing back to back, the second
+                            // copy carrying the crossing.
+                            //
+                            // Compared on collapsed whitespace, because that is
+                            // the whole of the observed difference: a genuinely
+                            // new conclusion is not a whitespace variant of the
+                            // question that earned it.
+                            Ok(second) if same_line(&second, &line) => {
+                                tracing::debug!(
+                                    company = %self.company,
+                                    desk = %self.desk.id,
+                                    agent = %turn.agent_id,
+                                    "[hive] a crossing's continuation repeated the line it \
+                                     already committed; not journaled"
+                                );
+                            }
+                            Ok(second) => {
+                                let second_seq = self
+                                    .events
+                                    .append(
+                                        &self.company,
+                                        CompanyEvent::AgentReply {
+                                            chat_id: self.desk.id.clone(),
+                                            agent_id: turn.agent_id.clone(),
+                                            text: second.clone(),
+                                            audience: Vec::new(),
+                                            steps: Vec::new(),
+                                            task_id: None,
+                                            outputs: Vec::new(),
+                                            parent: self.thread_root,
+                                            mentions: Vec::new(),
+                                            mention_depth: 0,
+                                        },
+                                    )
+                                    .await?;
+                                scope.record(second_seq);
+                                last_seq = Some(second_seq);
+                                lines.push((second_seq, turn.agent_id.clone(), second));
+                            }
+                            // The question and its answer are already durable,
+                            // and the room can read both. A continuation that
+                            // did not finish costs the episode nothing it did
+                            // not already have.
+                            Err(error) => tracing::warn!(
+                                company = %self.company,
+                                desk = %self.desk.id,
+                                agent = %turn.agent_id,
+                                error = %error,
+                                "[hive] the asker could not answer on its crossing; the room reads it regardless"
+                            ),
+                        }
+                    }
                 }
                 lines.push((seq, turn.agent_id.clone(), line));
                 if !spoken.contains(&turn.agent_id) {
@@ -798,6 +927,45 @@ impl<'a> EpisodeDriver<'a> {
     /// journaled **as-is** — the fold, not this host, decides what a line is
     /// worth, and a support that still misses is a real position the transcript
     /// should record.
+    /// The transcript re-folded, once a crossing this member opened has been
+    /// answered.
+    ///
+    /// `answered` is read off the referral ledger rather than off the rows: a
+    /// crossing that *failed* journals a `hive-referral` notice too ("did not
+    /// answer the question"), and recognising an answer by its author would
+    /// hand the asker a second turn to respond to nothing — which is exactly
+    /// what `a_far_turn_that_does_not_finish_leaves_the_room_running` caught.
+    /// `ReferralLedger::asked` counts only the crossings that ran a turn
+    /// somewhere else; `failed` and `declined` are counted apart from it.
+    ///
+    /// `None` when nothing answered, and the turn ends where it always did.
+    async fn refolded(
+        &self,
+        conversation: &Conversation,
+        answered: bool,
+    ) -> Option<Vec<tinyhivemind_hive::SessionMessage>> {
+        if !answered {
+            return None;
+        }
+        let log = EventLogSessionLog::new(
+            Arc::clone(&self.events),
+            self.company.clone(),
+            self.desk.id.clone(),
+            self.desk.name.clone(),
+        );
+        tinyhivemind_hive::project_session(
+            &log,
+            &SessionQuery {
+                conversation: conversation.clone(),
+                viewer: Viewer::Operator,
+                before: None,
+                window: SESSION_WINDOW,
+            },
+        )
+        .await
+        .ok()
+    }
+
     async fn line_from(
         &self,
         agent_id: &str,
