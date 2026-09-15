@@ -131,10 +131,70 @@ pub fn render_skill_md(doc: &SkillDoc) -> String {
     out
 }
 
+/// The bundle directory the skill registry lists first.
+///
+/// The global baseline (`companies/_globals`) is not a company, but its
+/// `skills/` are what `[skills].always` installs everywhere, so they head the
+/// registry and win any slug a vertical also ships.
+const BASELINE_BUNDLE: &str = "_globals";
+
+/// Loads the skill registry: every `<bundle>/skills/<slug>/SKILL.md` under a
+/// `companies/` directory, one document per slug, sorted by slug.
+///
+/// There is no separate shared library — a skill lives in the bundle it
+/// belongs to, and the registry is the union. When two bundles ship the same
+/// slug the first in registry order keeps it: the baseline, then every other
+/// bundle in name order. Each company still materializes its *own* bundle's
+/// copy (`harness::built_in::skills`); this only decides what the registry
+/// offers under that slug.
+///
+/// A missing `companies_dir` yields an empty list, exactly like
+/// [`load_dir_skills`]; a bundle without a `skills/` directory contributes
+/// nothing. A malformed `SKILL.md` anywhere fails the whole load, because a
+/// registry that silently dropped a document would serve a different catalog
+/// from the one on disk.
+pub fn load_catalog_skills(companies_dir: &Path) -> Result<Vec<SkillDoc>> {
+    if !companies_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(companies_dir).map_err(|source| OpenCompanyError::DataRead {
+        path: companies_dir.to_path_buf(),
+        source,
+    })?;
+    let mut bundles = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| OpenCompanyError::DataRead {
+            path: companies_dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir()
+            && let Some(name) = path.file_name().and_then(|name| name.to_str())
+        {
+            bundles.push((name.to_string(), path));
+        }
+    }
+    // Baseline first, then name order — the precedence the doc above promises.
+    bundles.sort_by(|a, b| {
+        (a.0 != BASELINE_BUNDLE)
+            .cmp(&(b.0 != BASELINE_BUNDLE))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    let mut by_slug: std::collections::BTreeMap<String, SkillDoc> =
+        std::collections::BTreeMap::new();
+    for (_, bundle) in bundles {
+        for doc in load_dir_skills(&bundle.join("skills"))? {
+            by_slug.entry(doc.slug.clone()).or_insert(doc);
+        }
+    }
+    Ok(by_slug.into_values().collect())
+}
+
 /// Loads every `<slug>/SKILL.md` under a directory, sorted by slug.
 ///
-/// Doubles as the repo-level shared skill registry loader. A missing directory
-/// yields an empty list; a subdirectory without a `SKILL.md` is skipped.
+/// A missing directory yields an empty list; a subdirectory without a
+/// `SKILL.md` is skipped. [`load_catalog_skills`] composes this per bundle.
 pub fn load_dir_skills(dir: &Path) -> Result<Vec<SkillDoc>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -296,17 +356,58 @@ mod tests {
     }
 
     #[test]
-    fn every_shipped_repo_skill_carries_a_version() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
-        let docs = load_dir_skills(&dir).expect("the shared registry parses");
-        assert!(!docs.is_empty(), "the shared registry is not empty");
+    fn every_baseline_skill_carries_a_version() {
+        // The baseline's skills are installed in every company, so an install
+        // of one must be pinnable to the revision it was made from.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../companies")
+            .join(BASELINE_BUNDLE)
+            .join("skills");
+        let docs = load_dir_skills(&dir).expect("the baseline skills parse");
+        assert!(!docs.is_empty(), "the baseline ships skills");
         for doc in &docs {
             assert!(
                 doc.version.is_some(),
-                "shared skill `{}` is missing `version` in its frontmatter",
+                "baseline skill `{}` is missing `version` in its frontmatter",
                 doc.slug
             );
         }
+    }
+
+    #[test]
+    fn catalog_is_the_union_of_bundles_with_the_baseline_winning_a_slug() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let write = |bundle: &str, slug: &str, name: &str| {
+            let dir = root.path().join(bundle).join("skills").join(slug);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: d\n---\n# {name}\n"),
+            )
+            .unwrap();
+        };
+        // `zeta` sorts after `alpha` but before nothing else; `_globals` must
+        // still win despite `_` sorting before letters only by accident.
+        write("zeta", "shared", "Zeta Shared");
+        write("alpha", "shared", "Alpha Shared");
+        write("_globals", "shared", "Baseline Shared");
+        write("alpha", "only-alpha", "Only Alpha");
+        // A bundle with no skills/ at all, and a stray file, contribute nothing.
+        std::fs::create_dir_all(root.path().join("bare")).unwrap();
+        std::fs::write(root.path().join("README.md"), "x").unwrap();
+
+        let docs = load_catalog_skills(root.path()).expect("catalog loads");
+        let slugs: Vec<&str> = docs.iter().map(|d| d.slug.as_str()).collect();
+        assert_eq!(slugs, ["only-alpha", "shared"]);
+        assert_eq!(docs[1].name, "Baseline Shared");
+
+        // Without a baseline copy, bundle name order decides.
+        std::fs::remove_dir_all(root.path().join("_globals")).unwrap();
+        let docs = load_catalog_skills(root.path()).expect("catalog loads");
+        assert_eq!(docs[1].name, "Alpha Shared");
+
+        // Nothing there at all is an empty catalog, not an error.
+        assert!(load_catalog_skills(&root.path().join("missing")).unwrap().is_empty());
     }
 
     #[test]
