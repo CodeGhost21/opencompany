@@ -1982,7 +1982,7 @@ fn shell_command_reaches_outside_cwd(command: &str) -> bool {
 /// classifier? A self-declared `category` may only escalate.
 #[cfg(feature = "openhuman")]
 fn shell_command_is_read(command: &str, declared: Option<&str>) -> bool {
-    use openhuman_core::openhuman::security::{CommandClass, SecurityPolicy};
+    use openhuman_core::security::{CommandClass, SecurityPolicy};
 
     // `classify_command` is a pure function of the command text — it reads no
     // field of the policy it hangs off — so the default instance is the whole
@@ -5106,8 +5106,8 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn the_read_only_set_matches_the_vendored_classifier() {
-        use openhuman_core::openhuman::security::SecurityPolicy;
-        use openhuman_core::openhuman::tools::{GitOperationsTool, Tool};
+        use openhuman_core::security::SecurityPolicy;
+        use openhuman_core::tools::{GitOperationsTool, Tool};
 
         let policy = std::sync::Arc::new(SecurityPolicy::default());
         let tool = GitOperationsTool::new(policy, std::path::PathBuf::from("."));

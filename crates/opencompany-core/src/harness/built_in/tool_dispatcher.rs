@@ -41,7 +41,7 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use openhuman_core::openhuman as oh;
+use openhuman_core as oh;
 use regex::Regex;
 
 use oh::agent::dispatcher::{

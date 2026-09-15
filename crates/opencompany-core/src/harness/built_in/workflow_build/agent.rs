@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use openhuman_core::openhuman as oh;
+use openhuman_core as oh;
 
 use oh::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher};
 use oh::agent::prompts::SystemPromptBuilder;

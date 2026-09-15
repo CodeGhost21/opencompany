@@ -51,7 +51,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use openhuman_core::openhuman as oh;
+use openhuman_core as oh;
 
 use oh::integrations::composio::client::{direct_execute, direct_list_connections};
 use oh::integrations::composio::types::{

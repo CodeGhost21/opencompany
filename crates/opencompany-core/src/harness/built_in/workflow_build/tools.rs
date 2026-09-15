@@ -1,7 +1,7 @@
 //! The three OC-native tools the create-time copilot agent drives (issue #840).
 //!
 //! PR-2 turns the create-time copilot from one tool-less `call_model` into a
-//! real tool-using [`Agent`](openhuman_core::openhuman::agent::Agent). The agent
+//! real tool-using [`Agent`](openhuman_core::agent::Agent). The agent
 //! reasons; these tools are the only things it can DO, and every one of them is
 //! read-only or host-gated — none of them runs a workflow, sends a message, or
 //! persists anything:
@@ -30,7 +30,7 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use openhuman_core::openhuman as oh;
+use openhuman_core as oh;
 use serde_json::{Value, json};
 
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};

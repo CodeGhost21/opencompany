@@ -1,7 +1,7 @@
 //! Fold the harness progress stream into the scrubbed [`TurnStep`] timeline
 //! surfaced in operator chat.
 //!
-//! During [`Agent::turn`](openhuman_core::openhuman::agent::Agent) the tinyagents
+//! During [`Agent::turn`](openhuman_core::agent::Agent) the tinyagents
 //! observability bridge emits a stream of
 //! [`AgentProgress`](oh::agent::progress::AgentProgress) events — tool calls
 //! starting/completing, thinking/text deltas, cost updates, sub-agent lifecycle.
@@ -88,7 +88,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use openhuman_core::openhuman as oh;
+use openhuman_core as oh;
 use serde_json::Value;
 
 use oh::agent::progress::AgentProgress;

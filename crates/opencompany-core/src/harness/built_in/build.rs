@@ -87,7 +87,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use openhuman_core::openhuman as oh;
+use openhuman_core as oh;
 
 use oh::agent::prompts::SystemPromptBuilder;
 use oh::agent::{Agent, AgentBuilder};

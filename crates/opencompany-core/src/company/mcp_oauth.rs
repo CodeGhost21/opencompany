@@ -32,7 +32,7 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use openhuman_core::openhuman as oh;
+use openhuman_core as oh;
 
 use oh::mcp::http_client::{AuthorizationServerMetadata, McpAuthorizationContext, McpHttpClient};
 
