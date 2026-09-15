@@ -321,8 +321,13 @@ test("an admin pins an agent to a provider and model, then clears it (keys rewor
   await expect(page.getByTestId("agent-model-select")).toHaveCount(0);
   await expect(page.getByTestId("agent-model-input")).toHaveCount(0);
 
+  // The option's accessible name carries the row's model too
+  // (`{label} · {model}`, `AgentDetailView.tsx`'s `pinnable.map`), so an exact
+  // match on the bare label alone never resolves — this hung the whole test
+  // on its 60s timeout waiting for an option that was on screen the entire
+  // time, just under a longer name.
   await page.getByTestId("agent-provider-select").click();
-  await page.getByRole("option", { name: "E2E Pair", exact: true }).click();
+  await page.getByRole("option", { name: "E2E Pair · e2e-model", exact: true }).click();
 
   // Prefilled from the row's own model (`e2e-model`), so an operator who
   // only wants "this agent, this provider" need not retype it — still
