@@ -89,7 +89,14 @@ export function RemoveProviderDialog({
   const reversible = intent === "disable" || intent === "enable";
 
   return (
-    <Dialog open onOpenChange={(next) => !next && onCancel()}>
+    // Live lane 1, KR-L1-05: Escape and an overlay click are ignored while
+    // `busy` — a confirmed write is in flight, the same guard
+    // `ProviderConnectDialog` has (round-2 review, P0-2). Without it, Escape
+    // could dismiss this dialog while its own request was still pending, and
+    // — because `busy` is shared with the connect flow — a later dialog
+    // opened before that pending request settled could read a stale `busy`
+    // it never set and never expected to clear.
+    <Dialog open onOpenChange={(next) => !next && !busy && onCancel()}>
       <DialogContent className="sm:max-w-md" data-testid="inference-remove-dialog">
         <DialogHeader>
           <DialogTitle>

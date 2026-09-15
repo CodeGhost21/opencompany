@@ -58,7 +58,12 @@ export function isConnected(providers: readonly Provider[], optionSlug: string):
 
 /** One entry in a connected provider's ⋯ menu. */
 export interface ProviderRowAction {
-  id: "edit" | "default" | "replaceKey" | "removeKey" | "remove";
+  // "setDefault", not "default" (round-2 live lane, KR-L1-04): the row's
+  // testid for this action is derived as `inference-provider-${slug}-${id}`,
+  // and the "Default" badge next to it already uses
+  // `inference-provider-${slug}-default` — the same id here made the two
+  // share one testid, which threw on any strict single-element lookup.
+  id: "edit" | "setDefault" | "replaceKey" | "removeKey" | "remove";
   label: string;
   /** Rendered in the destructive style, and confirmed before it runs. */
   destructive?: boolean;
@@ -98,14 +103,14 @@ export function providerMenu(
   // company, not a write to the row, and it is the one thing the operator may
   // genuinely want from this row.
   if (provider.origin === "entryZero") {
-    return provider.isDefault || !provider.enabled ? [] : [{ id: "default", label: "Set as default" }];
+    return provider.isDefault || !provider.enabled ? [] : [{ id: "setDefault", label: "Set as default" }];
   }
   const ask = credentialAsk(provider.kind);
   const actions: ProviderRowAction[] = [
     { id: "edit", label: ask.needsEndpoint ? "Edit endpoint" : "Edit" },
   ];
   if (!provider.isDefault && provider.enabled) {
-    actions.push({ id: "default", label: "Set as default" });
+    actions.push({ id: "setDefault", label: "Set as default" });
   }
   if (ask.needsKey) {
     actions.push({
