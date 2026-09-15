@@ -130,12 +130,15 @@ pub trait HarnessModel: ChatModel<()> {
     /// A sibling of this model that resolves every turn against agent
     /// `agent_id`'s own `{provider, model}` pair (keys rework, issue #2306,
     /// slice 3a), or `None` when this implementation cannot pin (test
-    /// doubles). Only that agent's own turns use the sibling this returns;
-    /// internal passes (title, triage, planning, and the rest — Q13) keep
-    /// resolving against the company default via the un-pinned model.
+    /// doubles). `agent_name` is the display name (round-3a review P1-1) a
+    /// turn-time refusal names — never the id, per X7. Internal passes
+    /// (title, triage, planning, and the rest) resolve per X12: the company
+    /// default first, else the turn's own pair — see
+    /// `crate::harness::built_in::pass_model`.
     fn pinned(
         &self,
         _agent_id: &str,
+        _agent_name: &str,
         _choice: &inference::store::ModelChoice,
     ) -> Option<Arc<dyn HarnessModel>> {
         None
@@ -166,7 +169,24 @@ pub fn harness_inference_from_env(
     // `OPENCOMPANY_INFERENCE_MODEL` flattens every agent to one workload. When
     // unset, each agent keeps its tier-derived model, which the tenant
     // `[inference].models` table then maps. `None` = no override.
-    let model_override = env.get("OPENCOMPANY_INFERENCE_MODEL");
+    let model_override = env
+        .get("OPENCOMPANY_INFERENCE_MODEL")
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
+    // A tier name here is not a model (keys rework, issue #2306, slice 2d) —
+    // it only ever selects a configured map entry, and never flattens the
+    // roster the way a real id does. Warned rather than refused: this is an
+    // env var an operator set at deploy time, not a request this process can
+    // decline.
+    if let Some(m) = model_override.as_deref()
+        && inference::legacy_tiers::is_tier_name(m)
+    {
+        tracing::warn!(
+            model = %m,
+            "OPENCOMPANY_INFERENCE_MODEL names a tier, which is never sent as a model; \
+             set a model id from the provider's catalog"
+        );
+    }
     Some((
         HostedProviderConfig {
             base_url,
@@ -1506,7 +1526,19 @@ impl ChatModel<()> for HostedProvider {
     /// [`Agent::turn`]: openhuman_core::openhuman::agent::Agent
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
         let messages = wire_messages(&request.messages);
-        let model = request.model.as_deref().unwrap_or(DEFAULT_HOSTED_MODEL);
+        let model = request
+            .model
+            .as_deref()
+            .unwrap_or(DEFAULT_HOSTED_MODEL)
+            .trim();
+        // No decl on this path, so no configured per-tier map to fall back to
+        // (keys rework, issue #2306, slice 2d): only a real requested id is
+        // ever sent.
+        if model.is_empty() || inference::legacy_tiers::is_tier_name(model) {
+            return Err(InferenceError::Model(
+                inference::NO_MODEL_CHOSEN.to_string(),
+            ));
+        }
 
         let mut body = serde_json::json!({
             "model": model,
@@ -1665,28 +1697,18 @@ pub struct RequestPlan {
 ///   byte-identical to the pre-tool-calling body.
 pub async fn request_plan(
     decl: &InferenceDecl,
-    abstract_model: &str,
+    requested_model: &str,
     messages: Vec<serde_json::Value>,
     sampling: inference::dialect::Sampling,
     max_tokens: Option<u32>,
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
 ) -> anyhow::Result<RequestPlan> {
-    // Tier -> what this endpoint understands, read off the endpoint's own
-    // published catalog rather than off who is paying for it. `is_proxied()`
-    // used to stand in for this and is now only the fallback inside
-    // `vocabulary()`: a tenant-keyed config pointed at a tier-native endpoint is
-    // not proxied, and rewriting `chat-v1` to an OpenRouter slug for it is what
-    // produced `Model 'anthropic/claude-sonnet-5' is not available` against an
-    // endpoint that publishes `chat-v1` itself.
-    //
-    // Keys rework (#2306), slice 2b: a decl with a chosen model (a full
-    // company default, or — from 3a — an agent pair) sends it as-is; only a
-    // legacy decl with none falls through to the tier map.
-    let model = match decl.chosen_model() {
-        Some(chosen) => chosen.to_string(),
-        None => inference::model_for_tier(abstract_model, &decl.models, decl.vocabulary()),
-    };
+    // Never a tier name (keys rework, issue #2306, slice 2d): the chosen
+    // model, else a real requested id, else the operator's configured id for
+    // the requested tier, else refuse before sending.
+    let model =
+        inference::model_on_the_wire(decl, requested_model).map_err(|e| anyhow::anyhow!("{e}"))?;
     let url = format!("{}/chat/completions", decl.base_url.trim_end_matches('/'));
     let bearer = decl
         .bearer()
@@ -2051,13 +2073,18 @@ pub struct TenantProvider {
     pin: Option<AgentPin>,
 }
 
-/// One agent's `{provider, model}` pair, carried with the agent's id so a
-/// turn-time refusal can name it (keys rework, issue #2306, slice 3a) —
+/// One agent's `{provider, model}` pair, carried with the agent's id and
+/// display name so a turn-time refusal can name it (keys rework, issue
+/// #2306, slice 3a; the name added in round-3a review P1-1) —
 /// `resolve_for_turn` itself sees only the [`inference::store::ModelChoice`]
-/// and has no agent to name, so the id travels beside it instead.
+/// and has no agent to name, so both travel beside it instead. `agent_name`
+/// is `Agent.name`, else `Agent.role` (never the raw id): X7 requires every
+/// user-facing sentence to name a display name, and `copy::pair_broken`
+/// takes one, not an id.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentPin {
     pub agent_id: String,
+    pub agent_name: String,
     pub choice: inference::store::ModelChoice,
 }
 
@@ -2098,28 +2125,6 @@ impl TenantProvider {
         &self.scope.id
     }
 
-    /// The scope an authenticated catalog read on this provider's behalf is
-    /// cached under.
-    ///
-    /// Company **and** harness, not company alone. `resolve_effective_scoped`
-    /// resolves config and credentials per [`inference::HarnessScope`] — that
-    /// is exactly what lets one `built_in` harness ride the subscription while
-    /// another runs on a key of its own — so two harnesses in one company can
-    /// present different credentials to the same endpoint. Keyed on the company
-    /// only, the first harness's entitlement-scoped catalog was reused for the
-    /// second for an hour without its credential ever being presented, and the
-    /// second could then be handed a vocabulary its own key does not reach
-    /// (Codex review on #2045).
-    ///
-    /// Both halves are non-secret ids, and neither is the credential or derived
-    /// from it — the invariant `catalog_registry` documents. The separator is
-    /// the same control character that module uses to join scope to endpoint,
-    /// which no id or URL can contain, so the three-field key cannot be spelled
-    /// two ways.
-    fn catalog_scope(&self) -> String {
-        format!("{}\u{1}{}", self.company.as_ref(), self.harness_id())
-    }
-
     /// Re-resolves the effective config from the secret store and updates the
     /// cached telemetry slug. Errors with [`inference::NO_MODEL_CHOSEN`] (or a
     /// fail-closed sentence for a broken pin/full default) when nothing
@@ -2135,11 +2140,26 @@ impl TenantProvider {
         // Checked **before** `resolve_for_turn`, and only here: that function
         // sees just the `ModelChoice`, so a refusal it raises for a gone pin
         // cannot name the agent. This pre-check can, because `AgentPin`
-        // carries the id alongside the choice (phase-3.md use case 4). If the
-        // row vanishes between this read and `resolve_for_turn`'s own, that
-        // function's generic "this agent is set to …" still fires — fail
-        // closed either way, just with a less specific sentence on the race.
-        if let Some(AgentPin { agent_id, choice }) = &self.pin {
+        // carries the id and display name alongside the choice (phase-3.md
+        // use case 4). If the row vanishes between this read and
+        // `resolve_for_turn`'s own, that function's generic "this agent is
+        // set to …" still fires — fail closed either way, just with a less
+        // specific sentence on the race.
+        //
+        // Round-3a review P1-1: both branches go through `copy::pair_broken`
+        // now, not a hand-written sentence — the shared X9 table, in display
+        // names, is what every other turn-time refusal in this module uses,
+        // and this was the one holdout still naming a raw agent id and
+        // provider slug in the sentence itself. `Removed` has no row to read
+        // a label from, so it names the slug (`copy::pair_broken`'s own
+        // "label, else nothing better on hand" contract); `TurnedOff` uses
+        // the row's real label.
+        if let Some(AgentPin {
+            agent_id: _,
+            agent_name,
+            choice,
+        }) = &self.pin
+        {
             match inference::store::get_provider(
                 &self.company,
                 self.secrets.as_ref(),
@@ -2148,17 +2168,39 @@ impl TenantProvider {
             .await
             .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
             {
-                None => anyhow::bail!(
-                    "agent `{agent_id}` is set to `{}`, which this company does not have. \
-                     Choose another in Team → {agent_id} → Model.",
-                    choice.provider
-                ),
-                Some(row) if !row.enabled => anyhow::bail!(
-                    "agent `{agent_id}` is set to `{}`, which is switched off. Switch it on in \
-                     Connections → API Keys → LLM, or choose another in Team → {agent_id} → Model.",
-                    row.label
-                ),
-                Some(_) => {}
+                None => anyhow::bail!(inference::copy::pair_broken(
+                    agent_name,
+                    &choice.provider,
+                    inference::copy::ProviderGone::Removed,
+                )),
+                Some(row) if !row.enabled => anyhow::bail!(inference::copy::pair_broken(
+                    agent_name,
+                    &row.label,
+                    inference::copy::ProviderGone::TurnedOff,
+                )),
+                Some(row) => {
+                    // Round-3a review P1-1: a pin naming an enabled row that
+                    // still has no credential used to go straight to the
+                    // network with no bearer and come back as a generic
+                    // rejection. Only for a kind that actually needs one —
+                    // the local-runtime kinds `auth_style_for` classifies
+                    // `None` (ollama, omlx) are keyless by design and must
+                    // reach `resolve_for_turn` exactly as before.
+                    if inference::catalogue::auth_style_for(&row.kind)
+                        != inference::catalogue::AuthStyle::None
+                        && !inference::store::provider_key_configured(
+                            &self.company,
+                            self.secrets.as_ref(),
+                            &row,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
+                    {
+                        anyhow::bail!(
+                            inference::copy::provider_has_no_key(agent_name, &row.label,)
+                        );
+                    }
+                }
             }
         }
         let decl = inference::resolve_for_turn(
@@ -2173,38 +2215,13 @@ impl TenantProvider {
         .await
         .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?;
         *self.slug.write().unwrap() = decl.telemetry_slug();
-        // A chosen model (a full default, or — from 3a — a pin) is sent as
-        // given: no tier vocabulary, no catalogue read. Only the legacy arm
-        // below still needs to know what an unmapped tier means to this
-        // endpoint.
-        if decl.chosen_model().is_some() {
-            return Ok(decl);
-        }
-        // Ask the endpoint what vocabulary it speaks before deciding whether to
-        // rewrite this turn's tier. Cached per company, harness and endpoint for
-        // an hour (and per failure for a minute), so this is one extra request
-        // per provider per hour rather than one per turn — and it is a request
-        // to the same host the turn is about to call anyway.
-        //
-        // `turn_vocabulary`, not `discovered_vocabulary`: this is the turn path,
-        // whose callers time out in two to three seconds, so the read is spawned
-        // and only waited on for `TURN_CATALOG_BUDGET`. A `/models` slower than
-        // that leaves the decl on its pre-discovery fallback for this turn —
-        // exactly the behaviour that shipped before discovery existed — while
-        // the spawned read still finishes and records its answer for the next
-        // one. Awaiting it inline let a caller's own timeout cancel the read
-        // before it could memoize anything, so every later turn repeated it
-        // (Codex review on #2045).
-        let bearer = decl.bearer().await.ok().flatten();
-        let vocabulary = crate::server::inference_models::turn_vocabulary(
-            &decl.base_url,
-            bearer.as_deref(),
-            Some(&self.catalog_scope()),
-            crate::company::inference::catalogue::auth_style_for(&decl.provider),
-            crate::company::inference::catalogue::catalog_shape_for(&decl.provider, &decl.base_url),
-        )
-        .await;
-        Ok(decl.with_vocabulary(vocabulary))
+        // No vocabulary discovery any more (keys rework, issue #2306, slice
+        // 2d): the model this turn sends is decided once, in
+        // `inference::model_on_the_wire` — a chosen model, else a real
+        // requested id, else the legacy arm's own configured map entry for
+        // the tier, else refuse. None of those needs this endpoint's catalog
+        // read first.
+        Ok(decl)
     }
 }
 
@@ -2311,6 +2328,7 @@ impl HarnessModel for TenantProvider {
     fn pinned(
         &self,
         agent_id: &str,
+        agent_name: &str,
         choice: &inference::store::ModelChoice,
     ) -> Option<Arc<dyn HarnessModel>> {
         Some(Arc::new(TenantProvider {
@@ -2324,6 +2342,7 @@ impl HarnessModel for TenantProvider {
             scope: self.scope.clone(),
             pin: Some(AgentPin {
                 agent_id: agent_id.to_string(),
+                agent_name: agent_name.to_string(),
                 choice: choice.clone(),
             }),
         }))
@@ -4265,9 +4284,27 @@ mod tests {
             extra_headers: Vec::new(),
         });
 
-        provider.invoke(&(), user_request("one")).await.expect("t1");
+        provider
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("one")
+                },
+            )
+            .await
+            .expect("t1");
         std::fs::write(&path, "token-after-rotation").unwrap();
-        provider.invoke(&(), user_request("two")).await.expect("t2");
+        provider
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("two")
+                },
+            )
+            .await
+            .expect("t2");
 
         let headers = seen.lock().unwrap().clone();
         assert_eq!(
@@ -4290,7 +4327,13 @@ mod tests {
             extra_headers: Vec::new(),
         });
         provider
-            .invoke(&(), user_request("hi"))
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("hi")
+                },
+            )
             .await
             .expect("turn");
         assert_eq!(seen.lock().unwrap().clone(), vec![String::new()]);
@@ -4360,11 +4403,26 @@ mod tests {
         });
 
         provider
-            .invoke(&(), user_request("one"))
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("one")
+                },
+            )
             .await
             .expect_err("first turn is refused");
         std::fs::write(&path, format!("rotated-{long_lived}")).unwrap();
-        provider.invoke(&(), user_request("two")).await.expect("t2");
+        provider
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("two")
+                },
+            )
+            .await
+            .expect("t2");
 
         let headers = seen.lock().unwrap().clone();
         assert_eq!(headers.len(), 2, "{headers:?}");
@@ -4388,7 +4446,13 @@ mod tests {
             extra_headers: Vec::new(),
         });
         let err = provider
-            .invoke(&(), user_request("hi"))
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("hi")
+                },
+            )
             .await
             .expect_err("unreadable credential");
         assert!(err.to_string().contains("credential"), "{err}");
@@ -4489,11 +4553,11 @@ mod tests {
                 .contains(&("X-Title", OPENROUTER_TITLE.to_string()))
         );
 
-        // A tier the manifest does not map takes the shipped default rather than
-        // passing through as a bare tier name. It used to pass through, which
-        // worked only because the platform endpoint resolved tier names; this
-        // decl is DIRECT, and OpenRouter has never heard of `reasoning-v1`.
-        let defaulted = request_plan(
+        // A tier the manifest does not map is refused rather than guessed or
+        // passed through as a bare tier name (keys rework, issue #2306, slice
+        // 2d): this decl is DIRECT, OpenRouter has never heard of
+        // `reasoning-v1`, and there is no shipped substitute any more.
+        let refused = request_plan(
             &decl,
             "reasoning-v1",
             Vec::new(),
@@ -4503,8 +4567,11 @@ mod tests {
             &ToolChoice::Auto,
         )
         .await
-        .expect("plan");
-        assert_eq!(defaulted.model, "openai/gpt-5.6-sol-pro");
+        .expect_err("an unmapped tier must be refused, not guessed");
+        assert!(
+            refused.to_string().contains("No model is chosen"),
+            "{refused}"
+        );
 
         // A concrete slug is still forwarded untouched, so a caller can name any
         // model in OpenRouter's catalog.
@@ -4522,72 +4589,6 @@ mod tests {
         assert_eq!(explicit.model, "anthropic/claude-sonnet-4.5");
     }
 
-    /// The live defect, at the layer that puts the string on the wire.
-    ///
-    /// A company on `provider = "openrouter"` with its own key against a
-    /// tier-native endpoint is **not proxied** — the tenant pays. The old rule
-    /// read the vocabulary off exactly that bit, so every tier was rewritten to
-    /// an OpenRouter slug and the endpoint answered `Model
-    /// 'anthropic/claude-sonnet-5' is not available`, naming an id nobody had
-    /// chosen. With the endpoint's own catalog consulted, the tier reaches it
-    /// intact — and who is billed is unchanged, because that was never the same
-    /// question.
-    #[tokio::test]
-    async fn request_plan_keeps_the_tier_for_a_tier_native_endpoint_on_a_tenant_key() {
-        let company = CompanyId::new("acme");
-        let secrets = MemSecrets::default();
-        let mut manifest = manifest_inference("openrouter");
-        manifest.base_url = Some(crate::company::inference::PLATFORM_BASE_URL.into());
-        inference::store_key(&company, &secrets, "test-token")
-            .await
-            .unwrap();
-        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
-            .await
-            .unwrap()
-            .expect("a keyed openrouter config resolves");
-        assert!(!decl.is_proxied(), "a tenant key means the tenant pays");
-
-        // Pre-discovery: the payer-derived guess, which is what shipped.
-        let guessed = request_plan(
-            &decl,
-            "agentic-v1",
-            Vec::new(),
-            inference::dialect::Sampling::Deterministic,
-            None,
-            Vec::new(),
-            &ToolChoice::Auto,
-        )
-        .await
-        .expect("plan");
-        assert_eq!(
-            guessed.model, "anthropic/claude-opus-5",
-            "unchanged fallback when no catalog could be read"
-        );
-
-        // The endpoint published `agentic-v1`, so it resolves tiers itself.
-        let discovered =
-            decl.with_vocabulary(Some(crate::company::inference::TierVocabulary::Tiers));
-        let plan = request_plan(
-            &discovered,
-            "agentic-v1",
-            Vec::new(),
-            inference::dialect::Sampling::Deterministic,
-            None,
-            Vec::new(),
-            &ToolChoice::Auto,
-        )
-        .await
-        .expect("plan");
-        assert_eq!(
-            plan.model, "agentic-v1",
-            "the tier the provider publishes goes out as the tier"
-        );
-        assert!(
-            !discovered.is_proxied(),
-            "discovering the vocabulary must not re-bill the company"
-        );
-    }
-
     #[tokio::test]
     async fn request_plan_omits_bearer_for_keyless_ollama() {
         let company = CompanyId::new("acme");
@@ -4600,7 +4601,7 @@ mod tests {
             .unwrap();
         let plan = request_plan(
             &decl,
-            "chat-v1",
+            "stub-model",
             Vec::new(),
             inference::dialect::Sampling::Deterministic,
             None,
@@ -4646,7 +4647,7 @@ mod tests {
 
         let plan = request_plan(
             &decl,
-            "chat-v1",
+            "stub-model",
             Vec::new(),
             inference::dialect::Sampling::Exact(0.2),
             None,
@@ -4732,7 +4733,7 @@ mod tests {
             .unwrap();
         let compat_plan = request_plan(
             &compat_decl,
-            "chat-v1",
+            "stub-model",
             Vec::new(),
             inference::dialect::Sampling::Exact(0.2),
             None,
@@ -4878,7 +4879,13 @@ mod tests {
 
         // Turn 1 → stub A.
         let first = provider
-            .invoke(&(), user_request("hi"))
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("hi")
+                },
+            )
             .await
             .expect("turn 1");
         assert_eq!(first.text(), "reply-from-A");
@@ -4900,7 +4907,13 @@ mod tests {
 
         // Turn 2 → stub B, same provider instance.
         let second = provider
-            .invoke(&(), user_request("hi"))
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("hi")
+                },
+            )
             .await
             .expect("turn 2");
         assert_eq!(
@@ -5105,10 +5118,18 @@ mod tests {
         let base =
             TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
         let a = base
-            .pinned("researcher", &choice("acme", "test-model-large"))
+            .pinned(
+                "researcher",
+                "Researcher",
+                &choice("acme", "test-model-large"),
+            )
             .expect("this provider can pin");
         let b = base
-            .pinned("web_search", &choice("other-co", "test-model-small"))
+            .pinned(
+                "web_search",
+                "Web search",
+                &choice("other-co", "test-model-small"),
+            )
             .expect("this provider can pin");
 
         a.invoke(&(), user_request("hi")).await.expect("turn a");
@@ -5123,19 +5144,23 @@ mod tests {
         assert_eq!(calls_b[0].0, "test-model-small", "{calls_b:?}");
         assert_eq!(calls_b[0].1.as_deref(), Some("Bearer sk-not-a-real-key"));
 
-        // The base (unpinned) provider resolves independently of either
-        // pin: with no explicit company default, it falls back to the first
-        // provider added ("acme", mock A) — the pre-2b positional-primary
-        // rule, untouched by 3a — on its own unmapped-tier default, never on
-        // either agent's pinned model.
-        base.invoke(&(), user_request("hi"))
+        // The base (unpinned) provider resolves independently of either pin
+        // — but with no company default and an empty `models` map on "acme"
+        // (the first provider added, the pre-2b positional-primary rule,
+        // untouched by 3a), there is no tier mapping for `chat-v1` either.
+        // Keys rework, issue #2306, slice 2d: an unmapped tier is refused
+        // before it ever reaches the wire, never guessed — and never either
+        // agent's pinned model.
+        let err = base
+            .invoke(&(), user_request("hi"))
             .await
-            .expect("base turn");
+            .expect_err("no default and no tier mapping must fail closed, not guess");
+        assert!(err.to_string().contains("No model is chosen"), "{err}");
         let calls_a = seen_a.lock().unwrap().clone();
-        assert_eq!(calls_a.len(), 2, "{calls_a:?}");
-        assert!(
-            !["test-model-large", "test-model-small"].contains(&calls_a[1].0.as_str()),
-            "the unpinned base must not pick up either agent's pinned model: {calls_a:?}"
+        assert_eq!(
+            calls_a.len(),
+            1,
+            "the unpinned base's own refusal must never reach mock A: {calls_a:?}"
         );
         assert_eq!(
             seen_b.lock().unwrap().len(),
@@ -5157,18 +5182,28 @@ mod tests {
         let base = TenantProvider::new(company.clone(), secrets.clone(), manifest, None);
 
         let pinned = base
-            .pinned("researcher", &choice("acme", "test-model-large"))
+            .pinned(
+                "researcher",
+                "Researcher",
+                &choice("acme", "test-model-large"),
+            )
             .expect("this provider can pin");
         let err = pinned
             .invoke(&(), user_request("hi"))
             .await
             .expect_err("the pinned provider does not exist");
         let text = err.to_string();
+        // Round-3a review P1-1: the shared `copy::pair_broken` sentence, in
+        // the agent's display name — no raw id, no raw slug, no
+        // hand-written "Team → …" path.
         assert!(
-            text.contains("agent `researcher` is set to `acme`, which this company does not have."),
+            text.contains("Researcher uses acme, which is removed."),
             "{text}"
         );
-        assert!(text.contains("Team → researcher → Model"), "{text}");
+        assert!(
+            text.contains("Choose another provider and model for Researcher"),
+            "{text}"
+        );
         assert!(
             default_seen.lock().unwrap().is_empty(),
             "the default must never receive the turn a bad pin refused"
@@ -5199,15 +5234,25 @@ mod tests {
         let base =
             TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
         let pinned = base
-            .pinned("researcher", &choice("acme", "test-model-large"))
+            .pinned(
+                "researcher",
+                "Researcher",
+                &choice("acme", "test-model-large"),
+            )
             .expect("this provider can pin");
         let err = pinned
             .invoke(&(), user_request("hi"))
             .await
             .expect_err("the pinned provider is switched off");
         let text = err.to_string();
-        assert!(text.contains("agent `researcher` is set to"), "{text}");
-        assert!(text.contains("which is switched off"), "{text}");
+        assert!(
+            text.contains("Researcher uses Acme, which is turned off."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Choose another provider and model for Researcher"),
+            "{text}"
+        );
     }
 
     /// The trait default: an implementation that reports no telemetry
@@ -5218,7 +5263,11 @@ mod tests {
         let double = MockProvider::default();
         assert!(
             double
-                .pinned("researcher", &choice("acme", "test-model-large"))
+                .pinned(
+                    "researcher",
+                    "Researcher",
+                    &choice("acme", "test-model-large")
+                )
                 .is_none()
         );
     }
@@ -5263,7 +5312,13 @@ mod tests {
             extra_headers: Vec::new(),
         });
         provider
-            .invoke(&(), user_request("hi"))
+            .invoke(
+                &(),
+                ModelRequest {
+                    model: Some("stub-model".into()),
+                    ..user_request("hi")
+                },
+            )
             .await
             .expect("turn against the stub");
 
@@ -5463,10 +5518,12 @@ mod tests {
         let secrets = MemSecrets::default();
         let mut manifest = manifest_inference("openai_compatible");
         manifest.base_url = Some(url);
-        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+        let mut decl = inference::resolve_effective(&company, &manifest, None, &secrets)
             .await
             .unwrap()
             .unwrap();
+        decl.models
+            .insert("chat-v1".to_string(), "stub-model".to_string());
 
         probe(&decl, None)
             .await
@@ -5563,10 +5620,12 @@ mod tests {
         let secrets = MemSecrets::default();
         let mut manifest = manifest_inference("openai_compatible");
         manifest.base_url = Some(url);
-        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+        let mut decl = inference::resolve_effective(&company, &manifest, None, &secrets)
             .await
             .unwrap()
             .unwrap();
+        decl.models
+            .insert("chat-v1".to_string(), "stub-model".to_string());
 
         probe(&decl, None).await.expect(
             "a reply carrying reasoning tokens proves the endpoint completes chat turns, \
@@ -5618,10 +5677,12 @@ mod tests {
         let secrets = MemSecrets::default();
         let mut manifest = manifest_inference("openai_compatible");
         manifest.base_url = Some(url);
-        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+        let mut decl = inference::resolve_effective(&company, &manifest, None, &secrets)
             .await
             .unwrap()
             .unwrap();
+        decl.models
+            .insert("chat-v1".to_string(), "stub-model".to_string());
 
         let err = probe(&decl, None)
             .await
@@ -5660,10 +5721,12 @@ mod tests {
         let secrets = MemSecrets::default();
         let mut manifest = manifest_inference("openai_compatible");
         manifest.base_url = Some(url);
-        let decl = inference::resolve_effective(&company, &manifest, None, &secrets)
+        let mut decl = inference::resolve_effective(&company, &manifest, None, &secrets)
             .await
             .unwrap()
             .unwrap();
+        decl.models
+            .insert("chat-v1".to_string(), "stub-model".to_string());
 
         let err = probe(&decl, None)
             .await
@@ -5962,7 +6025,8 @@ mod tests {
     #[tokio::test]
     async fn probe_names_the_harness_that_owns_the_failing_config() {
         let base_url = spawn_model_unavailable_stub().await;
-        let decl = inference::decl_for_probe("openai_compatible", Some(&base_url), None, None);
+        let decl = inference::decl_for_probe("openai_compatible", Some(&base_url), None, None)
+            .with_chosen_model("stub-model".to_string());
 
         let err = probe(&decl, Some("embedded"))
             .await

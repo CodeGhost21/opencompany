@@ -5,9 +5,11 @@
 //! The model that reaches an inference endpoint is **operator-authored free
 //! text**. A company on `openai_compatible` or `ollama` points at a server it
 //! runs and calls the model whatever it likes, and `[inference].models` maps a
-//! workload tier onto that name verbatim — [`model_for_tier`] deliberately
-//! honours an operator's entry without rewriting it. So the raw name can be a
-//! customer's name, an internal project code, or anything else a person typed.
+//! workload tier onto that name verbatim — the legacy arm's
+//! [`configured_model_for_tier`](crate::company::inference::legacy_tiers::configured_model_for_tier)
+//! deliberately honours an operator's entry without rewriting it (keys rework,
+//! issue #2306, slice 2d). So the raw name can be a customer's name, an
+//! internal project code, or anything else a person typed.
 //!
 //! Two consequences follow, and they are the whole reason this type exists
 //! rather than a `model: String` field on [`UsageSample`]:
@@ -55,11 +57,10 @@
 //!
 //! **Add a slug when one of these becomes true, and not otherwise:**
 //!
-//! 1. this repo starts shipping the model as a default — a new entry in
-//!    [`DEFAULT_TIER_MODELS`] or a new tier in `harness::build::model_for_tier`
-//!    (the `openhuman`-gated tier mapper). The test
-//!    `every_shipped_default_is_named` fails when this is forgotten, which is
-//!    what stops the list rotting silently as the defaults move;
+//! 1. a workload tier this repo defines starts classifying to `other` — the
+//!    test `a_workload_tier_is_named_rather_than_other` fails when that
+//!    happens, which is what stops `EXACT` rotting silently as the tier set
+//!    moves;
 //! 2. a vendor is common enough among BYOK tenants that `other` has stopped
 //!    being a useful answer for them. That is a judgement call, and it is meant
 //!    to be: the alternative — adding a slug for every model that exists — is
@@ -70,8 +71,6 @@
 //! answer and it is a *bounded* one; growing the list to avoid ever seeing it
 //! would defeat the point of the type.
 //!
-//! [`model_for_tier`]: crate::company::inference::model_for_tier
-//! [`DEFAULT_TIER_MODELS`]: crate::company::inference::DEFAULT_TIER_MODELS
 //! [`UsageSample`]: crate::ports::usage::UsageSample
 
 use std::fmt;
@@ -170,9 +169,9 @@ impl ModelSlug {
 
 /// Slugs matched on the whole model string, before any `author/` split.
 ///
-/// The four workload tiers this repo defines (`model_for_tier`), plus
-/// [`ModelSlug::OTHER`]'s own literal so that re-classifying an already-folded
-/// value is a fixed point.
+/// The four workload tiers this repo defines (`crate::company::types::INFERENCE_TIERS`),
+/// plus [`ModelSlug::OTHER`]'s own literal so that re-classifying an
+/// already-folded value is a fixed point.
 const EXACT: &[&str] = &[
     "chat-v1",
     "reasoning-v1",
@@ -205,10 +204,10 @@ const VENDORS: &[Vendor] = &[
             ("v4-pro", "deepseek-v4-pro"),
         ],
     },
-    // `DEFAULT_TIER_MODELS` binds `vision-v1` to `qwen/qwen3.8-max`. The dot in
-    // the upstream id is not carried into the slug — a telemetry value is read
-    // by people and grouped by machines, and a point release must not mint a
-    // new one.
+    // `qwen3.8-max` is a real upstream id an operator can point a `vision-v1`
+    // mapping at. The dot is not carried into the slug — a telemetry value is
+    // read by people and grouped by machines, and a point release must not
+    // mint a new one.
     Vendor {
         slug: "qwen",
         authors: &["qwen"],
@@ -297,7 +296,6 @@ impl<'de> Deserialize<'de> for ModelSlug {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::company::inference::DEFAULT_TIER_MODELS;
 
     /// Every literal the classifier is capable of emitting.
     fn every_slug() -> Vec<&'static str> {
@@ -312,18 +310,12 @@ mod tests {
     }
 
     #[test]
-    fn a_shipped_default_model_is_named_rather_than_other() {
-        // The ratchet that stops the vocabulary rotting: the moment
-        // `DEFAULT_TIER_MODELS` gains a model this table has never heard of,
-        // every self-serve tenant's spend starts reporting `other` and this
-        // test says so.
-        for (tier, model) in DEFAULT_TIER_MODELS {
-            assert_ne!(
-                ModelSlug::classify(model),
-                ModelSlug::OTHER,
-                "the shipped default for `{tier}` (`{model}`) classifies to `other`; \
-                 add it to the vendor table in src/metering/model.rs"
-            );
+    fn a_workload_tier_is_named_rather_than_other() {
+        // The ratchet that stops the tier vocabulary rotting: the moment a
+        // workload tier stops classifying via `EXACT`, historic usage rows
+        // that were metered as a tier name (the legacy arm, keys rework issue
+        // #2306 slice 2d) start reporting `other`, and this test says so.
+        for tier in crate::company::INFERENCE_TIERS {
             assert_ne!(
                 ModelSlug::classify(tier),
                 ModelSlug::OTHER,

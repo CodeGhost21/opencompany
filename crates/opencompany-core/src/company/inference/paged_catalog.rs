@@ -161,32 +161,37 @@ impl Collector {
     }
 }
 
-/// How many published model ids ride back on a probe or a `needsModel`
-/// answer.
-///
-/// A mirror of a large catalog runs to hundreds of entries, and this is a
-/// response body the console holds in memory for one dialog. Enough to choose
-/// from, and the field the operator types into accepts anything anyway.
-pub const PROBE_CATALOGUE_LIMIT: usize = 500;
-
-/// The published ids to offer, sorted, deduplicated and capped.
+/// The published ids to offer, sorted and deduplicated.
 ///
 /// Sorted because a catalog's own order is whatever the endpoint felt like,
 /// and a select an operator has to scan is worth putting in one order.
+///
+/// **Never capped below what the paged read returned** (keys rework #2306,
+/// round-3a review P2-5). A `500`-id truncation used to sit here, filtering
+/// by name the moment a catalog's alphabetically-first 500 entries were not
+/// its whole content — reachable ever since [`super::probe::probe_models`]
+/// started following `total` across pages instead of reading one page and
+/// calling it the catalog (KR-L1-01): OpenRouter's ~600 ids and TinyHumans'
+/// paged envelope (up to [`MAX_PAGES`] × [`PAGE_LIMIT`] = 10,000) both read in
+/// full, then had everything from roughly `x-ai/…` onward silently missing
+/// from the add dialog's model step while `modelCount` still reported the
+/// true total. The bound that actually applies is [`Collector`]'s own —
+/// [`MAX_PAGES`] pages of at most [`PAGE_LIMIT`] ids each — which is a read
+/// limit, not a display filter, and is never hit by a vendor catalog this
+/// small.
 ///
 /// Moved here from `server::ops::inference::providers` (keys rework #2306,
 /// P3-7 review): the account-key fan-out (`company::company_key::fan_out`)
 /// offers the same catalog shape on its own `needsModel` answer as this
 /// module's other readers ([`super::probe::probe_models`];
 /// `server::ops::inference::providers`'s probe route) already do — and
-/// `company` must never import from `server`, so the one place "sort, dedupe,
-/// cap" is decided has to live somewhere both layers can already reach. This
-/// module already is that place.
+/// `company` must never import from `server`, so the one place "sort, dedupe"
+/// a published id list is decided has to live somewhere both layers can
+/// already reach. This module already is that place.
 pub fn catalogue_offer(models: &[String]) -> Vec<String> {
     let mut ids: Vec<String> = models.to_vec();
     ids.sort_unstable();
     ids.dedup();
-    ids.truncate(PROBE_CATALOGUE_LIMIT);
     ids
 }
 
@@ -394,7 +399,7 @@ mod tests {
     /// Moved from `server::ops::inference::providers` alongside
     /// `catalogue_offer` itself (keys rework #2306, P3-7 review).
     #[test]
-    fn the_offered_catalogue_is_sorted_and_capped() {
+    fn the_offered_catalogue_is_sorted_and_deduplicated() {
         fn ids(values: &[&str]) -> Vec<String> {
             values.iter().map(|v| (*v).to_string()).collect()
         }
@@ -404,9 +409,16 @@ mod tests {
             ids(&["a", "b"]),
             "a catalog's own order is whatever the endpoint felt like"
         );
-        let many: Vec<String> = (0..PROBE_CATALOGUE_LIMIT + 50)
-            .map(|n| format!("model-{n:04}"))
-            .collect();
-        assert_eq!(catalogue_offer(&many).len(), PROBE_CATALOGUE_LIMIT);
+    }
+
+    /// Round-3a review P2-5: a catalog larger than the old 500-id cap must be
+    /// offered in full, not truncated to an alphabetical prefix.
+    #[test]
+    fn a_catalogue_larger_than_the_old_cap_is_offered_in_full() {
+        let many: Vec<String> = (0..600).map(|n| format!("model-{n:04}")).collect();
+        let offered = catalogue_offer(&many);
+        assert_eq!(offered.len(), 600);
+        // Not just a count: the tail past the old 500-entry cap is present.
+        assert!(offered.contains(&"model-0599".to_string()));
     }
 }

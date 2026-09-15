@@ -65,13 +65,6 @@ interface Props {
  * ({@link TINYHUMANS_API_KEYS_URL}, shared with the wizard so the two cannot
  * point at different pages).
  *
- * ## What it writes
- *
- * `PUT …/credential`, which stores `tinyhumans/key` and stops. That is the
- * company's TinyHumans identity, and since #2266 the slot a managed turn
- * resolves through. It does **not** declare the managed provider — only the
- * grant (`finish_link`) does.
- *
  * Deliberately minimal (operator request, 2026-09-14): a heading, the field,
  * the "Get an API key" link, Save and Cancel, and an error only when a save
  * fails — plus, since the keys rework (issue #2306), one conditional line
@@ -171,8 +164,12 @@ export function AccountKeyDialog({
               <DialogFooter>
                 {/* The key and its Composio copy are already saved (step one
                     landed before step two ever opens), so Cancel here closes
-                    the dialog rather than rolling anything back. */}
-                <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+                    the dialog rather than rolling anything back. Disabled
+                    while busy (round-3b review, P2-4) — the parent's own
+                    `onOpenChange` guard already refuses the close, but a
+                    button that visibly does nothing on click is its own kind
+                    of confusing. */}
+                <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
                   Cancel
                 </Button>
                 <Button
@@ -226,8 +223,12 @@ export function AccountKeyDialog({
                 </p>
                 {fillLine && (
                   <p className="text-xs text-muted-foreground" data-testid="account-key-fill-line">
+                    {/* `llmShown` matches `accountFillLine`'s own `llm` gate
+                        exactly (round-3b review, P3-4) — a row that already
+                        has a model gets no LLM clause in the sentence, so it
+                        must get no dangling "LLM page" link either. */}
                     {fillLine}{" "}
-                    {fills?.llm && (
+                    {fills?.llm && !fills?.llmHasModel && (
                       <a
                         href={LLM_PAGE_HREF}
                         data-testid="account-key-llm-link"
@@ -236,7 +237,7 @@ export function AccountKeyDialog({
                         LLM page
                       </a>
                     )}
-                    {fills?.llm && fills?.composio && " · "}
+                    {fills?.llm && !fills?.llmHasModel && fills?.composio && " · "}
                     {fills?.composio && (
                       <a
                         href={COMPOSIO_PAGE_HREF}
@@ -262,7 +263,9 @@ export function AccountKeyDialog({
               </p>
 
               <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+                {/* Disabled while busy (round-3b review, P2-4) — same reason
+                    as step two's Cancel button above. */}
+                <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
                   Cancel
                 </Button>
                 <Button type="submit" disabled={busy || !key.trim()} data-testid="account-key-save">

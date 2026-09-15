@@ -19,7 +19,13 @@
 // the four intents.
 
 import type { UsedBy } from "@/api/types";
+import { hasUsedBy, usedBySentence } from "@/lib/used-by";
 import type { Provider } from "./types";
+
+// Re-exported for this file's existing callers — moved to `@/lib/used-by.ts`
+// (round-3 review) so Search and Composio's own guarded dialogs can share the
+// same sentence instead of each composing their own wording.
+export { hasUsedBy, usedBySentence };
 
 /** The four things that can be done to a provider from its row. */
 export type ProviderIntent = "disable" | "enable" | "key" | "provider";
@@ -41,55 +47,6 @@ export function removalImpact(
     lastEnabled: provider.enabled && !remaining.some((p) => p.enabled),
     usedBy: provider.usedBy,
   };
-}
-
-/** "2 agents: Researcher, Web search" / "1 agent: Researcher". */
-function describeAgents(agents: readonly { id: string; name: string }[]): string {
-  const names = agents.map((a) => a.name).join(", ");
-  return `${agents.length} ${agents.length === 1 ? "agent" : "agents"}: ${names}`;
-}
-
-/** Display names for `UsedBy.surfaces` — never the raw wire id (X7). */
-const SURFACE_LABELS: Record<"llm" | "composio" | "search", string> = {
-  llm: "LLM",
-  composio: "Composio",
-  search: "Search",
-};
-
-/** "a, b and c" — the join every combined `usedBy` sentence below shares. */
-function joinParts(parts: readonly string[]): string {
-  if (parts.length === 0) return "";
-  if (parts.length === 1) return parts[0];
-  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
-  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
-}
-
-/** Whether `usedBy` names anything at all — the same check a confirm needs to decide whether to send `confirmInUse`. */
-export function hasUsedBy(usedBy: UsedBy | undefined | null): boolean {
-  return Boolean(usedBy?.default || usedBy?.agents?.length || usedBy?.surfaces?.length);
-}
-
-/**
- * One sentence naming everything a row's `usedBy` says still depends on it —
- * "Used by the company default and 2 agents: Researcher, Web search." — built
- * once so every confirm dialog says the same thing instead of composing its
- * own wording per field (round-2 review, P1-5). `null` when nothing is set.
- *
- * `ownSurface` excludes this row's own surface from the "other surfaces"
- * naming — an LLM provider's `usedBy.surfaces` lists the *other* things its
- * credential also backs, never itself.
- */
-export function usedBySentence(
-  usedBy: UsedBy | undefined | null,
-  ownSurface: "llm" | "composio" | "search" = "llm",
-): string | null {
-  const parts: string[] = [];
-  if (usedBy?.default) parts.push("the company default");
-  if (usedBy?.agents?.length) parts.push(describeAgents(usedBy.agents));
-  const otherSurfaces = (usedBy?.surfaces ?? []).filter((s) => s !== ownSurface);
-  if (otherSurfaces.length) parts.push(otherSurfaces.map((s) => SURFACE_LABELS[s]).join(" and "));
-  if (!parts.length) return null;
-  return `Used by ${joinParts(parts)}.`;
 }
 
 /**

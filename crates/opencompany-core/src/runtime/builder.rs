@@ -3128,6 +3128,37 @@ impl RuntimeBuilder {
                             )
                             .await;
 
+                        // X13 (round-3a review P1-5): a company that has SAID
+                        // something about inference — a provider row (even a
+                        // disabled one), an explicit default marker other
+                        // than `Unset`, or an agent pair (even a broken one)
+                        // — must never boot the echo brain merely because
+                        // that something is currently unusable. Hosted
+                        // tenants restart on wake, so "disable the only
+                        // provider, confirmed" followed by the next wake is
+                        // the normal path, not an edge case: previously that
+                        // combination made every check above answer `false`
+                        // and the company woke up on `EchoBrain`, "echoes
+                        // every operator message back" — silently, with
+                        // nothing to fix. Booting the harness brain instead
+                        // means `TenantProvider::resolve` (P1-1) and
+                        // `resolve_for_turn` (P1-4) are what then fail each
+                        // turn closed, naming the reason — which is what X13
+                        // requires and what an echo reply cannot do.
+                        let configured = configured
+                            || !matches!(
+                                inference::store::load_default(&id, secrets.as_ref())
+                                    .await
+                                    .unwrap_or(inference::store::DefaultChoice::Unset),
+                                inference::store::DefaultChoice::Unset
+                            )
+                            || !inference::store::list_providers(&id, secrets.as_ref())
+                                .await
+                                .unwrap_or_default()
+                                .is_empty()
+                            || !agent_pairs(&self.manifest, &overlay_agent_edits, &overlay_agents)
+                                .is_empty();
+
                         if configured {
                             // One shared steer registry; the same handle is wired
                             // onto the runtime below.
@@ -9385,13 +9416,20 @@ needs_reason = true
         );
     }
 
-    /// The mirror: a pin naming a provider this company never added resolves
-    /// no differently than a company with no inference at all, at boot — the
-    /// harness brain still boots (on the echo path), and the affected agent's
-    /// own turns fail closed at resolve time.
+    /// The mirror, inverted (round-3a review P1-5, X13): a pin naming a
+    /// provider this company never added is a *declared* inference source —
+    /// broken, but declared — and X13 says a company that has said anything
+    /// about inference never boots the echo brain merely because that
+    /// something does not currently work. Before this fix, a pin resolving
+    /// to nothing made every boot-time check answer `false` exactly like an
+    /// unconfigured company, and the affected agent silently got an echo
+    /// reply instead of the fail-closed sentence naming its broken pin. The
+    /// harness brain now boots regardless; `TenantProvider::resolve`'s own
+    /// pin check (P1-1) is what then fails that agent's turns closed, naming
+    /// it.
     #[cfg(feature = "openhuman")]
     #[tokio::test]
-    async fn a_pin_naming_a_missing_provider_keeps_the_echo_brain() {
+    async fn a_pin_naming_a_missing_provider_boots_the_harness_brain_not_echo() {
         use crate::harness::HarnessPool;
 
         let home_dir = tmp_home("oc-3a-pin-missing-");
@@ -9417,7 +9455,80 @@ needs_reason = true
             .build()
             .await
             .unwrap();
-        assert_eq!(runtime.cognition().path, "echo");
+        assert_ne!(
+            runtime.cognition().path,
+            "echo",
+            "a declared (even if broken) pair is still a declared inference \
+             source, not \"unconfigured\" — X13"
+        );
+    }
+
+    /// The exact reported sequence (round-3a review P1-5, X13): a company
+    /// with one provider, set as the full company default, has it switched
+    /// off (X14 keeps the default marker unchanged). The **next boot** —
+    /// hosted tenants restart on wake, so this is the normal path — must not
+    /// land on the echo brain just because that default cannot currently
+    /// resolve.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_disabled_full_default_boots_the_harness_brain_not_echo() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = tmp_home("oc-3a-default-off-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "researcher"
+            role = "Researcher"
+            "#,
+        );
+
+        let secrets = FsSecretStore::new(home.clone());
+        inference::store::put_provider(
+            &id,
+            &secrets,
+            inference::store::ProviderDraft {
+                slug: "acme".to_string(),
+                label: "Acme".to_string(),
+                kind: "openai_compatible".to_string(),
+                base_url: "http://127.0.0.1:9/v1".to_string(),
+                models: std::collections::BTreeMap::new(),
+                // Confirmed off, as X14's guard requires before a disable —
+                // the marker below stays untouched by that confirm, exactly
+                // as it would on the real route.
+                enabled: false,
+            },
+        )
+        .await
+        .unwrap();
+        inference::store::set_default_choice(
+            &id,
+            &secrets,
+            &inference::store::ModelChoice {
+                provider: "acme".to_string(),
+                model: "test-model-large".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id)
+            .with_harness(Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        assert_ne!(
+            runtime.cognition().path,
+            "echo",
+            "a stored default naming a switched-off provider is a declared \
+             inference source, not \"unconfigured\" — X13"
+        );
     }
 
     /// A desk added to `company.toml` since the last boot is wired on this one.
@@ -9895,7 +10006,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await
@@ -10022,7 +10133,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await
@@ -10181,7 +10292,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await

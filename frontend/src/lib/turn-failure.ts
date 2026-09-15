@@ -9,19 +9,20 @@
 // The operator could read server logs to find the real answer; nothing on
 // the surface they were actually looking at said it.
 //
-// CODED AGAINST THE STATED CONTRACT (orchestrator dispatch, 2026-09-15),
-// ahead of `docs/key-reworks/in-use-guards.md` §5 documenting the host's
-// exact wire shape: `userFacing`, `code` and `message` are the field names
-// given verbatim in that dispatch. `agentId`/`providerSlug` are this file's
-// own choice of name for "agent id and provider slug" — the dispatch did not
-// fix those two spellings. Align both the field names and the code list
-// below once B lands and documents them for real.
+// Field names match `docs/key-reworks/in-use-guards.md` §5, the host's own
+// contract: `userFacing`, `code`, `message`, `pairAgentId` and
+// `providerSlug`. `pairAgentId` (round-3, handover doc §2.1/§4.2's field
+// rename) rather than `agentId` — a reply already has an author, and a name
+// this close to it invited reading "the agent who replied" instead of "the
+// agent whose pair this failure is about" (the two differ for a title/triage
+// pass running under a different agent's identity than the one it serves).
+// Align further if `in-use-guards.md` §5 changes again.
 
 import { connectionsHref } from "@/views/connection-pages";
 import { consoleHref } from "./console-paths";
 
 /**
- * The seven cases the dispatch named. Kept as a list rather than a type
+ * The seven cases the contract names. Kept as a list rather than a type
  * union on {@link TurnFailure.code}: an unrecognised code must still render
  * `message` and fall back to the safe default action, never crash or hide
  * the sentence a person is relying on.
@@ -49,8 +50,8 @@ export interface TurnFailure {
   code: string;
   /** The X9 sentence itself, with display names (X7) — render verbatim, never re-derived or paraphrased. */
   message: string;
-  /** The agent this failure is about, when the code names one. */
-  agentId?: string;
+  /** The agent this failure's PAIR names, when the code names one — never the reply's own author/channel, which is a different question. */
+  pairAgentId?: string;
   /** The provider slug the failure names, when there is one. */
   providerSlug?: string;
 }
@@ -60,7 +61,7 @@ export interface TurnFailureWire {
   userFacing?: boolean;
   code?: string;
   message?: string;
-  agentId?: string;
+  pairAgentId?: string;
   providerSlug?: string;
 }
 
@@ -82,7 +83,7 @@ export function toTurnFailure(wire: TurnFailureWire | null | undefined): TurnFai
     userFacing: true,
     code,
     message,
-    agentId: wire.agentId,
+    pairAgentId: wire.pairAgentId,
     providerSlug: wire.providerSlug,
   };
 }
@@ -92,18 +93,18 @@ export function toTurnFailure(wire: TurnFailureWire | null | undefined): TurnFai
  * there is nothing useful to link — a pair code naming no agent id, which
  * only an unrecognised or malformed payload should ever produce.
  *
- * Two buckets, matching the dispatch's own two-way split and the codes'
+ * Two buckets, matching the contract's own two-way split and the codes'
  * own naming convention: a `pair_*` code is a fix on that agent's own pin
  * (Team → the agent → Model); every other code — the company default, "no
  * model chosen" at all, a keyless provider, or a model the catalogue no
  * longer lists — is a fix on the company-wide LLM page.
  */
 export function turnFailureAction(
-  failure: Pick<TurnFailure, "code" | "agentId">,
+  failure: Pick<TurnFailure, "code" | "pairAgentId">,
 ): { label: string; href: string } | null {
   if (failure.code.startsWith("pair_")) {
-    if (!failure.agentId) return null;
-    return { label: "Open Model settings", href: `${consoleHref("team", failure.agentId)}?tab=model` };
+    if (!failure.pairAgentId) return null;
+    return { label: "Open Model settings", href: `${consoleHref("team", failure.pairAgentId)}?tab=model` };
   }
   return { label: "Open LLM settings", href: connectionsHref("inference") };
 }

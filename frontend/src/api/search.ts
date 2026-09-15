@@ -205,10 +205,20 @@ export async function testSearchProvider(
   );
 }
 
-/** Clears every connection, falling the company back to managed search. */
+/**
+ * Clears every connection, falling the company back to managed search.
+ *
+ * `confirmInUse` (round-3 review, item 4): resends after a `409 in_use` names
+ * the search default this bulk action would otherwise strand
+ * (`docs/key-reworks/in-use-guards.md` §2) — coded against that contract
+ * ahead of the host's own guard landing on this route.
+ */
 export async function clearSearch(
   client: OpenCompanyClient,
   company: string | null,
+  confirmInUse?: boolean,
 ): Promise<SearchStatus> {
-  return client.del<SearchStatus>(`${client.scopeFor(company)}/search/key`);
+  return client.del<SearchStatus>(
+    `${client.scopeFor(company)}/search/key${confirmInUse ? "?confirmInUse=true" : ""}`,
+  );
 }

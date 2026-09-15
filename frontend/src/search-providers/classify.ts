@@ -11,6 +11,7 @@
 // and it exists as a plain function so the copy is selectable in a unit test
 // rather than only reachable through a rendered banner.
 
+import { usedBySentence } from "@/lib/used-by";
 import type { ConfirmTarget, ProbeClass } from "./types";
 
 /** How a failed check should be presented. */
@@ -197,6 +198,14 @@ export function describeTest(probeClass: ProbeClass, provider: string): string {
  * exactly what depends on the row, which the client cannot know without asking —
  * and the title and action label are unchanged, so the dialog still reads as the
  * same question, now with the real stakes attached.
+ *
+ * `target.usedBy` (round-3 review, P1-2) is read on the FIRST attempt, before
+ * any refusal — the row's own dependents, fetched fresh when the dialog
+ * opened. It is PREPENDED to the generic body rather than replacing it: unlike
+ * `notice`, this is not a refusal, so the sentence explaining what the action
+ * actually does still belongs underneath it. `notice` still wins outright when
+ * both are present — a live refusal is more current than what the dialog
+ * opened with.
  */
 export function confirmCopy(
   target: ConfirmTarget | null,
@@ -242,5 +251,7 @@ export function confirmCopy(
         return { title: "", body: "", action: "Confirm" };
     }
   })();
-  return notice ? { ...base, body: notice } : base;
+  if (notice) return { ...base, body: notice };
+  const usage = usedBySentence(target?.usedBy, "search");
+  return usage ? { ...base, body: `${usage} ${base.body}` } : base;
 }
