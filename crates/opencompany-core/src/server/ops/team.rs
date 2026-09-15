@@ -2584,7 +2584,7 @@ mod tests {
     /// The roster says which of its rows came from the global baseline.
     ///
     /// This is the field the console's first-run gate turns on. `apply_globals`
-    /// appends `globals/agents/*.toml` to **every** company whatever its
+    /// appends `companies/_globals/agents/*.toml` to **every** company whatever its
     /// manifest says, so a company nobody has ever staffed still answers this
     /// route with a non-empty list — and "is the roster empty?" therefore
     /// answered `no` everywhere, which is what made first-run setup unreachable

@@ -399,7 +399,7 @@ fn every_company_declares_a_search_posture() {
 }
 
 /// The footgun this suite exists to catch: `[tools].allow` **replaces** the
-/// default (`globals/globals.toml`'s `default_allow`), it never extends it. A
+/// default (`companies/_globals/globals.toml`'s `default_allow`), it never extends it. A
 /// reviewer "simplifying" a grant to `allow = ["search"]` would silently strip
 /// files/docs/shell/code/web/subagent, workspace writes, `media`, `composio`
 /// and the MCP grants from every agent in the company — no parse error, no
@@ -1209,7 +1209,7 @@ fn every_company_ledger_declaration_parses_and_fits_under_the_cap() {
 /// question — how is it going, which flavour of over — and that answer belongs
 /// in a field (`progress`, `reason`) where it does not have to be guessed.
 ///
-/// Covers the `globals/` baseline as well as `companies/`: the baseline ships
+/// Covers the `companies/_globals/` baseline as well as `companies/`: the baseline ships
 /// into every company, so a sprawling one there is sprawl nobody opted into.
 ///
 /// It fails here rather than at run time because nothing at run time would say
@@ -1239,7 +1239,7 @@ fn no_shipped_template_ledger_declares_more_than_five_statuses() {
     // ship into *every* company, so a sprawling one is sprawl every operator
     // gets whichever vertical they started from.
     for spec in crate::globals::ledgers() {
-        check("globals/ledgers".to_string(), spec);
+        check("companies/_globals/ledgers".to_string(), spec);
     }
     for company in subdirs(&repo_root().join("companies")) {
         let declared = load_dir_ledgers(&company)
@@ -1576,7 +1576,7 @@ fn every_shipped_setup_card_is_pickable() {
                 Some(assignee) => {
                     assert!(
                         name != "globals",
-                        "globals/tasks.toml: `{}` names an assignee, but the baseline ships to \
+                        "companies/_globals/tasks.toml: `{}` names an assignee, but the baseline ships to \
                          every company and can know no roster",
                         card.id
                     );

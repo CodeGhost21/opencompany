@@ -426,7 +426,7 @@ pub(super) fn is_orchestrator(record: &CompanyRecord, agent_id: &str) -> bool {
 /// ([`crate::globals`]) rather than from this company.
 ///
 /// Provenance, and the one question first-run setup turns on (issue #1404).
-/// `apply_globals` appends `globals/agents/*.toml` to *every* company's roster
+/// `apply_globals` appends `companies/_globals/agents/*.toml` to *every* company's roster
 /// whatever its manifest says, so "is the roster empty?" is answered `no` on a
 /// company nobody has ever staffed — which is how the whole first-run flow came
 /// to be unreachable in the shipped product. The console needs to tell the

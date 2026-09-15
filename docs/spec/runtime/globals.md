@@ -5,10 +5,10 @@ studio, a recruiting company. The **global baseline** is the part that is the
 same in all of them: the teammates, workflow graphs, and skills every company
 has whichever vertical it was started from, plus the tool belt it starts with.
 
-The authored source is `globals/`, beside `companies/`:
+The authored source is `companies/_globals/`, beside `companies/`:
 
 ```text
-globals/
+companies/_globals/
   globals.toml      # [tools].default_allow, [skills].always
   agents/*.toml     # one file per global teammate
   workflows/*.toml  # one file per global graph
@@ -16,11 +16,11 @@ globals/
 ```
 
 The code is [`crate::globals`](../../../src/globals/mod.rs), and the shipped
-contents are described in [`globals/README.md`](../../../globals/README.md).
+contents are described in [`companies/_globals/README.md`](../../../globals/README.md).
 
 ## Embedded, not read from disk
 
-Everything in `globals/` is embedded into the binary by `build.rs`, exactly like
+Everything in `companies/_globals/` is embedded into the binary by `build.rs`, exactly like
 the built-in ledgers in `src/ledger/registry.rs`. A platform-provisioned tenant
 container carries no repository checkout — it is why `skills_root()` is `None`
 there and the shared skill registry is empty — so a baseline resolved from the
@@ -61,7 +61,7 @@ enable, so the manifest wins over a console re-enable.
 
 ### Ledgers and setup cards are seeded rather than resolved
 
-Every other surface above is re-resolved on each read, so editing `globals/`
+Every other surface above is re-resolved on each read, so editing `companies/_globals/`
 changes what an existing company gets on its next load. Ledgers cannot work that
 way, because a company **owns its record**: `docs/spec/runtime/ledgers.md` makes
 retiring a ledger a person's call, and a baseline re-applied on every boot would
@@ -70,7 +70,7 @@ what a *new* company is seeded with, not what an existing one keeps.
 
 ### Setup cards, and why they are opt-in
 
-`globals/tasks.toml` is the setup work every company starts with on its board —
+`companies/_globals/tasks.toml` is the setup work every company starts with on its board —
 write the brief, set the first goals, record the standing decisions, name the
 top risks, wire the connections — on top of which each bundle's own
 `tasks.toml` adds the setup its vertical is defined by. Seeded once, at first
@@ -123,7 +123,7 @@ ambiguity — see `harness::workflow_build::resolve_agent_ids`.
 
 ### Global teammates ask for their tools
 
-Each `globals/agents/*.toml` declares an explicit `tools` list. An agent that
+Each `companies/_globals/agents/*.toml` declares an explicit `tools` list. An agent that
 requests nothing inherits the company-wide belt whole, which for a global
 teammate would mean every vertical's MCP servers, Composio account, and media
 budget — granted to a teammate that company never wrote. A request is intersected
@@ -180,7 +180,7 @@ global ids would break on the next global added, silently.
 
 ## Adding to the baseline
 
-1. Add the file under `globals/agents/` or `globals/workflows/`, or the slug to
+1. Add the file under `companies/_globals/agents/` or `companies/_globals/workflows/`, or the slug to
    `[skills].always` (its `SKILL.md` must exist in `skills/`).
 2. An agent node in a global workflow may only name a **global** agent — the
    graph runs in companies whose rosters it has never seen. A test enforces it.

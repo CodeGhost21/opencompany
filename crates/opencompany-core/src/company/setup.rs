@@ -147,7 +147,7 @@ const BASE_BELT: [&str; 6] = [
 /// described in three sentences.
 ///
 /// The globals teammates next to them already do the opposite, and say why in
-/// `globals/agents/researcher.toml`: a request is intersected with
+/// `companies/_globals/agents/researcher.toml`: a request is intersected with
 /// `[tools].allow`, so naming one *can only ever narrow*. These belts are that
 /// file's, verbatim, for exactly that reason — the strings are already exercised
 /// in every company rather than invented here.
@@ -331,7 +331,7 @@ impl AgentFocus {
     /// [`persona_prompt`](crate::company::prompt::persona_prompt) assembles from
     /// its role and its one-line mandate — around 150 characters, next to a
     /// globals teammate carrying 500–600 of standing instruction. The four
-    /// `globals/agents/*.toml` prompts are the register these are written in,
+    /// `companies/_globals/agents/*.toml` prompts are the register these are written in,
     /// deliberately without reusing their sentences: a global teammate is on the
     /// same roster, and two agents given the same instructions are one agent
     /// twice.
@@ -567,7 +567,7 @@ pub const MAX_DESCRIPTION: usize = 200;
 /// prompt, so what bounds them is prompt weight, not a card.
 ///
 /// 500 is set from what the neighbours cost. A globals teammate's composed
-/// prompt runs 648–761 characters (`globals/agents/*.toml` plus its persona
+/// prompt runs 648–761 characters (`companies/_globals/agents/*.toml` plus its persona
 /// framing), and a designed teammate here lands near 440 on shape instructions
 /// alone. This lets a curated profile reach roughly that same band without
 /// inviting a page of prose into every turn of every agent — the failure the
@@ -1426,7 +1426,7 @@ pub fn manifest_from_setup(
             built.id = unique_agent_id(&agent.role, &mut seen);
             built.role = agent.role.trim().to_string();
             built.description = non_empty(&agent.description);
-            // Asked for explicitly, exactly as `globals/agents/*.toml` do. An
+            // Asked for explicitly, exactly as `companies/_globals/agents/*.toml` do. An
             // agent that requests nothing inherits the company belt whole —
             // which here is the globals `default_allow`,
             // so every teammate a first-run operator created held real-money
@@ -2403,7 +2403,7 @@ mod tests {
     }
 
     /// And distinct from every globals prompt, because a global teammate sits
-    /// on the same roster. `globals/agents/*.toml` is the register these are
+    /// on the same roster. `companies/_globals/agents/*.toml` is the register these are
     /// written in, never the text to copy.
     ///
     /// Checked as a shared **run of words** rather than string equality, which

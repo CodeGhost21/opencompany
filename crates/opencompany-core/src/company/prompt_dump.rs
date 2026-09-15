@@ -69,7 +69,7 @@ pub struct AgentPrompt {
     pub role: String,
     pub tier: Option<String>,
     /// Whether this teammate came from the global baseline rather than the
-    /// company's own roster (`globals/agents/*.toml`).
+    /// company's own roster (`companies/_globals/agents/*.toml`).
     pub global: bool,
     /// Whether this is the company's orchestrator — it changes the prompt, so
     /// it is reported rather than left to be inferred from `tier`.
@@ -110,7 +110,7 @@ impl AgentPrompt {
             self.tier.as_deref().unwrap_or("—"),
             if self.orchestrator { "yes" } else { "no" },
             if self.global {
-                "global baseline (`globals/agents/`)"
+                "global baseline (`companies/_globals/agents/`)"
             } else {
                 "this company's roster"
             },

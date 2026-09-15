@@ -2641,7 +2641,7 @@ async fn a_manifest_teammate_and_a_runtime_one_can_be_the_ambiguous_pair() {
 /// Issue #1196. A tie between a company-authored teammate and a baseline one
 /// is not the tie #1106 exists for: the company already expressed a
 /// preference by staffing its own `Writer` (`maya`), so the baseline `writer`
-/// (`globals/agents/writer.toml`, merged into every company's roster) steps
+/// (`companies/_globals/agents/writer.toml`, merged into every company's roster) steps
 /// aside and the card dispatches instead of parking. Mirrors issue #1196's own
 /// worked example — a company `Writer` tying against the global `writer`.
 #[tokio::test]

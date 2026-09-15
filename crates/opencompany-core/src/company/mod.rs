@@ -113,7 +113,7 @@ mod skill_file;
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
 pub mod steer;
-/// Seed board cards: `globals/tasks.toml` and `companies/<name>/tasks.toml`. A
+/// Seed board cards: `companies/_globals/tasks.toml` and `companies/<name>/tasks.toml`. A
 /// company boots with the setup work it obviously has already on the board,
 /// rather than with an empty To-do column and agents that have nothing to pick
 /// up.

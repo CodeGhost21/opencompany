@@ -59,7 +59,7 @@ Unlike `workspace`, there is no `pages.write` split behind a separate,
 explicit grant: `pages` rides the default `"*"` grant whole, the same as
 `files`/`docs`/`shell`/`code`. A company that has not deliberately withheld
 tools gets all four the moment it names an agent for the job — the global
-`page_builder` agent (`globals/agents/page_builder.toml`) is exactly that.
+`page_builder` agent (`companies/_globals/agents/page_builder.toml`) is exactly that.
 `pages` is also **not** in `GATEABLE_NAMESPACES`
 (`src/company/types.rs`), for the same reason `workspace`/`docs`/`files`
 are not: an agent should not lose the ability to fix a broken page under
