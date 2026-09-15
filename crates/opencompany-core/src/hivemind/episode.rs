@@ -678,44 +678,19 @@ impl<'a> EpisodeDriver<'a> {
                 // the desk would put a second desk-visible contribution on one
                 // turn, which is the one thing a turn may not produce — and the
                 // member has already said its piece in the row above.
-                if let Some(aside_line) = scratch.aside.take() {
-                    let audience = self.aside_audience(
+                if let Some(aside_seq) = self
+                    .journaled_aside(
                         &turn.agent_id,
-                        &aside_line,
+                        &mut scratch,
                         &transcript,
                         &members,
                         &desks,
                         &retired,
-                    );
-                    if audience.is_empty() {
-                        tracing::debug!(
-                            company = %self.company,
-                            desk = %self.desk.id,
-                            agent = %turn.agent_id,
-                            "[hive] an aside was not authorized; the row was dropped"
-                        );
-                    } else {
-                        let aside_seq = self
-                            .events
-                            .append(
-                                &self.company,
-                                CompanyEvent::AgentReply {
-                                    chat_id: self.desk.id.clone(),
-                                    agent_id: turn.agent_id.clone(),
-                                    text: aside_line,
-                                    audience,
-                                    steps: Vec::new(),
-                                    task_id: None,
-                                    outputs: Vec::new(),
-                                    parent: self.thread_root,
-                                    mentions: Vec::new(),
-                                    mention_depth: 0,
-                                },
-                            )
-                            .await?;
-                        scope.record(aside_seq);
-                        last_seq = Some(aside_seq);
-                    }
+                    )
+                    .await?
+                {
+                    scope.record(aside_seq);
+                    last_seq = Some(aside_seq);
                 }
                 // **The asker's continuation, held until its own line is
                 // recorded.** `lines` is documented as every line this episode
@@ -912,6 +887,33 @@ impl<'a> EpisodeDriver<'a> {
                                     .await?;
                                 scope.record(second_seq);
                                 last_seq = Some(second_seq);
+                                // **A continuation may ride an aside too.**
+                                //
+                                // `line_from` puts one in `scratch.aside`
+                                // whichever pass produced it, and only the
+                                // first pass was draining it — so an aside a
+                                // continuation authorized was cleared by the
+                                // next turn and lost (CodeRabbit, #2332). Same
+                                // helper, so the authorize-or-drop rule has one
+                                // implementation rather than two.
+                                //
+                                // Never into `lines`: an aside is not a
+                                // desk-visible contribution and the fold must
+                                // not read it as one.
+                                if let Some(aside_seq) = self
+                                    .journaled_aside(
+                                        &turn.agent_id,
+                                        &mut scratch,
+                                        &transcript,
+                                        &members,
+                                        &desks,
+                                        &retired,
+                                    )
+                                    .await?
+                                {
+                                    scope.record(aside_seq);
+                                    last_seq = Some(aside_seq);
+                                }
                                 continuation = Some((second_seq, turn.agent_id.clone(), second));
                             }
                             // The question and its answer are already durable,
@@ -1004,6 +1006,65 @@ impl<'a> EpisodeDriver<'a> {
     /// somewhere else; `failed` and `declined` are counted apart from it.
     ///
     /// `None` when nothing answered, and the turn ends where it always did.
+    /// Authorize and journal whatever aside a turn's reply carried, returning
+    /// the sequence it landed on.
+    ///
+    /// One implementation, because both passes of a turn can produce one: the
+    /// member's own line, and the continuation it takes on a crossing's answer.
+    /// Only the first was draining `scratch.aside`, so an aside a continuation
+    /// authorized was cleared by the next turn and lost (CodeRabbit, #2332).
+    ///
+    /// **A refused audience is dropped, not published.** Falling back to the
+    /// desk would put a second desk-visible contribution on one turn, which is
+    /// the one thing a turn may not produce — and the member has already said
+    /// its piece in the row above.
+    ///
+    /// Never returned into `lines`: an aside is not a desk-visible
+    /// contribution and the fold must not count it as one.
+    async fn journaled_aside(
+        &self,
+        agent_id: &str,
+        scratch: &mut TurnScratch,
+        transcript: &[tinyhivemind_hive::SessionMessage],
+        members: &[RosterMember],
+        desks: &[Desk],
+        retired: &[String],
+    ) -> Result<Option<EventSeq>> {
+        let Some(aside_line) = scratch.aside.take() else {
+            return Ok(None);
+        };
+        let audience =
+            self.aside_audience(agent_id, &aside_line, transcript, members, desks, retired);
+        if audience.is_empty() {
+            tracing::debug!(
+                company = %self.company,
+                desk = %self.desk.id,
+                agent = %agent_id,
+                "[hive] an aside was not authorized; the row was dropped"
+            );
+            return Ok(None);
+        }
+        let seq = self
+            .events
+            .append(
+                &self.company,
+                CompanyEvent::AgentReply {
+                    chat_id: self.desk.id.clone(),
+                    agent_id: agent_id.to_owned(),
+                    text: aside_line,
+                    audience,
+                    steps: Vec::new(),
+                    task_id: None,
+                    outputs: Vec::new(),
+                    parent: self.thread_root,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                },
+            )
+            .await?;
+        Ok(Some(seq))
+    }
+
     async fn refolded(
         &self,
         conversation: &Conversation,

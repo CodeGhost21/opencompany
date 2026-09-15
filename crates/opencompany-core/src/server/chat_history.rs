@@ -1881,9 +1881,26 @@ async fn attach_referral_origins(
         // no later marker on the page can still reach forward. Closing it needs
         // the far desk to record the failure the way the asking desk does, which
         // is a journal change and not a projection one.
+        //
+        // Bounded at the next crossing BETWEEN THE SAME TWO DESKS, in the same
+        // direction — not at the next marker on the company's journal. `page` is
+        // company-wide, so any other pair's crossing was ending this window and
+        // a child journaled after it was skipped, dropping an answered crossing
+        // from the projection entirely. `to_desk` alone is not enough either:
+        // two different desks can ask the same one (Codex and CodeRabbit both,
+        // #2332).
         let next_marker = page[index + 1..]
             .iter()
-            .position(|later| matches!(&later.event, CompanyEvent::ReferralEnqueued { .. }))
+            .position(|later| {
+                matches!(
+                    &later.event,
+                    CompanyEvent::ReferralEnqueued {
+                        from_desk: next_from,
+                        to_desk: next_to,
+                        ..
+                    } if next_from == from_desk && next_to == to_desk
+                )
+            })
             .map_or(page.len(), |at| index + 1 + at);
         let Some(child) = page[index + 1..next_marker]
             .iter()
@@ -5084,6 +5101,103 @@ mod referral_origin_test {
                 .all(|line| !line.text.contains("icon set")),
             "and a reply this desk made outside the crossing is not part of it: {:?}",
             crossing.lines
+        );
+    }
+
+    /// **Another pair's crossing does not end this one's window.**
+    ///
+    /// The child search is bounded so a crossing that FAILED cannot latch onto
+    /// its target's next unrelated reply. `page` is the company's journal
+    /// though, not this pair's, so bounding at the next marker of ANY kind let
+    /// a third desk's crossing end the window — and a child journaled after it
+    /// was skipped, dropping an answered crossing from the projection
+    /// altogether. Matching `to_desk` alone is not enough either: two desks can
+    /// ask the same one (Codex and CodeRabbit both, #2332).
+    #[tokio::test]
+    async fn an_unrelated_pairs_marker_does_not_end_this_crossings_window() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+
+        let marker =
+            |from: &str, to: &str, asker: &str, target: &str| CompanyEvent::ReferralEnqueued {
+                conversation: None,
+                answers: None,
+                from_desk: from.to_string(),
+                from_desk_name: from.to_string(),
+                asker: asker.to_string(),
+                asker_label: asker.to_string(),
+                trigger_sequence: 1,
+                to_desk: to.to_string(),
+                target: target.to_string(),
+                returning: false,
+            };
+        // This crossing: engineering asks design.
+        runtime
+            .events()
+            .append(
+                &id,
+                marker(
+                    "engineering",
+                    "design",
+                    "software_engineer",
+                    "product_designer",
+                ),
+            )
+            .await
+            .expect("journal");
+        // A crossing between two entirely unrelated desks, interleaved BEFORE
+        // our child lands. It ends no window of ours — but the unscoped bound
+        // stopped here, so the child below was never reached.
+        runtime
+            .events()
+            .append(&id, marker("sales", "triage", "ae", "triager"))
+            .await
+            .expect("journal");
+        // Our child: the target's own turn on the desk that was asked.
+        runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::AgentReply {
+                    chat_id: "design".to_string(),
+                    agent_id: "product_designer".to_string(),
+                    text: "they read like a copy task".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    outputs: Vec::new(),
+                    parent: None,
+                    mentions: Vec::new(),
+                    mention_depth: 0,
+                    audience: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal");
+
+        let history = history_for_desk(
+            &runtime,
+            "design",
+            "design",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+        let answered = history
+            .iter()
+            .find(|m| m.referred_from.is_some())
+            .expect("the crossing still finds its child past another pair's marker");
+        assert_eq!(
+            answered.referred_from.as_ref().expect("origin").desk_id,
+            "engineering",
+            "and it is attributed to the desk that actually asked"
+        );
+        assert_eq!(
+            answered.text, "they read like a copy task",
+            "the child is the target's own turn, found past the unrelated marker"
         );
     }
 

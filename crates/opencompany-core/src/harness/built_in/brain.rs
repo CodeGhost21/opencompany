@@ -5219,7 +5219,15 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
         // attributed, in the order they were said.
         let conclusion = match &outcome.ending {
             crate::hivemind::EpisodeEnding::Converged { .. } => {
-                if outcome.report_seq.is_none() {
+                if let Some(report_seq) = outcome.report_seq {
+                    let page = events.read_from(&record.id, report_seq, 1).await?;
+                    page.into_iter().find_map(|stored| match stored.event {
+                        CompanyEvent::AgentReply { text, .. } if stored.seq == report_seq => {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                } else {
                     tracing::warn!(
                         company = %record.id,
                         desk = %desk_id,
@@ -5236,15 +5244,6 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
                     // #2332).
                     self.turns_of(&events, &record.id, &outcome, &far_desk, root)
                         .await
-                } else {
-                    let report_seq = outcome.report_seq.expect("checked above");
-                    let page = events.read_from(&record.id, report_seq, 1).await?;
-                    page.into_iter().find_map(|stored| match stored.event {
-                        CompanyEvent::AgentReply { text, .. } if stored.seq == report_seq => {
-                            Some(text)
-                        }
-                        _ => None,
-                    })
                 }
             }
             _ => {
