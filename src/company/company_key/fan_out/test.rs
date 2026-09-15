@@ -1525,3 +1525,139 @@ async fn no_report_or_note_contains_a_key() {
     assert!(!note.contains(OLD), "{note}");
     assert!(!note.contains(NEW), "{note}");
 }
+
+// ---------------------------------------------------------------------------
+// copy_account_key_to_composio — keys rework #2306, slice 4c (Composio half)
+// ---------------------------------------------------------------------------
+
+const MODE_KEY: &str = crate::company::composio::MODE_KEY;
+const BYOK_KEY_KEY: &str = crate::company::composio::BYOK_KEY_KEY;
+
+#[tokio::test]
+async fn copying_the_account_key_fills_the_composio_tinyhumans_key() {
+    let cid = company("copy-fill");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, NEW).await;
+
+    let report = copy_account_key_to_composio(&cid, &secrets).await.unwrap();
+
+    assert_eq!(raw_get(&secrets, &cid, COMPOSIO_KEY_KEY).await, NEW);
+    assert_eq!(outcome(&report, Slot::Composio), SlotOutcome::Filled);
+    assert_eq!(
+        report.slots.len(),
+        1,
+        "a single-slot copy reports one slot: {report:?}"
+    );
+    assert!(!report.needs_model);
+    assert!(!report.sets_default);
+    assert!(report.models.is_empty());
+}
+
+/// `decide_copy` alone answers `Keep(AlreadyCurrent)` when the slot already
+/// resolves to the account key — whether that resolution comes from the new
+/// address or, as here, purely from 1a's legacy fallback (`composio/token`).
+/// This copy is explicit and user-requested, so it goes one step further than
+/// the general fan-out's own `Keep` handling (which never writes) and
+/// materialises the value on the new address, clearing the legacy address the
+/// same way [`super::write_composio_slot`] always does — leaving a company
+/// that clicks "Yes" with a clean, new-address-only state rather than one
+/// still resolving through the pre-rename mirror.
+#[tokio::test]
+async fn copying_the_account_key_clears_the_legacy_token_when_it_was_the_old_value() {
+    let cid = company("copy-legacy");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, NEW).await;
+    // Only the legacy address holds the account key — the new address is
+    // untouched, exactly the shape a pre-1a company can still be in.
+    raw_set(&secrets, &cid, COMPOSIO_LEGACY_KEY, NEW).await;
+
+    let report = copy_account_key_to_composio(&cid, &secrets).await.unwrap();
+
+    assert_eq!(raw_get(&secrets, &cid, COMPOSIO_KEY_KEY).await, NEW);
+    assert_eq!(
+        raw_get(&secrets, &cid, COMPOSIO_LEGACY_KEY).await,
+        "",
+        "the copy retires the legacy mirror rather than carrying it forward"
+    );
+    assert_eq!(outcome(&report, Slot::Composio), SlotOutcome::Filled);
+}
+
+#[tokio::test]
+async fn copying_is_refused_without_an_account_key() {
+    let cid = company("copy-no-account-key");
+    let secrets = MemSecrets::default();
+
+    let err = copy_account_key_to_composio(&cid, &secrets)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, OpenCompanyError::InvalidRequest(ref m) if m.contains("no account key to reuse")),
+        "{err}"
+    );
+    assert_eq!(
+        raw_get(&secrets, &cid, COMPOSIO_KEY_KEY).await,
+        "",
+        "nothing is written on a refusal"
+    );
+}
+
+#[tokio::test]
+async fn copying_is_refused_over_a_custom_composio_key() {
+    let cid = company("copy-custom-key");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, NEW).await;
+    raw_set(&secrets, &cid, COMPOSIO_KEY_KEY, CUSTOM).await;
+
+    let err = copy_account_key_to_composio(&cid, &secrets)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, OpenCompanyError::InvalidRequest(ref m) if m.contains("already has its own key")),
+        "{err}"
+    );
+    assert_eq!(
+        raw_get(&secrets, &cid, COMPOSIO_KEY_KEY).await,
+        CUSTOM,
+        "the custom key is left exactly as it was"
+    );
+}
+
+/// A slot already equal to the account key is not a refusal (§3.1): it
+/// answers `Kept`/`AlreadyCurrent` and touches nothing.
+#[tokio::test]
+async fn copying_the_account_key_is_a_no_op_when_already_current() {
+    let cid = company("copy-already-current");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, NEW).await;
+    raw_set(&secrets, &cid, COMPOSIO_KEY_KEY, NEW).await;
+
+    let report = copy_account_key_to_composio(&cid, &secrets).await.unwrap();
+
+    assert_eq!(raw_get(&secrets, &cid, COMPOSIO_KEY_KEY).await, NEW);
+    assert_eq!(
+        outcome(&report, Slot::Composio),
+        SlotOutcome::Kept(SkipReason::AlreadyCurrent)
+    );
+}
+
+#[tokio::test]
+async fn copying_the_account_key_never_touches_mode_or_byok() {
+    let cid = company("copy-no-mode-byok");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, NEW).await;
+    raw_set(&secrets, &cid, MODE_KEY, "byok").await;
+    raw_set(&secrets, &cid, BYOK_KEY_KEY, CUSTOM).await;
+
+    copy_account_key_to_composio(&cid, &secrets).await.unwrap();
+
+    assert_eq!(
+        raw_get(&secrets, &cid, MODE_KEY).await,
+        "byok",
+        "the copy never reads or writes composio/mode"
+    );
+    assert_eq!(
+        raw_get(&secrets, &cid, BYOK_KEY_KEY).await,
+        CUSTOM,
+        "the copy never reads or writes composio/byok/key"
+    );
+}

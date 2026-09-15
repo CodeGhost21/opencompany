@@ -764,5 +764,118 @@ pub fn fan_out_note(clearing: bool, report: &FanOutReport, model: Option<&str>) 
     sentences.join(" ")
 }
 
+// ---------------------------------------------------------------------------
+// copy_account_key_to_composio — keys rework #2306, slice 4c (Composio half)
+// ---------------------------------------------------------------------------
+
+/// Copies [`KEY_KEY`] (the account key) into `composio/tinyhumans/key`, for
+/// the reuse banner offered when Composio's own copy is gone but the account
+/// key still exists (`docs/key-reworks/phase-4c-reuse-banner.md`).
+///
+/// A single-slot copy, not a save: the account key itself is never read as
+/// "old" and "new" here in the way [`fan_out`] reads a `PUT …/credential`
+/// body — there is no new value coming in, only a request to make the
+/// Composio slot agree with what `tinyhumans/key` already holds. That is
+/// exactly [`decide_copy`]'s rule with `old_account` and `new` both equal to
+/// the current account key, so it is reused rather than reimplemented: the
+/// only branches `decide_copy` can take with a non-empty `new` are `Write`
+/// (the slot is empty) and `Keep` (`AlreadyCurrent` or `CustomKey`) — a
+/// `Clear`/`Skip` branch would require an empty `new`, which never happens
+/// here because an empty account key is refused first.
+///
+/// One case gets one refinement past a literal `decide_copy` read: when the
+/// slot already agrees with the account key only through 1a's legacy
+/// fallback (`composio/token`) — the new address itself is still empty —
+/// this explicit, user-requested copy materialises the value on the new
+/// address and retires the mirror via [`write_composio_slot`], the same as
+/// every other write that function makes. Leaving it alone would mean a
+/// company that clicks "Yes" on the reuse banner stays one legacy read away
+/// from a clean state.
+///
+/// Refuses (`OpenCompanyError::InvalidRequest`, 400, before any write) when
+/// there is no account key to copy, or when the Composio slot already holds a
+/// different, non-empty key of its own. Never reads or writes `composio/mode`
+/// or `composio/byok/key` — this touches the managed TinyHumans slot only.
+pub async fn copy_account_key_to_composio(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<FanOutReport> {
+    let _guard = slot_guard(company).await;
+
+    // 1. Read the account key. Any error here returns `Err` — nothing has
+    // been written.
+    let account_key = secrets
+        .get(company, KEY_KEY)
+        .await?
+        .map(|SecretValue(v)| v.trim().to_string())
+        .unwrap_or_default();
+    if account_key.is_empty() {
+        return Err(OpenCompanyError::InvalidRequest(
+            "There is no account key to reuse. Add one on the Account page.".to_string(),
+        ));
+    }
+
+    // 2. Read the Composio slot: the new address directly, and — only when
+    // that is empty — the pre-rename legacy address (1a's fallback), so a
+    // value that reads correctly today purely through the legacy fallback is
+    // told apart from one already sitting on the new address.
+    let composio_direct = secrets
+        .get(company, composio::TINYHUMANS_KEY_KEY)
+        .await?
+        .map(|SecretValue(v)| v.trim().to_string())
+        .unwrap_or_default();
+    let composio_now = if composio_direct.is_empty() {
+        composio::load_tinyhumans_key(company, secrets)
+            .await?
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    } else {
+        composio_direct.clone()
+    };
+
+    // 3. Decide, before any write. `old_account` and `new` are both the
+    // account key: this call never changes it, only copies it.
+    let outcome = match decide_copy(&composio_now, &account_key, &account_key) {
+        CopyDecision::Write => {
+            write_composio_slot(company, secrets, &account_key).await?;
+            SlotOutcome::Filled
+        }
+        // The slot already agrees with the account key, but only through the
+        // legacy fallback — the new address itself is still empty. This
+        // explicit, user-requested copy is the moment to materialise the
+        // value on the new address and retire the mirror, exactly what
+        // `write_composio_slot` already does on every write; leaving it
+        // alone here would mean a company that clicks "Yes" stays one legacy
+        // read away from a clean state.
+        CopyDecision::Keep(SkipReason::AlreadyCurrent) if composio_direct.is_empty() => {
+            write_composio_slot(company, secrets, &account_key).await?;
+            SlotOutcome::Filled
+        }
+        CopyDecision::Keep(SkipReason::AlreadyCurrent) => {
+            SlotOutcome::Kept(SkipReason::AlreadyCurrent)
+        }
+        CopyDecision::Keep(SkipReason::CustomKey) => {
+            return Err(OpenCompanyError::InvalidRequest(
+                "TinyHumans already has its own key here. Remove it first to reuse the account key."
+                    .to_string(),
+            ));
+        }
+        other => unreachable!(
+            "decide_copy with a non-empty `new` only ever answers Write or \
+             Keep(AlreadyCurrent | CustomKey): {other:?}"
+        ),
+    };
+
+    Ok(FanOutReport {
+        slots: vec![SlotReport {
+            slot: Slot::Composio,
+            outcome,
+        }],
+        needs_model: false,
+        sets_default: false,
+        models: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod test;
