@@ -553,6 +553,20 @@ fn named_desk(desk: &str) -> String {
     }
 }
 
+/// The line an unanswered question leaves when a ROOM could not answer it.
+///
+/// [`unanswered_note`] names the seat that was asked, which is right when a
+/// seat was asked. A crossing that convened the far desk asked nobody in
+/// particular — and when that room fails, `forward` returns from the
+/// `deliberate` arm before `refer` ever runs — so naming the seat the library
+/// happened to resolve credits a teammate with a refusal it never made, on a
+/// desk where nobody reading the row can check. The same defect
+/// [`room_note`] exists to remove on the success path (CodeRabbit, #2332).
+#[must_use]
+pub fn room_unanswered_note(desk: &str) -> String {
+    format!("{} did not answer the question.", named_desk(desk))
+}
+
 /// The line an unanswered question leaves on the asking desk.
 #[must_use]
 pub fn unanswered_note(target: &str, desk: &str) -> String {
@@ -846,6 +860,9 @@ impl<'a> EpisodeReferrals<'a> {
         &self,
         referral: &Referral,
         error: &crate::OpenCompanyError,
+        // Whether it was a ROOM that failed rather than a seat, so the note
+        // names whoever was actually asked. See `room_unanswered_note`.
+        by_room: bool,
     ) -> EnqueueOutcome {
         tracing::warn!(
             company = %self.company,
@@ -862,7 +879,12 @@ impl<'a> EpisodeReferrals<'a> {
             .journal(
                 &self.home,
                 super::HIVE_REFERRAL_AUTHOR,
-                unanswered_note(&referral.target_id, &self.desk_name(&referral.to.desk_id)),
+                match by_room {
+                    true => room_unanswered_note(&self.desk_name(&referral.to.desk_id)),
+                    false => {
+                        unanswered_note(&referral.target_id, &self.desk_name(&referral.to.desk_id))
+                    }
+                },
             )
             .await;
         EnqueueOutcome::Refused {
@@ -963,7 +985,7 @@ impl<'a> EpisodeReferrals<'a> {
                 // failures — not silently retried as one seat, which would
                 // bill the room's turns and then bill a turn again.
                 Err(error) => {
-                    return self.unanswered(referral, &error).await;
+                    return self.unanswered(referral, &error, true).await;
                 }
             },
             false => None,
@@ -977,7 +999,7 @@ impl<'a> EpisodeReferrals<'a> {
                 .await
             {
                 Ok(answer) => answer,
-                Err(error) => return self.unanswered(referral, &error).await,
+                Err(error) => return self.unanswered(referral, &error, false).await,
             },
         };
         // Journaled in the conversation the turn ran in — the pair's own thread,

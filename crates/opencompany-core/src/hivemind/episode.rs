@@ -773,7 +773,31 @@ impl<'a> EpisodeDriver<'a> {
                         seq,
                     )
                     .await;
-                    let answered = queue.ledger().await.asked.len() > answered_before;
+                    // **Continue only on an answer this seat can actually
+                    // read.**
+                    //
+                    // Counting successful far-desk turns is not that. A desk
+                    // with `returns = false` still records the question on the
+                    // ledger, but `consider` exits before journaling anything
+                    // on THIS desk — so the count grew while the transcript
+                    // gained nothing, and the continuation ran with a prompt
+                    // announcing an answer that was not there, free to commit a
+                    // decision on information its speaker never received
+                    // (Codex, #2332).
+                    //
+                    // `returned || !crossed`, not `returned` alone: a question
+                    // put to a peer on this same desk never needs carrying back
+                    // — `forward` appends the answer to the very conversation
+                    // the asker is reading — so that continuation is legitimate
+                    // and gating on `returned` would suppress it.
+                    let answered = {
+                        let ledger = queue.ledger().await;
+                        ledger.asked.len() > answered_before
+                            && ledger
+                                .asked
+                                .last()
+                                .is_some_and(|asked| asked.returned || !asked.crossed)
+                    };
                     // **The asker's turn continues on the answer it paid for.**
                     //
                     // Landing the answer before the *next* speaker is chosen
@@ -792,7 +816,7 @@ impl<'a> EpisodeDriver<'a> {
                     // move. The room's budget is untouched — `turns` counts the
                     // round, not the rows — and a second pass is taken at most
                     // once, so a continuation that asks again cannot regress.
-                    if let Some(transcript) = self.refolded(&conversation, answered).await {
+                    if let Some(transcript) = self.refolded(&conversation, answered, &scope).await {
                         let visible = project_for(&turn, &transcript);
                         let prompt = EpisodePrompt::new(
                             member,
@@ -955,6 +979,13 @@ impl<'a> EpisodeDriver<'a> {
         &self,
         conversation: &Conversation,
         answered: bool,
+        // **This episode's own fold boundary.** The desk and thread filters do
+        // not separate two episodes that share them, so an unscoped refold
+        // admits a concurrent episode's rows and `EpisodePrompt::standings`
+        // folds them — showing the continuation supporter counts belonging to
+        // somebody else's room. The main loop scopes its log for exactly this
+        // reason; this one was built without it (CodeRabbit, #2332).
+        scope: &Arc<EpisodeScope>,
     ) -> Option<Vec<tinyhivemind_hive::SessionMessage>> {
         if !answered {
             return None;
@@ -964,7 +995,8 @@ impl<'a> EpisodeDriver<'a> {
             self.company.clone(),
             self.desk.id.clone(),
             self.desk.name.clone(),
-        );
+        )
+        .with_scope(Arc::clone(scope));
         tinyhivemind_hive::project_session(
             &log,
             &SessionQuery {

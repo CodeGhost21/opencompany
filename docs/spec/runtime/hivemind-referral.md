@@ -52,10 +52,19 @@ time and `refunds` cannot be reached by a desk crossing at all.
 Answering a question put to a *desk* with whichever seat is listed first on it
 is the thing deliberation exists to stop, so this host convenes the far desk
 instead: `HiveReferralRunner::deliberate` stands up that desk's own episode —
-its `[hive]` policy, quorum, turn budget, move grammar and desk memory — and
-the crossing's answer is the room's closing report. `direct_responder` is
-untouched, so a desk mention still cannot start a turn through the ordinary
-responder ladder.
+its `[hive]` policy, quorum, turn budget, move grammar and desk memory.
+`direct_responder` is untouched, so a desk mention still cannot start a turn
+through the ordinary responder ladder.
+
+**What comes home depends on how the room ended.** A room that CONVERGED
+answers with its closing report: that row names the proposal that carried and
+who grounded it, which is the one sentence no single seat on that desk is
+entitled to say. A room that did not converge has no such sentence, and its
+report is bookkeeping — "Nobody on the desk had anything to add, so the room did
+not open" — so relaying it would tell the asking room the desk had no view while
+the view sat in the transcript. An unconverged room carries its members' own
+turns instead, attributed and in order, each rewritten so the far desk's topic
+and sequence markers do not travel into a desk where they name nothing.
 
 Three things follow, and each is load-bearing:
 

@@ -5019,6 +5019,10 @@ impl HiveDeskRunner<'_> {
         company: &crate::ports::types::CompanyId,
         outcome: &crate::hivemind::EpisodeOutcome,
         desk_id: &str,
+        // The question this room was convened on. Every turn of a referred
+        // episode is parented to it, which is what separates them from whatever
+        // else that desk was doing at the time.
+        root: EventSeq,
     ) -> Option<String> {
         let (first, last) = (outcome.first_seq?, outcome.last_seq?);
         let span = last.value().saturating_sub(first.value()).saturating_add(1);
@@ -5035,8 +5039,19 @@ impl HiveDeskRunner<'_> {
                     agent_id,
                     text,
                     audience,
+                    parent,
                     ..
                 } if chat_id == desk_id
+                    // **This room's turns, not the desk's other traffic.**
+                    //
+                    // A desk that was asked keeps working while the referred
+                    // room runs — its own episode, an ordinary reply — and all
+                    // of it lands on the same desk inside the same sequence
+                    // span. Carried home, somebody else's words would arrive as
+                    // this desk's answer and steer the asking room. The history
+                    // projection scopes the same rows by this parent; this is
+                    // the second builder and needed it too (Codex, #2332).
+                    && *parent == Some(root)
                     && !crate::hivemind::is_hive_author(agent_id)
                     // **An aside is not a turn, and never leaves the desk.**
                     //
@@ -5220,7 +5235,7 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
                     // said, exactly as the unconverged arm does (CodeRabbit,
                     // #2332).
                     return Ok(self
-                        .turns_of(&events, &record.id, &outcome, &far_desk)
+                        .turns_of(&events, &record.id, &outcome, &far_desk, root)
                         .await);
                 };
                 let page = events.read_from(&record.id, report_seq, 1).await?;
@@ -5230,7 +5245,7 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
                 })
             }
             _ => {
-                self.turns_of(&events, &record.id, &outcome, &far_desk)
+                self.turns_of(&events, &record.id, &outcome, &far_desk, root)
                     .await
             }
         };
@@ -12103,25 +12118,53 @@ members = ["engineer", "designer"]
             Arc::new(crate::hivemind::test::MemoryLog::default());
         let company = crate::hivemind::test::MemoryLog::company();
 
-        let row = |agent: &str, text: &str, audience: Vec<String>| CompanyEvent::AgentReply {
-            chat_id: "returns".to_string(),
-            agent_id: agent.to_string(),
-            text: text.to_string(),
-            steps: Vec::new(),
-            task_id: None,
-            outputs: Vec::new(),
-            parent: None,
-            mentions: Vec::new(),
-            mention_depth: 0,
-            audience,
+        // The question the room was convened on: every turn of a referred
+        // episode is parented to it.
+        let root = events
+            .append(
+                &company,
+                CompanyEvent::OperatorMessage {
+                    text: "cancellations has put a question to this desk".to_string(),
+                    by: Some(crate::ports::types::Actor {
+                        kind: crate::ports::types::ActorKind::Agent,
+                        id: "cancellations".to_string(),
+                    }),
+                    chat: Some("returns".to_string()),
+                    parent: None,
+                    deliverable: None,
+                    mentions: Vec::new(),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal");
+        let row = |agent: &str, text: &str, audience: Vec<String>, parent: Option<EventSeq>| {
+            CompanyEvent::AgentReply {
+                chat_id: "returns".to_string(),
+                agent_id: agent.to_string(),
+                text: text.to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                outputs: Vec::new(),
+                parent,
+                mentions: Vec::new(),
+                mention_depth: 0,
+                audience,
+            }
         };
         let first = events
             .append(
                 &company,
-                row("exchanges", "no refund tool on this seat", Vec::new()),
+                row(
+                    "exchanges",
+                    "no refund tool on this seat",
+                    Vec::new(),
+                    Some(root),
+                ),
             )
             .await
             .expect("journal");
+        // A private aside, inside the span and on the same thread.
         events
             .append(
                 &company,
@@ -12129,6 +12172,21 @@ members = ["engineer", "designer"]
                     "refunds",
                     "aside @exchanges — do not tell them we are short-staffed",
                     vec!["exchanges".to_string()],
+                    Some(root),
+                ),
+            )
+            .await
+            .expect("journal");
+        // **Concurrent traffic on the same desk**, in the same span but on no
+        // thread of this crossing — the desk's own other work.
+        events
+            .append(
+                &company,
+                row(
+                    "exchanges",
+                    "unrelated: the Thursday roster is posted",
+                    Vec::new(),
+                    None,
                 ),
             )
             .await
@@ -12136,7 +12194,7 @@ members = ["engineer", "designer"]
         let last = events
             .append(
                 &company,
-                row("refunds", "i hold the refund tool", Vec::new()),
+                row("refunds", "i hold the refund tool", Vec::new(), Some(root)),
             )
             .await
             .expect("journal");
@@ -12154,12 +12212,16 @@ members = ["engineer", "designer"]
             referrals: crate::hivemind::ReferralLedger::default(),
         };
         let carried = runner
-            .turns_of(&events, &company, &outcome, "returns")
+            .turns_of(&events, &company, &outcome, "returns", root)
             .await
             .expect("the room said something");
 
         assert!(carried.contains("no refund tool on this seat"));
         assert!(carried.contains("i hold the refund tool"));
+        assert!(
+            !carried.contains("Thursday roster"),
+            "the desk's own other work is not this room's answer: {carried}"
+        );
         assert!(
             !carried.contains("short-staffed"),
             "an aside is not a turn and does not answer a crossing: {carried}"

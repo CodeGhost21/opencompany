@@ -1870,16 +1870,33 @@ async fn attach_referral_origins(
         // own transcript for the next speaker to read. Same event, two shapes,
         // and a matcher that knew only the first left every room crossing
         // unattached: marker on the journal, nothing on the message.
-        let Some(child) = page[index + 1..].iter().find(|later| match &later.event {
-            CompanyEvent::OperatorMessage { chat, by, .. } => {
-                chat.as_deref() == Some(to_desk.as_str())
-                    && by.as_ref().is_some_and(|actor| actor.id == *asker)
-            }
-            CompanyEvent::AgentReply {
-                chat_id, agent_id, ..
-            } => {
-                chat_id == to_desk
-                    && (agent_id == crate::hivemind::HIVE_REFERRAL_AUTHOR
+        // **Bounded at the next crossing.** A crossing's own child is journaled
+        // by the turn that produced it, so it lands before any later crossing is
+        // raised. Unbounded, a crossing that FAILED — which journals nothing on
+        // the desk it went to — matched that agent's next ordinary reply there,
+        // whenever it happened, and stamped it with the failed question's
+        // provenance (Codex, #2332).
+        //
+        // This narrows the window rather than closing it: a failed crossing with
+        // no later marker on the page can still reach forward. Closing it needs
+        // the far desk to record the failure the way the asking desk does, which
+        // is a journal change and not a projection one.
+        let next_marker = page[index + 1..]
+            .iter()
+            .position(|later| matches!(&later.event, CompanyEvent::ReferralEnqueued { .. }))
+            .map_or(page.len(), |at| index + 1 + at);
+        let Some(child) = page[index + 1..next_marker]
+            .iter()
+            .find(|later| match &later.event {
+                CompanyEvent::OperatorMessage { chat, by, .. } => {
+                    chat.as_deref() == Some(to_desk.as_str())
+                        && by.as_ref().is_some_and(|actor| actor.id == *asker)
+                }
+                CompanyEvent::AgentReply {
+                    chat_id, agent_id, ..
+                } => {
+                    chat_id == to_desk
+                        && (agent_id == crate::hivemind::HIVE_REFERRAL_AUTHOR
                         // **The answering desk's own view of the crossing.**
                         //
                         // The two shapes above are both the ASKING desk's: the
@@ -1896,9 +1913,10 @@ async fn attach_referral_origins(
                         // marker already names the asker, their desk and the
                         // sequence to link to; this is the row to hang it on.
                         || agent_id == target)
-            }
-            _ => false,
-        }) else {
+                }
+                _ => false,
+            })
+        else {
             continue;
         };
         let child_id = child.seq.value().to_string();

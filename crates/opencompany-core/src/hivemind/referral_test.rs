@@ -1171,6 +1171,66 @@ async fn a_continuation_that_repeats_the_committed_line_is_not_journaled() {
     );
 }
 
+/// **No continuation on an answer this seat cannot read.**
+///
+/// `returns = false` is a legitimate policy: ask a peer desk, let the answer
+/// stand on their transcript, and do not carry it back. `forward` still records
+/// the question on the ledger, so counting successful far-desk turns reported an
+/// answer the asking desk had never received — and the continuation ran with a
+/// prompt announcing it, free to commit a decision on information its speaker
+/// never saw (Codex, #2332).
+#[tokio::test]
+async fn a_crossing_whose_answer_never_came_home_grants_no_continuation() {
+    const NO_RETURNS: &str = "hive = { turn_budget = 6, quorum = 2, blind_round = false, \
+                              referral = { enabled = true, returns = false } }";
+    let far = FarDesk::answering("The replica lag budget is 400ms.");
+    let (log, _) = run(
+        NO_RETURNS,
+        &[
+            (
+                "planner",
+                "!question #lag What is the replica lag budget? @#platform",
+            ),
+            // Would be the continuation, if one were granted.
+            (
+                "planner",
+                "!evidence #lag ^2 platform came back with 400ms.",
+            ),
+            ("scout", "!propose #stage Stage the rollout behind a flag."),
+            ("critic", "!support #stage ^1 Staging fits the lag budget."),
+            ("planner", "!commit #stage ^3 Recorded."),
+        ],
+        Some(&far),
+    )
+    .await;
+
+    assert_eq!(far.asked().len(), 1, "the question was still put");
+    let home = log.replies("eng");
+    assert!(
+        home.iter()
+            .all(|(_, text)| !text.contains("The replica lag budget is 400ms")),
+        "the far desk's answer stays on the far desk, which is what `returns = false` \
+         asks for: {home:?}"
+    );
+    // **The structural tell, not the text.** A continuation makes the asker
+    // speak twice in immediate succession — its question, then its second pass
+    // on the answer. Denied one, the floor passes to somebody else. Asserted
+    // this way because the room's ordinary rotation brings the asker back later
+    // anyway, so counting its rows or matching its words cannot tell a granted
+    // continuation from a scheduled turn.
+    let asked_at = home
+        .iter()
+        .position(|(author, text)| {
+            author == "planner" && text.contains("What is the replica lag budget?")
+        })
+        .expect("the question is on the desk");
+    assert_ne!(
+        home[asked_at + 1].0,
+        "planner",
+        "the asker must not speak again on an answer it never received: {home:?}"
+    );
+}
+
 /// **A continuation that says something new IS a row.**
 ///
 /// The guard above must not cost the feature it protects: the whole reason the
@@ -1420,6 +1480,62 @@ fn a_question_containing_the_footers_words_survives_unwrapping() {
         referral::asked_message(&prompt),
         question,
         "the generated footer is last, so only the last occurrence delimits it"
+    );
+}
+
+/// **A room that could not answer is reported as the DESK failing, not a seat.**
+///
+/// `forward` returns from the `deliberate` arm before `refer` ever runs, so on
+/// a room failure no seat was asked anything. Naming the seat the library
+/// resolved credits a teammate with a refusal it never made, on a desk where
+/// nobody reading the row can check — the same defect `room_note` removes on
+/// the success path (CodeRabbit, #2332).
+#[tokio::test]
+async fn a_room_that_could_not_answer_is_not_blamed_on_a_seat() {
+    let far = Room::broken();
+    let (log, _) = run_with(
+        REFERRING,
+        &[
+            (
+                "planner",
+                "!question #lag What is the replica lag budget? @#platform",
+            ),
+            ("scout", "!propose #stage Stage the rollout behind a flag."),
+            ("critic", "!support #stage ^1 Staging fits the lag budget."),
+            ("planner", "!commit #stage ^3 Recorded."),
+        ],
+        &far,
+    )
+    .await;
+
+    let note = log
+        .replies("eng")
+        .into_iter()
+        .find(|(_, text)| text.contains("did not answer the question"))
+        .expect("the room that spent the question is told it got nothing back");
+    assert_eq!(note.0, HIVE_REFERRAL_AUTHOR);
+    assert!(
+        note.1.contains("Platform"),
+        "the desk that was asked is named: {}",
+        note.1
+    );
+    assert!(
+        !note.1.contains("@sre") && !note.1.contains("@dba"),
+        "and no seat is blamed for a refusal it never made: {}",
+        note.1
+    );
+}
+
+#[test]
+fn a_rooms_failure_names_the_desk_and_no_seat_within_it() {
+    assert_eq!(
+        referral::room_unanswered_note("Platform"),
+        "the Platform desk did not answer the question."
+    );
+    // The seat form is unchanged for a crossing that actually asked a seat.
+    assert_eq!(
+        referral::unanswered_note("sre", "Platform"),
+        "@sre on the Platform desk did not answer the question."
     );
 }
 
