@@ -176,20 +176,30 @@ async function connectAnchorProvider(context: APIRequestContext): Promise<void> 
       model: "e2e-anchor-model",
     },
   });
-  // Best-effort: a provider slug is idempotent per company (409 on a repeat
-  // run against a reused data root), and this bootstrap has no more useful
-  // action than a plain add either way — the identity check above already
-  // guarantees the response is this run's own host.
-  if (!response.ok() && response.status() !== 409) {
-    const body = await response.text().catch(() => "<body could not be read>");
-    throw new Error(
-      `[e2e global-setup] POST /api/v1/company/inference/providers → ${response.status()} ` +
-        `${response.statusText()}; body: ${body || "<empty>"}\n` +
-        "Connecting the permanent anchor default failed, so every later spec's " +
-        "agent turn would resolve through whatever the first test-created " +
-        "provider leaves behind instead — see connectAnchorProvider's doc comment.",
-    );
+  if (response.ok()) return;
+  const body = await response.text().catch(() => "<body could not be read>");
+  // Idempotent across a repeat run against a reused data root (`reuseExistingServer`
+  // outside CI, or a rerun with `--last-failed`) — this bootstrap has no more
+  // useful action to take than a plain add either way, the identity check
+  // above already guarantees the response is this run's own host, and the
+  // anchor from the earlier run is exactly as good as a fresh one.
+  //
+  // NOT a `409`: `add_provider` maps a taken slug through `check_slug` to
+  // `OpenCompanyError::InvalidRequest`, which `server/error.rs` renders as a
+  // plain `400` — matched on the message `check_slug`'s `SlugError::Taken`
+  // produces (`store.rs`), not the status code, so a change to the wording
+  // fails this loudly (an error, not a silently-wrong idempotency check)
+  // rather than start throwing on every repeat run again.
+  if (response.status() === 400 && body.includes("already has a provider with that name")) {
+    return;
   }
+  throw new Error(
+    `[e2e global-setup] POST /api/v1/company/inference/providers → ${response.status()} ` +
+      `${response.statusText()}; body: ${body || "<empty>"}\n` +
+      "Connecting the permanent anchor default failed, so every later spec's " +
+      "agent turn would resolve through whatever the first test-created " +
+      "provider leaves behind instead — see connectAnchorProvider's doc comment.",
+  );
 }
 
 /**
