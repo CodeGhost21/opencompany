@@ -109,7 +109,16 @@ export default async function globalSetup(config: FullConfig) {
       );
     }
     await context.storageState({ path: storageState });
-    if (LIVE_BRAIN && MANAGED_HOST_HOME !== undefined) {
+    // Not gated on `MANAGED_HOST_HOME !== undefined` (this run bringing the
+    // host up itself): the caller-managed mode (`PW_BASE_URL` + `PW_LIVE_BRAIN=1`,
+    // `playwright.config.ts`'s documented "against a host you brought
+    // yourself, the flag still enables the four specs but the fixtures are
+    // yours to start too") is on the same shared, mutable `e2e_harness`
+    // company and hits the identical X1/X14 poisoning this guards against —
+    // a caller who started `mock-brain.mjs` on the documented default address
+    // is exactly who this is for. See `connectAnchorProvider`'s own doc
+    // comment for the mechanism.
+    if (LIVE_BRAIN) {
       await connectAnchorProvider(context);
     }
   } finally {
