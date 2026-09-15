@@ -2433,10 +2433,21 @@ async fn async_main() -> Result<()> {
             // `companies/` dir; derive that dir from the first loaded company's
             // source dir so the `skillRegistry` query resolves the committed
             // bundles, the baseline's included.
-            if let Some(skills_root) = companies
-                .first()
-                .and_then(|path| company_source_dir(path).parent().map(Path::to_path_buf))
-            {
+            //
+            // `company_source_dir` is normalized first (Codex review, PR #2326):
+            // a relative `--company .` yields the source dir `.`, whose
+            // `Path::parent()` is the empty path. An empty `skills_root` is
+            // rejected by `AppState::skill_registry` as "not a directory",
+            // taking the REST/GraphQL skill-registry reads down with a 500
+            // even though the company loaded fine. `std::path::absolute` is a
+            // lexical (no filesystem access, cannot fail on a nonexistent
+            // path) join against the process CWD, so `.`'s parent resolves to
+            // the real containing directory instead of empty.
+            if let Some(skills_root) = companies.first().and_then(|path| {
+                let source_dir = company_source_dir(path);
+                let absolute = std::path::absolute(&source_dir).unwrap_or(source_dir);
+                absolute.parent().map(Path::to_path_buf)
+            }) {
                 state = state.with_skills_root(skills_root);
             }
             // Issue #290: with every builder input above now resolved, this host
