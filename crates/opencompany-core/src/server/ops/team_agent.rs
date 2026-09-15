@@ -599,10 +599,15 @@ pub(super) struct EditAgent {
     /// double-option shape and the same admin gate as `model`: absent leaves
     /// it alone, `null` clears it back to the company default, and a string
     /// pins it to one of this company's connected provider slugs
-    /// (`GET {scope}/inference` lists them). Always sent together with
-    /// `model` — [`edit_agent`] refuses either one present without the other,
-    /// and refuses both outright when the resulting harness is `acp`, where
-    /// `model` keeps its existing ACP-hint meaning instead.
+    /// (`GET {scope}/inference` lists them). The frontend always sends this
+    /// together with `model` when setting or clearing a pin, but the host
+    /// only actually requires the pair one-directionally: [`edit_agent`]
+    /// refuses a `provider` that would be left with no `model` to pin to
+    /// (setting one without the other, or clearing `model` alone while a
+    /// provider is already stored), but a bare `model` with no `provider` at
+    /// all remains the long-standing, still-valid ACP-hint case. Refused
+    /// outright when the resulting harness is `acp`, where `model` keeps its
+    /// existing ACP-hint meaning instead of naming the pair's model half.
     #[serde(default, deserialize_with = "double_option")]
     provider: Option<Option<String>>,
     /// Which declared `[[harness]]` this teammate runs on (issue #1245's
