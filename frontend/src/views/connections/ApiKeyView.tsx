@@ -11,6 +11,7 @@ import {
   type CompanyBilling,
   type CompanyCredentialStatus,
 } from "@/api/credential";
+import { accountFills } from "@/views/connections/account-fill";
 import { ApiError } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
 import {
@@ -44,7 +45,7 @@ import {
   headerActions,
   type AccountLoad,
 } from "@/views/connections/account";
-import { AccountKeyDialog } from "@/views/connections/AccountKeyDialog";
+import { AccountKeyDialog, type AccountKeyModelStep } from "@/views/connections/AccountKeyDialog";
 import { useRedeemKeyGrant } from "@/views/connections/use-redeem-key-grant";
 
 interface Props {
@@ -129,6 +130,15 @@ export function ApiKeyView({ client, company }: Props) {
   /** Whether the Remove-key confirmation is open. */
   const [removing, setRemoving] = useState(false);
   const [busy, setBusy] = useState(false);
+  /**
+   * The key already saved by step one, waiting on step two's model
+   * (keys rework #2306, slice 4b). A ref, not state: it must survive step one
+   * closing its own form but never outlive the dialog or land in
+   * `localStorage` — see `AccountKeyDialog`'s gotchas.
+   */
+  const pendingKey = useRef<string | null>(null);
+  /** Non-null once the host has answered `needsModel` — the dialog's step two. */
+  const [modelStep, setModelStep] = useState<AccountKeyModelStep | null>(null);
 
   // Discards the result of a request that is no longer the latest one asked
   // for — a monotonic counter rather than "is this still the wanted company",
@@ -224,6 +234,21 @@ export function ApiKeyView({ client, company }: Props) {
       setKeyError(null);
       try {
         const result = await setCompanyCredential(client, company, key);
+        // The fan-out (keys rework #2306, slice 4a) could not create a
+        // `tinyhumans` row for want of a model. The key itself already saved
+        // — `setGeneration` reflects that on the page underneath — but the
+        // dialog stays open on step two rather than closing on a save that is
+        // only half done.
+        if (mode === "save" && result.needsModel === true) {
+          pendingKey.current = key;
+          setModelStep({
+            models: result.models ?? [],
+            setsDefault: result.setsDefault ?? false,
+            note: result.note,
+          });
+          setGeneration((n) => n + 1);
+          return;
+        }
         // Unconditional: the write really did land, and an admin who navigated
         // away mid-request is still owed that fact.
         toast.success(mode === "save" ? "Key saved." : "Key removed.", {
@@ -248,6 +273,53 @@ export function ApiKeyView({ client, company }: Props) {
     },
     [client, company],
   );
+
+  /**
+   * Step two: save the model against the key step one already stored. Guarded
+   * on `pendingKey` rather than trusting the caller — a stray call after the
+   * dialog has already been closed and forgotten its pending key must not
+   * repost an empty key.
+   */
+  const writeModel = useCallback(
+    async (model: string) => {
+      const key = pendingKey.current;
+      if (!key) {
+        setModelStep(null);
+        setEditing(false);
+        return;
+      }
+      setBusy(true);
+      setKeyError(null);
+      try {
+        const result = await setCompanyCredential(client, company, key, model);
+        toast.success("Key saved.", { description: result.note });
+        pendingKey.current = null;
+        setModelStep(null);
+        setEditing(false);
+        setGeneration((n) => n + 1);
+      } catch (err) {
+        // Shown in the dialog's step two, not as a toast — the operator is
+        // still looking at the model they picked when this fails.
+        setKeyError(err instanceof ApiError ? err.message : "Couldn't save the model.");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, company],
+  );
+
+  /**
+   * The dialog's own `onOpenChange`. Any close forgets the pending key and
+   * step two's state — reopening must start over at step one, never resume a
+   * half-finished model save against a key nobody can see any more.
+   */
+  const closeKeyDialog = useCallback((next: boolean) => {
+    setEditing(next);
+    if (!next) {
+      pendingKey.current = null;
+      setModelStep(null);
+    }
+  }, []);
 
   const shape = accountShape(load, status);
   const removable = canRemoveKey(status);
@@ -281,20 +353,21 @@ export function ApiKeyView({ client, company }: Props) {
               <h2 className="text-sm font-medium">{ACCOUNT_LABEL}</h2>
               {/* The billing consequence, on the card carrying the button it is
                   true of, and visible before anything is saved. Connecting
-                  stores the identity and declares the `managed` provider, and
-                  managed turns resolve through this same key (#2266) — so it
-                  moves the thinking bill as well.
+                  stores the identity, and managed turns resolve through this
+                  same key (#2266) — so it moves the thinking bill as well.
 
-                  Qualified, because the managed chain has two rungs above this
-                  one: a key pasted for TinyHumans on the LLM page
-                  (`provider/tinyhumans/key`), and the legacy `inference/key`.
-                  Where either is set it keeps answering, and connecting moves
-                  the apps without moving the bill. Saying so is cheaper than
-                  being wrong on a company that has one. */}
+                  Q7 (keys rework #2306): saving never overwrites a key set on
+                  the LLM or Composio page's own — the fan-out fills only the
+                  slots that are empty or still equal to this account key.
+                  Where either page already holds a key of its own it keeps
+                  answering, and saving moves the other slots without moving
+                  that one. The dialog's own conditional line
+                  (`account-fill.ts`) says exactly which slots this save would
+                  fill; this sentence states the general rule. */}
               <p className="text-xs text-muted-foreground">
                 One key for the apps your agents act through and the models they think with.
-                Connecting points both at this company&apos;s account — unless the LLM page
-                already holds a TinyHumans key of its own, which keeps precedence.
+                Saving copies it to the LLM and Composio pages wherever they hold no key of their
+                own.
               </p>
             </div>
             {/* One way to connect: the API-key dialog. The "Sign in with
@@ -490,11 +563,16 @@ export function ApiKeyView({ client, company }: Props) {
 
         <AccountKeyDialog
           open={editing}
-          onOpenChange={setEditing}
+          onOpenChange={closeKeyDialog}
           replacing={removable}
           busy={busy}
           error={keyError}
           onSubmit={(key) => void write(key, "save")}
+          fills={accountFills(status)}
+          modelStep={modelStep}
+          onSubmitModel={(model) => void writeModel(model)}
+          client={client}
+          company={company}
         />
 
         {/* Names what actually depends on the key, and what happens next rather

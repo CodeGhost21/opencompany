@@ -75,6 +75,20 @@ async function press(selector: string) {
   await act(async () => {});
 }
 
+/** Clicks the button whose visible text matches exactly — for the dialog's
+ * plain `Cancel`/`Save model` controls, which carry no `data-testid` of their
+ * own beyond the ones already asserted on. */
+async function pressButtonNamed(text: string) {
+  const button = Array.from(document.querySelectorAll("button")).find(
+    (candidate) => candidate.textContent?.trim() === text,
+  );
+  if (!button) throw new Error(`no button named "${text}"`);
+  await act(async () => {
+    button.click();
+  });
+  await act(async () => {});
+}
+
 async function mount(client: OpenCompanyClient) {
   await act(async () => {
     root.render(createElement(ApiKeyView, { client, company: "acme" }));
@@ -214,17 +228,24 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
   // managed provider. So the header card, which carries the Connect button,
   // states the move, and the dialog must not: telling someone that pasting a
   // key moved their model spend is the same defect pointing the other way.
-  it("puts the billing move on the connect path, not on the paste field", async () => {
+  //
+  // Keys rework (#2306, slice 4b): the sentence was reworded around Q7 (a
+  // save never overwrites a key set on the LLM or Composio page's own) rather
+  // than the old precedence chain. `git grep -n "keeps precedence"
+  // frontend/src/views/connections` must print nothing.
+  it("puts the fan-out consequence on the connect path, not on the paste field", async () => {
     await mount(
       adminClient(async () => credential({ configured: false, source: "none", hubLink: true })),
     );
 
     // The header card says it, beside the button it is true of.
     expect(container.textContent ?? "").toContain(
-      "Connecting points both at this company's account",
+      "One key for the apps your agents act through and the models they think with.",
     );
-    // …and qualifies it, because the managed chain has rungs above this key.
-    expect(container.textContent ?? "").toContain("which keeps precedence");
+    expect(container.textContent ?? "").toContain(
+      "Saving copies it to the LLM and Composio pages wherever they hold no key of their own.",
+    );
+    expect(container.textContent ?? "").not.toContain("keeps precedence");
   });
 
   // The dialog is kept minimal at the operator's request (2026-09-14): a
@@ -545,5 +566,168 @@ describe("ApiKeyView redeems a returning grant whatever else failed", () => {
     await act(async () => {});
 
     expect(finished).toHaveLength(0);
+  });
+});
+
+describe("ApiKeyView's account-key dialog two-step flow (keys rework #2306, slice 4b)", () => {
+  /** A client whose `PUT …/credential` answers from a fixed queue, one
+   * response per call — the two-step flow posts the key, then (on a
+   * `needsModel` answer) posts it again with a model. `status` is the fixed
+   * `GET …/credential` answer, matching what the real host would report
+   * before a save (the fill line is a property of the *read*, not the
+   * write). */
+  function queuedClient(
+    writes: unknown[],
+    responses: unknown[],
+    status: CompanyCredentialStatus = credential({ configured: false, source: "none", hubLink: true }),
+  ): OpenCompanyClient {
+    let call = 0;
+    return {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) return status;
+        throw new Error(`unexpected GET ${path}`);
+      },
+      put: async (_path: string, body: unknown) => {
+        writes.push(body);
+        const response = responses[Math.min(call, responses.length - 1)];
+        call += 1;
+        return response;
+      },
+    } as unknown as OpenCompanyClient;
+  }
+
+  it("the fill line names only the slots saving fills", async () => {
+    await mount(
+      queuedClient(
+        [],
+        [{ status: credential({ source: "company" }), note: "" }],
+        credential({
+          configured: false,
+          source: "none",
+          hubLink: true,
+          inferenceHasOwnKey: true,
+          composioHasOwnKey: false,
+          defaultSet: false,
+        }),
+      ),
+    );
+    await press('[data-testid="account-add-key"]');
+
+    expect(document.querySelector('[data-testid="account-key-fill-line"]')?.textContent).toContain(
+      "Saving also connects TinyHumans for Composio.",
+    );
+    expect(document.querySelector('[data-testid="account-key-llm-link"]')).toBeNull();
+    expect(document.querySelector('[data-testid="account-key-composio-link"]')).not.toBeNull();
+  });
+
+  it("no fill line when both pages hold their own keys", async () => {
+    await mount(
+      queuedClient(
+        [],
+        [{ status: credential({ source: "company" }), note: "" }],
+        credential({
+          configured: false,
+          source: "none",
+          hubLink: true,
+          inferenceHasOwnKey: true,
+          composioHasOwnKey: true,
+          defaultSet: false,
+        }),
+      ),
+    );
+    await press('[data-testid="account-add-key"]');
+
+    expect(document.querySelector('[data-testid="account-key-fill-line"]')).toBeNull();
+  });
+
+  it("needs_model opens step two, then reposts the key and the chosen model", async () => {
+    const writes: unknown[] = [];
+    await mount(
+      queuedClient(writes, [
+        {
+          status: credential({ source: "none" }),
+          note: "Key saved. Choose a model to finish setting up TinyHumans for LLM.",
+          needsModel: true,
+          setsDefault: true,
+          models: ["acme/test-model"],
+        },
+        {
+          status: credential({ source: "company" }),
+          note: "Key saved. TinyHumans is set up for LLM with acme/test-model. It is now the default for new work.",
+        },
+      ]),
+    );
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    expect(document.querySelector('[data-testid="account-key-model-step"]')).not.toBeNull();
+    expect(document.body.textContent ?? "").toContain("Choose the model new work uses");
+    expect(document.querySelector('[data-testid="account-key-note"]')?.textContent).toBe(
+      "Key saved. Choose a model to finish setting up TinyHumans for LLM.",
+    );
+
+    // Switch the model field to free text rather than driving the catalog
+    // combobox's popover through jsdom — the e2e spec exercises the real
+    // combobox in a real browser.
+    await press('[data-testid="inference-model-enter-id"]');
+    await typeInto("#account-key-model", "acme/test-model");
+    await press('[data-testid="account-key-model-save"]');
+
+    expect(writes).toEqual([
+      { key: "th-not-a-real-key" },
+      { key: "th-not-a-real-key", model: "acme/test-model" },
+    ]);
+    expect(document.querySelector('[data-testid="account-key-model-step"]')).toBeNull();
+    expect(document.querySelector('[data-testid="account-key-input"]')).toBeNull();
+  });
+
+  it("closing step two forgets the pending key", async () => {
+    const writes: unknown[] = [];
+    await mount(
+      queuedClient(writes, [
+        {
+          status: credential({ source: "none" }),
+          note: "note",
+          needsModel: true,
+          setsDefault: false,
+          models: ["acme/test-model"],
+        },
+      ]),
+    );
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+    expect(document.querySelector('[data-testid="account-key-model-step"]')).not.toBeNull();
+
+    await pressButtonNamed("Cancel");
+    expect(document.querySelector('[data-testid="account-key-model-step"]')).toBeNull();
+
+    // Reopening starts over at step one, with an empty key field — and sends
+    // no second request for a key that closing already forgot.
+    await press('[data-testid="account-add-key"]');
+    expect(document.querySelector('[data-testid="account-key-model-step"]')).toBeNull();
+    expect(
+      (document.querySelector('[data-testid="account-key-input"]') as HTMLInputElement | null)
+        ?.value,
+    ).toBe("");
+    expect(writes).toHaveLength(1);
+  });
+
+  it("a response without needsModel closes at once", async () => {
+    const writes: unknown[] = [];
+    await mount(
+      queuedClient(writes, [{ status: credential({ source: "company" }), note: "Key saved." }]),
+    );
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    expect(writes).toEqual([{ key: "th-not-a-real-key" }]);
+    expect(document.querySelector('[data-testid="account-key-model-step"]')).toBeNull();
+    expect(document.querySelector('[data-testid="account-key-input"]')).toBeNull();
   });
 });
