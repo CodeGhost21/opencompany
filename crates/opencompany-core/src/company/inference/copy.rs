@@ -115,6 +115,139 @@ pub fn default_broken(provider_label: &str, why: ProviderGone) -> String {
     )
 }
 
+/// The seven wire codes `docs/key-reworks/in-use-guards.md` §5 names, the
+/// reverse of [`classify`] (keys rework #2306, round-2 review KR-L2-03).
+pub const NO_MODEL_CHOSEN_CODE: &str = "no_model_chosen";
+pub const PAIR_PROVIDER_REMOVED_CODE: &str = "pair_provider_removed";
+pub const PAIR_PROVIDER_OFF_CODE: &str = "pair_provider_off";
+pub const DEFAULT_PROVIDER_REMOVED_CODE: &str = "default_provider_removed";
+pub const DEFAULT_PROVIDER_OFF_CODE: &str = "default_provider_off";
+pub const PROVIDER_NO_KEY_CODE: &str = "provider_no_key";
+/// Reserved: no resolver path produces this sentence yet (a chosen model is
+/// never re-validated against a live catalogue at turn time, by design —
+/// see phase-2b/2d), so [`classify`] never returns it. Kept so the console's
+/// `TURN_FAILURE_CODES` list and the backend's own set of codes agree on
+/// what the wire vocabulary is, even though only one side can produce every
+/// value in it today.
+#[allow(dead_code)]
+pub const MODEL_NOT_LISTED_CODE: &str = "model_not_listed";
+
+/// One classified turn-time resolution failure — the exact sentence one of
+/// this module's functions produced, plus the wire code and (when
+/// recoverable) the agent id and provider slug the sentence names (keys
+/// rework #2306, round-2 review KR-L2-03).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolutionFailure {
+    pub code: &'static str,
+    pub message: String,
+    pub pair_agent_id: Option<String>,
+    pub provider_slug: Option<String>,
+}
+
+/// A hidden trailer [`with_agent_marker`] appends and [`classify`] strips —
+/// never `format!`-interpolated into a sentence a person reads. `\u{0}` is
+/// not typable and cannot appear in a display name or a slug (both are
+/// validated ASCII-ish identifiers), so `rsplit_once` on it can never
+/// misfire against a name that happens to contain the marker text.
+const AGENT_MARKER: char = '\u{0}';
+
+/// Appends a hidden, non-displayed marker carrying `agent_id` to a sentence
+/// this module already built, so [`classify`] can recover a real
+/// `pairAgentId` for the one call site that has one in hand at the moment it
+/// raises the error — `TenantProvider::resolve`'s pin pre-check
+/// (`harness/built_in/provider.rs`), which is mid-resolution and still holds
+/// the agent's raw id, unlike everything downstream of it. The sentence
+/// itself is never displayed with this attached: `classify` strips it before
+/// setting `message`, and every OTHER call site (the pin's own fallback in
+/// `resolve_choice`, the company-default paths) has no id to attach and
+/// calls the plain `pair_broken`/`default_broken` functions unmarked.
+pub fn with_agent_marker(sentence: String, agent_id: &str) -> String {
+    format!("{sentence}{AGENT_MARKER}{agent_id}")
+}
+
+/// Classifies a turn-abort's error text against the sentences this module
+/// produces, so `server::operator::spawn_chat_turn` can tell a resolution
+/// failure — a broken pin, a broken default, no key, no model chosen at all
+/// — from every other failure class (a tool timeout, an empty response, a
+/// rate limit), which must keep the host's existing generic wording.
+///
+/// Substring matching, in the same idiom `operator.rs`'s own
+/// `provider_failure_sentence` already uses for other failure classes: there
+/// is no structured error type left by the time a turn's error reaches this
+/// point (the vendored turn loop converts everything to a plain
+/// `anyhow::Error`), so the sentence text itself (plus, where present,
+/// [`with_agent_marker`]'s hidden trailer) is the only signal.
+///
+/// `pair_agent_id` is filled in only when the sentence carries
+/// [`with_agent_marker`]'s trailer — today, only the pin pre-check. Every
+/// other caller of `pair_broken`/`provider_has_no_key` (the pin's own
+/// unreachable-in-practice fallback in `resolve_choice`) has no id in hand
+/// to attach, and `default_broken`'s callers never have an agent at all.
+/// `provider_slug` is filled in only for `pair_provider_removed`, whose
+/// sentence names the slug directly (there is no provider row left to read
+/// a display label from in that one case — see [`pair_broken`]).
+///
+/// Order matters: `default_broken` and `pair_broken`'s sentences both
+/// contain " uses ", so the company-default prefix is checked first.
+pub fn classify(detail: &str) -> Option<ResolutionFailure> {
+    // Strip the hidden marker, if present, before any pattern match runs —
+    // so a marker's own bytes can never accidentally satisfy one.
+    let (detail, pair_agent_id) = match detail.rsplit_once(AGENT_MARKER) {
+        Some((sentence, id)) if !id.is_empty() => (sentence, Some(id.to_string())),
+        _ => (detail, None),
+    };
+
+    fn found(
+        code: &'static str,
+        detail: &str,
+        pair_agent_id: Option<String>,
+        provider_slug: Option<String>,
+    ) -> ResolutionFailure {
+        ResolutionFailure {
+            code,
+            message: detail.trim().to_string(),
+            pair_agent_id,
+            provider_slug,
+        }
+    }
+
+    if detail.contains("The company default uses ") {
+        if detail.contains(", which is removed.") {
+            return Some(found(DEFAULT_PROVIDER_REMOVED_CODE, detail, None, None));
+        }
+        if detail.contains(", which is turned off.") {
+            return Some(found(DEFAULT_PROVIDER_OFF_CODE, detail, None, None));
+        }
+    }
+    if detail.contains(", which has no key.") {
+        return Some(found(PROVIDER_NO_KEY_CODE, detail, pair_agent_id, None));
+    }
+    if detail.contains(" uses ") && detail.contains(", which is removed.") {
+        // The one sentence shaped this way with a real slug to recover:
+        // `pair_broken`'s `Removed` arm names the raw slug, because there is
+        // no row left to read a display label from.
+        let slug = detail
+            .split(" uses ")
+            .nth(1)
+            .and_then(|rest| rest.split(", which is").next())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        return Some(found(
+            PAIR_PROVIDER_REMOVED_CODE,
+            detail,
+            pair_agent_id,
+            slug,
+        ));
+    }
+    if detail.contains(" uses ") && detail.contains(", which is turned off.") {
+        return Some(found(PAIR_PROVIDER_OFF_CODE, detail, pair_agent_id, None));
+    }
+    if detail.contains("No model is chosen") {
+        return Some(found(NO_MODEL_CHOSEN_CODE, detail, None, None));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +309,99 @@ mod tests {
             "The company default uses Anthropic, which is removed. Choose a \
              new default in Connections → API Keys → LLM."
         );
+    }
+
+    // ---- classify (keys rework #2306, round-2 review KR-L2-03) -------------
+
+    #[test]
+    fn classify_recognises_every_producible_code() {
+        let cases: [(String, &str); 6] = [
+            (nothing_resolved("Researcher"), NO_MODEL_CHOSEN_CODE),
+            (nothing_resolved_for_company(), NO_MODEL_CHOSEN_CODE),
+            (
+                pair_broken("Researcher", "acme", ProviderGone::Removed),
+                PAIR_PROVIDER_REMOVED_CODE,
+            ),
+            (
+                pair_broken("Researcher", "Acme", ProviderGone::TurnedOff),
+                PAIR_PROVIDER_OFF_CODE,
+            ),
+            (
+                default_broken("Acme", ProviderGone::Removed),
+                DEFAULT_PROVIDER_REMOVED_CODE,
+            ),
+            (
+                default_broken("Acme", ProviderGone::TurnedOff),
+                DEFAULT_PROVIDER_OFF_CODE,
+            ),
+        ];
+        for (sentence, code) in cases {
+            let got = classify(&sentence).unwrap_or_else(|| panic!("did not classify: {sentence}"));
+            assert_eq!(got.code, code, "{sentence}");
+            assert_eq!(got.message, sentence);
+        }
+        let no_key = provider_has_no_key("Researcher", "Acme");
+        let got = classify(&no_key).expect("provider_has_no_key classifies");
+        assert_eq!(got.code, PROVIDER_NO_KEY_CODE);
+    }
+
+    #[test]
+    fn classify_recovers_the_slug_only_for_a_removed_pair() {
+        let removed = pair_broken("Researcher", "acme", ProviderGone::Removed);
+        assert_eq!(
+            classify(&removed).unwrap().provider_slug.as_deref(),
+            Some("acme"),
+            "the Removed sentence names the raw slug, with nothing else to name"
+        );
+
+        let off = pair_broken("Researcher", "Acme", ProviderGone::TurnedOff);
+        assert_eq!(
+            classify(&off).unwrap().provider_slug,
+            None,
+            "TurnedOff names a display label, not a slug — nothing to recover"
+        );
+
+        let default_removed = default_broken("Acme", ProviderGone::Removed);
+        assert_eq!(
+            classify(&default_removed).unwrap().provider_slug,
+            None,
+            "a bare-slug default already names a slug in the sentence, but \
+             this classifier only recovers one for the pair case today"
+        );
+    }
+
+    #[test]
+    fn with_agent_marker_round_trips_through_classify_and_never_shows() {
+        let sentence = pair_broken("Researcher", "acme", ProviderGone::Removed);
+        let marked = with_agent_marker(sentence.clone(), "researcher");
+        assert_ne!(marked, sentence, "the marker must actually be attached");
+
+        let got = classify(&marked).expect("still classifies with the marker attached");
+        assert_eq!(got.code, PAIR_PROVIDER_REMOVED_CODE);
+        assert_eq!(
+            got.message, sentence,
+            "the marker must never appear in the displayed message"
+        );
+        assert_eq!(got.pair_agent_id.as_deref(), Some("researcher"));
+        assert_eq!(got.provider_slug.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn classify_without_a_marker_leaves_pair_agent_id_unset() {
+        let sentence = pair_broken("Researcher", "Acme", ProviderGone::TurnedOff);
+        let got = classify(&sentence).unwrap();
+        assert_eq!(got.pair_agent_id, None);
+    }
+
+    #[test]
+    fn classify_ignores_every_other_failure() {
+        for detail in [
+            "This turn couldn't be finished — the AI provider is rate-limiting requests.",
+            "the tool timed out",
+            "inference returned 500 Internal Server Error",
+            "",
+        ] {
+            assert!(classify(detail).is_none(), "{detail}");
+        }
     }
 }

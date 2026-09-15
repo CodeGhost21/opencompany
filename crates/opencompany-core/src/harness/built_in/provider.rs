@@ -2160,8 +2160,14 @@ impl TenantProvider {
         // a label from, so it names the slug (`copy::pair_broken`'s own
         // "label, else nothing better on hand" contract); `TurnedOff` uses
         // the row's real label.
+        //
+        // KR-L2-03: `copy::with_agent_marker` attaches `agent_id` as a
+        // hidden trailer `copy::classify` strips before display — this is
+        // the one place in the whole resolution path that is mid-turn AND
+        // still holds the agent's raw id, so it is the one place that can
+        // close the `pairAgentId` gap `copy::classify`'s own doc names.
         if let Some(AgentPin {
-            agent_id: _,
+            agent_id,
             agent_name,
             choice,
         }) = &self.pin
@@ -2174,15 +2180,21 @@ impl TenantProvider {
             .await
             .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
             {
-                None => anyhow::bail!(inference::copy::pair_broken(
-                    agent_name,
-                    &choice.provider,
-                    inference::copy::ProviderGone::Removed,
+                None => anyhow::bail!(inference::copy::with_agent_marker(
+                    inference::copy::pair_broken(
+                        agent_name,
+                        &choice.provider,
+                        inference::copy::ProviderGone::Removed,
+                    ),
+                    agent_id,
                 )),
-                Some(row) if !row.enabled => anyhow::bail!(inference::copy::pair_broken(
-                    agent_name,
-                    &row.label,
-                    inference::copy::ProviderGone::TurnedOff,
+                Some(row) if !row.enabled => anyhow::bail!(inference::copy::with_agent_marker(
+                    inference::copy::pair_broken(
+                        agent_name,
+                        &row.label,
+                        inference::copy::ProviderGone::TurnedOff,
+                    ),
+                    agent_id,
                 )),
                 Some(row) => {
                     // Round-3a review P1-1: a pin naming an enabled row that
@@ -2202,9 +2214,10 @@ impl TenantProvider {
                         .await
                         .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
                     {
-                        anyhow::bail!(
-                            inference::copy::provider_has_no_key(agent_name, &row.label,)
-                        );
+                        anyhow::bail!(inference::copy::with_agent_marker(
+                            inference::copy::provider_has_no_key(agent_name, &row.label),
+                            agent_id,
+                        ));
                     }
                 }
             }
