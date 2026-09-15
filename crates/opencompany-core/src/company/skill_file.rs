@@ -458,20 +458,25 @@ mod tests {
     }
 
     #[test]
-    fn every_shipped_repo_skill_renders_to_its_own_source() {
+    fn every_shipped_bundle_skill_renders_to_its_own_source() {
         // Installing a registry skill persists `render_skill_md` output, so for
         // an install to be a faithful copy the committed file must already be in
         // canonical form. Pinning that here turns the one lossy case — an
         // unknown frontmatter key, which the parser tolerates but the renderer
         // drops — into a CI failure instead of a silent loss at install time.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
-        for doc in load_dir_skills(&dir).expect("the shared registry parses") {
-            let file = dir.join(&doc.slug).join("SKILL.md");
-            let src = std::fs::read_to_string(&file).expect("readable");
-            assert_eq!(
-                render_skill_md(&doc),
-                src,
-                "shared skill `{}` is not in canonical frontmatter form, so installing it \
+        // Every bundle's skills are in the registry, so every bundle is walked.
+        let companies = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../companies");
+        let mut walked = 0;
+        for bundle in std::fs::read_dir(&companies).expect("companies/ is readable") {
+            let dir = bundle.expect("entry").path().join("skills");
+            for doc in load_dir_skills(&dir).expect("the bundle's skills parse") {
+                walked += 1;
+                let file = dir.join(&doc.slug).join("SKILL.md");
+                let src = std::fs::read_to_string(&file).expect("readable");
+                assert_eq!(
+                    render_skill_md(&doc),
+                    src,
+                    "{} is not in canonical frontmatter form, so installing it \
                  would not persist it verbatim. Frontmatter must be exactly \
                  `name`, `description`, optional `category`, optional `version`, in that \
                  order — any other key is dropped by the renderer. Either drop the extra \
