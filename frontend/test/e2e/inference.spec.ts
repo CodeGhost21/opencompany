@@ -134,7 +134,7 @@ const PROVIDERS_THIS_FILE_CREATES = [
   "e2e-gateway",
   "e2e-one",
   "e2e-two",
-  "groq",
+  "ollama",
   "e2e-parked",
   "e2e-doomed",
 ];
@@ -311,34 +311,28 @@ test("a second provider holds a credential of its own", async ({ page }) => {
 
 test("the add dialog stops offering a provider once it is connected", async ({ page }) => {
   // Offering to add something twice is how you get two rows for one provider.
+  //
+  // A local runtime rather than a cloud vendor, on purpose. This used to
+  // connect Groq with a made-up key and take "Add anyway" past the refusal —
+  // but a key the vendor rejects now stops on the key field with no "Add
+  // anyway" at all (round-2 review, P1-8: the escape hatch is for an endpoint
+  // that cannot be reached, never for a credential that is wrong), so there
+  // is no longer any honest way to a connected cloud row without a real key.
+  // Ollama asks for an endpoint and no key; pointed at `UNREACHABLE` its
+  // probe fails as `endpoint`, the model step opens in free text, and the add
+  // is stored amber — the same path every custom-provider spec here takes, and
+  // one that needs no network beyond loopback.
   await openInference(page);
 
-  await choose(page, "cloud", "Groq");
-  await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
+  await choose(page, "local", "Ollama");
+  await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.getByTestId("inference-connect-submit").click();
-
-  // A real vendor is reachable from CI. Its own catalogue read may itself
-  // fail on a made-up key, in which case the model step opens in free text
-  // with the reason said — the step always opens either way (D-model).
-  await expect(page.getByTestId("inference-connect-model-step")).toBeVisible({ timeout: 30_000 });
-  const modelField = page.locator("#inference-connect-model");
-  if (await modelField.count()) await modelField.fill("e2e-model");
-  await page.getByTestId("inference-connect-submit").click();
-
-  // The add itself is refused and rolled back rather than stored looking
-  // green — there is no real Groq credential here to satisfy it, so this test
-  // asserts the refusal and then takes the documented escape hatch, which is
-  // the only honest way to reach a connected catalogue row without a key.
-  await expect(page.getByTestId("inference-connect-error")).toContainText(
-    "rejected the credential",
-    { timeout: 30_000 },
-  );
-  await page.getByTestId("inference-add-anyway").click();
-  await expect(page.getByTestId("inference-provider-groq")).toBeVisible({ timeout: 30_000 });
+  await pickModel(page, "e2e-model");
+  await expect(page.getByTestId("inference-provider-ollama")).toBeVisible({ timeout: 30_000 });
 
   await page.getByTestId("inference-add-open").click();
-  await page.locator("#inference-add-cloud").click();
-  await expect(page.getByRole("option", { name: /^Groq/ })).toHaveCount(0);
+  await page.locator("#inference-add-local").click();
+  await expect(page.getByRole("option", { name: /^Ollama/ })).toHaveCount(0);
   await page.keyboard.press("Escape");
 });
 
@@ -349,10 +343,10 @@ test("a custom provider may not take a name the catalogue ships", async ({ page 
   // **Deliberately a catalogue row nothing else connects.** `checkSlug` reports
   // `taken` before `reserved`, and every test in this file shares one company:
   // once "the add dialog stops offering a provider once it is connected" has
-  // added Groq, typing "Groq" here answers "This company already has a provider
-  // with that name" — a true sentence about the wrong rule, and the assertion
-  // below would be pinning test order rather than the reservation. Cerebras is
-  // in the catalogue and is connected by no test.
+  // added Ollama, typing "Ollama" here answers "This company already has a
+  // provider with that name" — a true sentence about the wrong rule, and the
+  // assertion below would be pinning test order rather than the reservation.
+  // Cerebras is in the catalogue and is connected by no test.
   await openInference(page);
 
   await addCustom(page);
