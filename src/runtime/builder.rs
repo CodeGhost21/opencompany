@@ -4657,7 +4657,10 @@ fn build_networked_brain(
 /// [`CompanyManifest::harness_for`] does for a manifest agent — but usable for
 /// an overlay teammate too, which `harness_for` cannot resolve (it reads only
 /// `manifest.agents`).
-fn agent_harness_kind(manifest: &CompanyManifest, harness_field: Option<&str>) -> Option<String> {
+pub(crate) fn agent_harness_kind(
+    manifest: &CompanyManifest,
+    harness_field: Option<&str>,
+) -> Option<String> {
     let id = harness_field
         .map(str::to_string)
         .unwrap_or_else(|| manifest.default_harness_id());

@@ -4366,6 +4366,107 @@ base_url = "https://byo.example/v1"
         assert_eq!(resp["usedBy"]["default"], true);
     }
 
+    /// Keys rework, issue #2306, slice 3a: a provider named by an agent's own
+    /// pin is `usedBy` on every status read and refused on delete without
+    /// confirmation — the counterpart of the `default` guard above, now that
+    /// `Agent.provider` exists to name.
+    #[tokio::test]
+    async fn a_provider_pinned_by_an_agent_is_used_by_that_agent() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let pinned_manifest: CompanyManifest = toml::from_str(
+            r#"[company]
+name = "Acme"
+[policy]
+mode = "full"
+
+[[agent]]
+id = "researcher"
+role = "Researcher"
+provider = "acme"
+model = "test-model-large"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+"#,
+        )
+        .unwrap();
+        save_record(&home, &id, &pinned_manifest).await;
+        let runtime = RuntimeBuilder::new(home.clone(), pinned_manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        // The provider does not exist yet — no row, no default, no pin can
+        // resolve — so nothing is used yet.
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(
+                json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key", "model": "test-model-large" }),
+            ),
+        )
+        .await;
+
+        // Status names the pinning agent on the row itself.
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let acme = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "acme")
+            .unwrap();
+        let agent_ids: Vec<&str> = acme["usedBy"]["agents"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no usedBy.agents on {acme}: {raw}"))
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(agent_ids, vec!["researcher"], "{acme}");
+        assert_eq!(
+            acme["usedBy"]["agents"][0]["name"], "Researcher",
+            "the display name, not the bare id: {acme}"
+        );
+        // The writer, which names no pair, must not appear.
+        assert!(
+            !agent_ids.contains(&"writer"),
+            "an agent with no pair must not be counted: {acme}"
+        );
+
+        // Deleting the pinned provider is refused the same way the default is.
+        let (status, err, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/acme",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "in_use");
+        assert_eq!(
+            err["usedBy"]["agents"][0]["id"], "researcher",
+            "the refusal must name the pinning agent: {err}"
+        );
+
+        // Confirmed, it proceeds and echoes the same agent.
+        let (status, resp, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/acme?confirmInUse=true",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["usedBy"]["agents"][0]["id"], "researcher");
+    }
+
     #[tokio::test]
     async fn disabling_the_default_provider_is_refused_without_confirmation() {
         let home_dir = home();
