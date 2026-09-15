@@ -458,7 +458,12 @@ jobs:
               rollout_error=$(printf '%s' "${rollout_output}" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
             fi
 
-            if ! pod_json=$(kubectl -n "${ns}" get pod -l app=opencompany -o json 2>&1); then
+            # Unselected on purpose. `app=opencompany` labels the StatefulSet
+            # OBJECT; Kubernetes does not copy it onto the pod template, and a
+            # manager-provisioned sidecar (cortexdb) carries it on the object
+            # while its pods do not. Attribution is the jq ownerReferences
+            # filter below, which is exact.
+            if ! pod_json=$(kubectl -n "${ns}" get pod -o json 2>&1); then
               printf '%-24s %-24s %-8s %-90s %s\n' \
                 "${ns}" "${name}" failed - "could not read pod status: ${pod_json}"
               tenant_failed=yes
