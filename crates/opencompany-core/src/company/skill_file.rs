@@ -481,9 +481,14 @@ mod tests {
                  `name`, `description`, optional `category`, optional `version`, in that \
                  order — any other key is dropped by the renderer. Either drop the extra \
                  key or teach `SkillDoc`/`render_skill_md` about it.",
-                doc.slug
-            );
+                    file.display()
+                );
+            }
         }
+        assert!(
+            walked > 14,
+            "sanity: the bundles ship skills ({walked} walked)"
+        );
     }
 
     #[test]
