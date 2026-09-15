@@ -814,7 +814,11 @@ async fn edit_agent(
     // Deliberately unlike `set_budget`, which authorises first: that route is
     // admin-only in full, so admin-first is self-consistent there. This one is
     // admin-only *per field*, which is what makes the ordering load-bearing.
-    if body.tools.is_some() || body.model.is_some() || body.provider.is_some() || body.harness.is_some() {
+    if body.tools.is_some()
+        || body.model.is_some()
+        || body.provider.is_some()
+        || body.harness.is_some()
+    {
         require_admin(&headers, &state, &company.runtime, peer).await?;
     }
 
