@@ -16,7 +16,7 @@ fn the_baseline_parses_without_faults() {
 
 #[test]
 fn the_baseline_is_not_empty() {
-    // `build.rs` tolerates an absent `globals/` so the crate still compiles
+    // `build.rs` tolerates an absent `companies/_globals/` so the crate still compiles
     // without one. That tolerance is exactly what would let the directory go
     // missing unnoticed, so the assertion lives here instead.
     assert!(!agents().is_empty(), "no global agents embedded");

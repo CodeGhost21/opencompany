@@ -296,7 +296,7 @@ fn parse_agent_file(
         name: None,
         can_declare_ledgers: file.can_declare_ledgers.unwrap_or(true),
         // Provenance is set by whoever merges the baseline in, never by a file:
-        // this same parser reads both a company's `agents/` and `globals/`.
+        // this same parser reads both a company's `agents/` and `companies/_globals/`.
         global: false,
         model: file.model,
     })

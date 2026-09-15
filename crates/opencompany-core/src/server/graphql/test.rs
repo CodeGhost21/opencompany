@@ -1509,7 +1509,8 @@ async fn finances_fold_the_ledger() {
 
 /// On the serve path a company has an on-disk source dir; `Company.skills`,
 /// `Company.workflow`, and the top-level `skillRegistry` resolve their content
-/// from it (and the repo-level `skills/` root) rather than the empty bundle.
+/// from it (and the `companies/` tree behind `skills_root`) rather than the
+/// empty bundle.
 #[tokio::test]
 async fn skills_and_workflows_resolve_from_source_dir() {
     let home_dir = home();
@@ -1537,13 +1538,14 @@ async fn skills_and_workflows_resolve_from_source_dir() {
     .await
     .unwrap();
 
-    // A separate repo-level shared skill library backing `skillRegistry`.
-    let skills_root = home.join("skills");
-    tokio::fs::create_dir_all(skills_root.join("web-research"))
+    // A separate `companies/` tree backing `skillRegistry`: the registry is
+    // every bundle's `skills/` under it, not this company's source dir.
+    let skills_root = home.join("catalog");
+    tokio::fs::create_dir_all(skills_root.join("other/skills/web-research"))
         .await
         .unwrap();
     tokio::fs::write(
-        skills_root.join("web-research/SKILL.md"),
+        skills_root.join("other/skills/web-research/SKILL.md"),
         "---\nname: Web Research\ndescription: Research on the web.\ncategory: Research\n---\n# Web Research\n",
     )
     .await
@@ -1619,7 +1621,7 @@ async fn skills_and_workflows_resolve_from_source_dir() {
     // Company.workflow reads the graph from the source dir.
     assert_eq!(company["workflow"]["name"], "Test Flow");
     assert_eq!(company["workflow"]["nodes"].as_array().unwrap().len(), 1);
-    // skillRegistry reads the repo-level shared library.
+    // skillRegistry reads the bundle catalog behind `skills_root`.
     let registry = value["data"]["skillRegistry"].as_array().unwrap();
     assert!(registry.iter().any(|s| s["id"] == "web-research"));
 }
@@ -1635,14 +1637,14 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
     let home = home_dir.path().to_path_buf();
     let id = CompanyId::new("acme");
 
-    // The shared library has moved on to a rewritten v2 of `web-research`, and
-    // never had `retired-skill` at all.
-    let skills_root = home.join("skills");
-    tokio::fs::create_dir_all(skills_root.join("web-research"))
+    // The registry (a `companies/` tree) has moved on to a rewritten v2 of
+    // `web-research`, and never had `retired-skill` at all.
+    let skills_root = home.join("catalog");
+    tokio::fs::create_dir_all(skills_root.join("other/skills/web-research"))
         .await
         .unwrap();
     tokio::fs::write(
-        skills_root.join("web-research/SKILL.md"),
+        skills_root.join("other/skills/web-research/SKILL.md"),
         "---\nname: Web Research v2\ndescription: Rewritten upstream.\ncategory: Ops\nversion: 2.0.0\n---\n# Web Research v2\n",
     )
     .await

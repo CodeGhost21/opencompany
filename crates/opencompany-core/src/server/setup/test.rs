@@ -1254,7 +1254,7 @@ async fn applying_a_template_seeds_it_under_the_name_the_operator_chose() {
     let manifest = record.manifest;
     assert_eq!(manifest.company.name, "Northwind Studio");
     // Every teammate the template declares, by role. Not a count: a registered
-    // company's stored manifest also carries the roster `globals/` contributes,
+    // company's stored manifest also carries the roster `companies/_globals/` contributes,
     // so an equality here would be asserting the size of something this change
     // has nothing to do with.
     let template_roles: Vec<String> = crate::desktop::preset("marketing_agency")

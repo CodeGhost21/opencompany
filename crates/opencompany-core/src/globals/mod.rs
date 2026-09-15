@@ -4,7 +4,7 @@
 //! A `companies/<name>/` bundle describes one vertical. This module is the part
 //! that is the same in all of them — a small roster, two workflow graphs, a few
 //! installed skills, and the tool belt a company starts from.
-//! The authored sources live in `globals/` beside `companies/`, and the
+//! The authored sources live in `companies/_globals/` beside `companies/`, and the
 //! contract is `docs/spec/runtime/globals.md`.
 //!
 //! Everything here is **embedded at build time**, not read from disk. A
@@ -54,7 +54,7 @@ mod test;
 /// which is the one failure mode an opt-out list must not have.
 pub const DISABLE_KINDS: &[&str] = &["agent", "workflow", "skill", "ledger", "task"];
 
-/// The parsed `globals/globals.toml`.
+/// The parsed `companies/_globals/globals.toml`.
 #[derive(Debug, Default, serde::Deserialize)]
 struct GlobalsManifest {
     #[serde(default)]
@@ -98,7 +98,9 @@ fn build() -> Baseline {
     let manifest: GlobalsManifest = match toml::from_str(generated::EMBEDDED_GLOBALS_MANIFEST) {
         Ok(manifest) => manifest,
         Err(err) => {
-            faults.push(format!("`globals/globals.toml` is not valid TOML — {err}"));
+            faults.push(format!(
+                "`companies/_globals/globals.toml` is not valid TOML — {err}"
+            ));
             GlobalsManifest::default()
         }
     };
@@ -210,14 +212,14 @@ fn build_ledgers(faults: &mut Vec<String>) -> Vec<LedgerSpec> {
     specs
 }
 
-/// Parses `globals/tasks.toml` into the baseline's seed cards.
+/// Parses `companies/_globals/tasks.toml` into the baseline's seed cards.
 ///
 /// Fault-isolated like every other global surface: a malformed baseline costs
 /// its own cards and nothing else, because the alternative is one bad line
 /// stopping every company on the install from booting.
 fn build_tasks(faults: &mut Vec<String>) -> Vec<crate::company::TaskSeed> {
     let (tasks, problems) = crate::company::task_file::parse_tasks(
-        "globals/tasks.toml",
+        "companies/_globals/tasks.toml",
         generated::EMBEDDED_GLOBAL_TASKS,
     );
     faults.extend(
@@ -231,12 +233,12 @@ fn build_tasks(faults: &mut Vec<String>) -> Vec<crate::company::TaskSeed> {
 fn build_skills(always: &[String], faults: &mut Vec<String>) -> Vec<SkillDoc> {
     let mut out = Vec::new();
     for slug in always {
-        let Some((_, body)) = generated::EMBEDDED_SHARED_SKILLS
+        let Some((_, body)) = generated::EMBEDDED_GLOBAL_SKILLS
             .iter()
             .find(|(candidate, _)| candidate == slug)
         else {
             faults.push(format!(
-                "`[skills].always` names `{slug}`, which is not in the shared library (`skills/{slug}/SKILL.md`)."
+                "`[skills].always` names `{slug}`, which the baseline does not ship (`companies/_globals/skills/{slug}/SKILL.md`)."
             ));
             continue;
         };
@@ -279,7 +281,8 @@ pub fn tasks() -> &'static [crate::company::TaskSeed] {
     &baseline().tasks
 }
 
-/// The shared-library skills installed in every company.
+/// The baseline's skills (`companies/_globals/skills/`, named by `[skills].always`),
+/// installed in every company.
 pub fn skills() -> &'static [SkillDoc] {
     &baseline().skills
 }

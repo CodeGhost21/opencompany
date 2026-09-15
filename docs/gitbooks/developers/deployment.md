@@ -23,7 +23,7 @@ and `cargo-watch` rebuilds and restarts the backend when Rust source, Cargo
 files, or company definitions change. Each company uses a separate Compose
 project and persistent data volume.
 
-For custom ports, credentials, or feature flags, copy `.env.example` to `.env`
+For custom ports, credentials, or feature flags, copy `deploy/.env.example` to `deploy/.env`
 before launching.
 
 ## Production-like images
@@ -31,7 +31,7 @@ before launching.
 Run without source mounts or hot reload:
 
 ```sh
-OPENCOMPANY_COMPANY=marketing docker compose up --build
+OPENCOMPANY_COMPANY=marketing docker compose -f deploy/docker-compose.yml up --build
 ```
 
 The same two images deploy to:

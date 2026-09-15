@@ -1,5 +1,5 @@
 //! Ledger declaration files: `companies/<name>/ledgers/<slug>.toml`, and the
-//! same shape under `globals/ledgers/`.
+//! same shape under `companies/_globals/ledgers/`.
 //!
 //! A company's axes were discoverable only at run time. The runtime ships three
 //! ledgers (`tasks`, `goals`, `decisions`) and everything else a vertical

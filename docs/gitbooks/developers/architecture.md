@@ -64,4 +64,4 @@ vendor/openhuman/vendor/tinyagents/
 * **One required credential**; everything else optional and gracefully degrading.
 * Keep docs, examples, and public APIs aligned.
 
-For the normative port contracts and the full spec, see [`docs/spec/`](../../docs/spec/) in the repository.
+For the normative port contracts and the full spec, see [`docs/spec/`](../../spec/) in the repository.

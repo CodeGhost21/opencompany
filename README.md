@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source srcset="gitbooks/.gitbook/assets/opencompany-hero.gif" type="image/gif" />
-    <img src="gitbooks/.gitbook/assets/opencompany-hero.png" alt="OpenCompany: run an entire company with a headcount of one" />
+    <source srcset="docs/gitbooks/.gitbook/assets/opencompany-hero.gif" type="image/gif" />
+    <img src="docs/gitbooks/.gitbook/assets/opencompany-hero.png" alt="OpenCompany: run an entire company with a headcount of one" />
   </picture>
 </p>
 
@@ -160,7 +160,7 @@ what each one owns, and where you want to be asked before anything happens. It's
 written to be read by people; changing a role is editing a few lines rather than
 programming. `opencompany check` reports any problems in plain language, and
 adding a new business is a new folder, not a new program.
-[Your first company](gitbooks/get-started/your-first-company.md) walks through it.
+[Your first company](docs/gitbooks/get-started/your-first-company.md) walks through it.
 
 ## What it reports about itself
 
@@ -196,12 +196,12 @@ configure it, and goes to your own Sentry project rather than ours —
 
 | Where | What's there |
 | --- | --- |
-| [`gitbooks/`](gitbooks/README.md) | The full docs: what OpenCompany is, what one person can run, how [Medulla](gitbooks/overview/medulla.md) drives it |
+| [`docs/gitbooks/`](docs/gitbooks/README.md) | The full docs: what OpenCompany is, what one person can run, how [Medulla](docs/gitbooks/overview/medulla.md) drives it |
 | [`docs/running-locally.md`](docs/running-locally.md) | Docker, Compose, from-source builds, feature flags, desktop preview, deploy targets |
 | [`docs/repository-layout.md`](docs/repository-layout.md) | Where everything lives in the tree and what each package owns |
 | [`docs/spec/README.md`](docs/spec/README.md) | Architecture reference |
-| [`gitbooks/developers/`](gitbooks/developers/README.md) | Build, CLI, authoring companies, deployment, configuration |
-| [`qa/`](qa/README.md) | Checking a release against a deployed tenant |
+| [`docs/gitbooks/developers/`](docs/gitbooks/developers/README.md) | Build, CLI, authoring companies, deployment, configuration |
+| [`scripts/qa/`](scripts/qa/README.md) | Checking a release against a deployed tenant |
 
 ## Contributing
 
@@ -217,7 +217,7 @@ rather than a PR.
 
 [Discussions](https://github.com/tinyhumansai/opencompany/discussions) is where
 questions get answered and large changes get argued out before they're built.
-[SUPPORT.md](SUPPORT.md) says which channel takes what.
+[docs/SUPPORT.md](docs/SUPPORT.md) says which channel takes what.
 
 - **Discord**: <https://discord.tinyhumans.ai>
 - **X**: [@tinyhumansai](https://x.com/tinyhumansai)

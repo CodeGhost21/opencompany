@@ -28,7 +28,6 @@ target/
 # file is a compile input — openhuman's own `include_str!`s all resolve in `src/`.
 **/docs/**
 !**/tinyagents/docs/**
-**/gitbooks/
 **/website/
 **/paper/
 **/wiki/
@@ -40,5 +39,5 @@ vendor/openhuman/e2e/
 vendor/openhuman/fastlane/
 
 *.log
-.env
+**/.env
 .DS_Store

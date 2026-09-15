@@ -1,7 +1,7 @@
 //! The [`SkillStateStore`] port: operator deltas over the company's skills.
 //!
-//! Built-in skill content lives on disk (`companies/<name>/skills/**` and the
-//! repo-level registry). This store holds only the **deltas** the operator
+//! Built-in skill content lives on disk (`companies/<name>/skills/**`, whose
+//! union across bundles is the registry). This store holds only the **deltas** the operator
 //! applies through the console: library installs, custom skills authored
 //! in-app, and enable/disable overrides. The effective skill set is the
 //! company-dir skills unioned with these rows (see the seeder in

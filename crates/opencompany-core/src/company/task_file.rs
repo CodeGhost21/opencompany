@@ -1,4 +1,4 @@
-//! Seed board cards: `globals/tasks.toml` and `companies/<name>/tasks.toml`.
+//! Seed board cards: `companies/_globals/tasks.toml` and `companies/<name>/tasks.toml`.
 //!
 //! A company already boots knowing what it tracks — `seed_ledgers` seeds its
 //! axes and `seed_workspace` seeds its documents — and with nothing to do. The

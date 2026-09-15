@@ -1,4 +1,4 @@
-//! Content-validation walk over the shipped `companies/*` and `skills/*`.
+//! Content-validation walk over the shipped `companies/*`, their skills included.
 //!
 //! These tests parse every data file the WS1 readers cover against the real
 //! on-disk content, so any future content edit that breaks the frozen formats
@@ -10,8 +10,8 @@ use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
     grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, load_dir_ledgers, load_dir_skills, parse_workflow,
-    walk_workspace,
+    grants_workspace_write_explicit, load_catalog_skills, load_dir_ledgers, load_dir_skills,
+    parse_workflow, walk_workspace,
 };
 use crate::runtime::builder::{agent_scoped_grants, effective_grants};
 
@@ -19,11 +19,20 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Every bundle directory under `dir`. An underscore-prefixed entry is not a
+/// bundle: `companies/_globals` is the global baseline, which has no
+/// `company.toml` and is covered by the `globals` tests instead.
 fn subdirs(dir: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|err| panic!("read {}: {err}", dir.display()))
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.is_dir())
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('_'))
+        })
         .collect();
     dirs.sort();
     dirs
@@ -96,11 +105,11 @@ fn every_company_skill_and_workspace_parses() {
 /// Templates that must carry an explicit `search` grant (issues #312, #878).
 ///
 /// The reason is the work the roster is described as doing, not anything on
-/// disk under the company: the search-dependent skills (`web-research`,
-/// `seo-audit`, `competitor-scan`) live in the *repo-level* `skills/` registry,
-/// which is global and unscoped, so an operator can install any of them into
-/// any company at runtime. No company ships a copy in its own `skills/` dir.
-/// Whether a template belongs here is therefore a judgement about its charter —
+/// disk under the company: the search-dependent skills (`web-research` in the
+/// baseline, `seo-audit` and `competitor-scan` in the bundles that author
+/// them) are all in the skill registry, which is global and unscoped, so an
+/// operator can install any of them into any company at runtime. Whether a
+/// template belongs here is therefore a judgement about its charter —
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
 const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
@@ -390,7 +399,7 @@ fn every_company_declares_a_search_posture() {
 }
 
 /// The footgun this suite exists to catch: `[tools].allow` **replaces** the
-/// default (`globals/globals.toml`'s `default_allow`), it never extends it. A
+/// default (`companies/_globals/globals.toml`'s `default_allow`), it never extends it. A
 /// reviewer "simplifying" a grant to `allow = ["search"]` would silently strip
 /// files/docs/shell/code/web/subagent, workspace writes, `media`, `composio`
 /// and the MCP grants from every agent in the company — no parse error, no
@@ -591,12 +600,12 @@ fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
 }
 
 #[test]
-fn the_repo_skill_registry_parses() {
-    let skills = load_dir_skills(&repo_root().join("skills"))
-        .unwrap_or_else(|err| panic!("repo skills: {err}"));
+fn the_skill_registry_parses() {
+    let skills = load_catalog_skills(&repo_root().join("companies"))
+        .unwrap_or_else(|err| panic!("bundle skills: {err}"));
     assert!(
         skills.iter().any(|skill| skill.slug == "web-research"),
-        "expected the web-research skill in the shared registry"
+        "expected the baseline's web-research skill in the registry"
     );
     for skill in &skills {
         assert!(!skill.name.is_empty(), "skill `{}` has no name", skill.slug);
@@ -1200,7 +1209,7 @@ fn every_company_ledger_declaration_parses_and_fits_under_the_cap() {
 /// question — how is it going, which flavour of over — and that answer belongs
 /// in a field (`progress`, `reason`) where it does not have to be guessed.
 ///
-/// Covers the `globals/` baseline as well as `companies/`: the baseline ships
+/// Covers the `companies/_globals/` baseline as well as `companies/`: the baseline ships
 /// into every company, so a sprawling one there is sprawl nobody opted into.
 ///
 /// It fails here rather than at run time because nothing at run time would say
@@ -1230,7 +1239,7 @@ fn no_shipped_template_ledger_declares_more_than_five_statuses() {
     // ship into *every* company, so a sprawling one is sprawl every operator
     // gets whichever vertical they started from.
     for spec in crate::globals::ledgers() {
-        check("globals/ledgers".to_string(), spec);
+        check("companies/_globals/ledgers".to_string(), spec);
     }
     for company in subdirs(&repo_root().join("companies")) {
         let declared = load_dir_ledgers(&company)
@@ -1512,7 +1521,10 @@ fn every_shipped_setup_card_is_pickable() {
         })
         .collect();
     // The baseline is held to exactly the same rules as a vertical's own file.
-    companies.push(("globals".to_string(), repo_root().join("globals")));
+    companies.push((
+        "globals".to_string(),
+        repo_root().join("companies").join("_globals"),
+    ));
 
     for (name, dir) in companies {
         if !super::has_task_file(&dir) {
@@ -1564,7 +1576,7 @@ fn every_shipped_setup_card_is_pickable() {
                 Some(assignee) => {
                     assert!(
                         name != "globals",
-                        "globals/tasks.toml: `{}` names an assignee, but the baseline ships to \
+                        "companies/_globals/tasks.toml: `{}` names an assignee, but the baseline ships to \
                          every company and can know no roster",
                         card.id
                     );

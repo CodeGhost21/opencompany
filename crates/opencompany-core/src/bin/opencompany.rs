@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
@@ -417,6 +417,22 @@ fn company_source_dir(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// The skill-registry catalog root for a company source directory: the
+/// `companies/` dir every bundle's `skills/` lives under.
+///
+/// Normalizes `dir` with [`std::path::absolute`] first (Codex review, PR
+/// #2326): a relative `--company .` makes `company_source_dir` return `.`,
+/// whose `Path::parent()` is the empty path. An empty `skills_root` is
+/// rejected by `AppState::skill_registry` as "not a directory", taking the
+/// REST/GraphQL skill-registry reads down with a 500 even though the company
+/// loaded fine. `std::path::absolute` is lexical — no filesystem access, so it
+/// cannot fail on a nonexistent path — and joins against the process CWD, so
+/// `.`'s parent resolves to the real containing directory instead of empty.
+fn skills_root_for(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let absolute = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    absolute.parent().map(Path::to_path_buf)
+}
+
 /// Loads the manifest under `dir`, builds a runtime over `home`, and registers
 /// it in `state`. Returns the derived company id and display name.
 ///
@@ -552,7 +568,7 @@ fn activation_gate_bypass_enabled(value: Option<&str>) -> bool {
 /// Assembles the `RuntimeBuilder` for one company with this host's full boot
 /// wiring: the OpenHuman RPC transport, the harness pool and its managed
 /// backends, feedback routing, the opened storage backend and memory overlay,
-/// the shared skill library, and the manager-injected per-tenant mailbox.
+/// the skill registry, and the manager-injected per-tenant mailbox.
 ///
 /// Extracted from [`register_company`] so an in-place rebuild (issue #290) runs
 /// the *same* wiring boot ran. A rebuild that assembled its own would drift from
@@ -2429,15 +2445,14 @@ async fn async_main() -> Result<()> {
             // test send and outbound mail. Absent the features these stay `None`
             // and the surfaces degrade to "not wired yet" (404).
             state = state.with_connections(connections_runtime()?);
-            // The repo-level shared skill library (`skills/`) sits beside the
-            // `companies/` dir; derive it from the first loaded company's source
-            // dir so the `skillRegistry` query resolves the committed library.
-            if let Some(skills_root) = companies.first().and_then(|path| {
-                let dir = company_source_dir(path);
-                dir.parent()
-                    .and_then(|companies_dir| companies_dir.parent())
-                    .map(|repo_root| repo_root.join("skills"))
-            }) {
+            // The skill registry is every bundle's `skills/` under the
+            // `companies/` dir; derive that dir from the first loaded company's
+            // source dir so the `skillRegistry` query resolves the committed
+            // bundles, the baseline's included. See `skills_root_for`.
+            if let Some(skills_root) = companies
+                .first()
+                .and_then(|path| skills_root_for(&company_source_dir(path)))
+            {
                 state = state.with_skills_root(skills_root);
             }
             // Issue #290: with every builder input above now resolved, this host
@@ -3023,6 +3038,32 @@ mod test {
         // A manifest-file argument resolves to its parent company directory, so
         // the serve-path `workspace`/`skills`/`workflows` lookups stay correct.
         assert_eq!(company_source_dir(&dir.join("company.toml")), dir);
+    }
+
+    #[test]
+    fn skills_root_for_normalizes_a_relative_dot_source_dir() {
+        // Codex review, PR #2326: `--company .` makes `company_source_dir`
+        // return `.`, whose `Path::parent()` is the empty path — an empty
+        // `skills_root` then fails `AppState::skill_registry`'s directory
+        // check even though the company loaded fine. `skills_root_for` must
+        // resolve `.` against the real working directory before taking its
+        // parent, so the catalog root comes back as the actual `companies/`
+        // dir rather than empty.
+        let dot = std::path::Path::new(".");
+        let root = skills_root_for(dot).expect("skills_root_for must resolve `.`");
+        assert_ne!(
+            root.as_os_str(),
+            "",
+            "skills_root_for must not return the empty path for `.`"
+        );
+        assert_eq!(
+            root,
+            std::env::current_dir()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        );
     }
 
     #[tokio::test]

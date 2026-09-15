@@ -11,7 +11,7 @@ Pick the channel by what you have, not by how urgent it feels.
 | A small, well-shaped feature request | [A feature request](https://github.com/tinyhumansai/opencompany/issues/new?template=feature_request.yml) |
 | A change big enough to break someone | [RFCs](https://github.com/tinyhumansai/opencompany/discussions/categories/rfcs) |
 | A company you are running on this | [Show your company](https://github.com/tinyhumansai/opencompany/discussions/categories/show-and-tell) |
-| A vulnerability | [The security policy](SECURITY.md) — never a public thread |
+| A vulnerability | [The security policy](../SECURITY.md) — never a public thread |
 
 ## What to bring
 
@@ -26,7 +26,7 @@ editing it later does not un-publish a key — you have to rotate it.
 
 Maintainers work a triage queue, not an inbox. A thread with community replies
 but no maintainer reply gets the `awaiting maintainer` label and is worked
-oldest-first; see [docs/community/discussions.md](docs/community/discussions.md)
+oldest-first; see [community/discussions.md](community/discussions.md)
 for how that queue runs and who can move a thread through it.
 
 If a question turns out to be a bug, a maintainer opens the issue and links it.

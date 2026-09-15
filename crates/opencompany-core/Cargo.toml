@@ -6,7 +6,7 @@
 #
 # The sources live beneath this manifest — `src/`, `tests/`, `benches/`,
 # `examples/` and `build.rs` — so `CARGO_MANIFEST_DIR` is their parent, and the
-# repository root (`companies/`, `globals/`, `skills/`, `frontend/`, `vendor/`,
+# repository root (`companies/`, `frontend/`, `vendor/`,
 # the workspace `Cargo.lock`) is `../..` from it. Auto-discovery stays off all
 # the same: `scripts/ci/assert-integration-targets-run.sh` reads the `[[test]]`
 # entries here to decide which integration targets must run something, and a
@@ -92,7 +92,7 @@ required-features = ["openhuman", "mcp"]
 [dependencies]
 # Compiles agent-authored `Page.tsx` (issue: agent-authored dashboard pages)
 # into browser-runnable JS inside `pages_write` (`src/harness/pages_tools.rs`).
-# The runtime image's builder stage (see `Dockerfile`) has no Node — only the
+# The runtime image's builder stage (see `deploy/Dockerfile`) has no Node — only the
 # separate frontend Docker build stage does — so turning agent-written TSX into
 # something a browser can run has to happen as a Rust-native step, at request
 # time, inside this binary. `swc_core` is a pure-Rust TS/JSX compiler with no

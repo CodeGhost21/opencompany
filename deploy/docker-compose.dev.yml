@@ -29,7 +29,7 @@ services:
       start_period: 60s
       retries: 20
     volumes:
-      - .:/workspace
+      - ..:/workspace
       - cargo-registry:/usr/local/cargo/registry
       - cargo-git:/usr/local/cargo/git
       - cargo-target:/workspace/target
@@ -48,7 +48,7 @@ services:
       OC_API_TARGET: http://opencompany:8080
       CHOKIDAR_USEPOLLING: "true"
     volumes:
-      - ./frontend:/app
+      - ../frontend:/app
       - frontend-node-modules:/app/node_modules
     restart: "no"
 

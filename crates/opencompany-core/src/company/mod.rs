@@ -114,7 +114,7 @@ mod skill_file;
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
 pub mod steer;
-/// Seed board cards: `globals/tasks.toml` and `companies/<name>/tasks.toml`. A
+/// Seed board cards: `companies/_globals/tasks.toml` and `companies/<name>/tasks.toml`. A
 /// company boots with the setup work it obviously has already on the board,
 /// rather than with an empty To-do column and agents that have nothing to pick
 /// up.
@@ -188,7 +188,9 @@ pub(crate) use manifest::is_snake_case;
 pub use manifest::{DELEGATES_TO_WILDCARD, LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use mcp_file::{MCP_FILE, has_mcp_file, load_dir_mcp_servers};
 pub use skill_effective::{EffectiveSkill, SkillBody, SkillContent};
-pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
+pub use skill_file::{
+    SkillDoc, load_catalog_skills, load_dir_skills, parse_skill_md, render_skill_md,
+};
 pub use task_file::{TASKS_FILE, TaskSeed, has_task_file, load_dir_tasks};
 pub use types::{
     ACP_AGENTS, ACP_TRANSPORTS, AcpHarness, Agent, BRAIN_MODES, Brain, Budget, ChannelConfig,

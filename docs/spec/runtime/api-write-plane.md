@@ -39,7 +39,7 @@ DELETE …/workspace/{nodeId}                  delete a node
 POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `agents/` strays (#700)
 POST   …/workspace/merge-duplicate-folders?dry_run=    repair a raced tree (#759)
 POST   …/skills                             add a custom skill
-GET    …/skills/registry                     browse the shared skill library
+GET    …/skills/registry                     browse the skill registry (every bundle's skills)
 POST   …/skills/{slug}/install              install a registry/company skill
 POST   …/skills/{slug}/uninstall            uninstall a skill
 PUT    …/skills/{slug}                       enable / disable a skill

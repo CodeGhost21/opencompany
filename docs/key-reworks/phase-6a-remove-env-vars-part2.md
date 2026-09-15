@@ -202,7 +202,7 @@ does not, report it rather than special-casing around it.
 | `docs/modules/inference/current-state.md` | :25-26 — the same collapse |
 | `docs/modules/openhuman/README.md` | :80-81 — the key/url table rows lose their env-var column entries; state the base URL is fixed at the constant |
 | `docs/modules/composio/data-model.md` | :79 — drop the `OPENCOMPANY_COMPOSIO_BACKEND_URL` clause, keep the `TINYHUMANS_API_URL` fallback |
-| `gitbooks/developers/configuration.md` | :75-76 — delete both rows |
+| `docs/gitbooks/developers/configuration.md` | :75-76 — delete both rows |
 | `companies/hive_math_lab/{README.md,company.toml}`, `companies/retail_co/{README.md,company.toml}`, `companies/vending_machine_co/{README.md,company.toml}`, `companies/openhuman_demo/{README.md,company.toml}` | Every example command that sets `OPENCOMPANY_INFERENCE_KEY` or `OPENCOMPANY_INFERENCE_URL` (`git grep -n "OPENCOMPANY_INFERENCE_KEY\|OPENCOMPANY_INFERENCE_URL" companies`) needs rewriting to the new mechanism: a `provider/tinyhumans/key` row set up through the console or the provider API, not an environment variable. Rewrite each example command; do not just delete the line, or the example stops demonstrating anything. |
 | `docs/plans/hivemind-handoff.md` | :57, :83 — same rewrite; this is a grading/dev doc, not a shipped feature, so confirm with the operator whether it still needs an equivalent before spending time on it |
 | `examples/live_company_turn.rs` | :10, :73-74 — doc comment and the runtime error message both name `OPENCOMPANY_INFERENCE_KEY` / `_URL`; reword to name `TINYHUMANS_API_KEY` and the fixed proxy URL |

@@ -367,7 +367,7 @@ impl ProfileDraft {
 /// `persona_prompt`'s "You are {name}, the {role} at {company}." and rendered
 /// beside an id in the orchestrator's Team block, both of which read a job
 /// title and neither of which reads a paragraph. Every role shipped in
-/// `companies/` and `globals/` today is under 25 characters, so this is loose
+/// `companies/` and `companies/_globals/` today is under 25 characters, so this is loose
 /// by a factor of two rather than tight.
 ///
 /// Enforced host-side on the way out of a design pass, for the same reason

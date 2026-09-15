@@ -1,4 +1,4 @@
-# `qa/` — the release parity harness
+# `scripts/qa/` — the release parity harness
 
 What a release is checked with, in one pass, against a real deployed tenant.
 

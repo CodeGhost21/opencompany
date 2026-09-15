@@ -82,7 +82,7 @@ It requires the effective email auth mode (`OPENCOMPANY_AUTH_MODE` →
 `config.toml` → the manifest's `[users] mode`); a `wallet` or `none` company is
 refused. Committing revokes the user's existing sessions and pending login codes
 first, then flags the password for replacement — the same semantics as the admin
-temporary-password route ([users spec](../../docs/spec/runtime/users.md)). On
+temporary-password route ([users spec](../../spec/runtime/users.md)). On
 the filesystem store it holds the same data-root lock as `serve`, so it fails
 cleanly if a server is running on that root.
 
