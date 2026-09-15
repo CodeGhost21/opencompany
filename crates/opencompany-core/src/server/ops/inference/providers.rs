@@ -339,29 +339,76 @@ struct ProviderMutation {
 /// the whole guard: the `default` half still answers, and a company whose
 /// record cannot be read has bigger problems than an incomplete advisory.
 ///
-/// `pub(super)`: also called from `provider_list` in the parent module
-/// (`ops/inference.rs`) to fill `ProviderDto.usedBy` on every status read,
-/// not only inside a guarded mutation.
+/// The pure half of the guard: from an already-resolved default and an
+/// already-loaded record, whether `slug` is used, and by what.
+///
+/// Split out (round-3a review P3-6) so a status read computing this for every
+/// row in the list can load the default and the record **once** for the
+/// whole request — see `ops::inference::provider_list` — instead of each row
+/// repeating both reads through [`provider_used_by`].
+///
+/// `default` is read from the [`store::DefaultChoice`] itself, not
+/// re-fetched, precisely so a caller that could not read the real one can
+/// pass [`store::DefaultChoice::Unset`] and get an honest "not the default"
+/// rather than this function silently going back to the store a second time
+/// and hitting the same failure.
+///
+/// `pub(super)`: `ops::inference::provider_list` calls this directly, once
+/// per row, over one default and one record loaded for the whole request.
+pub(super) fn used_by_from(
+    default: &store::DefaultChoice,
+    record: Option<&crate::ports::types::CompanyRecord>,
+    slug: &str,
+) -> Option<crate::error::UsedBy> {
+    let is_default = default.provider().is_some_and(|p| p == slug);
+    let agents = record
+        .map(|r| agents_pinned_to(r, slug))
+        .unwrap_or_default();
+    let used_by = crate::error::UsedBy {
+        default: is_default,
+        agents,
+        surfaces: Vec::new(),
+    };
+    (!used_by.is_empty()).then_some(used_by)
+}
+
+/// `pub(super)`: called from the three guarded mutations below (delete,
+/// disable, key clear) and from the agent-pair PATCH
+/// (`server::ops::team_agent`) — never from a read path, which computes
+/// [`used_by_from`] directly over data it already loaded once for the whole
+/// request (round-3a review P3-6).
+///
+/// **A guard fails closed, a read degrades — this is the guard half**
+/// (round-3a review P2-1). The company record is read fresh here because a
+/// mutation's whole job is to decide whether it is safe to proceed *right
+/// now*; a load error therefore propagates as `Err` rather than reading as
+/// "no agents named", which used to let a transient store error turn an
+/// unconfirmed delete, disable or key clear on a pinned-only provider into a
+/// silent 200. `Ok(None)` — the record genuinely does not exist — still reads
+/// as no agents: that is not a failure to recover from, it is the company
+/// having nothing to strand.
+///
+/// The stored default, by contrast, is read leniently
+/// ([`store::load_default_lenient`], round-3a review P2-4): a corrupt or
+/// unreadable `inference/default` must never block an otherwise-unrelated
+/// delete, disable or key clear — the guard still answers about `agents`, and
+/// `default` reads as `false` rather than the whole request failing.
 pub(super) async fn provider_used_by(
     runtime: &CompanyRuntime,
     slug: &str,
 ) -> Result<Option<crate::error::UsedBy>, ApiError> {
     let secrets = runtime.secrets().as_ref();
-    let default = store::load_default(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?
-        .provider()
-        .is_some_and(|p| p == slug);
-    let agents = match runtime.store().load(runtime.id()).await {
-        Ok(Some(record)) => agents_pinned_to(&record, slug),
-        Ok(None) | Err(_) => Vec::new(),
-    };
-    let used_by = crate::error::UsedBy {
-        default,
-        agents,
-        surfaces: Vec::new(),
-    };
-    Ok((!used_by.is_empty()).then_some(used_by))
+    let (default, unreadable) = store::load_default_lenient(runtime.id(), secrets).await;
+    if unreadable {
+        tracing::warn!(
+            company = %runtime.id(),
+            slug = %slug,
+            "computing usedBy for a guarded mutation with an unreadable default; treating it \
+             as not the default rather than refusing the mutation",
+        );
+    }
+    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
+    Ok(used_by_from(&default, record.as_ref(), slug))
 }
 
 /// Every effective roster agent whose own pair names `slug` (keys rework,

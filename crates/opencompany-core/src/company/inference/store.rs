@@ -1055,6 +1055,43 @@ pub async fn load_default(company: &CompanyId, secrets: &dyn SecretStore) -> Res
     parse_default(&raw)
 }
 
+/// [`load_default`], but never fails (round-3a review P2-4).
+///
+/// A read path — a status response, or an in-use guard ahead of a delete,
+/// disable or key clear — has to be able to answer even when
+/// `inference/default` cannot be: a store read error or a hand-corrupted
+/// value used to 500 every one of those, so the only repair left for an
+/// operator was `POST …/default` from curl. Read as [`DefaultChoice::Unset`]
+/// instead, with a `warn!` and `true` in the second half of the pair so the
+/// caller can say so (`InferenceStatusDto::default_unreadable`) rather than
+/// silently reporting "no default" as if the operator had never set one.
+///
+/// **Never writes.** An unreadable value is never overwritten by this call —
+/// only an explicit [`set_default_choice`] ever rewrites the key — so once
+/// the underlying corruption is fixed by hand, the next read recovers on its
+/// own.
+///
+/// Turn-time resolution does not use this: a broken default there fails a
+/// turn closed with a named sentence (`company::inference::copy`), which is
+/// the opposite instinct from a read path degrading quietly.
+pub async fn load_default_lenient(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> (DefaultChoice, bool) {
+    match load_default(company, secrets).await {
+        Ok(choice) => (choice, false),
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                error = %err,
+                "inference default could not be read; treating it as unset rather than \
+                 failing the read",
+            );
+            (DefaultChoice::Unset, true)
+        }
+    }
+}
+
 /// Writes a full default as **one** JSON value, e.g.
 /// `{"provider":"tinyhumans","model":"acme/test-model"}` (keys rework, issue
 /// #2306, slice 2b). One write, so a provider can never be paired with
@@ -2271,6 +2308,50 @@ mod tests {
                 "raw: {raw}: {err}"
             );
         }
+    }
+
+    /// Round-3a review P2-4: the read side of a corrupt default must degrade,
+    /// never 500 — see [`load_default_lenient`]'s own doc for why.
+    #[tokio::test]
+    async fn a_corrupt_default_reads_as_unset_and_unreadable_never_written() {
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company(),
+                DEFAULT_PROVIDER_KEY,
+                SecretValue(r#"{oops"#.to_string()),
+            )
+            .await
+            .unwrap();
+
+        let (choice, unreadable) = load_default_lenient(&company(), &secrets).await;
+        assert_eq!(choice, DefaultChoice::Unset);
+        assert!(unreadable);
+
+        // Never rewritten: the corrupt value is still on disk, byte for byte,
+        // so fixing it by hand and reading again recovers on its own.
+        let raw = secrets
+            .get(&company(), DEFAULT_PROVIDER_KEY)
+            .await
+            .unwrap()
+            .map(|SecretValue(v)| v);
+        assert_eq!(raw.as_deref(), Some(r#"{oops"#));
+    }
+
+    #[tokio::test]
+    async fn a_readable_default_round_trips_through_the_lenient_reader_unmarked() {
+        let secrets = MemSecrets::default();
+        let choice = ModelChoice {
+            provider: "acme".to_string(),
+            model: "test-model".to_string(),
+        };
+        set_default_choice(&company(), &secrets, &choice)
+            .await
+            .unwrap();
+
+        let (read, unreadable) = load_default_lenient(&company(), &secrets).await;
+        assert_eq!(read, DefaultChoice::Full(choice));
+        assert!(!unreadable);
     }
 
     #[tokio::test]
