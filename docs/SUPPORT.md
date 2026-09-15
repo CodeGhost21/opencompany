@@ -26,7 +26,7 @@ editing it later does not un-publish a key — you have to rotate it.
 
 Maintainers work a triage queue, not an inbox. A thread with community replies
 but no maintainer reply gets the `awaiting maintainer` label and is worked
-oldest-first; see [docs/community/discussions.md](docs/community/discussions.md)
+oldest-first; see [community/discussions.md](community/discussions.md)
 for how that queue runs and who can move a thread through it.
 
 If a question turns out to be a bug, a maintainer opens the issue and links it.

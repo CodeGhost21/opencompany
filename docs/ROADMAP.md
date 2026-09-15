@@ -2,7 +2,7 @@
 
 This file tracks engineering now/next/later for the current code surface.
 The product roadmap — stages, phases, and non-goals for the one-person
-company runtime — lives in [docs/spec/roadmap.md](docs/spec/roadmap.md).
+company runtime — lives in [spec/roadmap.md](spec/roadmap.md).
 
 ## Now
 

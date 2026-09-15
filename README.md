@@ -217,7 +217,7 @@ rather than a PR.
 
 [Discussions](https://github.com/tinyhumansai/opencompany/discussions) is where
 questions get answered and large changes get argued out before they're built.
-[SUPPORT.md](SUPPORT.md) says which channel takes what.
+[docs/SUPPORT.md](docs/SUPPORT.md) says which channel takes what.
 
 - **Discord**: <https://discord.tinyhumans.ai>
 - **X**: [@tinyhumansai](https://x.com/tinyhumansai)

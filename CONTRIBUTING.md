@@ -5,7 +5,7 @@
 Questions, self-hosting trouble, and a run that misbehaved go to
 [Discussions](https://github.com/tinyhumansai/opencompany/discussions);
 reproducible behavior that should change goes to an issue.
-[SUPPORT.md](SUPPORT.md) has the full routing table, and
+[docs/SUPPORT.md](docs/SUPPORT.md) has the full routing table, and
 [docs/community/discussions.md](docs/community/discussions.md) explains how
 threads are triaged.
 
