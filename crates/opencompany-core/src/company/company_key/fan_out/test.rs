@@ -98,41 +98,6 @@ impl SecretStore for SlowSecrets {
     }
 }
 
-/// A store that writes an "intruder" default the Nth time `inference/default`
-/// is read — simulating another writer (e.g. the LLM page setting a default
-/// on a different provider) landing in the gap `still_unset` exists to catch
-/// (P2-3, keys rework #2306 review): `read_slots`'s own early read of
-/// `default_now` is call #1 and always sees whatever was there before the
-/// call; `still_unset`'s re-read right before the write is call #2, which
-/// this makes see the intruder instead — proving the interim, non-`index_lock`
-/// re-read actually backs off rather than clobbering a concurrent write.
-struct IntrudingDefaultRead {
-    inner: MemSecrets,
-    calls: AtomicUsize,
-    intrude_after: usize,
-    intruder_slug: String,
-}
-
-#[async_trait]
-impl SecretStore for IntrudingDefaultRead {
-    async fn get(&self, c: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
-        let result = self.inner.get(c, key).await;
-        if key == inference_store::DEFAULT_PROVIDER_KEY {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            if n == self.intrude_after {
-                self.inner
-                    .set(c, key, SecretValue(self.intruder_slug.clone()))
-                    .await
-                    .unwrap();
-            }
-        }
-        result
-    }
-    async fn set(&self, c: &CompanyId, key: &str, value: SecretValue) -> Result<()> {
-        self.inner.set(c, key, value).await
-    }
-}
-
 /// A canned prober answer, with a call counter so a test can assert the
 /// probe never ran at all (e.g. on a `CustomKey` skip).
 struct FakeProber {
@@ -1899,54 +1864,162 @@ async fn copying_the_account_key_never_touches_mode_or_byok() {
 }
 
 // ---------------------------------------------------------------------------
-// P2-3 (interim, non-`index_lock`): the default re-read closes the gap
-// between `read_slots`'s own read and the write, without a shared lock.
+// index_lock (KR review comment 4012261302): the row and default writes are
+// now genuinely serialised against every other `index_lock` holder, not
+// merely re-checked immediately before the write.
 // ---------------------------------------------------------------------------
 
-/// A fresh company, no row yet: `fan_out` would normally create the
-/// `tinyhumans` row and set it as the default (matrix M1/M2's shape). Here,
-/// between `read_slots` seeing `Unset` and `still_unset`'s re-read right
-/// before the actual write, [`IntrudingDefaultRead`] simulates a concurrent
-/// writer landing a bare-slug default on a different provider — proving the
-/// interim re-read backs the default write off to `Kept(DefaultAlreadySet)`
-/// rather than clobbering what the other writer just set.
+/// A fresh company, no row yet: `fan_out` creates the `tinyhumans` row
+/// (matrix M1's shape) while a *real* concurrent provider add — the same
+/// `index_lock`-then-`put_provider` sequence
+/// `server::ops::inference::providers::add_provider` uses, simulated here
+/// without the HTTP scaffolding — adds a second, unrelated provider. Neither
+/// row may be lost: with both operations taking the same lock around their
+/// own read-modify-write of the index, they can only ever run one at a time,
+/// never interleaved.
 #[tokio::test]
-async fn the_default_re_read_backs_off_when_something_else_wins_the_race() {
-    let cid = company("default-race");
-    let secrets = IntrudingDefaultRead {
+async fn a_fan_out_racing_a_provider_add_loses_neither_row() {
+    let cid = company("fanout-vs-add");
+    let secrets = std::sync::Arc::new(SlowSecrets {
         inner: MemSecrets::default(),
-        calls: AtomicUsize::new(0),
-        intrude_after: 1,
-        intruder_slug: "openrouter".to_string(),
-    };
+    });
     let prober = FakeProber::ok(&[MODEL]);
 
-    let report = fan_out(
-        &cid,
-        &secrets,
+    let (s1, s2) = (secrets.clone(), secrets.clone());
+    let (c1, c2) = (cid.clone(), cid.clone());
+
+    let fan_out_fut = fan_out(
+        &c1,
+        s1.as_ref(),
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
             confirm_in_use: true,
         },
         &prober,
+    );
+    let add_fut = async move {
+        let _guard = inference_store::index_lock(&c2).await;
+        inference_store::put_provider(
+            &c2,
+            s2.as_ref(),
+            inference_store::ProviderDraft {
+                slug: "openrouter".to_string(),
+                label: "OpenRouter".to_string(),
+                kind: "openrouter".to_string(),
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                models: tier_overrides("openrouter/test-model"),
+                enabled: true,
+            },
+        )
+        .await
+    };
+
+    let (fan_out_result, add_result) = tokio::join!(fan_out_fut, add_fut);
+    let report = fan_out_result.unwrap();
+    add_result.unwrap();
+
+    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Filled);
+
+    let mut slugs: Vec<String> = inference_store::list_providers(&cid, secrets.as_ref())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.slug)
+        .collect();
+    slugs.sort();
+    assert_eq!(
+        slugs,
+        vec![
+            "openrouter".to_string(),
+            inference::MANAGED_SLUG.to_string()
+        ],
+        "neither the fan-out's tinyhumans row nor the concurrent add's openrouter row may be lost"
+    );
+}
+
+/// The default-slot counterpart: a concurrent, genuinely locked default
+/// change to a different, already-connected provider — the same
+/// `index_lock`-then-`set_default_slug` sequence a real set-default route
+/// uses — must not be clobbered by the fan-out's own default write, and the
+/// fan-out must see it rather than blindly overwriting it.
+#[tokio::test]
+async fn a_fan_out_racing_a_default_change_backs_off_or_wins_but_never_corrupts() {
+    let cid = company("fanout-vs-default");
+    let secrets = std::sync::Arc::new(SlowSecrets {
+        inner: MemSecrets::default(),
+    });
+    // The provider the concurrent request marks default must already be
+    // connected, exactly as the real route requires.
+    inference_store::put_provider(
+        &cid,
+        secrets.as_ref(),
+        inference_store::ProviderDraft {
+            slug: "openrouter".to_string(),
+            label: "OpenRouter".to_string(),
+            kind: "openrouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            models: tier_overrides("openrouter/test-model"),
+            enabled: true,
+        },
     )
     .await
     .unwrap();
+    let prober = FakeProber::ok(&[MODEL]);
 
-    // The row still gets created — the race is only about the default slot.
-    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Filled);
-    assert_eq!(
-        outcome(&report, Slot::Default),
-        SlotOutcome::Kept(SkipReason::DefaultAlreadySet),
-        "the re-read must see the intruder's write and back off: {report:?}"
+    let (s1, s2) = (secrets.clone(), secrets.clone());
+    let (c1, c2) = (cid.clone(), cid.clone());
+
+    let fan_out_fut = fan_out(
+        &c1,
+        s1.as_ref(),
+        FanOutRequest {
+            key: NEW,
+            model: Some(MODEL),
+            confirm_in_use: true,
+        },
+        &prober,
     );
-    assert_eq!(
-        inference_store::load_default(&cid, &secrets.inner)
+    let default_fut = async move {
+        let _guard = inference_store::index_lock(&c2).await;
+        inference_store::set_default_slug(&c2, s2.as_ref(), "openrouter")
             .await
-            .unwrap(),
-        inference_store::DefaultChoice::ProviderOnly("openrouter".to_string()),
-        "the intruder's default must survive untouched — this is the race \
-         guard actually working, not merely reporting itself as skipped"
-    );
+            .unwrap();
+    };
+
+    let (fan_out_result, ()) = tokio::join!(fan_out_fut, default_fut);
+    let report = fan_out_result.unwrap();
+
+    // Whichever operation's lock hold went first, the default ends up
+    // exactly one of the two — the fan-out's own default write if it ran
+    // first and saw `Unset`, or the concurrent marker if that ran first and
+    // the fan-out's own re-read (under the same lock) then saw it and backed
+    // off. What must never happen is the fan-out reporting `Filled` while a
+    // *different* value ends up stored — that would mean it wrote blind to a
+    // marker it should have seen.
+    let stored = inference_store::load_default(&cid, secrets.as_ref())
+        .await
+        .unwrap();
+    if outcome(&report, Slot::Default) == SlotOutcome::Filled {
+        assert_eq!(
+            stored,
+            inference_store::DefaultChoice::Full(inference_store::ModelChoice {
+                provider: inference::MANAGED_SLUG.to_string(),
+                model: MODEL.to_string(),
+            }),
+            "fan_out reported Filled, so the stored default must be its own write: {report:?}"
+        );
+    } else {
+        assert_eq!(
+            outcome(&report, Slot::Default),
+            SlotOutcome::Kept(SkipReason::DefaultAlreadySet),
+            "if fan_out did not fill the default, it must be because it saw the concurrent \
+             marker already set: {report:?}"
+        );
+        assert_eq!(
+            stored,
+            inference_store::DefaultChoice::ProviderOnly("openrouter".to_string()),
+            "the concurrent marker must survive untouched"
+        );
+    }
 }

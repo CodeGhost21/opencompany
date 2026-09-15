@@ -392,9 +392,16 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
 // value (P2-1, keys rework #2306 review)
 // ---------------------------------------------------------------------------
 
-/// Everything [`fan_out`] needs to decide the Composio/LLM/provider/default/
-/// health slots, read as one batch — always AFTER the account key itself is
-/// already safely stored, never before (see [`fan_out`]'s own step 3/4).
+/// Everything [`fan_out`] needs to decide the Composio/LLM/provider/health
+/// slots, read as one batch — always AFTER the account key itself is already
+/// safely stored, never before (see [`fan_out`]'s own step 3/4).
+///
+/// Carries no default-marker read: unlike `row`, which step 8's health probe
+/// needs *before* the network round trip (for the provider's `base_url`),
+/// nothing here needs the default before the probe, and reading it this early
+/// only invited a second, later re-read to stay accurate. [`fan_out`] now
+/// reads `inference/default` exactly once, under `index_lock`, in step 9b
+/// (KR review comment 4012261302) — see [`RelockedReads`].
 struct ReadSlots {
     composio_now: String,
     legacy_managed: bool,
@@ -404,7 +411,6 @@ struct ReadSlots {
     legacy_owned: bool,
     legacy_raw: Option<String>,
     inference_now: String,
-    default_now: inference_store::DefaultChoice,
 }
 
 /// Reads everything [`ReadSlots`] holds. Split out of [`fan_out`] itself so
@@ -442,7 +448,6 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
             .await?
             .trim()
             .to_string();
-    let default_now = inference_store::load_default(company, secrets).await?;
 
     Ok(ReadSlots {
         composio_now,
@@ -453,31 +458,47 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
         legacy_owned,
         legacy_raw,
         inference_now,
-        default_now,
     })
 }
 
-/// Re-reads `inference/default` immediately before a fan-out default write
-/// (P2-3, keys rework #2306 review): the `default_now` read in [`ReadSlots`]
-/// happens before the health probe's network round trip, so another writer
-/// (e.g. the LLM page setting a default on a different provider) can land a
-/// default in that window. `Ok(true)` only when it is STILL `Unset` at the
-/// moment of this check — the caller treats anything else exactly like the
-/// ordinary `Kept(DefaultAlreadySet)` case rather than overwriting it.
+/// What [`fan_out`]'s row/default writes need, read fresh under
+/// [`inference_store::index_lock`] (KR review comment 4012261302).
 ///
-/// This narrows the race window; it does not close it (there is still a gap
-/// between this read and the write right after it). Closing it fully needs a
-/// shared per-company lock across `add_provider`/`set_default`/this fan-out —
-/// a separate, larger change tracked as `inference::store::index_lock`, not
-/// yet in this tree as of this commit. **Lock order, once that lands: this
-/// module's own [`slot_guard`] FIRST, then `index_lock` — never the reverse,
-/// and never held across a network probe** (the health probe in [`fan_out`]
-/// already runs with neither held).
-async fn still_unset(company: &CompanyId, secrets: &dyn SecretStore) -> Result<bool> {
-    Ok(matches!(
-        inference_store::load_default(company, secrets).await?,
-        inference_store::DefaultChoice::Unset
-    ))
+/// [`ReadSlots`]'s own `row` is captured before the health probe's network
+/// round trip, so a concurrent `add_provider`, `set_default`, or another
+/// fan-out call can land in that window — creating the row this call is
+/// about to create, or marking a default this call is about to overwrite.
+/// `still_unset` used to re-read only the default, immediately before the
+/// write, which narrowed the race but could not close it: the read and the
+/// write were still two separate operations, with a gap between them nothing
+/// serialised. This closes it by taking `index_lock` — the same lock
+/// `server::ops::inference::providers` and `set_default` already hold for
+/// their own reads and writes — and re-reading both the row and the default
+/// while holding it continuously through the writes that follow, so nothing
+/// else touching this company's inference index or default can interleave.
+///
+/// **Lock order: [`slot_guard`] first (already held for the whole of
+/// [`fan_out`]), then `index_lock` — never the reverse, and never held across
+/// a network call.** The health probe in [`fan_out`] runs with neither held;
+/// this lock is taken only after it returns.
+struct RelockedReads {
+    row: Option<inference_store::Provider>,
+    default_now: inference_store::DefaultChoice,
+}
+
+async fn reread_under_index_lock(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<RelockedReads> {
+    let row = inference_store::list_providers(company, secrets)
+        .await?
+        .into_iter()
+        .find(|p| {
+            p.origin == inference_store::ProviderOrigin::Indexed
+                && p.slug == inference::MANAGED_SLUG
+        });
+    let default_now = inference_store::load_default(company, secrets).await?;
+    Ok(RelockedReads { row, default_now })
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +600,6 @@ pub async fn fan_out(
         legacy_owned,
         legacy_raw,
         inference_now,
-        default_now,
     } = match read_slots(company, secrets).await {
         Ok(reads) => reads,
         Err(err) => {
@@ -853,6 +873,60 @@ pub async fn fan_out(
         inference_outcome = SlotOutcome::RolledBack;
     }
 
+    // 9b. Take `index_lock` (KR review comment 4012261302) and re-read the row
+    // and the default fresh, now that the network probe is done — this lock
+    // is never held across a network call, and `slot_guard` (held for the
+    // whole of this function) is always taken first. Held continuously from
+    // here through the row and default writes below, so nothing else
+    // touching this company's inference index or default can interleave with
+    // the checks steps 10 and 11 make against it.
+    let _index_guard = inference_store::index_lock(company).await;
+    let (row, default_now) = match reread_under_index_lock(company, secrets).await {
+        Ok(RelockedReads { row, default_now }) => (row, default_now),
+        Err(err) => {
+            // Best-effort from here, same as step 4's own read failure (P2-1):
+            // the account key and the Composio/inference/health slots are
+            // already settled, so a transient fault re-reading the index
+            // degrades only the two slots that depend on it rather than
+            // losing the whole call.
+            tracing::error!(
+                company = %company,
+                error = %err,
+                "keys rework: fan_out could not re-read the inference index under index_lock; \
+                 the provider and default slots are reported as failed",
+            );
+            return Ok(FanOutReport {
+                slots: vec![
+                    SlotReport {
+                        slot: Slot::Composio,
+                        outcome: composio_outcome,
+                    },
+                    SlotReport {
+                        slot: Slot::Inference,
+                        outcome: inference_outcome,
+                    },
+                    SlotReport {
+                        slot: Slot::Provider,
+                        outcome: SlotOutcome::Failed,
+                    },
+                    SlotReport {
+                        slot: Slot::Default,
+                        outcome: SlotOutcome::Failed,
+                    },
+                    SlotReport {
+                        slot: Slot::Health,
+                        outcome: health_outcome,
+                    },
+                ],
+                needs_model: false,
+                sets_default: false,
+                models: Vec::new(),
+                rollback_had_prior_key,
+                used_by: strand_check.clone(),
+            });
+        }
+    };
+
     // 10. Provider row.
     let mut needs_model = false;
     let provider_outcome = if auth_rejected {
@@ -893,14 +967,12 @@ pub async fn fan_out(
 
     // 11. Default.
     //
-    // P2-3 (keys rework #2306 review): `default_now` above was read in
-    // `read_slots`, before the health probe's network round trip — another
-    // writer (e.g. the LLM page setting a default on a different provider)
-    // can land a default in that window. `still_unset` re-reads immediately
-    // before each write below and, if something else already set one,
-    // this treats it exactly like the ordinary `DefaultAlreadySet` case
-    // instead of clobbering it. This narrows the race; a full close needs the
-    // shared `index_lock` noted on `still_unset` itself.
+    // `default_now` was re-read under `index_lock` in step 9b, held
+    // continuously from that read through the write here — nothing else
+    // touching this company's default marker can land in between, so unlike
+    // the old `still_unset` re-check, no second read is needed immediately
+    // before the write: the one already taken is current for the whole of
+    // this critical section.
     let default_outcome = if auth_rejected {
         SlotOutcome::Skipped(SkipReason::InferenceRejected)
     } else if !matches!(default_now, inference_store::DefaultChoice::Unset) {
@@ -913,14 +985,8 @@ pub async fn fan_out(
                     provider: inference::MANAGED_SLUG.to_string(),
                     model: chosen,
                 };
-                match still_unset(company, secrets).await {
-                    Ok(true) => {
-                        match inference_store::set_default_choice(company, secrets, &choice).await {
-                            Ok(()) => SlotOutcome::Filled,
-                            Err(_) => SlotOutcome::Failed,
-                        }
-                    }
-                    Ok(false) => SlotOutcome::Kept(SkipReason::DefaultAlreadySet),
+                match inference_store::set_default_choice(company, secrets, &choice).await {
+                    Ok(()) => SlotOutcome::Filled,
                     Err(_) => SlotOutcome::Failed,
                 }
             }
@@ -947,16 +1013,10 @@ pub async fn fan_out(
                                 provider: inference::MANAGED_SLUG.to_string(),
                                 model: chosen,
                             };
-                            match still_unset(company, secrets).await {
-                                Ok(true) => match inference_store::set_default_choice(
-                                    company, secrets, &choice,
-                                )
+                            match inference_store::set_default_choice(company, secrets, &choice)
                                 .await
-                                {
-                                    Ok(()) => SlotOutcome::Filled,
-                                    Err(_) => SlotOutcome::Failed,
-                                },
-                                Ok(false) => SlotOutcome::Kept(SkipReason::DefaultAlreadySet),
+                            {
+                                Ok(()) => SlotOutcome::Filled,
                                 Err(_) => SlotOutcome::Failed,
                             }
                         }
