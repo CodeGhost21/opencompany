@@ -44,6 +44,7 @@ import {
   toHostMessageId,
   type ChatMessage,
 } from "@/lib/chat";
+import { toTurnFailure } from "@/lib/turn-failure";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
 import { connectionsHref } from "@/views/connection-pages";
@@ -2272,6 +2273,7 @@ export function RoomView({
               taskId: r.taskId,
               messageId: r.messageId,
               mentions: r.mentions,
+              turnFailure: toTurnFailure(r),
             }),
           )
         : reply.reviewFeedbackApplied

@@ -4,6 +4,7 @@ import type {
   ChatMentionDto,
   TurnStep,
 } from "@/api/types";
+import { toTurnFailure, type TurnFailure } from "./turn-failure";
 
 /**
  * The company's main line, by thread id.
@@ -288,6 +289,15 @@ export interface ChatMessage {
    * landed (see `ChatView`'s `send` on why a throw is ambiguous).
    */
   sendFailed?: string;
+  /**
+   * The exact, actionable reason a fail-closed turn could not run (keys
+   * rework, issue #2306, round-2 review KR-L2-03) - set only on a `company`
+   * reply the host marked `userFacing`, from either the live reply or a
+   * rehydrated history entry. See `src/lib/turn-failure.ts` for what this
+   * unlocks (the sentence rendered verbatim, plus an action button) and the
+   * note on this being coded against a contract B has not yet documented.
+   */
+  turnFailure?: TurnFailure;
 }
 
 /**
@@ -443,6 +453,8 @@ export function makeMessage(
     attachments?: AttachmentDto[];
     /** Mention spans the host resolved against this message, for chip rendering. */
     mentions?: Mention[];
+    /** The fail-closed reason (KR-L2-03), already narrowed by `toTurnFailure`. */
+    turnFailure?: TurnFailure;
   } = {},
 ): ChatMessage {
   return {
@@ -454,6 +466,7 @@ export function makeMessage(
     parentId: opts.parentId,
     steps: opts.steps,
     taskId: opts.taskId,
+    turnFailure: opts.turnFailure,
     // Issue #1682: an empty list is dropped to `undefined` so a line with no
     // attachment stays exactly the shape it was before the field existed.
     attachments: opts.attachments?.length ? opts.attachments : undefined,
@@ -610,6 +623,11 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // the same chips on reload it showed live. Empty drops to `undefined`,
       // keeping the pre-#1682 line shape.
       attachments: entry.attachments?.length ? entry.attachments : undefined,
+      // Rehydrate the fail-closed reason (KR-L2-03) so a reload shows the
+      // same sentence and button the live reply did, rather than losing it
+      // back to generic text. Company-only, like `steps` above — a system or
+      // your-own line is never the host's turn-failure notice.
+      turnFailure: from === "company" ? toTurnFailure(entry) : undefined,
     };
   });
 }
