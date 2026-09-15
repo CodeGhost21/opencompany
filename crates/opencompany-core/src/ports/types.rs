@@ -3647,9 +3647,10 @@ pub struct AgentOverride {
     pub model: Option<String>,
     /// The provider half of this teammate's `{provider, model}` pair on a
     /// `built_in` harness (keys rework, issue #2306, slice 3a) — a company
-    /// provider list slug. Cleared the same way as [`Self::model`], and always
-    /// set together with it: `edit_agent` (`server::ops::team_agent`) refuses
-    /// one without the other.
+    /// provider list slug. Cleared the same way as [`Self::model`].
+    /// `edit_agent` (`server::ops::team_agent`) refuses a stored `provider`
+    /// with no `model` (a pin with nothing to pin to) but allows a bare
+    /// `model` alone — that is the long-standing ACP-hint case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// The harness this teammate is bound to, as an overlay on the blueprint.
