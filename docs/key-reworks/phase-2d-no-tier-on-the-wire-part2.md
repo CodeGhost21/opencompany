@@ -371,14 +371,14 @@ In `probe_inference` (`:1244-1354`):
   default becomes "none". Its description: "a real model id the whole roster
   sends when nothing chooses one; a tier name only selects a configured map
   entry and logs a warning."
-- **`docs/modules/openhuman/README.md:82` and `docs/developers/configuration.md:77`:**
+- **`docs/modules/openhuman/README.md:82` and `docs/gitbooks/developers/configuration.md:77`:**
   the same change.
 - **`docs/spec/runtime/providers.md:218-219`:** delete the `tierVocabulary` and
   `tierDefaults` rows.
 - **Other tier-vocabulary prose.** Reword it in `docs/modules/inference/`
   (`architecture.md`, `current-state.md`, `routing.md`, `routing-states.md`,
   `staging.md`, `README.md`, `data-model.md`). Find it with
-  `git grep -n "DEFAULT_TIER_MODELS\|TierVocabulary\|model_for_tier\|turn_vocabulary" -- docs`.
+  `git grep -n "DEFAULT_TIER_MODELS\|TierVocabulary\|model_for_tier\|turn_vocabulary" -- docs docs/gitbooks`.
 - **Deploy gate — record it in the PR body.** Before an image with 2d reaches
   hosted tenants, `opencompany-manager` must inject
   `OPENCOMPANY_INFERENCE_MODEL=<a model id from the catalog>`
