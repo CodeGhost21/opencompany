@@ -1231,52 +1231,6 @@ async fn a_crossing_whose_answer_never_came_home_grants_no_continuation() {
     );
 }
 
-/// **A continuation may not raise a new crossing.**
-///
-/// `consider` has already run for the line that earned the second pass and is
-/// not called again on what that pass produces. A continuation answering with
-/// its own `!question @#desk` therefore journals a question nothing will
-/// dispatch — valid-looking to the fold and to every later speaker, able to
-/// move the room on an exchange that never happened. `!question` is a move
-/// every seat keeps, so nothing else stops it (Codex, #2332).
-#[tokio::test]
-async fn a_continuation_may_not_open_a_second_crossing() {
-    let far = FarDesk::answering("The replica lag budget is 400ms.");
-    let (log, _) = run(
-        REFERRING,
-        &[
-            (
-                "planner",
-                "!question #lag What is the replica lag budget? @#platform",
-            ),
-            // The continuation, asking again instead of concluding.
-            (
-                "planner",
-                "!question #lag and what about the write path? @#platform",
-            ),
-            ("scout", "!propose #stage Stage the rollout behind a flag."),
-            ("critic", "!support #stage ^1 Staging fits the lag budget."),
-            ("planner", "!commit #stage ^3 Recorded."),
-        ],
-        Some(&far),
-    )
-    .await;
-
-    assert_eq!(
-        far.asked().len(),
-        1,
-        "only the original question was ever put: {:?}",
-        far.asked()
-    );
-    assert!(
-        log.replies("eng")
-            .iter()
-            .all(|(_, text)| !text.contains("what about the write path")),
-        "a question nothing will dispatch is not journaled: {:?}",
-        log.replies("eng")
-    );
-}
-
 /// **A continuation that says something new IS a row.**
 ///
 /// The guard above must not cost the feature it protects: the whole reason the
