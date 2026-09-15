@@ -1472,6 +1472,25 @@ fn the_prompt_a_room_is_handed_does_not_forbid_its_own_protocol() {
 /// The question is operator- and agent-authored, so it can contain the
 /// footer's opening sentence; searching forwards treats that copy as the
 /// generated footer and cuts the question there.
+/// **A ROOM question quoting the footer survives too.**
+///
+/// `referral_room_prompt` deliberately has no footer, so the backwards split
+/// that fixed the single-seat case found the question's own copy of that
+/// sentence and truncated there instead — the same defect as the forward
+/// split, in the other prompt shape (Codex, #2332). The footer is now taken
+/// from `referral_prompt` whole and removed only as a suffix, so a shape that
+/// does not end with it keeps its question intact.
+#[test]
+fn a_room_question_containing_the_footers_words_is_not_truncated() {
+    let question = "Answer in a few sentences. is what the customer wrote — can we refund it?";
+    let room = referral::referral_room_prompt("planner", "Engineering", question);
+    assert_eq!(
+        referral::asked_message(&room),
+        question,
+        "a footerless prompt has nothing to strip"
+    );
+}
+
 #[test]
 fn a_question_containing_the_footers_words_survives_unwrapping() {
     let question = "Answer in a few sentences. is what they told us — what is the lag budget?";

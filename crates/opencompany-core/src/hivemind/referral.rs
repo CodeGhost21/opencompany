@@ -439,20 +439,38 @@ Their message:
 #[must_use]
 pub fn asked_message(text: &str) -> String {
     const HEAD: &str = "Their message:";
-    const TAIL: &str = "Answer in a few sentences.";
     let Some((_, rest)) = text.split_once(HEAD) else {
         return text.trim().to_string();
     };
-    // From the END. The question is operator- and agent-authored text and may
-    // itself contain the footer's opening sentence; searching forwards then
-    // treats that occurrence as the generated footer and truncates the question
-    // at it — or returns nothing at all when it lands first. The generated
-    // footer is always last, so matching from the end cannot be fooled by a
-    // copy of it inside the question (CodeRabbit, #2332).
-    rest.rsplit_once(TAIL)
-        .map_or(rest, |(question, _)| question)
-        .trim()
-        .to_string()
+    // **The exact footer, or nothing.**
+    //
+    // Two earlier attempts both cut the question short, in opposite ways.
+    // Splitting FORWARDS on the footer's opening sentence truncated a question
+    // that quoted it (CodeRabbit). Splitting BACKWARDS fixed that for the
+    // single-seat prompt and broke `referral_room_prompt`, which deliberately
+    // has no footer at all — so a room question quoting that sentence was
+    // truncated at its own words instead (Codex). Both are the same mistake:
+    // recognising the footer by a fragment that the question may also contain.
+    //
+    // So the footer is taken from `referral_prompt` itself, whole, and removed
+    // only as a suffix. A shape that does not end with it — the room prompt, or
+    // any future one — keeps its question intact, and the two cannot drift
+    // because the literal is never written twice.
+    let footer = {
+        let empty = referral_prompt("", "", "");
+        empty
+            .split_once(HEAD)
+            .map(|(_, tail)| tail.trim_start().to_string())
+            .unwrap_or_default()
+    };
+    let question = match footer.is_empty() {
+        true => rest,
+        false => rest
+            .trim_end()
+            .strip_suffix(footer.as_str())
+            .unwrap_or(rest),
+    };
+    question.trim().to_string()
 }
 
 /// The conversation two teammates hold with each other, by their ids.
