@@ -98,7 +98,9 @@ fn build() -> Baseline {
     let manifest: GlobalsManifest = match toml::from_str(generated::EMBEDDED_GLOBALS_MANIFEST) {
         Ok(manifest) => manifest,
         Err(err) => {
-            faults.push(format!("`companies/_globals/globals.toml` is not valid TOML — {err}"));
+            faults.push(format!(
+                "`companies/_globals/globals.toml` is not valid TOML — {err}"
+            ));
             GlobalsManifest::default()
         }
     };
