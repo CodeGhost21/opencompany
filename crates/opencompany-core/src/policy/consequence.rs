@@ -764,7 +764,7 @@ const DECLARED: &[Declared] = &[
     ),
     // ---- Hosting (issues #1079, #913) --------------------------------------
     //
-    // The nine `hosting_*` tools openhuman ships in `src/openhuman/hosting/`.
+    // The ten `hosting_*` tools openhuman ships in its `hosting/` module.
     // Declared here rather than left to `undeclared()`, which is what that
     // fallback's own doc asks for: it is "a courtesy for an unregistered read,
     // not a second classifier to trust with an unreviewed capability".
@@ -783,11 +783,22 @@ const DECLARED: &[Declared] = &[
     // fail-OPEN one, an effect that reads as a read. Declaring is the fix the
     // file already prescribes.
     //
-    // Five reads, per openhuman's own `hosting/README.md`, which labels each of
+    // Six reads, per openhuman's own `hosting/README.md`, which labels each of
     // them "Read-only.". They ask the provider what exists and what it did;
     // nothing leaves this company and nothing is spent.
     d(
         "hosting_deployment_status",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    // `hosting_deployment_logs` arrived with the 2026-09 vendor bump, in
+    // `tools/deployments.rs` beside the two above: "a deployment's build and
+    // runtime log events, oldest first, trimmed to the most recent. Read-only."
+    // It is the tool that says *why* a `hosting_deployment_status` failure
+    // failed, so parking it would cost an approval on the way to every
+    // diagnosis — the same reasoning `hosting_list_deployments` carries.
+    d(
+        "hosting_deployment_logs",
         EffectGroup::Other,
         Reach::Nothing,
     ),
