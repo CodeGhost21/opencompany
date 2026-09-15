@@ -146,6 +146,14 @@ struct CredentialStatusDto {
     composio_has_own_key: bool,
     /// `inference/default` is set (`ProviderOnly` or `Full`).
     default_set: bool,
+    /// What a **clear** of this key would strand right now — the same
+    /// [`account_key_used_by`] computation [`set_key`]'s guard runs, exposed
+    /// here so the Remove-key dialog can name dependents the moment it opens
+    /// rather than only after a refused, uninformed attempt
+    /// (`docs/key-reworks/in-use-guards.md` §1-2; keys rework #2306, KR-L3-01).
+    /// `None` when the key is unset or nothing would be stranded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    used_by: Option<UsedBy>,
 }
 
 /// The two account pages the console links out to.
@@ -235,14 +243,22 @@ struct SetKey {
 /// `"llm"` appears only when a clear would actually clear
 /// `provider/tinyhumans/key` (its current value equals the account key,
 /// i.e. `decide_copy` would `Clear` it) **and** a `tinyhumans` row already
-/// exists — a key with no row behind it is not "set" (D-set/X5), so it can
-/// never make `"llm"` appear. `"composio"` appears whenever the same is true
-/// of `composio/tinyhumans/key`, row or no row (Composio has no such
-/// gate — a bearer with no row concept still serves live calls).
+/// exists (indexed) **or** entry zero itself is the legacy managed config
+/// (P1-1, keys rework #2306, KR-L3-01 review — see the `llm_in_use` comment
+/// below for why entry-zero counts) — a key with no row and no legacy managed
+/// entry zero behind it is not "set" (D-set/X5), so it can never make
+/// `"llm"` appear. `"composio"` appears whenever the same is true of
+/// `composio/tinyhumans/key` **and** `composio/mode` currently selects the
+/// managed slot this clear would touch (P1-1: the same rule
+/// [`super::composio::composio_used_by`] already applies to Composio's own
+/// guard — a company on `byok` has nothing live resolving through
+/// `composio/tinyhumans/key`, so clearing the account key cannot strand a
+/// Composio workload even though the copy would still be cleared).
 ///
 /// `None` when the account key itself is unset, or when neither derived slot
-/// would actually be cleared (both already hold a custom key of their own) —
-/// the account-key clear equivalent of matrix rows M6/C2.
+/// would actually be cleared (both already hold a custom key of their own, or
+/// composio is on `byok`) — the account-key clear equivalent of matrix rows
+/// M6/C2.
 async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>, ApiError> {
     let secrets = runtime.secrets();
     let secrets = secrets.as_ref();
@@ -270,14 +286,34 @@ async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>,
     .map_err(ApiError)?
     .trim()
     .to_string();
-    let row_exists = crate::company::inference::store::list_providers(runtime.id(), secrets)
+    let providers = crate::company::inference::store::list_providers(runtime.id(), secrets)
         .await
-        .map_err(ApiError)?
-        .iter()
-        .any(|p| {
-            p.origin == crate::company::inference::store::ProviderOrigin::Indexed
-                && p.slug == crate::company::inference::MANAGED_SLUG
-        });
+        .map_err(ApiError)?;
+    let row_exists = providers.iter().any(|p| {
+        p.origin == crate::company::inference::store::ProviderOrigin::Indexed
+            && p.slug == crate::company::inference::MANAGED_SLUG
+    });
+    // P1-1 decision (keys rework #2306, KR-L3-01 review): count a company
+    // still on the legacy managed entry zero (`inference/config`,
+    // `ProviderOrigin::EntryZero`) as "llm in use" too, not just an indexed
+    // row. `row_exists` alone only sees `Indexed` rows, so an entry-zero-managed
+    // company clearing the account key got no `"llm"` warning even though the
+    // clear strands that company's managed inference (`provider/tinyhumans/key`
+    // and, via it, `inference/key`) exactly the way an indexed row would be
+    // stranded. Recorded here, and in `docs/key-reworks/in-use-guards.md` §2's
+    // `"llm"` row, so the two cannot drift apart on this point again.
+    let entry_zero_managed = providers.iter().any(|p| {
+        p.origin == crate::company::inference::store::ProviderOrigin::EntryZero
+            && p.slug == crate::company::inference::MANAGED_SLUG
+    });
+    let llm_in_use = row_exists || entry_zero_managed;
+
+    // P1-1: `"composio"` only when `composio/mode` currently selects the slot
+    // this clear would touch — see the doc comment above and
+    // `in-use-guards.md` §2's surfaces table.
+    let composio_mode = crate::company::composio::load_mode(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
 
     let mut surfaces = Vec::new();
     let clears = |current: &str| {
@@ -286,10 +322,10 @@ async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>,
             company_key::CopyDecision::Clear
         )
     };
-    if clears(&inference_now) && row_exists {
+    if clears(&inference_now) && llm_in_use {
         surfaces.push(UsedBySurface::Llm);
     }
-    if clears(&composio_now) {
+    if clears(&composio_now) && composio_mode == crate::company::composio::ComposioMode::Managed {
         surfaces.push(UsedBySurface::Composio);
     }
 
@@ -302,22 +338,25 @@ async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>,
     }))
 }
 
-/// §2's fixed sentence for "a key clear/disable with only `surfaces`":
-/// `"<Label>'s key is used by <surfaces, comma-joined>."`, applied to the
-/// account key itself — there is no better subject noun than the thing being
-/// cleared, the same shape [`super::composio`]'s own token guard takes for
-/// Composio's key.
+/// One plain sentence naming every surface a clear would strand, e.g. "Used
+/// by TinyHumans on the LLM page and by Composio." or, with one surface,
+/// "Used by Composio." Matches the operator's pattern (2026-09-15 review) —
+/// the upfront copy in `CredentialStatusDto.used_by` and this 409 message are
+/// built from the same phrases so they can never disagree.
 fn account_key_in_use_message(surfaces: &[UsedBySurface]) -> String {
-    let names = surfaces
+    let phrases: Vec<&str> = surfaces
         .iter()
         .map(|s| match s {
-            UsedBySurface::Llm => "LLM",
+            UsedBySurface::Llm => "TinyHumans on the LLM page",
             UsedBySurface::Composio => "Composio",
             UsedBySurface::Search => "Search",
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("The TinyHumans account key's copies are used by {names}.")
+        .collect();
+    match phrases.split_last() {
+        None => String::new(),
+        Some((last, [])) => format!("Used by {last}."),
+        Some((last, rest)) => format!("Used by {} and by {last}.", rest.join(", ")),
+    }
 }
 
 /// The real inference prober in production, or a per-company override in
@@ -426,6 +465,7 @@ async fn effective_status(
     let facts = company_key::slot_facts(runtime.id(), secrets.as_ref())
         .await
         .map_err(ApiError)?;
+    let used_by = account_key_used_by(runtime).await?;
     Ok(CredentialStatusDto {
         configured,
         source,
@@ -442,6 +482,7 @@ async fn effective_status(
         inference_has_own_key: facts.inference_has_own_key,
         composio_has_own_key: facts.composio_has_own_key,
         default_set: facts.default_set,
+        used_by,
     })
 }
 

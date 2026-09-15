@@ -57,7 +57,7 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::inference::{TierVocabulary, catalogue, probe, resolve, store};
+use crate::company::inference::{TierVocabulary, catalogue, paged_catalog, probe, resolve, store};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -286,29 +286,12 @@ struct ProbeResultDto {
     needs_model: bool,
 }
 
-/// How many published model ids ride back on a probe.
-///
-/// A mirror of a large catalog runs to hundreds of entries, and this is a
-/// response body the console holds in memory for one dialog. Enough to choose
-/// from, and the field the operator types into accepts anything anyway.
-const PROBE_CATALOGUE_LIMIT: usize = 500;
-
-/// The published ids to offer, sorted and capped.
-///
-/// Sorted because a catalog's own order is whatever the endpoint felt like, and
-/// a select an operator has to scan is worth putting in one.
-///
-/// `pub(crate)` (keys rework, #2306, slice 4a): the account-key fan-out
-/// (`company::company_key::fan_out`) offers the same catalog shape on its own
-/// `needsModel` answer, and this is the one place "sort, dedupe, cap" is
-/// decided.
-pub(crate) fn catalogue_offer(models: &[String]) -> Vec<String> {
-    let mut ids: Vec<String> = models.to_vec();
-    ids.sort_unstable();
-    ids.dedup();
-    ids.truncate(PROBE_CATALOGUE_LIMIT);
-    ids
-}
+// `catalogue_offer` (the published ids to offer, sorted, deduplicated and
+// capped) moved to `paged_catalog::catalogue_offer` (keys rework #2306, P3-7
+// review): the account-key fan-out (`company::company_key::fan_out`) needs
+// the same "sort, dedupe, cap" this probe route decided, and `company` must
+// never import from `server` — so the one place that decides it lives at a
+// layer both already reach.
 
 /// What `POST …/providers/{slug}/test` may be asked.
 #[derive(Debug, Default, Deserialize)]
@@ -623,7 +606,7 @@ async fn add_provider(
                     message: None,
                     model_count: models.len(),
                     model_known: None,
-                    models: catalogue_offer(&models),
+                    models: paged_catalog::catalogue_offer(&models),
                     needs_model: needs_an_explicit_model(&models),
                 }),
                 format!("{} is connected and answering.", provider.label),
@@ -1142,8 +1125,8 @@ async fn restore_previous_key(runtime: &CompanyRuntime, slug: &str, previous: Op
 /// A health record is a decoration on a row. Failing an otherwise successful add
 /// because a decoration could not be written would be the tail wagging the dog.
 async fn record_health(runtime: &CompanyRuntime, slug: &str, state: &str) {
-    // Dependency-free: the same formatter the GraphQL layer already carries.
-    let at = crate::server::graphql::iso8601(crate::ports::now_millis());
+    // Dependency-free: the crate's one RFC-3339 formatter (`ports::iso8601`).
+    let at = crate::ports::iso8601(crate::ports::now_millis());
     match store::record_health(runtime.id(), runtime.secrets().as_ref(), slug, state, &at).await {
         Ok(true) => tracing::info!(
             company = %runtime.id(),
@@ -1999,7 +1982,7 @@ async fn test_managed(
                 message: None,
                 model_count: models.len(),
                 model_known: None,
-                models: catalogue_offer(&models),
+                models: paged_catalog::catalogue_offer(&models),
                 needs_model: needs_an_explicit_model(&models),
             }))
         }
@@ -2291,7 +2274,7 @@ async fn test_provider(
                 message: None,
                 model_count: models.len(),
                 model_known,
-                models: catalogue_offer(&models),
+                models: paged_catalog::catalogue_offer(&models),
                 needs_model: needs_an_explicit_model(&models),
             }))
         }
@@ -2372,7 +2355,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
             model_count: models.len(),
             model_known: None,
             needs_model: needs_an_explicit_model(&models),
-            models: catalogue_offer(&models),
+            models: paged_catalog::catalogue_offer(&models),
         })
         .into_response(),
         Err(failure) => {
@@ -2896,19 +2879,7 @@ mod tests {
         );
     }
 
-    /// The catalogue that rides back on a probe is sorted, deduplicated and
-    /// capped: it is a select an operator scans, on a response that is held in
-    /// memory for one dialog.
-    #[test]
-    fn the_offered_catalogue_is_sorted_and_capped() {
-        assert_eq!(
-            catalogue_offer(&ids(&["b", "a", "b"])),
-            ids(&["a", "b"]),
-            "a catalog's own order is whatever the endpoint felt like"
-        );
-        let many: Vec<String> = (0..PROBE_CATALOGUE_LIMIT + 50)
-            .map(|n| format!("model-{n:04}"))
-            .collect();
-        assert_eq!(catalogue_offer(&many).len(), PROBE_CATALOGUE_LIMIT);
-    }
+    // `the_offered_catalogue_is_sorted_and_capped` moved to
+    // `company::inference::paged_catalog::tests` alongside `catalogue_offer`
+    // itself (keys rework #2306, P3-7 review).
 }

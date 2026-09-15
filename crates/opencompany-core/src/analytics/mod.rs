@@ -352,8 +352,7 @@ pub fn payload(envelope: &Envelope, event: &Event) -> serde_json::Value {
 ///   by `profileId`.
 ///
 /// The value is second-precision RFC-3339 UTC, from the crate's one formatter
-/// (`server::graphql::iso8601`) rather than a second copy of the civil-date
-/// arithmetic.
+/// (`ports::iso8601`) rather than a second copy of the civil-date arithmetic.
 ///
 /// It is also the only string in a payload that is neither a compiled literal
 /// nor the opaque id — so `analytics::test` asserts its **shape** rather than
@@ -373,7 +372,7 @@ pub fn payload_at(envelope: &Envelope, event: &Event, at_millis: u64) -> serde_j
     // storage; nothing else this module emits uses one.
     properties.insert(
         "__timestamp".to_string(),
-        serde_json::Value::from(crate::server::graphql::iso8601(at_millis)),
+        serde_json::Value::from(crate::ports::iso8601(at_millis)),
     );
     serde_json::json!({
         "type": "track",

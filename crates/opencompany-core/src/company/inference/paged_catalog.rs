@@ -6,6 +6,13 @@
 //! Keys rework, issue #2306, slice 2a. Every id this parser reads is kept
 //! exactly as given — nothing here hardcodes, filters, prefers or rejects a
 //! model id by vendor or name; any id the endpoint returns is valid.
+//!
+//! [`catalogue_offer`] (slice 4a, moved here in the P3-7 layering-violation
+//! review) is the one place "sort, dedupe, cap" a published id list is
+//! decided, read by both [`crate::server::ops::inference::providers`] and the
+//! account-key fan-out ([`crate::company::company_key::fan_out`]) — a
+//! `company`-layer caller, which is why this pure helper lives here rather
+//! than under `server`.
 
 use std::collections::HashSet;
 
@@ -152,6 +159,35 @@ impl Collector {
     pub fn finish(self) -> Vec<CatalogEntry> {
         self.entries
     }
+}
+
+/// How many published model ids ride back on a probe or a `needsModel`
+/// answer.
+///
+/// A mirror of a large catalog runs to hundreds of entries, and this is a
+/// response body the console holds in memory for one dialog. Enough to choose
+/// from, and the field the operator types into accepts anything anyway.
+pub const PROBE_CATALOGUE_LIMIT: usize = 500;
+
+/// The published ids to offer, sorted, deduplicated and capped.
+///
+/// Sorted because a catalog's own order is whatever the endpoint felt like,
+/// and a select an operator has to scan is worth putting in one order.
+///
+/// Moved here from `server::ops::inference::providers` (keys rework #2306,
+/// P3-7 review): the account-key fan-out (`company::company_key::fan_out`)
+/// offers the same catalog shape on its own `needsModel` answer as this
+/// module's other readers ([`super::probe::probe_models`];
+/// `server::ops::inference::providers`'s probe route) already do — and
+/// `company` must never import from `server`, so the one place "sort, dedupe,
+/// cap" is decided has to live somewhere both layers can already reach. This
+/// module already is that place.
+pub fn catalogue_offer(models: &[String]) -> Vec<String> {
+    let mut ids: Vec<String> = models.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.truncate(PROBE_CATALOGUE_LIMIT);
+    ids
 }
 
 #[cfg(test)]
@@ -353,5 +389,24 @@ mod tests {
                 total: 1_000_000
             }
         );
+    }
+
+    /// Moved from `server::ops::inference::providers` alongside
+    /// `catalogue_offer` itself (keys rework #2306, P3-7 review).
+    #[test]
+    fn the_offered_catalogue_is_sorted_and_capped() {
+        fn ids(values: &[&str]) -> Vec<String> {
+            values.iter().map(|v| (*v).to_string()).collect()
+        }
+
+        assert_eq!(
+            catalogue_offer(&ids(&["b", "a", "b"])),
+            ids(&["a", "b"]),
+            "a catalog's own order is whatever the endpoint felt like"
+        );
+        let many: Vec<String> = (0..PROBE_CATALOGUE_LIMIT + 50)
+            .map(|n| format!("model-{n:04}"))
+            .collect();
+        assert_eq!(catalogue_offer(&many).len(), PROBE_CATALOGUE_LIMIT);
     }
 }

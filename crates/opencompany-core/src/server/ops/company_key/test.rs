@@ -1067,6 +1067,97 @@ async fn clearing_when_nothing_depends_on_it_needs_no_confirmation() {
     assert_eq!(*slot_outcome(&resp, "inference"), json!("kept"));
 }
 
+/// KR-L3-01: `GET …/credential` carries the same `usedBy` a clear would be
+/// refused with, computed the moment the page loads rather than only after a
+/// stale-UI 409 — the Remove-key dialog's first-open text.
+#[tokio::test]
+async fn status_reports_used_by_when_a_clear_would_strand_dependents() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "statususedby", GRANTED).await;
+    send(
+        &state,
+        "statususedby",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY, "model": "acme/test-model" })),
+    )
+    .await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "statususedby",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    let surfaces: Vec<&str> = dto["usedBy"]["surfaces"]
+        .as_array()
+        .expect("usedBy on the status DTO")
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(surfaces.contains(&"llm"), "{raw}");
+    assert!(surfaces.contains(&"composio"), "{raw}");
+}
+
+/// The other half: nothing set, or nothing left depending on the account key
+/// (matrix M6/C2's shape) — `usedBy` is absent, never an empty object, so a
+/// plain `"usedBy" in dto` check on the console reads false.
+#[tokio::test]
+async fn status_reports_no_used_by_when_nothing_depends_on_it() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "statusnousedby", GRANTED).await;
+
+    let (_, empty_dto, raw) = send(
+        &state,
+        "statusnousedby",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert!(empty_dto.get("usedBy").is_none(), "no key set yet: {raw}");
+
+    send(
+        &state,
+        "statusnousedby",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    send(
+        &state,
+        "statusnousedby",
+        "PUT",
+        "/api/v1/company/composio/token",
+        Some(json!({ "token": "custom-composio-token" })),
+    )
+    .await;
+    send(
+        &state,
+        "statusnousedby",
+        "PUT",
+        "/api/v1/company/inference/managed/key",
+        Some(json!({ "key": "custom-llm-key" })),
+    )
+    .await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "statusnousedby",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert!(
+        dto.get("usedBy").is_none(),
+        "both slots hold their own key, not the account key's copy: {raw}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `slot_facts` — the account-key dialog's own-key booleans (keys rework
 // #2306, slice 4b). See `docs/key-reworks/phase-4b-account-dialog.md` §3.1/§6.
