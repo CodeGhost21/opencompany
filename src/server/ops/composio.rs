@@ -77,9 +77,14 @@ use crate::company::composio::{
 use crate::company::composio_probe::{ComposioProbeClass, classify, describe, describe_verdict};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
+// Keys rework (#2306), slice 4c: the Composio half of the account-key reuse
+// banner. `company_key::copy_account_key_to_composio` is 4c's own function;
+// the rest of this surface never otherwise reaches into `company_key`.
+use crate::company::company_key::{self, SlotOutcome};
 use crate::ports::types::CompanyEvent;
 use crate::server::error::ApiError;
 use crate::server::ops::composio_toolkits::{self, CatalogSource, OpenModeToolkits};
+use crate::server::ops::slot_report::SlotReportDto;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
 /// The reminder attached to a set / rotate response.
@@ -279,6 +284,10 @@ pub fn router() -> Router<AppState> {
         .merge(scoped("/composio/token", put(set_token)))
         .merge(scoped("/composio/api-key", put(set_api_key)))
         .merge(scoped("/composio/api-key/test", post(test_api_key)))
+        .merge(scoped(
+            "/composio/tinyhumans/key/from-account",
+            post(copy_account_key),
+        ))
         .merge(scoped("/composio/authorize", post(authorize)))
         .merge(scoped("/composio/connections", get(connections)))
         .merge(scoped(
@@ -433,6 +442,12 @@ struct MutationResponse {
     /// had nothing to warn about.
     #[serde(skip_serializing_if = "Option::is_none")]
     used_by: Option<crate::error::UsedBy>,
+    /// What [`copy_account_key`] did to the Composio slot (keys rework #2306,
+    /// slice 4c) — always exactly one entry, `Slot::Composio`. Empty (and
+    /// omitted) on every other mutation on this surface, which touches this
+    /// company's own credential directly rather than copying the account key.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    slots: Vec<SlotReportDto>,
 }
 
 /// Set-token body. `token` is write-only intake (never returned): a non-empty
@@ -806,6 +821,7 @@ async fn set_token(
         advisory: None,
         probe_class: None,
         used_by,
+        slots: Vec::new(),
     }))
 }
 
@@ -912,6 +928,7 @@ async fn set_api_key(
         advisory: probe.map(|class| describe(class).to_string()),
         probe_class: probe,
         used_by,
+        slots: Vec::new(),
     }))
 }
 
@@ -1131,6 +1148,65 @@ struct ApiKeyTestDto {
     /// [`describe_verdict`]'s fixed copy, never the upstream error text.
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+/// `POST …/composio/tinyhumans/key/from-account` — copy this company's
+/// TinyHumans account key (`company_key::KEY_KEY`, set on the Account page)
+/// into `composio/tinyhumans/key`, for the reuse banner offered once Composio's
+/// own copy is gone but the account key still exists
+/// (`docs/key-reworks/phase-4c-reuse-banner.md`, keys rework #2306).
+///
+/// ## No body, and there never will be one
+///
+/// The key is read from this company's own store; there is nothing for a
+/// request body to name. See [`test_api_key`]'s own "no body" note for the
+/// same shape of reasoning against a route that could otherwise be tempted to
+/// take one.
+///
+/// ## Admin-only
+///
+/// The same boundary [`set_token`] and [`set_api_key`] carry: this decides
+/// which account the company's Composio tool calls present.
+///
+/// Refuses with `400 invalid_request` before any write when there is no
+/// account key to copy, or when the Composio slot already holds a different,
+/// non-empty key of its own
+/// ([`company_key::copy_account_key_to_composio`]'s own refusal table).
+/// Never touches `composio/mode` or `composio/byok/key`.
+async fn copy_account_key(company: AdminScopedCompany) -> Result<Json<MutationResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let report =
+        company_key::copy_account_key_to_composio(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+
+    // The account key can change which Composio entity the backend resolves,
+    // exactly as a direct token/API-key write does — drop the cached catalog
+    // so this response (and every read after it) reflects the new credential
+    // rather than the previous one's.
+    evict_catalog_cache(runtime);
+    journal(&company, "company_key_composio_filled", None).await?;
+
+    let filled = report
+        .slots
+        .iter()
+        .any(|s| matches!(s.outcome, SlotOutcome::Filled));
+    let note = if filled {
+        "Composio now uses your account key. A key you created by hand may lack the \
+         connections permission Composio needs."
+            .to_string()
+    } else {
+        "Composio already uses your account key.".to_string()
+    };
+
+    Ok(Json(MutationResponse {
+        status: effective_status(runtime).await?,
+        note,
+        advisory: None,
+        probe_class: None,
+        used_by: None,
+        slots: report.slots.iter().map(SlotReportDto::from).collect(),
+    }))
 }
 
 /// Records who changed the company's tool access (issue #403).
@@ -2928,6 +3004,117 @@ mod tests {
             &state,
             "POST",
             "/api/v1/company/composio/api-key/test",
+            None,
+            Auth::Cookie(member),
+        )
+        .await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "{raw}");
+        assert_eq!(body["code"], "forbidden", "{body}");
+    }
+
+    /// `POST …/composio/tinyhumans/key/from-account` copies the account key
+    /// into the Composio slot, evicts the cached catalog and reports the one
+    /// slot it touched (keys rework #2306, slice 4c).
+    #[tokio::test]
+    async fn the_from_account_route_fills_the_composio_key_and_reports_one_slot() {
+        use crate::company::composio::TINYHUMANS_KEY_KEY;
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-composio", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-composio");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-account-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let (code, body, raw) = send_for(
+            &state,
+            "reuse-composio",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(
+            read_slot(&runtime, TINYHUMANS_KEY_KEY).await.as_deref(),
+            Some("th-not-a-real-account-key")
+        );
+        let slots = body["slots"].as_array().expect("slots array");
+        assert_eq!(slots.len(), 1, "{body}");
+        assert_eq!(slots[0]["slot"], "composio", "{body}");
+        assert_eq!(slots[0]["outcome"], "filled", "{body}");
+        assert!(
+            body["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("Composio now uses your account key")),
+            "{body}"
+        );
+        assert!(
+            !raw.contains("th-not-a-real-account-key"),
+            "the response leaked the key: {raw}"
+        );
+    }
+
+    /// Copying with no account key on file is refused before any write.
+    #[tokio::test]
+    async fn the_from_account_route_refuses_without_an_account_key() {
+        use crate::company::composio::TINYHUMANS_KEY_KEY;
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-no-key", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-no-key");
+
+        let (code, body, raw) = send_for(
+            &state,
+            "reuse-no-key",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{raw}");
+        assert_eq!(body["code"], "invalid_request", "{body}");
+        assert_eq!(
+            read_slot(&runtime, TINYHUMANS_KEY_KEY).await,
+            None,
+            "nothing is written on a refusal"
+        );
+    }
+
+    /// Whose account the company's Composio calls present is an admin's
+    /// decision, exactly as the token and API-key writes on this surface are
+    /// (issue #403).
+    #[tokio::test]
+    async fn a_member_cannot_copy_the_account_key_to_composio() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-member", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-member");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-account-key".into()),
+            )
+            .await
+            .unwrap();
+        let member = crate::server::test_support::seed_session(
+            &state,
+            "reuse-member",
+            crate::ports::UserRole::Member,
+        )
+        .await;
+
+        let (code, body, raw) = send_as(
+            &state,
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
             None,
             Auth::Cookie(member),
         )
