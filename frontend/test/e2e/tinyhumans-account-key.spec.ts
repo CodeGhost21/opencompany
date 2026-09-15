@@ -49,7 +49,36 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-const toasts = (page: import("@playwright/test").Page) => page.locator("[data-sonner-toast]");
+type Page = import("@playwright/test").Page;
+
+const toasts = (page: Page) => page.locator("[data-sonner-toast]");
+
+/**
+ * Clears the activation gate ("Skip setup") and the tour ("Skip for now") if
+ * either is up, then re-opens `hash` — dismissing the gate navigates away
+ * from a deep link. The umbrella runner starts the host with
+ * `OPENCOMPANY_SKIP_ACTIVATION_GATE=1`, so normally neither appears; this is
+ * for a hand-started host. Same shape as `agent-session.spec.ts`'s helper.
+ */
+async function open(page: Page, hash: string): Promise<void> {
+  await page.goto(hash);
+  const any = page.getByRole("button", { name: /^(Skip setup|Skip for now)$/ });
+  await any
+    .first()
+    .waitFor({ state: "visible", timeout: 3_000 })
+    .catch(() => {});
+  let dismissed = false;
+  for (const name of ["Skip setup", "Skip for now"]) {
+    const skip = page.getByRole("button", { name });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (!(await skip.isVisible().catch(() => false))) break;
+      dismissed = true;
+      await skip.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(300);
+    }
+  }
+  if (dismissed) await page.goto(hash);
+}
 
 test("the account key sets up TinyHumans for LLM and a turn reaches the backend", async ({
   page,
@@ -63,7 +92,7 @@ test("the account key sets up TinyHumans for LLM and a turn reaches the backend"
   expect(beforeStatus.cognition, "the host must start on the echo brain").toBe("echo");
 
   // 1. Account page → add the key.
-  await page.goto("/#/connections/api-key");
+  await open(page, "/#/connections/api-key");
   await expect(
     page.getByTestId("account-rows").or(page.getByTestId("account-empty")),
   ).toBeVisible({ timeout: 30_000 });
@@ -108,7 +137,7 @@ test("the account key sets up TinyHumans for LLM and a turn reaches the backend"
   expect(row?.baseUrl).not.toContain("api.tinyhumans.ai");
 
   // 4. The LLM page agrees, from its own read.
-  await page.goto("/#/connections/inference");
+  await open(page, "/#/connections/inference");
   await expect(page.getByTestId("inference-provider-tinyhumans")).toBeVisible({
     timeout: 30_000,
   });
@@ -120,7 +149,7 @@ test("the account key sets up TinyHumans for LLM and a turn reaches the backend"
   // 5. A turn goes through the backend. On the reply's prose rather than the
   //    `__MOCK_LLM__` marker: Room renders the line as Markdown, and the
   //    marker's underscores become emphasis (see `wiring.spec.ts`).
-  await page.goto("/#/chat");
+  await open(page, "/#/chat");
   const prompt = `tinyhumans account key e2e ${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(prompt);
   await page.getByRole("button", { name: "Send", exact: true }).click();
