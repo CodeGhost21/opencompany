@@ -154,10 +154,11 @@ fn tier_overrides(model: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// `now`, RFC 3339 — the same dependency-free formatter
-/// `ops::inference::providers`' own `record_health` wrapper uses.
+/// `now`, RFC 3339 — the crate's one dependency-free formatter
+/// (`ports::iso8601`), the same one `ops::inference::providers`' own
+/// `record_health` wrapper uses.
 fn now_rfc3339() -> String {
-    crate::server::graphql::iso8601(crate::ports::now_millis())
+    crate::ports::iso8601(crate::ports::now_millis())
 }
 
 /// Writes the Composio TinyHumans slot for the fan-out specifically: the new
@@ -262,44 +263,30 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
 }
 
 // ---------------------------------------------------------------------------
-// fan_out
+// read_slots — everything fan_out needs beyond the account key's own prior
+// value (P2-1, keys rework #2306 review)
 // ---------------------------------------------------------------------------
 
-/// Runs the whole account-key fan-out for one `PUT …/credential` (or the
-/// key-grant's `finish_link`), under [`slot_guard`] for the whole call.
-///
-/// `Err` only when the pre-write reads or the account-key write itself fail —
-/// nothing else has been written yet at that point. Every later failure is
-/// reported as a `Failed` slot in the returned [`FanOutReport`] instead, so a
-/// transient fault in, say, the row write never rolls back the key copies
-/// that already succeeded.
-pub async fn fan_out(
-    company: &CompanyId,
-    secrets: &dyn SecretStore,
-    request: FanOutRequest<'_>,
-    prober: &dyn InferenceProber,
-) -> Result<FanOutReport> {
-    let _guard = slot_guard(company).await;
+/// Everything [`fan_out`] needs to decide the Composio/LLM/provider/default/
+/// health slots, read as one batch — always AFTER the account key itself is
+/// already safely stored, never before (see [`fan_out`]'s own step 3/4).
+struct ReadSlots {
+    composio_now: String,
+    legacy_managed: bool,
+    row: Option<inference_store::Provider>,
+    inference_key_key: String,
+    inference_raw_new: Option<String>,
+    legacy_owned: bool,
+    legacy_raw: Option<String>,
+    inference_now: String,
+    default_now: inference_store::DefaultChoice,
+}
 
-    // 1. Validate. Nothing is written yet.
-    let new = request.key.trim().to_string();
-    let clearing = new.is_empty();
-    let model: Option<String> = match request.model.map(str::trim).filter(|m| !m.is_empty()) {
-        Some(_) if clearing => {
-            return Err(OpenCompanyError::InvalidRequest(
-                "A model cannot be chosen while removing the key.".to_string(),
-            ));
-        }
-        Some(raw) => Some(inference_store::check_model_id(raw)?),
-        None => None,
-    };
-
-    // 2. Read. Any error here returns `Err` — nothing has been written.
-    let old_account = secrets
-        .get(company, KEY_KEY)
-        .await?
-        .map(|SecretValue(v)| v.trim().to_string())
-        .unwrap_or_default();
+/// Reads everything [`ReadSlots`] holds. Split out of [`fan_out`] itself so
+/// that function can treat a failure anywhere in this batch as one thing to
+/// react to (degrade every derived slot to `Failed`) rather than several
+/// `?`-propagated exits that would each need the same care.
+async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<ReadSlots> {
     let composio_now = composio::load_tinyhumans_key(company, secrets)
         .await?
         .map(|v| v.trim().to_string())
@@ -332,13 +319,157 @@ pub async fn fan_out(
             .to_string();
     let default_now = inference_store::load_default(company, secrets).await?;
 
-    // 3. Account key. Error here also returns `Err` — the read above is the
-    // last chance to fail with nothing stored.
+    Ok(ReadSlots {
+        composio_now,
+        legacy_managed,
+        row,
+        inference_key_key,
+        inference_raw_new,
+        legacy_owned,
+        legacy_raw,
+        inference_now,
+        default_now,
+    })
+}
+
+/// Re-reads `inference/default` immediately before a fan-out default write
+/// (P2-3, keys rework #2306 review): the `default_now` read in [`ReadSlots`]
+/// happens before the health probe's network round trip, so another writer
+/// (e.g. the LLM page setting a default on a different provider) can land a
+/// default in that window. `Ok(true)` only when it is STILL `Unset` at the
+/// moment of this check — the caller treats anything else exactly like the
+/// ordinary `Kept(DefaultAlreadySet)` case rather than overwriting it.
+///
+/// This narrows the race window; it does not close it (there is still a gap
+/// between this read and the write right after it). Closing it fully needs a
+/// shared per-company lock across `add_provider`/`set_default`/this fan-out —
+/// a separate, larger change tracked as `inference::store::index_lock`, not
+/// yet in this tree as of this commit. **Lock order, once that lands: this
+/// module's own [`slot_guard`] FIRST, then `index_lock` — never the reverse,
+/// and never held across a network probe** (the health probe in [`fan_out`]
+/// already runs with neither held).
+async fn still_unset(company: &CompanyId, secrets: &dyn SecretStore) -> Result<bool> {
+    Ok(matches!(
+        inference_store::load_default(company, secrets).await?,
+        inference_store::DefaultChoice::Unset
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// fan_out
+// ---------------------------------------------------------------------------
+
+/// Runs the whole account-key fan-out for one `PUT …/credential` (or the
+/// key-grant's `finish_link`), under [`slot_guard`] for the whole call.
+///
+/// `Err` only when the read of the account key's own prior value, or the
+/// account-key write itself, fails — nothing else has been written yet at
+/// that point (P2-1, keys rework #2306 review). Every later read or write
+/// failure is reported as a `Failed` slot in the returned [`FanOutReport`]
+/// instead, so a transient fault — in, say, the row write, or in reading
+/// `inference/default` — never costs the hub-minted, single-use key
+/// `finish_link` stores here and can never reissue.
+pub async fn fan_out(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    request: FanOutRequest<'_>,
+    prober: &dyn InferenceProber,
+) -> Result<FanOutReport> {
+    let _guard = slot_guard(company).await;
+
+    // 1. Validate. Nothing is written yet.
+    let new = request.key.trim().to_string();
+    let clearing = new.is_empty();
+    let model: Option<String> = match request.model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(_) if clearing => {
+            return Err(OpenCompanyError::InvalidRequest(
+                "A model cannot be chosen while removing the key.".to_string(),
+            ));
+        }
+        Some(raw) => Some(inference_store::check_model_id(raw)?),
+        None => None,
+    };
+
+    // 2. Read the one thing that must be read before the account key itself
+    // is overwritten: its own prior value (P2-1, keys rework #2306 review).
+    // Every derived-slot decision below needs "what did tinyhumans/key hold
+    // before this call" to tell a copy that still matches the old account key
+    // apart from a value someone set by hand — and once step 3 overwrites it,
+    // that answer is gone for good. An error here returns `Err` — nothing has
+    // been written yet.
+    let old_account = secrets
+        .get(company, KEY_KEY)
+        .await?
+        .map(|SecretValue(v)| v.trim().to_string())
+        .unwrap_or_default();
+
+    // 3. Write the account key itself — as early as it can land once its own
+    // prior value is known. This is the point that makes `finish_link`'s
+    // single-use, unreissuable hub-minted key safe: past this line, no later
+    // read or write failure can lose it (see `read_slots` and step 4 below).
+    // An error on THIS write is still `Err` — the read above is the last
+    // chance to fail with nothing stored.
     secrets
         .set(company, KEY_KEY, SecretValue(new.clone()))
         .await?;
 
-    // 4. Composio. Never reads or writes `composio/mode` or
+    // 4. Read everything else the derived slots need — best-effort from here
+    // (P2-1). A failure reading any of this (a corrupt `inference/default`
+    // blob, a transient store fault) can no longer cost the account key
+    // itself, so it degrades to every derived slot reporting `Failed` rather
+    // than losing the whole call — and the key it already safely holds — to a
+    // bubbled `Err`.
+    let ReadSlots {
+        composio_now,
+        legacy_managed,
+        row,
+        inference_key_key,
+        inference_raw_new,
+        legacy_owned,
+        legacy_raw,
+        inference_now,
+        default_now,
+    } = match read_slots(company, secrets).await {
+        Ok(reads) => reads,
+        Err(err) => {
+            tracing::error!(
+                company = %company,
+                error = %err,
+                "keys rework: fan_out could not read Composio/LLM/provider state after \
+                 storing the account key; every derived slot is reported as failed",
+            );
+            return Ok(FanOutReport {
+                slots: vec![
+                    SlotReport {
+                        slot: Slot::Composio,
+                        outcome: SlotOutcome::Failed,
+                    },
+                    SlotReport {
+                        slot: Slot::Inference,
+                        outcome: SlotOutcome::Failed,
+                    },
+                    SlotReport {
+                        slot: Slot::Provider,
+                        outcome: SlotOutcome::Failed,
+                    },
+                    SlotReport {
+                        slot: Slot::Default,
+                        outcome: SlotOutcome::Failed,
+                    },
+                    SlotReport {
+                        slot: Slot::Health,
+                        outcome: SlotOutcome::Failed,
+                    },
+                ],
+                needs_model: false,
+                sets_default: false,
+                models: Vec::new(),
+                rollback_had_prior_key: false,
+            });
+        }
+    };
+
+    // 5. Composio. Never reads or writes `composio/mode` or
     // `composio/byok/key` — see `write_composio_slot`.
     let composio_outcome = match decide_copy(&composio_now, &old_account, &new) {
         CopyDecision::Write => match write_composio_slot(company, secrets, &new).await {
@@ -359,7 +490,7 @@ pub async fn fan_out(
         CopyDecision::Skip(reason) => SlotOutcome::Skipped(reason),
     };
 
-    // 5. Inference key.
+    // 6. Inference key.
     let legacy_raw_is_live = legacy_owned
         && legacy_raw
             .as_deref()
@@ -420,7 +551,7 @@ pub async fn fan_out(
         SlotOutcome::Filled | SlotOutcome::Rotated | SlotOutcome::Kept(SkipReason::AlreadyCurrent)
     );
 
-    // 6. Clearing stops here: rows and the default are never touched by a
+    // 7. Clearing stops here: rows and the default are never touched by a
     // clear (§6, case C1).
     if clearing {
         let health_outcome = if matches!(inference_outcome, SlotOutcome::Cleared) {
@@ -463,10 +594,11 @@ pub async fn fan_out(
             needs_model: false,
             sets_default: false,
             models: Vec::new(),
+            rollback_had_prior_key: false,
         });
     }
 
-    // 7. Health, before any row or default write (Q6 by construction).
+    // 8. Health, before any row or default write (Q6 by construction).
     let mut probe_ids: Option<Vec<String>> = None;
     let health_outcome = if legacy_managed {
         SlotOutcome::Skipped(SkipReason::LegacyManagedConfig)
@@ -516,18 +648,29 @@ pub async fn fan_out(
         }
     };
 
-    // 8. Q6 rollback: an `auth` probe undoes only what THIS request wrote to
+    // 9. Q6 rollback: an `auth` probe undoes only what THIS request wrote to
     // the LLM slots, and never touches the account key or the Composio copy.
     let auth_rejected = matches!(
         health_outcome,
         SlotOutcome::HealthFailed(probe::ProbeClass::Auth)
     );
+    // P2-2 (keys rework #2306 review): whether this specific rollback undoes
+    // a genuine **rotation** (the slot held a real prior key, now restored)
+    // rather than a first-time **fill** (the slot was empty, and "restoring"
+    // it just puts it back to empty) — `fan_out_note` reads this to say the
+    // LLM page still uses the *previous* key, rather than only that the new
+    // one "was not kept". Computed from `inference_outcome` before it is
+    // overwritten to `RolledBack` below: within this `if`, the only two
+    // outcomes reachable are `Filled` (nothing to restore) and `Rotated`
+    // (there was).
+    let mut rollback_had_prior_key = false;
     if auth_rejected
         && matches!(
             inference_outcome,
             SlotOutcome::Filled | SlotOutcome::Rotated
         )
     {
+        rollback_had_prior_key = matches!(inference_outcome, SlotOutcome::Rotated);
         let restore = inference_raw_new.clone().unwrap_or_default();
         if let Err(err) = secrets
             .set(company, &inference_key_key, SecretValue(restore))
@@ -557,7 +700,7 @@ pub async fn fan_out(
         inference_outcome = SlotOutcome::RolledBack;
     }
 
-    // 9. Provider row.
+    // 10. Provider row.
     let mut needs_model = false;
     let provider_outcome = if auth_rejected {
         SlotOutcome::Skipped(SkipReason::InferenceRejected)
@@ -595,7 +738,16 @@ pub async fn fan_out(
         SlotOutcome::Skipped(SkipReason::NeedsModel)
     };
 
-    // 10. Default.
+    // 11. Default.
+    //
+    // P2-3 (keys rework #2306 review): `default_now` above was read in
+    // `read_slots`, before the health probe's network round trip — another
+    // writer (e.g. the LLM page setting a default on a different provider)
+    // can land a default in that window. `still_unset` re-reads immediately
+    // before each write below and, if something else already set one,
+    // this treats it exactly like the ordinary `DefaultAlreadySet` case
+    // instead of clobbering it. This narrows the race; a full close needs the
+    // shared `index_lock` noted on `still_unset` itself.
     let default_outcome = if auth_rejected {
         SlotOutcome::Skipped(SkipReason::InferenceRejected)
     } else if !matches!(default_now, inference_store::DefaultChoice::Unset) {
@@ -608,33 +760,57 @@ pub async fn fan_out(
                     provider: inference::MANAGED_SLUG.to_string(),
                     model: chosen,
                 };
-                match inference_store::set_default_choice(company, secrets, &choice).await {
-                    Ok(()) => SlotOutcome::Filled,
-                    Err(_) => SlotOutcome::Failed,
-                }
-            }
-            SlotOutcome::Kept(SkipReason::RowExists) => {
-                let picked = match &model {
-                    Some(sent) => Some(sent.clone()),
-                    None => match row.as_ref().map(|r| r.model()) {
-                        Some(inference_store::ModelOnRow::One(m)) => Some(m),
-                        _ => None,
-                    },
-                };
-                match picked {
-                    Some(chosen) => {
-                        let choice = inference_store::ModelChoice {
-                            provider: inference::MANAGED_SLUG.to_string(),
-                            model: chosen,
-                        };
+                match still_unset(company, secrets).await {
+                    Ok(true) => {
                         match inference_store::set_default_choice(company, secrets, &choice).await {
                             Ok(()) => SlotOutcome::Filled,
                             Err(_) => SlotOutcome::Failed,
                         }
                     }
-                    None => {
-                        needs_model = true;
-                        SlotOutcome::Skipped(SkipReason::NeedsModel)
+                    Ok(false) => SlotOutcome::Kept(SkipReason::DefaultAlreadySet),
+                    Err(_) => SlotOutcome::Failed,
+                }
+            }
+            SlotOutcome::Kept(SkipReason::RowExists) => {
+                // P3-8 (keys rework #2306 review): a disabled row cannot
+                // currently serve anything, so it must not become the new
+                // default — that would point the company's default at a
+                // provider nothing can resolve through until someone
+                // re-enables it, with no warning that this save was what did
+                // it.
+                if !row.as_ref().is_some_and(|r| r.enabled) {
+                    SlotOutcome::Skipped(SkipReason::ProviderDisabled)
+                } else {
+                    let picked = match &model {
+                        Some(sent) => Some(sent.clone()),
+                        None => match row.as_ref().map(|r| r.model()) {
+                            Some(inference_store::ModelOnRow::One(m)) => Some(m),
+                            _ => None,
+                        },
+                    };
+                    match picked {
+                        Some(chosen) => {
+                            let choice = inference_store::ModelChoice {
+                                provider: inference::MANAGED_SLUG.to_string(),
+                                model: chosen,
+                            };
+                            match still_unset(company, secrets).await {
+                                Ok(true) => match inference_store::set_default_choice(
+                                    company, secrets, &choice,
+                                )
+                                .await
+                                {
+                                    Ok(()) => SlotOutcome::Filled,
+                                    Err(_) => SlotOutcome::Failed,
+                                },
+                                Ok(false) => SlotOutcome::Kept(SkipReason::DefaultAlreadySet),
+                                Err(_) => SlotOutcome::Failed,
+                            }
+                        }
+                        None => {
+                            needs_model = true;
+                            SlotOutcome::Skipped(SkipReason::NeedsModel)
+                        }
                     }
                 }
             }
@@ -642,11 +818,11 @@ pub async fn fan_out(
         }
     };
 
-    // 11. The two flags a follow-up (or the console) needs.
+    // 12. The two flags a follow-up (or the console) needs.
     let sets_default = needs_model && matches!(default_now, inference_store::DefaultChoice::Unset);
     let models = if needs_model {
         probe_ids
-            .map(|ids| crate::server::ops::inference::providers::catalogue_offer(&ids))
+            .map(|ids| inference::paged_catalog::catalogue_offer(&ids))
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -678,6 +854,7 @@ pub async fn fan_out(
         needs_model,
         sets_default,
         models,
+        rollback_had_prior_key,
     })
 }
 
@@ -739,9 +916,28 @@ pub fn fan_out_note(clearing: bool, report: &FanOutReport, model: Option<&str>) 
     }
     if let Some(SlotOutcome::HealthFailed(class)) = health {
         if class == probe::ProbeClass::Auth {
-            sentences.push(
-                "TinyHumans rejected this key for LLM, so the LLM copy was not kept.".to_string(),
-            );
+            // P3-1 (keys rework #2306 review): this sentence only makes sense
+            // when the inference slot actually rolled back — a resave of an
+            // already-current key that then fails health (`Kept(AlreadyCurrent)`)
+            // never rolled anything back, so nothing here was "not kept".
+            if matches!(inference, Some(SlotOutcome::RolledBack)) {
+                if report.rollback_had_prior_key {
+                    // P2-2: a rollback on what was a genuine rotation — the LLM
+                    // slot is back on its previous key, not empty, so the
+                    // generic "was not kept" sentence would undersell what
+                    // actually happened.
+                    sentences.push(
+                        "TinyHumans on the LLM page still uses your previous key, because the \
+                         new key was rejected for LLM use."
+                            .to_string(),
+                    );
+                } else {
+                    sentences.push(
+                        "TinyHumans rejected this key for LLM, so the LLM copy was not kept."
+                            .to_string(),
+                    );
+                }
+            }
         } else {
             sentences.push(probe::describe(class, "TinyHumans"));
         }
@@ -874,6 +1070,7 @@ pub async fn copy_account_key_to_composio(
         needs_model: false,
         sets_default: false,
         models: Vec::new(),
+        rollback_had_prior_key: false,
     })
 }
 

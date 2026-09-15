@@ -61,6 +61,11 @@ pub enum SkipReason {
     /// This request cleared the account key — the row and default are never
     /// touched by a clear (§6, case C1).
     KeyCleared,
+    /// A `tinyhumans` row exists and no default is set yet, but the row is
+    /// disabled — the default slot is left alone rather than pointing the
+    /// company's default at a provider it cannot currently serve through
+    /// (P3-8, keys rework #2306 review).
+    ProviderDisabled,
 }
 
 /// What happened to one [`Slot`].
@@ -130,4 +135,13 @@ pub struct FanOutReport {
     /// only when the health probe succeeded. Sorted, deduped, capped — see
     /// `catalogue_offer`.
     pub models: Vec<String>,
+    /// Whether the Q6 auth rollback on the inference slot
+    /// (`SlotOutcome::RolledBack`) restored a genuine prior key — i.e. this
+    /// request was a **rotation**, not a first-time fill (P2-2, keys rework
+    /// #2306 review). `false` on every report where the inference slot never
+    /// rolled back, and also `false` when it did but there was nothing to
+    /// restore (a fill being undone, not a rotation). [`fan_out_note`] reads
+    /// this to say specifically that the LLM page still uses the *previous*
+    /// key, rather than only that the new one "was not kept".
+    pub rollback_had_prior_key: bool,
 }
