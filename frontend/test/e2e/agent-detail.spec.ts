@@ -335,6 +335,14 @@ test("an admin pins an agent to a provider and model, then clears it (keys rewor
   const model = page.locator("#agent-model-field-input");
   await expect(model).toHaveValue("e2e-model");
   await model.fill("test-model-large");
+  // `fill` resolving only guarantees the DOM input's own value changed, not
+  // that React has committed `modelDraft` from the `onChange` it dispatched —
+  // a `Save` click that outruns that commit reads the pre-fill draft, and
+  // `pairEdits` then sees no change on either half of the pair and saves
+  // nothing at all (the silent early return in `saveHarnessAndModel`, "no
+  // edits, close the form"). Reading the value back off the controlled input
+  // is a real wait on React's own state, not a fixed delay.
+  await expect(model).toHaveValue("test-model-large");
 
   await page.getByTestId("agent-harness-save").click();
   await expect(page.getByTestId("agent-pair-badge")).toContainText("E2E Pair · test-model-large", {
