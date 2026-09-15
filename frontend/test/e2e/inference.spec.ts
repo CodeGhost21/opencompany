@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { restoreSharedInference } from "./shared-inference";
 
 /**
- * The LLM page, against a real browser and a real host.
+ * Connections → LLM, against a real browser and a real host.
  *
  * The `Console E2E` job runs this (issue #428) and it is a merge gate, so treat
  * a red run here as a real regression rather than a stale reproduction.
@@ -11,13 +11,13 @@ import { restoreSharedInference } from "./shared-inference";
  * ## What these cover, and why they are the ones that need a browser
  *
  * The rules this surface is built on are pure functions with unit tests —
- * what each category offers, what a probe class means, what a removal costs,
- * whether a model id is valid. None of those needs a browser.
+ * which category offers what, what a probe class means, what a removal
+ * orphans, whether an override is sendable. None of those needs a browser.
  *
  * What does need one is the part that only breaks in integration: a credential
  * travelling from a dialog through a write route into a store and back as a
  * boolean, a probe classification reaching the row it belongs to, and a delete
- * that has to clear a credential. Those are below.
+ * that has to move a route in a different subsystem. Those are below.
  *
  * ## The invariant that predates the list (issue #265)
  *
@@ -27,44 +27,16 @@ import { restoreSharedInference } from "./shared-inference";
  * a managed save was a revert that carried none. The list removes the shape of
  * the bug — each provider holds its own credential — and the test for it is now
  * "two providers, two independent keys", below.
- *
- * ## The model-required flow (keys rework, issue #2306)
- *
- * Every add now goes: fill the key or endpoint, submit (opens the model step,
- * always — D-model), choose or type a model, submit again. `pickModel` below is
- * that second step, added to every existing add flow.
  */
 
 type Page = import("@playwright/test").Page;
-
-/** Pick a provider from the inference configuration select. */
-async function pickProvider(page: Page, label: string) {
-  await page.locator("#inference-provider").click();
-  await page.getByRole("option", { name: label, exact: true }).click();
-}
-
-/**
- * Switching provider asks before overwriting a draft's Base URL and model
- * fields. Whether it asks depends on what the previous save left in the form,
- * which is not what every spec is about — this answers the prompt when it
- * appears and says nothing when it does not.
- */
-async function confirmReplaceIfAsked(page: Page) {
-  const replace = page.getByRole("button", { name: "Replace fields" });
-  await replace
-    .waitFor({ state: "visible", timeout: 2_000 })
-    .then(() => replace.click())
-    .catch(() => {
-      /* the draft was clean, so there was nothing to replace */
-    });
-}
 
 /**
  * A fresh browser context has no tour state, so the first-run welcome dialog
  * opens over the console and swallows clicks. Skip it when it shows up.
  */
 async function openInference(page: Page) {
-  await page.goto("/#/connections/inference");
+  await page.goto("/#/settings/inference");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
@@ -72,17 +44,12 @@ async function openInference(page: Page) {
     .catch(() => {
       /* already seen in this context — nothing to dismiss */
     });
-  // The page renders directly — no tab bar any more (routing removed, phase
-  // 5b) — so waiting on either the list or its empty state is the whole wait.
+  // Either the list or its empty state — a company with nothing connected shows
+  // the second, and waiting only for the first would hang on exactly the
+  // company a first run starts from.
   await expect(
     page.getByTestId("inference-providers").or(page.getByTestId("inference-providers-empty")),
   ).toBeVisible({ timeout: 30_000 });
-}
-
-// Kept as an alias for the legacy managed-selection regression below: inference
-// lives on its own settings page after the Connections split.
-async function openConnections(page: Page) {
-  await openInference(page);
 }
 
 /**
@@ -123,21 +90,6 @@ async function addCustom(page: Page) {
   await expect(page.getByTestId("inference-add-provider")).toBeVisible();
   await page.getByTestId("inference-add-custom").click();
   await connectDialogReady(page);
-}
-
-/**
- * Step 2 of the connect dialog: the model step, which opens unconditionally
- * once step 1 succeeds (D-model, keys rework issue #2306) — there is no more
- * "this endpoint resolves tiers itself, skip the model" case. Against an
- * unreachable endpoint the draft probe fails, so the field is free text.
- */
-async function pickModel(page: Page, model: string) {
-  await expect(page.getByTestId("inference-connect-model-step")).toBeVisible({ timeout: 30_000 });
-  // Every spec in this file points at `UNREACHABLE`, so the draft probe always
-  // fails and the field is always free text (`#inference-connect-model`), never
-  // the catalogue combobox — this helper does not need to handle that case.
-  await page.locator("#inference-connect-model").fill(model);
-  await page.getByTestId("inference-connect-submit").click();
 }
 
 /** The discard port: refused immediately, no DNS, no wait. */
@@ -181,67 +133,17 @@ const PROVIDERS_THIS_FILE_CREATES = [
 test.afterEach(async ({ request }) => {
   await restoreSharedInference(request, PROVIDERS_THIS_FILE_CREATES);
 });
-  }
-});
 
-/**
- * Removes a provider this file connected, so it cannot outlive its test.
- *
- * Every spec in this file (bar the legacy single-slot one below, which has its
- * own "Reset to default" cleanup) runs against the one company the whole `npm
- * run e2e:live` run shares (`playwright.config.ts`'s `managesHost` path — one
- * host process, one company, for every spec file that is not first-run/Euler/
- * live-LLM/visual). `resolve_effective`'s unset-workload fallback is the
- * *primary* provider — the first enabled one (`company::inference::resolve`)
- * — so a provider this file leaves connected and enabled does not just sit
- * there: it becomes the route every agent turn in every *other* spec takes,
- * for the rest of the run. An unreachable one (every provider this file
- * creates points at `UNREACHABLE`) turns every later turn into the exact 500
- * this cleanup exists to prevent. `.catch()` swallows a delete on a slug a
- * test already removed itself.
- */
-async function deleteProvider(page: Page, slug: string) {
-  await page.request.delete(`/api/v1/company/inference/providers/${slug}`).catch(() => {});
-}
-
-test("TinyHumans is offered as an ordinary catalogue row, once (keys rework, slice 2a)", async ({ page }) => {
-  await openInference(page);
-
-  await page.getByTestId("inference-add-open").click();
-  await expect(page.getByTestId("inference-add-provider")).toBeVisible();
-  await page.locator("#inference-add-cloud").click();
-  const option = page.getByRole("option", { name: /^TinyHumans/ });
-  await expect(option).toBeVisible();
-  await expect(option).toContainText("api.tinyhumans.ai");
-  // Never a "Managed (TinyHumans)" special entry any more — it is this same
-  // ordinary row.
-  await expect(page.getByRole("option", { name: /^Managed/ })).toHaveCount(0);
-  await page.keyboard.press("Escape");
-});
-
-test("the legacy Managed row is a connected row only when its chain actually resolves, and never renders beside a tinyhumans row", async ({
-  page,
-}) => {
+test("Managed is a connected row only when its chain actually resolves", async ({ page }) => {
   // Managed is not a record, so the row is keyed on whether the chain answers
-  // rather than on anything having been stored. Three states are asserted
-  // here on purpose: the default lane's host serves a company with no managed
-  // credential anywhere in the chain, the live-brain lane's has a key but no
-  // chosen model (needsModel — D-model, keys rework issue #2306), and a fully
-  // resolved chain is the third. A test that assumed only one of these would
-  // be red on the others — and one that simply returned early on whichever
-  // state it did not expect would be quietly vacuous.
-  //
-  // Decision Q3 (keys rework, issue #2306, slice 2a): once a `tinyhumans` row
-  // exists this legacy row must never render beside it — that is the
-  // `legacyRow` field's whole job.
+  // rather than on anything having been stored. Both states are asserted here
+  // on purpose: the default lane's host serves a company with no managed
+  // credential anywhere in the chain and the live-brain lane's has one, so a
+  // test that assumed either would be red on the other — and one that simply
+  // returned early on the state it did not expect would be quietly vacuous.
   await openInference(page);
 
   const managed = page.getByTestId("inference-provider-managed");
-  const tinyhumans = page.getByTestId("inference-provider-tinyhumans");
-  if ((await tinyhumans.count()) > 0) {
-    await expect(managed).toHaveCount(0);
-    return;
-  }
   if ((await managed.count()) === 0) {
     // Nothing in the chain answers. The honest rendering is not a dead row: it
     // is no row, plus the sentence saying managed is not a fallback.
@@ -249,23 +151,18 @@ test("the legacy Managed row is a connected row only when its chain actually res
     return;
   }
 
-  const needsModel = page.getByTestId("inference-provider-managed-needs-model");
-  if ((await needsModel.count()) > 0) {
-    // The chain has a credential but no chosen model yet (keys rework,
-    // decision X5/P1-3): the row is honest that it is not serving turns —
-    // "Key added — choose a model", the affordance instead of a live switch,
-    // and never the connected-sounding "Billed to" text a resolved chain gets.
-    await expect(managed).toContainText("Key added — choose a model");
-    await expect(needsModel).toContainText("Needs a model");
-    await expect(managed.locator("[role='switch']")).toHaveCount(0);
-    return;
-  }
-
-  // It resolves and a model is chosen, so the row says which step answers and
-  // who it bills.
+  // It resolves, so the row says which step answers and who it bills.
   await expect(managed).toContainText("Billed to");
-  await expect(managed.locator("[role='switch']")).toHaveAttribute("aria-checked", "true");
-  await expect(managed.locator("[role='switch']")).toBeEnabled();
+  // The switch is this row's one statement about routing — excluding managed
+  // from routing is a different act from removing its key, and only the switch
+  // expresses it — so it is present, on, and operable rather than decorative.
+  const toggle = page.getByTestId("inference-provider-managed-toggle");
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await expect(toggle).toBeEnabled();
+  // And there is nothing to remove: no provider record exists, so the menu
+  // offers key actions only.
+  await page.getByTestId("inference-provider-managed-menu").click();
+  await expect(page.getByRole("menuitem", { name: "Remove provider" })).toHaveCount(0);
 });
 
 test("a provider behind an unreachable endpoint is saved, amber, and keeps its key", async ({
@@ -276,36 +173,28 @@ test("a provider behind an unreachable endpoint is saved, amber, and keeps its k
   // the key is perfectly good.
   await openInference(page);
 
-  try {
-    await addCustom(page);
-    await page.locator("#inference-connect-name").fill("E2E Gateway");
-    await expect(page.getByTestId("inference-slug-preview")).toHaveText("Slug: e2e-gateway");
-    await page.locator("#inference-connect-url").fill(UNREACHABLE);
-    await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
-    await page.getByTestId("inference-connect-submit").click();
-    await pickModel(page, "e2e-model");
+  await addCustom(page);
+  await page.locator("#inference-connect-name").fill("E2E Gateway");
+  await expect(page.getByTestId("inference-slug-preview")).toHaveText("Slug: e2e-gateway");
+  await page.locator("#inference-connect-url").fill(UNREACHABLE);
+  await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
+  await page.getByTestId("inference-connect-submit").click();
 
-    const row = page.getByTestId("inference-provider-e2e-gateway");
-    await expect(row).toBeVisible({ timeout: 30_000 });
-    // The row was created and the credential was kept: the save succeeded, and
-    // only reachability is in question.
-    await expect(row).toContainText("•••• configured");
-    await expect(page.getByTestId("inference-provider-e2e-gateway-health")).toContainText(
-      "unreachable",
-    );
+  const row = page.getByTestId("inference-provider-e2e-gateway");
+  await expect(row).toBeVisible({ timeout: 30_000 });
+  // The row was created and the credential was kept: the save succeeded, and
+  // only reachability is in question.
+  await expect(row).toContainText("•••• configured");
+  await expect(page.getByTestId("inference-provider-e2e-gateway-health")).toContainText(
+    "unreachable",
+  );
 
-    // And it survives a reload, which is the half a component test cannot see.
-    await page.reload();
-    await openInference(page);
-    await expect(page.getByTestId("inference-provider-e2e-gateway")).toContainText(
-      "•••• configured",
-    );
-  } finally {
-    // An enabled, unreachable provider is exactly the shape that becomes the
-    // shared company's *primary* route (see `deleteProvider`) — remove it
-    // regardless of where the assertions above landed.
-    await deleteProvider(page, "e2e-gateway");
-  }
+  // And it survives a reload, which is the half a component test cannot see.
+  await page.reload();
+  await openInference(page);
+  await expect(page.getByTestId("inference-provider-e2e-gateway")).toContainText(
+    "•••• configured",
+  );
 });
 
 test("a second provider holds a credential of its own", async ({ page }) => {
@@ -320,7 +209,6 @@ test("a second provider holds a credential of its own", async ({ page }) => {
     await page.locator("#inference-connect-url").fill(UNREACHABLE);
     await page.locator("#inference-connect-key").fill(`pw-e2e-${name}-${Date.now()}`);
     await page.getByTestId("inference-connect-submit").click();
-    await pickModel(page, "e2e-model");
     await expect(page.getByTestId("inference-connect-provider")).toHaveCount(0, {
       timeout: 30_000,
     });
@@ -338,16 +226,10 @@ test("the add dialog stops offering a provider once it is connected", async ({ p
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-connect-submit").click();
 
-  // A real vendor is reachable from CI. Its own catalogue read may itself
-  // fail on a made-up key, in which case the model step opens in free text
-  // with the reason said — the step always opens either way (D-model).
-  await expect(page.getByTestId("inference-connect-model-step")).toBeVisible({ timeout: 30_000 });
-  const modelField = page.locator("#inference-connect-model");
-  if (await modelField.count()) await modelField.fill("e2e-model");
-  await page.getByTestId("inference-connect-submit").click();
-
-  // The add itself is refused and rolled back rather than stored looking
-  // green — there is no real Groq credential here to satisfy it, so this test
+  // A real vendor is reachable from CI and rejects a made-up key, and an add
+  // whose credential was rejected is refused and rolled back rather than stored
+  // looking green. That refusal is the behaviour this surface exists to have,
+  // and there is no real Groq credential here to satisfy it with — so this test
   // asserts the refusal and then takes the documented escape hatch, which is
   // the only honest way to reach a connected catalogue row without a key.
   await expect(page.getByTestId("inference-connect-error")).toContainText(
@@ -360,11 +242,10 @@ test("the add dialog stops offering a provider once it is connected", async ({ p
   await page.getByTestId("inference-add-open").click();
   await page.locator("#inference-add-cloud").click();
   await expect(page.getByRole("option", { name: /^Groq/ })).toHaveCount(0);
-  await page.keyboard.press("Escape");
 });
 
 test("a custom provider may not take a name the catalogue ships", async ({ page }) => {
-  // A stored slug saying `cerebras` would otherwise mean two things — and the
+  // A routing entry saying `cerebras` would otherwise mean two things — and the
   // refusal happens before anything is written.
   //
   // **Deliberately a catalogue row nothing else connects.** `checkSlug` reports
@@ -383,9 +264,10 @@ test("a custom provider may not take a name the catalogue ships", async ({ page 
   await expect(page.getByTestId("inference-connect-submit")).toBeDisabled();
 });
 
-test("turning a provider off and back on both confirm (decision X3)", async ({ page }) => {
+test("disabling a provider keeps its credential", async ({ page }) => {
   // Distinct from deleting it: "stop billing this account this week" has to be
-  // expressible, and neither direction of the toggle scrubs anything.
+  // expressible, and a disable that scrubbed would make re-enabling a
+  // re-configuration.
   await openInference(page);
 
   await addCustom(page);
@@ -393,12 +275,12 @@ test("turning a provider off and back on both confirm (decision X3)", async ({ p
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-connect-submit").click();
-  await pickModel(page, "e2e-model");
   await expect(page.getByTestId("inference-provider-e2e-parked")).toBeVisible({ timeout: 30_000 });
 
-  // Off, reversible language.
+  // Switching off is confirmed now, in reversible language: it parks the
+  // workloads routed through this provider rather than losing anything.
   await page.getByTestId("inference-provider-e2e-parked-toggle").click();
-  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn off");
+  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Switch off");
   await page.getByTestId("inference-remove-confirm").click();
   await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
   await page.reload();
@@ -407,16 +289,11 @@ test("turning a provider off and back on both confirm (decision X3)", async ({ p
   const row = page.getByTestId("inference-provider-e2e-parked");
   await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "false");
   await expect(row).toContainText("•••• configured");
-
-  // On, also confirmed (decision X3: every toggle does).
-  await row.getByTestId("inference-provider-e2e-parked-toggle").click();
-  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn on");
-  await page.getByTestId("inference-remove-confirm").click();
-  await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
-  await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "true");
 });
 
-test("deleting a provider removes its row", async ({ page }) => {
+test("deleting a provider removes its row and resets the routes that named it", async ({
+  page,
+}) => {
   await openInference(page);
 
   await addCustom(page);
@@ -424,157 +301,72 @@ test("deleting a provider removes its row", async ({ page }) => {
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
   await page.getByTestId("inference-connect-submit").click();
-  await pickModel(page, "e2e-model");
   await expect(page.getByTestId("inference-provider-e2e-doomed")).toBeVisible({ timeout: 30_000 });
 
+  // Point one workload at it, through the routing tab.
+  await page.getByRole("tab", { name: "Routing" }).click();
+  await page.getByTestId("inference-mode-advanced").click();
+  await page
+    .getByTestId("inference-workload-reasoning")
+    .getByRole("button", { name: /Model$/ })
+    .click();
+  await page.locator("#inference-workload-provider").click();
+  await page.getByRole("option", { name: "E2E Doomed", exact: true }).click();
+  await page.getByTestId("inference-workload-apply").click();
+  await expect(page.getByTestId("inference-workload-reasoning")).toContainText("E2E Doomed");
+
+  // Remove it, and the row that named it moves back to the primary.
+  await page.getByRole("tab", { name: "LLM Providers" }).click();
   await page.getByTestId("inference-provider-e2e-doomed-menu").click();
   // Named exactly. The menu carries "Remove key" beside "Remove provider" —
   // two different acts, and the distinction between them is the whole reason
   // both are there — so a substring match resolves to both and takes neither.
   await page.getByTestId("inference-provider-e2e-doomed-remove").click();
+  // Removing a provider moves routes that belong to other workloads, so it is
+  // confirmed rather than done on a single click.
   await expect(page.getByTestId("inference-remove-dialog")).toBeVisible();
   await page.getByTestId("inference-remove-confirm").click();
   await expect(page.getByTestId("inference-provider-e2e-doomed")).toHaveCount(0, {
     timeout: 30_000,
   });
+
+  await page.getByRole("tab", { name: "Routing" }).click();
+  await page.getByTestId("inference-mode-advanced").click();
+  await expect(page.getByTestId("inference-workload-reasoning")).toContainText("Primary (");
 });
 
-test("the inference page has no routing tab (keys rework, phase 5b)", async ({ page }) => {
-  // An old `?tab=routing` link still lands on the providers — there is one
-  // page now.
+test("the routing mode is inferred from the routes and round-trips", async ({ page }) => {
+  // There is no stored mode to drift out of sync with the rows.
   await openInference(page);
-  await expect(page.getByRole("tab", { name: "Routing" })).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "LLM Providers" })).toHaveCount(0);
-  await expect(page.getByTestId("inference-add-open")).toBeVisible();
+  await page.getByRole("tab", { name: "Routing" }).click();
+
+  // **Managed is only selectable when Managed can answer.** On an instance whose
+  // managed chain resolves to nothing, an empty table must not read as Managed
+  // and the row must not be clickable — which is the reported defect, and the
+  // opposite of what this screen did before.
+  const managedMode = page.getByTestId("inference-mode-managed");
+  if (await managedMode.isDisabled()) {
+    // Whatever else this company's routes say, the one thing that must hold is
+    // that Managed is neither selected nor selectable when it cannot answer.
+    await expect(managedMode).toHaveAttribute("aria-pressed", "false");
+    return;
+  }
+
+  await managedMode.click();
+  await page.reload();
+  await openInference(page);
+  await page.getByRole("tab", { name: "Routing" }).click();
+  await expect(page.getByTestId("inference-mode-managed")).toHaveAttribute("aria-pressed", "true");
 });
 
-test("switching to the managed brain and saving stays on managed, with its Connect button", async ({
-  page,
-}) => {
-  // The save always landed; there was no way to see that it had. `PUT
-  // …/inference` stored `managed` verbatim, but the status route reported the
-  // *resolved* kind — and `normalize_provider` folds the managed alias onto
-  // `openrouter` — so every read-back said "openrouter". `seedFromStatus` takes
-  // that value verbatim (deliberately: it is what keeps the select and the
-  // header beside it from naming different providers), so the select snapped
-  // back to OpenRouter the instant the save returned, and the
-  // Connect-TinyHumans button, which renders only for `provider === "managed"`,
-  // went with it. Two symptoms, one cause: the host reported where the config
-  // resolves to where the console asked what was chosen.
-  //
-  // A unit test cannot catch this — the wrong value is produced by the host and
-  // consumed by the card, and each half is individually correct. Only a real
-  // save against a real host closes the loop.
-  await page.route(/\/credential(\?|$)/, async (route) => {
-    // The Connect button also needs a host with a hub wired (`hubLink`), which
-    // the E2E host has no reason to have. That is a separate precondition from
-    // the one under test, so it is supplied here rather than left to decide
-    // whether this spec can run.
-    if (route.request().method() !== "GET") return route.fallback();
-    await route.fulfill({
-      contentType: "application/json",
-      body: JSON.stringify({
-        configured: false,
-        source: "none",
-        notice: "pw-e2e fixture",
-        hubLink: true,
-      }),
-    });
-  });
+test("coding is shown as an alias and cannot be routed separately", async ({ page }) => {
+  // Four editable rows, not five: coding and agentic are one tier, so an
+  // editable coding row would write one tier's route under two names.
+  await openInference(page);
+  await page.getByRole("tab", { name: "Routing" }).click();
+  await page.getByTestId("inference-mode-advanced").click();
 
-  await openConnections(page);
-  await expect(page.locator("#inference-provider")).toBeVisible({ timeout: 30_000 });
-
-  // coderabbit: this test mutates the shared E2E company's inference config,
-  // and the "Reset to default" cleanup at the end used not to run if an
-  // earlier assertion or interaction threw — leaving the generated key and
-  // the managed-provider override in place for whichever spec ran next.
-  // Wrapped in try/finally so the reset always runs, success or failure.
-  try {
-    // Start from a *saved* OpenRouter company, so "still stuck with OpenRouter"
-    // is a state this test could actually be stuck in rather than the default it
-    // happens to open on.
-    await pickProvider(page, "OpenRouter");
-    await confirmReplaceIfAsked(page);
-    await page.getByTestId("inference-save").click();
-    await expect(
-      page.getByText(/Inference updated\.|Inference saved — restart the company/),
-    ).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId("inference-current-provider")).toHaveText("OpenRouter");
-
-    // Now the switch under test.
-    await pickProvider(page, "Managed (TinyHumans)");
-    await confirmReplaceIfAsked(page);
-    await page.getByTestId("inference-save").click();
-    await expect(
-      page.getByText(/Inference updated\.|Inference saved — restart the company/),
-    ).toBeVisible({ timeout: 30_000 });
-
-    // The host reports the selection back. Asserted on `provider` alone, and
-    // deliberately not on `slug` or `baseUrl`: a keyless managed save is sent as a
-    // revert (a managed brain with no key of its own is the platform default, not
-    // an override), so *which* resolution arm answers depends on whether this host
-    // was given a platform endpoint — and this spec is about the choice being
-    // visible on every one of them. The resolution itself is pinned by
-    // `company::inference`'s own tests, where each arm can be set up exactly.
-    const saved = await page.request.get("/api/v1/company/inference");
-    expect(saved.ok()).toBeTruthy();
-    expect((await saved.json()).provider).toBe("managed");
-
-    // Both halves of the card agree, and neither has snapped back.
-    await expect(page.getByTestId("inference-current-provider")).toHaveText(
-      "Managed (TinyHumans)",
-    );
-    await expect(page.locator("#inference-provider")).toContainText("Managed (TinyHumans)");
-
-    // The managed-only Connect button is on screen — the second reported symptom,
-    // and the reason it had gone: it never rendered because `provider` was never
-    // `"managed"` for longer than the round trip.
-    await expect(page.getByTestId("connect-tinyhumans")).toBeVisible();
-
-    // A reload proves it is stored, not just held in the component's state.
-    await page.reload();
-    await expect(
-      page.getByTestId("inference-current-provider"),
-    ).toHaveText("Managed (TinyHumans)", {
-      timeout: 30_000,
-    });
-    await expect(page.locator("#inference-provider")).toContainText("Managed (TinyHumans)");
-    await expect(page.getByTestId("connect-tinyhumans")).toBeVisible();
-
-    // A managed save carrying a key takes the other branch — a real `PUT`
-    // override rather than a revert — and that is the branch whose stored blob
-    // used to read back as its `openrouter` alias. Both have to hold, so both are
-    // exercised: the two failed for different reasons and one passing has never
-    // meant the other does.
-    await page.locator("#inference-key").fill(`pw-e2e-${Date.now()}`);
-    await page.getByTestId("inference-save").click();
-    await expect(
-      page.getByText(/Inference updated\.|Inference saved — restart the company/),
-    ).toBeVisible({ timeout: 30_000 });
-
-    const keyed = await page.request.get("/api/v1/company/inference");
-    expect(keyed.ok()).toBeTruthy();
-    const keyedBody = await keyed.json();
-    expect(keyedBody.keyConfigured).toBe(true);
-    expect(keyedBody.provider).toBe("managed");
-    // The key is what takes a managed company off the subscription and onto its
-    // own OpenRouter account — the fact the console used to reconstruct from
-    // `provider` and can no longer, now that `provider` is the selection.
-    expect(keyedBody.proxied).toBe(false);
-    expect(keyedBody.slug).toBe("openrouter");
-    await expect(page.getByTestId("inference-current-provider")).toHaveText(
-      "Managed (TinyHumans)",
-    );
-  } finally {
-    // Leave the shared E2E company on its committed default for later specs —
-    // and with no key of its own, which the reset also clears (issue #993).
-    // Runs on success or failure, so a broken assertion above never leaves a
-    // generated key or a managed override for whichever spec runs next.
-    await page.getByRole("button", { name: "Reset to default" }).click();
-    await expect(
-      page.getByText("Reverted to the committed manifest (or managed) configuration."),
-    ).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId("inference-remove-key")).toHaveCount(0, { timeout: 30_000 });
-  }
+  const coding = page.getByTestId("inference-workload-coding");
+  await expect(coding).toContainText("Follows Agentic");
+  await expect(coding.getByRole("button")).toHaveCount(0);
 });
