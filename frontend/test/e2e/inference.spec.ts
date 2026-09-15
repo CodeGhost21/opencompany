@@ -142,6 +142,51 @@ async function pickModel(page: Page, model: string) {
 const UNREACHABLE = "http://127.0.0.1:9/v1";
 
 /**
+ * Every provider slug a spec in this file can leave behind. Each is removed
+ * after every test, whatever that test did — see the hook below for why.
+ */
+const PROVIDERS_THIS_FILE_CREATES = [
+  "e2e-gateway",
+  "e2e-one",
+  "e2e-two",
+  "groq",
+  "e2e-parked",
+  "e2e-doomed",
+];
+
+/**
+ * Removes every provider this file connects, after every test, even one that
+ * timed out.
+ *
+ * Every spec here (bar the legacy single-slot one at the bottom, which has its
+ * own "Reset to default" cleanup) runs against the one company the whole `npm
+ * run e2e:live` run shares — `playwright.config.ts` brings up one host and one
+ * company for every spec file that is not first-run/Euler/live-LLM/visual.
+ * `resolve_effective`'s unset-workload fallback is the *primary* provider,
+ * which is the first enabled one (`company::inference::resolve`), so a
+ * provider left connected here does not just sit in the list: it becomes the
+ * route every agent turn in every *later* spec file takes. Every provider
+ * this file creates points at `UNREACHABLE`, so the leak turned every later
+ * turn — a workspace note attaching, a workflow running — into
+ * `inference request failed … 127.0.0.1:9/v1/chat/completions`.
+ *
+ * An `afterEach` hook and not a `try { … } finally { … }` inside each test,
+ * on purpose: when a test hits its timeout Playwright abandons the test
+ * function outright, and an in-body `finally` never runs — which is exactly
+ * how the leak happened, since the leaking specs were the ones timing out.
+ * A hook runs after a timed-out test with a request context that still works.
+ *
+ * The delete is idempotent — a slug the test already removed, or never got as
+ * far as creating, answers 404 — so it is one flat list rather than per-test
+ * bookkeeping that could itself be skipped.
+ */
+test.afterEach(async ({ request }) => {
+  for (const slug of PROVIDERS_THIS_FILE_CREATES) {
+    await request.delete(`/api/v1/company/inference/providers/${slug}`).catch(() => {});
+  }
+});
+
+/**
  * Removes a provider this file connected, so it cannot outlive its test.
  *
  * Every spec in this file (bar the legacy single-slot one below, which has its
