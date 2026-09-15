@@ -57,13 +57,22 @@ import type { APIRequestContext } from "@playwright/test";
  * failure this file's own header describes for every spec after it, with
  * no error pointing back at the cleanup that should have caught it.
  */
-export async function disconnectSharedProviders(request: APIRequestContext, slugs: string[]) {
+export async function disconnectSharedProviders(
+  request: APIRequestContext,
+  slugs: string[],
+) {
+  // Every slug gets its DELETE before anything is reported. Throwing on the
+  // first failure would skip the rest, and a spec that connected two (the
+  // `e2e-one`/`e2e-two` case in `inference.spec.ts`) would then leave the
+  // second one behind — the very leak this helper exists to close. The first
+  // failure is what gets thrown, after the loop.
+  let firstFailure: Error | null = null;
   for (const slug of slugs) {
     const path = `/api/v1/company/inference/providers/${slug}?confirmInUse=true`;
     const response = await request.delete(path);
     if (response.ok() || response.status() === 404) continue;
     const body = await response.text().catch(() => "<body could not be read>");
-    throw new Error(
+    firstFailure ??= new Error(
       `[shared-inference] DELETE ${path} → ${response.status()} ${response.statusText()}; ` +
         `body: ${body || "<empty>"}\n` +
         `Failed to disconnect "${slug}" from the shared E2E company — left connected, it (or ` +
@@ -71,4 +80,5 @@ export async function disconnectSharedProviders(request: APIRequestContext, slug
         "function's own doc comment.",
     );
   }
+  if (firstFailure) throw firstFailure;
 }

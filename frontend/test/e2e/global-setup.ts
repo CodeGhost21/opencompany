@@ -59,7 +59,8 @@ export default async function globalSetup(config: FullConfig) {
   // that case — writing no session, and leaving every spec to fail on a
   // storage-state file nobody had created. The env var still wins where it is
   // set: the config honours it first.
-  const storageState = config.projects[0]?.use.storageState as string | undefined;
+  const storageState = config.projects[0]?.use.storageState as
+    string | undefined;
   if (!storageState) return;
 
   const context = await request.newContext({ baseURL });
@@ -131,6 +132,8 @@ export default async function globalSetup(config: FullConfig) {
  * looking for with whatever `mock-brain.mjs` is listening on for THIS run. */
 const ANCHOR_SLUG = "e2e-anchor-default";
 const ANCHOR_MODEL = "e2e-anchor-model";
+/** The anchor's stored credential — a placeholder the mock brain never checks. */
+const ANCHOR_KEY = "pw-e2e-anchor";
 
 /**
  * Connects one permanent, reachable provider before any spec runs, on the
@@ -196,14 +199,26 @@ const ANCHOR_MODEL = "e2e-anchor-model";
  *    without depending on error-message wording, and it is what supplies the
  *    stored `baseUrl` finding (2) needs anyway.
  */
-async function connectAnchorProvider(context: APIRequestContext): Promise<void> {
+async function connectAnchorProvider(
+  context: APIRequestContext,
+): Promise<void> {
   const anchorUrl = `http://${MOCK_BRAIN_BIND}/v1`;
   const existing = await findAnchorProvider(context);
   if (existing) {
     if (existing.baseUrl !== anchorUrl) {
-      const edited = await context.put(`/api/v1/company/inference/providers/${ANCHOR_SLUG}`, {
-        data: { baseUrl: anchorUrl },
-      });
+      // The key goes with the move. A stale anchor from another run's
+      // `PW_MOCK_BRAIN_BIND` is almost always a different *origin* (another
+      // port), and `edit_provider` refuses to carry a stored credential across
+      // origins unless the request re-enters it — a blank key field means
+      // "unchanged", which is exactly what must not happen when the host
+      // changes. The anchor's key is this file's own placeholder, so resending
+      // it is free and turns a 400 into the repoint this branch exists for.
+      const edited = await context.put(
+        `/api/v1/company/inference/providers/${ANCHOR_SLUG}`,
+        {
+          data: { baseUrl: anchorUrl, key: ANCHOR_KEY },
+        },
+      );
       if (!edited.ok()) {
         throw await setupError(
           "PUT",
@@ -220,7 +235,7 @@ async function connectAnchorProvider(context: APIRequestContext): Promise<void> 
         kind: "custom",
         label: "E2E Anchor Default",
         baseUrl: anchorUrl,
-        key: "pw-e2e-anchor",
+        key: ANCHOR_KEY,
         model: ANCHOR_MODEL,
       },
     });
@@ -265,7 +280,9 @@ async function findAnchorProvider(
       "could not read this company's inference status to check for an existing anchor",
     );
   }
-  const status = (await response.json()) as { providers?: { slug: string; baseUrl: string }[] };
+  const status = (await response.json()) as {
+    providers?: { slug: string; baseUrl: string }[];
+  };
   return status.providers?.find((p) => p.slug === ANCHOR_SLUG);
 }
 
@@ -293,7 +310,10 @@ async function setupError(
  * under the responder's own data root. Read in this order, a root of ours with
  * no file is proof the responder does not serve it. See `host-identity.ts`.
  */
-async function identifyServer(context: APIRequestContext, baseURL: string): Promise<void> {
+async function identifyServer(
+  context: APIRequestContext,
+  baseURL: string,
+): Promise<void> {
   const url = `${baseURL.replace(/\/$/, "")}${SPEC_PATH}`;
 
   let response: APIResponse;
@@ -317,7 +337,9 @@ async function identifyServer(context: APIRequestContext, baseURL: string): Prom
     body: await response.text().catch(() => "<body could not be read>"),
     expectedInstanceId: EXPECTED_INSTANCE_ID,
     home: MANAGED_HOST_HOME,
-    homeInstanceId: MANAGED_HOST_HOME ? readHomeInstanceId(MANAGED_HOST_HOME) : undefined,
+    homeInstanceId: MANAGED_HOST_HOME
+      ? readHomeInstanceId(MANAGED_HOST_HOME)
+      : undefined,
   });
 
   if (failure) throw new Error(`[e2e global-setup] ${failure}`);
