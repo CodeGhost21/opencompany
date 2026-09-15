@@ -114,13 +114,40 @@ existing add flow to call the helper after its first submit:
 |---|---|
 | `a provider behind an unreachable endpoint…` (`:127`) | after `:140`: `pickModel(page, "e2e-model")` |
 | `a second provider holds a credential of its own` (`:159`) | inside the loop, after `:170` |
-| `the add dialog stops offering a provider once it is connected` (`:180`) | after `:186`: `pickModel(page, "test-model")`. The draft probe to Groq fails (`auth`), so the step opens in free text; the add's own probe still refuses with `rejected the credential` (`:194`); `inference-add-anyway` is in the model step |
+| `the add dialog stops offering a provider once it is connected` (`:180`) | after `:186`: `pickModel(page, "test-model")`. **Superseded by round-2 review, decision P1-8, KR-L1-03** — see below; the row that follows described a since-changed behaviour. |
 | `disabling a provider keeps its credential` (`:226`) | after `:236` |
 | `deleting a provider removes its row…` (`:253`) | after `:262` |
 | `:96` (Managed row), `:206` (reserved name) | unchanged |
 
 Leave `makeDefault = false` in every existing flow. The spec shares one company, and a
 full default pointing at `UNREACHABLE` would move every later test off the legacy path.
+
+> **Superseded (round-2 review, decision P1-8; found live, KR-L1-03, build
+> `f9fe35988`).** The row above still describes the original plan: a probe
+> rejected on the `auth` class (a bad key) was supposed to open the model
+> step in free text with "Could not read this provider's models: … rejected
+> the credential. Type a model id.", offering **Add anyway** there. That is
+> no longer what happens, deliberately: a rejected key now **stays on the
+> details step** with the host's own refusal message (X9 wording) and never
+> reaches the model step at all — `ProvidersTab.tsx`'s `submitConnect`, the
+> comment at the `probe.class === "auth"` branch. There is no "Add anyway"
+> for a credential that was actually rejected; that escape hatch is reserved
+> for a probe that failed for some other reason (`endpoint`, `timeout`,
+> `unknown` — the network could not be reached to say either way), where the
+> operator may still know the endpoint is fine.
+>
+> Note the distinction this doc's original wording collapsed: the **probe**
+> (step 1's own check) and the **add** (step 2's write) are two different
+> requests that can reject a credential separately. Only the probe's `auth`
+> class is affected by this change — `test/e2e/inference.spec.ts`'s "the add
+> dialog stops offering a provider once it is connected" (Groq) is a
+> **final-add** rejection reached after a probe that succeeded (a real
+> vendor's `/models` route commonly needs no key to list), so it is unchanged
+> and still reaches the model step and "Add anyway" exactly as written. A
+> test exercising a **probe-time** `auth` rejection is the one that needs the
+> updated expectation — stays on the details step, never opens the model
+> step; see `test/unit/inference-default-model.test.ts`'s `modelAskFromProbe`
+> suite for the non-auth probe failures that still open it in free text.
 
 **New test: `add TinyHumans: key, model list from the paged catalog, one row, health ok`.**
 

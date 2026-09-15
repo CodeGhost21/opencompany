@@ -283,7 +283,7 @@ describe("providerMenu", () => {
   const ids = (over = {}) => providerMenu(row(over)).map((a) => a.id);
 
   it("offers key actions on a provider that has a key to act on", () => {
-    expect(ids()).toEqual(["edit", "default", "replaceKey", "removeKey", "remove"]);
+    expect(ids()).toEqual(["edit", "setDefault", "replaceKey", "removeKey", "remove"]);
   });
 
   it("never offers key actions to a local runtime or a CLI login", () => {
@@ -310,9 +310,9 @@ describe("providerMenu", () => {
   });
 
   it("omits Set as default where it would change nothing", () => {
-    expect(ids({ isDefault: true })).not.toContain("default");
+    expect(ids({ isDefault: true })).not.toContain("setDefault");
     // Switched off, so it cannot be a routing target at all.
-    expect(ids({ enabled: false })).not.toContain("default");
+    expect(ids({ enabled: false })).not.toContain("setDefault");
   });
 
   it("marks exactly the two removals as destructive", () => {
@@ -334,7 +334,7 @@ describe("providerMenu", () => {
     // three live and every one of them was a round trip to a refusal. Setting it
     // as the default is not one of the three — that is a marker on the company,
     // not a write to the row.
-    expect(ids({ origin: "entryZero" })).toEqual(["default"]);
+    expect(ids({ origin: "entryZero" })).toEqual(["setDefault"]);
     expect(ids({ origin: "entryZero", isDefault: true })).toEqual([]);
     expect(ids({ origin: "entryZero", enabled: false })).toEqual([]);
   });
