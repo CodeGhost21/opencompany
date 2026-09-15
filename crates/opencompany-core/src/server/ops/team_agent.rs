@@ -4102,6 +4102,195 @@ prompt = "Lead decisively."
         assert!(unchanged["model"].is_null(), "{unchanged}");
     }
 
+    /// Keys rework (issue #2306, slice 3a): an admin can pin an overlay
+    /// teammate on a `built_in` harness to one of the company's own connected
+    /// providers plus a model, round-trip it through a reload, then clear
+    /// both back to the company default in one request — the write-and-read
+    /// half of the flow `frontend/test/e2e/agent-detail.spec.ts`'s pin test
+    /// drives end to end.
+    #[tokio::test]
+    async fn an_admin_can_pin_and_clear_a_teammates_provider_pair() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, connected) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": "Team Pair",
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "key": "sk-not-a-real-key",
+                "model": "seed-model",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{connected}");
+
+        let (status, set) = patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "team-pair", "model": "pinned-model"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        assert_eq!(set["provider"], "team-pair", "{set}");
+        assert_eq!(set["model"], "pinned-model", "{set}");
+
+        // Host-backed, not a write-only echo.
+        let (_, reread) = get_agent(&state, &jamie).await;
+        assert_eq!(reread["provider"], "team-pair", "{reread}");
+        assert_eq!(reread["model"], "pinned-model", "{reread}");
+
+        // Both clear together, back to the company default.
+        let (status, cleared) =
+            patch_agent(&state, &jamie, json!({"provider": null, "model": null})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["provider"].is_null(), "{cleared}");
+        assert!(cleared["model"].is_null(), "{cleared}");
+    }
+
+    /// Keys rework (issue #2306, slice 3a): a provider left with no model to
+    /// pin to is refused — whether that is setting one alone, or clearing
+    /// `model` back off an existing pin while leaving `provider` standing. A
+    /// bare `model` with no `provider` at all is not this case: it is the
+    /// long-standing ACP-hint override, and `an_admin_can_set_and_clear_a_teammates_model_override`
+    /// above already proves that stays legal.
+    #[tokio::test]
+    async fn a_provider_with_no_model_is_refused() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, connected) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": "Team Pair",
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "key": "sk-not-a-real-key",
+                "model": "seed-model",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{connected}");
+
+        let (status, refusal) = patch_agent(&state, &jamie, json!({"provider": "team-pair"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        let (status, set) = patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "team-pair", "model": "pinned-model"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+
+        let (status, refusal) = patch_agent(&state, &jamie, json!({"model": null})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        let (_, unchanged) = get_agent(&state, &jamie).await;
+        assert_eq!(unchanged["provider"], "team-pair", "{unchanged}");
+        assert_eq!(unchanged["model"], "pinned-model", "{unchanged}");
+    }
+
+    /// Keys rework (issue #2306, slice 3a): a provider slug this company has
+    /// not connected — a typo, or a row deleted since the client last read
+    /// the list — is refused rather than silently stored, and a switched-off
+    /// one is refused with its own reason (issue #403's "no dishonest button"
+    /// rule applied to a pin instead of a toggle).
+    #[tokio::test]
+    async fn an_unknown_or_disabled_provider_cannot_be_pinned() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, refusal) = patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "ghost", "model": "pinned-model"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        let (status, connected) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": "Team Pair",
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "key": "sk-not-a-real-key",
+                "model": "seed-model",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{connected}");
+        let (status, disabled) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers/team-pair/enabled",
+            Some(json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{disabled}");
+
+        let (status, refusal) = patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "team-pair", "model": "pinned-model"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        let (_, unchanged) = get_agent(&state, &jamie).await;
+        assert!(unchanged["provider"].is_null(), "{unchanged}");
+    }
+
+    /// Keys rework (issue #2306, slice 3a): the pair is refused outright on
+    /// an `acp` harness — `model` keeps its existing ACP-hint meaning there,
+    /// and a company provider pair has nothing to do with a coding CLI's own
+    /// model. Mirrors `a_model_override_is_refused_off_an_acp_harness`'s shape
+    /// for the opposite direction.
+    #[tokio::test]
+    async fn a_provider_pin_is_refused_on_an_acp_harness() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ACP_ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, connected) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": "Team Pair",
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "key": "sk-not-a-real-key",
+                "model": "seed-model",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{connected}");
+
+        let (status, refusal) = patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "team-pair", "model": "pinned-model"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        let (_, unchanged) = get_agent(&state, &jamie).await;
+        assert!(unchanged["provider"].is_null(), "{unchanged}");
+    }
+
     /// Issue #1245's harness-picker follow-up: a teammate's harness binding
     /// is admin-only (same gate as `model`/`tools`), validated against the
     /// company's own declared set, and clears back to the default with
