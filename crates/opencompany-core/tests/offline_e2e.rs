@@ -152,7 +152,9 @@ summary = "Proves the no-network path."
 [inference]
 provider = "ollama"
 base_url = "{base_url}"
-model = "llama3"
+
+[inference.models]
+chat-v1 = "llama3"
 
 [tools]
 allow = ["workspace", "files"]

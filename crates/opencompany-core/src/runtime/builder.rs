@@ -20,8 +20,16 @@ use crate::app::config::{AuthMode, BrainMode};
 use crate::brain::medulla::MedullaTransport;
 use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::brain::{EchoBrain, HostedMedullaBrain};
+// `inference` (the module path) is needed unconditionally by `agent_pairs`
+// and `any_agent_pair_resolves` below (keys rework, issue #2306, slice 3a) —
+// pure/read-only helpers that must build in the default feature set, even
+// though every other use of this module in this file sits behind
+// `openhuman`. `EnvDefault` stays gated: it is only ever named inside the
+// `openhuman`-only harness-brain wiring, so importing it unconditionally
+// would be an unused-import warning with `openhuman` off.
+use crate::company::inference;
 #[cfg(feature = "openhuman")]
-use crate::company::inference::{self, EnvDefault};
+use crate::company::inference::EnvDefault;
 use crate::company::runtime::{CompanyMail, CompanyRuntime, OpsStores};
 use crate::company::{CompanyManifest, GroupChat, Policy, Tools};
 use crate::feedback::github::{GitHubClient, RateLimiter};
@@ -3101,6 +3109,56 @@ impl RuntimeBuilder {
                         })
                         .is_some();
 
+                        // Keys rework, issue #2306, slice 3a: a company whose
+                        // *only* inference is one or more agent pins is still
+                        // configured — `resolve_effective` above only ever
+                        // answers about the company/harness default, and a
+                        // manifest can pin every agent while declaring none.
+                        // Read-only and never fails boot: a bad pin still
+                        // boots the harness brain, and that agent's own turns
+                        // fail closed at resolve time (`TenantProvider::resolve`),
+                        // naming the agent.
+                        let configured = configured
+                            || any_agent_pair_resolves(
+                                &id,
+                                &self.manifest,
+                                &overlay_agents,
+                                &overlay_agent_edits,
+                                secrets.as_ref(),
+                            )
+                            .await;
+
+                        // X13 (round-3a review P1-5): a company that has SAID
+                        // something about inference — a provider row (even a
+                        // disabled one), an explicit default marker other
+                        // than `Unset`, or an agent pair (even a broken one)
+                        // — must never boot the echo brain merely because
+                        // that something is currently unusable. Hosted
+                        // tenants restart on wake, so "disable the only
+                        // provider, confirmed" followed by the next wake is
+                        // the normal path, not an edge case: previously that
+                        // combination made every check above answer `false`
+                        // and the company woke up on `EchoBrain`, "echoes
+                        // every operator message back" — silently, with
+                        // nothing to fix. Booting the harness brain instead
+                        // means `TenantProvider::resolve` (P1-1) and
+                        // `resolve_for_turn` (P1-4) are what then fail each
+                        // turn closed, naming the reason — which is what X13
+                        // requires and what an echo reply cannot do.
+                        let configured = configured
+                            || !matches!(
+                                inference::store::load_default(&id, secrets.as_ref())
+                                    .await
+                                    .unwrap_or(inference::store::DefaultChoice::Unset),
+                                inference::store::DefaultChoice::Unset
+                            )
+                            || !inference::store::list_providers(&id, secrets.as_ref())
+                                .await
+                                .unwrap_or_default()
+                                .is_empty()
+                            || !agent_pairs(&self.manifest, &overlay_agent_edits, &overlay_agents)
+                                .is_empty();
+
                         if configured {
                             // One shared steer registry; the same handle is wired
                             // onto the runtime below.
@@ -4631,6 +4689,136 @@ fn build_networked_brain(
     _tool_catalog: Vec<ToolManifestEntry>,
 ) -> Arc<dyn Brain> {
     Arc::new(EchoBrain::new())
+}
+
+/// The harness `kind` a manifest or overlay agent's own `harness` field
+/// resolves to, defaulting to the company's default harness exactly as
+/// [`CompanyManifest::harness_for`] does for a manifest agent — but usable for
+/// an overlay teammate too, which `harness_for` cannot resolve (it reads only
+/// `manifest.agents`).
+pub(crate) fn agent_harness_kind(
+    manifest: &CompanyManifest,
+    harness_field: Option<&str>,
+) -> Option<String> {
+    let id = harness_field
+        .map(str::to_string)
+        .unwrap_or_else(|| manifest.default_harness_id());
+    manifest.harness_by_id(&id).map(|h| h.kind)
+}
+
+/// Every `built_in` agent's own `{provider, model}` pair, manifest and overlay
+/// alike (keys rework, issue #2306, slice 3a's boot check) — a reduction of
+/// the same merge rule [`crate::ports::types::CompanyRecord::effective_manifest_agent`]
+/// and `overlay_agent_to_manifest` apply, to just the pair, so the boot check
+/// needs no full roster build. An `acp`-bound agent is skipped: validation
+/// refuses a pair there, but an unvalidated manifest (loaded before
+/// `RuntimeBuilder::build`'s own checks) must not be trusted to have run it.
+///
+/// Its only production caller is `any_agent_pair_resolves`, gated on
+/// `openhuman`; with the feature off this is reachable only from its own
+/// `agent_pairs_apply_edits_and_skip_acp_agents` unit test, which is why the
+/// dead-code lint needs silencing there and not by gating the function
+/// itself — the test still exercises it on every build.
+#[cfg_attr(not(feature = "openhuman"), allow(dead_code))]
+fn agent_pairs(
+    manifest: &CompanyManifest,
+    edits: &[AgentOverride],
+    overlays: &[OverlayAgent],
+) -> Vec<(String, inference::store::ModelChoice)> {
+    let mut pairs = Vec::new();
+
+    for agent in &manifest.agents {
+        if agent_harness_kind(manifest, agent.harness.as_deref()).as_deref() == Some("acp") {
+            continue;
+        }
+        let mut provider = agent.provider.clone();
+        let mut model = agent.model.clone();
+        // The override merge rule (`Some("")` clears, `None` leaves alone),
+        // applied field-wise exactly as `effective_manifest_agent` does.
+        if let Some(edit) = edits.iter().find(|e| e.agent_id == agent.id) {
+            if let Some(p) = &edit.provider {
+                provider = Some(p.clone()).filter(|s| !s.is_empty());
+            }
+            if let Some(m) = &edit.model {
+                model = Some(m.clone()).filter(|s| !s.is_empty());
+            }
+        }
+        if let (Some(provider), Some(model)) = (provider, model)
+            && !provider.trim().is_empty()
+            && !model.trim().is_empty()
+        {
+            pairs.push((
+                agent.id.clone(),
+                inference::store::ModelChoice { provider, model },
+            ));
+        }
+    }
+
+    for overlay in overlays {
+        if agent_harness_kind(manifest, overlay.harness.as_deref()).as_deref() == Some("acp") {
+            continue;
+        }
+        if let (Some(provider), Some(model)) = (overlay.provider.clone(), overlay.model.clone())
+            && !provider.trim().is_empty()
+            && !model.trim().is_empty()
+        {
+            pairs.push((
+                overlay.id.clone(),
+                inference::store::ModelChoice { provider, model },
+            ));
+        }
+    }
+
+    pairs
+}
+
+/// Whether any agent's pair names a provider that is actually there and
+/// switched on (keys rework, issue #2306, slice 3a's boot check) — the
+/// read-only half of "is this company configured", alongside the company/
+/// harness-default check `resolve_effective` already answers.
+///
+/// Never fails boot: a `store::get_provider` error, a missing provider, or a
+/// disabled one is logged and treated as "not resolving" rather than
+/// propagated — the harness brain still boots (on the echo brain if nothing
+/// else resolves either), and the affected agent's own turns fail closed,
+/// naming it, at `TenantProvider::resolve` time.
+///
+/// Gated on `openhuman`: its only caller is the harness-brain wiring above,
+/// which is itself `openhuman`-only, so without the feature this is dead
+/// code — `agent_pairs` above stays unconditional because its own test
+/// (`agent_pairs_apply_edits_and_skip_acp_agents`) is not feature-gated.
+#[cfg(feature = "openhuman")]
+async fn any_agent_pair_resolves(
+    id: &CompanyId,
+    manifest: &CompanyManifest,
+    overlays: &[OverlayAgent],
+    edits: &[AgentOverride],
+    secrets: &dyn SecretStore,
+) -> bool {
+    for (agent_id, choice) in agent_pairs(manifest, edits, overlays) {
+        match inference::store::get_provider(id, secrets, &choice.provider).await {
+            Ok(Some(row)) if row.enabled => return true,
+            Ok(_) => {
+                tracing::warn!(
+                    company = %id,
+                    agent = %agent_id,
+                    provider = %choice.provider,
+                    "agent pair names a provider this company does not have or has switched \
+                     off; that agent's turns will fail until it is fixed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    company = %id,
+                    agent = %agent_id,
+                    provider = %choice.provider,
+                    %error,
+                    "could not check the agent pair's provider; treating it as unresolved"
+                );
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -9087,6 +9275,262 @@ needs_reason = true
         );
     }
 
+    // ---- agent pin boot check (keys rework, issue #2306, slice 3a) ----
+
+    /// The pure helper: a manifest pair, an overlay pair, an edit that clears
+    /// a manifest agent's pair (`Some("")`), and an `acp`-bound agent that
+    /// must never contribute one however its record reads.
+    #[test]
+    fn agent_pairs_apply_edits_and_skip_acp_agents() {
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "researcher"
+            role = "Researcher"
+            provider = "acme"
+            model = "test-model-large"
+
+            [[agent]]
+            id = "writer"
+            role = "Writer"
+            provider = "acme"
+            model = "test-model-small"
+
+            [[harness]]
+            id = "main"
+            kind = "built_in"
+            default = true
+
+            [[harness]]
+            id = "laptop"
+            kind = "acp"
+
+            [harness.acp]
+            transport = "local"
+            agent = "claude"
+            "#,
+        );
+        let edits = vec![AgentOverride {
+            agent_id: "writer".to_string(),
+            provider: Some(String::new()),
+            model: Some(String::new()),
+            ..Default::default()
+        }];
+        let overlays = vec![OverlayAgent {
+            provider: Some("other-co".to_string()),
+            id: "sam".to_string(),
+            name: "Sam".to_string(),
+            role: "Web search".to_string(),
+            description: None,
+            tools: None,
+            model: Some("test-model-small".to_string()),
+            harness: None,
+        }];
+
+        let pairs = agent_pairs(&manifest, &edits, &overlays);
+        let by_id: std::collections::BTreeMap<_, _> = pairs.into_iter().collect();
+        assert_eq!(
+            by_id.get("researcher").map(|c| c.provider.as_str()),
+            Some("acme"),
+            "the manifest pair, untouched by any edit"
+        );
+        assert!(
+            !by_id.contains_key("writer"),
+            "an edit clearing both halves must drop the pair, not leave a stale one"
+        );
+        assert_eq!(
+            by_id.get("sam").map(|c| c.provider.as_str()),
+            Some("other-co"),
+            "an overlay teammate's own pair"
+        );
+
+        // An agent bound to an acp harness must never contribute a pair, even
+        // if its record somehow carries one (an unvalidated manifest) — only
+        // `researcher` moves to `laptop` here, so its absence below is the
+        // whole assertion; `writer`'s own (untouched) pair still resolves.
+        let mut acp_pair = manifest.clone();
+        acp_pair.agents[0].harness = Some("laptop".to_string());
+        let pairs = agent_pairs(&acp_pair, &[], &[]);
+        assert!(
+            !pairs.iter().any(|(id, _)| id == "researcher"),
+            "an acp-bound agent's pair must never resolve: {pairs:?}"
+        );
+    }
+
+    /// A company whose only inference source is a single agent's pin still
+    /// boots the harness brain, not the offline echo — `resolve_effective`
+    /// alone would answer "unconfigured" here, since there is no company or
+    /// harness default at all.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_company_whose_only_inference_is_a_pin_boots_the_harness_brain() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = tmp_home("oc-3a-pin-boots-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "researcher"
+            role = "Researcher"
+            provider = "acme"
+            model = "test-model-large"
+            "#,
+        );
+
+        // Seeded on the same on-disk secret store `RuntimeBuilder::build`
+        // opens for this `home`/id when none is passed explicitly.
+        let secrets = FsSecretStore::new(home.clone());
+        inference::store::put_provider(
+            &id,
+            &secrets,
+            inference::store::ProviderDraft {
+                slug: "acme".to_string(),
+                label: "Acme".to_string(),
+                kind: "openai_compatible".to_string(),
+                base_url: "http://127.0.0.1:9/v1".to_string(),
+                models: std::collections::BTreeMap::new(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id)
+            .with_harness(Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        assert_ne!(
+            runtime.cognition().path,
+            "echo",
+            "an agent pin is a real inference source, not \"unconfigured\""
+        );
+    }
+
+    /// The mirror, inverted (round-3a review P1-5, X13): a pin naming a
+    /// provider this company never added is a *declared* inference source —
+    /// broken, but declared — and X13 says a company that has said anything
+    /// about inference never boots the echo brain merely because that
+    /// something does not currently work. Before this fix, a pin resolving
+    /// to nothing made every boot-time check answer `false` exactly like an
+    /// unconfigured company, and the affected agent silently got an echo
+    /// reply instead of the fail-closed sentence naming its broken pin. The
+    /// harness brain now boots regardless; `TenantProvider::resolve`'s own
+    /// pin check (P1-1) is what then fails that agent's turns closed, naming
+    /// it.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_pin_naming_a_missing_provider_boots_the_harness_brain_not_echo() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = tmp_home("oc-3a-pin-missing-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "researcher"
+            role = "Researcher"
+            provider = "acme"
+            model = "test-model-large"
+            "#,
+        );
+
+        // No provider seeded this time.
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id)
+            .with_harness(Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        assert_ne!(
+            runtime.cognition().path,
+            "echo",
+            "a declared (even if broken) pair is still a declared inference \
+             source, not \"unconfigured\" — X13"
+        );
+    }
+
+    /// The exact reported sequence (round-3a review P1-5, X13): a company
+    /// with one provider, set as the full company default, has it switched
+    /// off (X14 keeps the default marker unchanged). The **next boot** —
+    /// hosted tenants restart on wake, so this is the normal path — must not
+    /// land on the echo brain just because that default cannot currently
+    /// resolve.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_disabled_full_default_boots_the_harness_brain_not_echo() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = tmp_home("oc-3a-default-off-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "researcher"
+            role = "Researcher"
+            "#,
+        );
+
+        let secrets = FsSecretStore::new(home.clone());
+        inference::store::put_provider(
+            &id,
+            &secrets,
+            inference::store::ProviderDraft {
+                slug: "acme".to_string(),
+                label: "Acme".to_string(),
+                kind: "openai_compatible".to_string(),
+                base_url: "http://127.0.0.1:9/v1".to_string(),
+                models: std::collections::BTreeMap::new(),
+                // Confirmed off, as X14's guard requires before a disable —
+                // the marker below stays untouched by that confirm, exactly
+                // as it would on the real route.
+                enabled: false,
+            },
+        )
+        .await
+        .unwrap();
+        inference::store::set_default_choice(
+            &id,
+            &secrets,
+            &inference::store::ModelChoice {
+                provider: "acme".to_string(),
+                model: "test-model-large".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id)
+            .with_harness(Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        assert_ne!(
+            runtime.cognition().path,
+            "echo",
+            "a stored default naming a switched-off provider is a declared \
+             inference source, not \"unconfigured\" — X13"
+        );
+    }
+
     /// A desk added to `company.toml` since the last boot is wired on this one.
     ///
     /// The persisted record carries the manifest of a PREVIOUS boot, so reusing
@@ -9562,7 +10006,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await
@@ -9689,7 +10133,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await
@@ -9848,7 +10292,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await

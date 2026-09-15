@@ -48,6 +48,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import {
+  agentDisplayName,
   agentEdits,
   agentPairBrokenCopy,
   companyCovers,
@@ -1264,7 +1265,9 @@ export function AgentDetailView({
       >
         <DialogContent className="sm:max-w-md" data-testid="agent-pair-clear-confirm">
           <DialogHeader>
-            <DialogTitle>Clear {agent?.name ?? "this teammate"}&apos;s pair?</DialogTitle>
+            <DialogTitle>
+              Clear {agent ? agentDisplayName(agent) : "this teammate"}&apos;s pair?
+            </DialogTitle>
             <DialogDescription>
               It goes back to using the company default the moment you confirm — pin another
               provider and model any time to change that.
@@ -2176,7 +2179,7 @@ function PairFallbackLine({
   providers: readonly Provider[];
   defaultChoice: DefaultChoice | null | undefined;
 }) {
-  const resolution = resolveAgentDefault(defaultChoice, providers, agent.name ?? agent.role);
+  const resolution = resolveAgentDefault(defaultChoice, providers, agentDisplayName(agent));
   if (resolution.kind === "full") {
     return (
       <span className="text-sm text-muted-foreground" data-testid="agent-pair-default">

@@ -335,14 +335,6 @@ test("an admin pins an agent to a provider and model, then clears it (keys rewor
   const model = page.locator("#agent-model-field-input");
   await expect(model).toHaveValue("e2e-model");
   await model.fill("test-model-large");
-  // `fill` resolving only guarantees the DOM input's own value changed, not
-  // that React has committed `modelDraft` from the `onChange` it dispatched —
-  // a `Save` click that outruns that commit reads the pre-fill draft, and
-  // `pairEdits` then sees no change on either half of the pair and saves
-  // nothing at all (the silent early return in `saveHarnessAndModel`, "no
-  // edits, close the form"). Reading the value back off the controlled input
-  // is a real wait on React's own state, not a fixed delay.
-  await expect(model).toHaveValue("test-model-large");
 
   await page.getByTestId("agent-harness-save").click();
   await expect(page.getByTestId("agent-pair-badge")).toContainText("E2E Pair · test-model-large", {
@@ -358,16 +350,16 @@ test("an admin pins an agent to a provider and model, then clears it (keys rewor
   });
 
   // Clear it: back to the company default, in one request (`provider` and
-  // `model` both `null`). Save does not send that request straight away —
-  // clearing an *existing* pin is gated behind its own confirm dialog
-  // (Round-2 review, P2-5: `saveHarnessAndModel` in `AgentDetailView.tsx`
-  // sets `confirmClearPair` instead of writing, the same way every other
-  // action this rework added got a confirm), so the flow is edit → clear the
-  // draft → Save (opens the dialog, no request yet) → confirm (the request
-  // that actually lands).
+  // `model` both `null`). Clearing an existing pin gates the save behind its
+  // own confirm dialog (round-2 review, P2-5, `saveHarnessAndModel`'s doc in
+  // `AgentDetailView.tsx`) — Save opens `agent-pair-clear-confirm` rather
+  // than persisting immediately, and only the dialog's own submit sends the
+  // request.
   await page.getByTestId("agent-harness-edit").click();
   await page.getByTestId("agent-pair-clear").click();
   await page.getByTestId("agent-harness-save").click();
+  const clearConfirm = page.getByTestId("agent-pair-clear-confirm");
+  await expect(clearConfirm).toBeVisible();
   await page.getByTestId("agent-pair-clear-confirm-submit").click();
   await expect(page.getByTestId("agent-pair-default")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("agent-pair-badge")).toHaveCount(0);

@@ -143,13 +143,31 @@ impl PayloadExtractor {
     /// company's own credential and is metered against it — the reason every
     /// other one-shot pass in this crate is constructed this way rather than
     /// resolving its own.
-    pub fn from_deps(deps: &HarnessDeps, company: &crate::ports::types::CompanyId) -> Self {
+    ///
+    /// `agent_pin` is the calling agent's own `{provider, model}` pin, when
+    /// the manifest names one — the same [`HarnessModel`](crate::harness::provider::HarnessModel)
+    /// [`build_agent_with_model`](crate::harness::build::build_agent_with_model)
+    /// resolved for that agent's primary turn. Round-2 review (comment
+    /// 4012457329, keys rework issue #2306, X12): before this an oversized
+    /// tool result was always extracted through the unpinned company default,
+    /// so a company configured solely through agent pins — no default at all
+    /// — lost extraction outright rather than falling back to the pin that
+    /// was sitting right there. Resolved through
+    /// [`pass_model`](crate::harness::built_in::pass_model): the default is
+    /// still tried first on every call, and the pin is only reached when the
+    /// default's own call fails.
+    pub fn from_deps(
+        deps: &HarnessDeps,
+        company: &crate::ports::types::CompanyId,
+        agent_pin: Option<Arc<dyn crate::harness::provider::HarnessModel>>,
+    ) -> Self {
         let model_name = deps
             .model_override
             .clone()
             .unwrap_or_else(|| model_for_tier(None));
         Self {
-            model: deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>,
+            model: crate::harness::built_in::pass_model(deps, agent_pin)
+                as Arc<dyn tinyinference::model::ChatModel<()>>,
             model_name,
             metering: Some(ExtractionMetering {
                 company: company.clone(),

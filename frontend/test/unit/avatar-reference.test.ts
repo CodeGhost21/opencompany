@@ -1,6 +1,6 @@
 // The avatar reference grammar, and the two rules it exists to keep.
 //
-// The grammar is mirrored in two places — `src/company/avatar.rs` validates it
+// The grammar is mirrored in two places — `crates/opencompany-core/src/company/avatar.rs` validates it
 // and `src/lib/avatar.ts` renders it — so the first test here reads the Rust
 // source and asserts the flavour lists match. A flavour one side accepts and the
 // other has no file for renders as a broken image on every surface at once, and

@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import {
+  copyAccountKeyToComposio,
   getComposioStatus,
   setComposioApiKey,
   setComposioToken,
@@ -11,6 +12,7 @@ import {
   type ComposioMutation,
   type ComposioStatus,
 } from "@/api/composio";
+import { getCompanyCredential } from "@/api/credential";
 import { ApiError } from "@/api/types";
 import {
   advisoryMessage,
@@ -19,13 +21,23 @@ import {
 } from "@/composio/classify";
 import type { ComposioSubmitOutcome } from "@/composio/classify";
 import { ComposioRowList } from "@/composio/ComposioRowList";
-import { confirmInUseFor, guardedOutcome } from "@/composio/in-use";
+import { guardedOutcome } from "@/composio/in-use";
 import { ProbeAdvisory } from "@/composio/ProbeAdvisory";
+// Shared with the LLM page (round-3b review, item 6) — moved out of
+// `@/composio/**`, which held it alone until now.
+import { ReuseAccountKeyBanner } from "@/inference/ReuseAccountKeyBanner";
+import {
+  readDismissed,
+  reuseDismissKey,
+  showsComposioReuseBanner,
+  writeDismissed,
+} from "@/inference/reuse-banner";
 import {
   composioForm,
   composioRows,
   credentialDialogBlurb,
   credentialDialogTitle,
+  managedSourceOf,
   modeOf,
 } from "@/composio/rows";
 import type {
@@ -194,18 +206,34 @@ export function ComposioSection({
   // explicit click with fixed, load-bearing-accessible copy, so `submit`
   // below always sends `confirmInUse: true` for it — see `submit`'s comment.
   //
-  // Each is `undefined` while the dialog is closed, `null` once open with no
-  // host reason yet (the generic question), and a string once a first,
-  // unconfirmed attempt comes back `409 in_use` — the host's own sentence,
-  // shown in place of the generic question so a SECOND click can resend with
-  // `confirmInUse: true` (`@/composio/in-use`, `guardedOutcome` /
-  // `confirmInUseFor`).
+  // Each is `undefined` while the dialog is closed, `null` once open — showing
+  // usage up front when `status.mode` already says this key is in use
+  // (round-3 review, P1-2: re-read on open, see `requestClearManagedToken`/
+  // `requestGiveBackManaged`) — and a string once a first, unconfirmed
+  // attempt comes back `409 in_use` anyway (a stale read) — the host's own
+  // sentence, shown in place of the generic question so a SECOND click can
+  // resend with `confirmInUse: true` (`@/composio/in-use`, `guardedOutcome`).
   const [clearTokenPrompt, setClearTokenPrompt] = useState<
     string | null | undefined
   >(undefined);
   const [giveBackManagedPrompt, setGiveBackManagedPrompt] = useState<
     string | null | undefined
   >(undefined);
+
+  // ── Reuse-the-account-key banner (keys rework, issue #2306, slice 4c) ──
+  //
+  // Whether this company has a TinyHumans account key at all
+  // (`GET …/credential`'s existing `configured`) — read alongside the
+  // Composio status in `refresh` below, best-effort: a failure here must not
+  // affect the section's own load state, only hide the banner.
+  const [accountConfigured, setAccountConfigured] = useState(false);
+  // Whether the operator already said "Not now" for this company. Seeded from
+  // `localStorage` and re-seeded whenever `company` changes, in the same
+  // reset effect that clears every other per-company field below.
+  const [reuseDismissed, setReuseDismissed] = useState(() =>
+    readDismissed(reuseDismissKey("composio", company)),
+  );
+  const [reuseBusy, setReuseBusy] = useState(false);
 
   const requestGeneration = useRef(0);
   // Focus in and back out of the switch confirmation. It is a labelled group
@@ -244,6 +272,17 @@ export function ComposioSection({
       // (issue #1470).
       setLoad(classifyLoadFailure(err));
     }
+    // Best-effort, and deliberately its own try/catch: the reuse banner is a
+    // courtesy, not core status, so a failed read here (or a host predating
+    // `/credential`) must only hide the banner, never the section above.
+    try {
+      const credential = await getCompanyCredential(client, company);
+      if (generation !== requestGeneration.current) return;
+      setAccountConfigured(credential.configured);
+    } catch {
+      if (generation !== requestGeneration.current) return;
+      setAccountConfigured(false);
+    }
   }, [client, company]);
 
   useEffect(() => {
@@ -254,9 +293,11 @@ export function ComposioSection({
     setConfirmSwitch(false);
     setClearTokenPrompt(undefined);
     setGiveBackManagedPrompt(undefined);
+    setAccountConfigured(false);
+    setReuseDismissed(readDismissed(reuseDismissKey("composio", company)));
     setLoad("loading");
     void refresh();
-  }, [refresh]);
+  }, [refresh, company]);
 
   // Opening moves focus onto the confirmation's primary action; cancelling
   // hands it back to the Save button the confirmation replaced.
@@ -280,6 +321,38 @@ export function ComposioSection({
   const rows = composioRows(status);
   const form = composioForm(pending, rows);
   const persistedMode = modeOf(status);
+  const showsReuseBanner = showsComposioReuseBanner({
+    canManage,
+    accountConfigured,
+    mode: status?.mode,
+    managedCredentialSource: managedSourceOf(status),
+    dismissed: reuseDismissed,
+  });
+
+  /** "Yes" on the reuse banner: a single-slot copy, never the full fan-out. */
+  async function reuseAccountKey() {
+    setReuseBusy(true);
+    try {
+      const res = await copyAccountKeyToComposio(client, company);
+      setStatus(res.status);
+      toast.success(res.note);
+      onChanged();
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Could not copy the account key to Composio.",
+      );
+    } finally {
+      setReuseBusy(false);
+    }
+  }
+
+  /** "Not now": remembered per company, so it stays hidden after a reload. */
+  function dismissReuseBanner() {
+    writeDismissed(reuseDismissKey("composio", company));
+    setReuseDismissed(true);
+  }
 
   /**
    * Land a mutation's answer.
@@ -354,26 +427,29 @@ export function ComposioSection({
    * cannot drift between the two dialogs; the decisions themselves live in
    * `@/composio/in-use`, which is what is actually under test.
    *
-   * `prompt` is the dialog's own state at the moment of THIS click —
-   * `undefined`/`null` on a first attempt, the host's sentence on a retry —
-   * and `setPrompt` is how this function reports what the dialog should show
-   * next: `undefined` closes it (the write landed, or failed for an ordinary
-   * reason reported through `reject` instead), a string reopens it.
+   * `confirmInUse` (round-3 review, P1-2) is the caller's own computed value —
+   * true once `status.mode` already said this key is in use (shown in the
+   * dialog before any click), OR once a prior refusal on this same open
+   * dialog already said so — never sent blind. `prompt` is the dialog's own
+   * state at the moment of THIS click — `undefined`/`null` before any
+   * refusal, the host's sentence on a retry — and `setPrompt` is how this
+   * function reports what the dialog should show next: `undefined` closes it
+   * (the write landed, or failed for an ordinary reason reported through
+   * `reject` instead), a string reopens it.
    */
   async function runGuarded(
     call: (confirmInUse: boolean) => Promise<ComposioMutation>,
     fallback: string,
-    prompt: string | null | undefined,
+    confirmInUse: boolean,
     setPrompt: (next: string | null | undefined) => void,
   ) {
     setBusy(true);
     setOutcome(null);
-    const alreadyConfirmed = confirmInUseFor(prompt ?? null);
     try {
-      settle(await call(alreadyConfirmed));
+      settle(await call(confirmInUse));
       setPrompt(undefined);
     } catch (err) {
-      const outcome = guardedOutcome(err, alreadyConfirmed);
+      const outcome = guardedOutcome(err, confirmInUse);
       if (outcome.action === "reopen") {
         setPrompt(outcome.message);
         return;
@@ -385,24 +461,35 @@ export function ComposioSection({
     }
   }
 
-  /** Open the confirm dialog for clearing the token stored for the managed route. */
+  /** Open the confirm dialog for clearing the token stored for the managed route, re-reading status so `status.mode` is fresh (round-3 review, P1-2). */
   function requestClearManagedToken() {
     setClearTokenPrompt(null);
+    void refresh();
   }
 
-  /** Clear the Composio token stored for the managed route, falling back to whatever remains. */
+  /**
+   * Clear the Composio token stored for the managed route, falling back to
+   * whatever remains.
+   *
+   * `composioUsesThisKey` (round-3 review, P1-2): `ComposioStatusDto` cannot
+   * carry a structured `usedBy` (#886), but the host's own guard rule is
+   * exactly `mode == slot` — so this token is in use whenever the persisted
+   * mode currently reads `managed`, and that is on the wire already.
+   */
   function confirmClearManagedToken() {
+    const composioUsesThisKey = status?.mode === "managed";
     void runGuarded(
       (confirmInUse) => setComposioToken(client, company, "", confirmInUse),
       "Could not clear the Composio token.",
-      clearTokenPrompt,
+      clearTokenPrompt !== null && clearTokenPrompt !== undefined ? true : composioUsesThisKey,
       setClearTokenPrompt,
     );
   }
 
-  /** Open the confirm dialog for giving the managed route back. */
+  /** Open the confirm dialog for giving the managed route back, re-reading status so `status.mode` is fresh (round-3 review, P1-2). */
   function requestGiveBackManaged() {
     setGiveBackManagedPrompt(null);
+    void refresh();
   }
 
   /**
@@ -413,13 +500,17 @@ export function ComposioSection({
    * Composio key and the route derived from it in the same write. That is also
    * why the own-account row offers no "Remove key" — it would be this exact
    * call under a second name.
+   *
+   * `composioUsesThisKey`: the byok key this clears is in use exactly when
+   * `status.mode` currently reads `byok` (round-3 review, P1-2).
    */
   function confirmGiveBackManaged() {
+    const composioUsesThisKey = status?.mode === "byok";
     void runGuarded(
       (confirmInUse) =>
         setComposioApiKey(client, company, "", false, confirmInUse),
       "Could not move this company to the TinyHumans-managed route.",
-      giveBackManagedPrompt,
+      giveBackManagedPrompt !== null && giveBackManagedPrompt !== undefined ? true : composioUsesThisKey,
       setGiveBackManagedPrompt,
     );
   }
@@ -597,6 +688,19 @@ export function ComposioSection({
         <SectionUnreachable label="Couldn't read this company's Composio credential" />
       ) : (
         <>
+          {/* Keys rework, issue #2306, slice 4c: offered only once the account
+              key exists, the managed slot has no key of its own, and the
+              operator has not already dismissed it for this company. */}
+          {showsReuseBanner && (
+            <ReuseAccountKeyBanner
+              testId="composio-reuse-account-key-banner"
+              text="Your TinyHumans account is connected. Use the same key for Composio?"
+              busy={reuseBusy}
+              onYes={() => void reuseAccountKey()}
+              onNotNow={dismissReuseBanner}
+            />
+          )}
+
           {/* Fires only on an explicit not-granted, never on an unchecked grant
               (issue #1478): telling an operator to widen a grant that may
               already be set, off a field that was never read, is the same false
@@ -931,7 +1035,10 @@ export function ComposioSection({
                   <AlertDialogTitle>Disconnect Composio?</AlertDialogTitle>
                   <AlertDialogDescription>
                     {clearTokenPrompt ??
-                      "Clears the token stored for the managed route. Agents use whatever credential remains — a company key, the instance identity, or none — from their next turn."}
+                      // Round-3 review, P1-2: named up front whenever
+                      // `status.mode` already says this key is in use — never
+                      // only after a refusal.
+                      `${status?.mode === "managed" ? "Composio uses this key. " : ""}Clears the token stored for the managed route. Agents use whatever credential remains — a company key, the instance identity, or none — from their next turn.`}
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -978,7 +1085,9 @@ export function ComposioSection({
                   </AlertDialogTitle>
                   <AlertDialogDescription>
                     {giveBackManagedPrompt ??
-                      "Clears this company's own Composio API key. Providers connected through that account stay there — connect them again here, or add the key back to switch to it."}
+                      // Round-3 review, P1-2: named up front whenever
+                      // `status.mode` already says this key is in use.
+                      `${status?.mode === "byok" ? "Composio uses this key. " : ""}Clears this company's own Composio API key. Providers connected through that account stay there — connect them again here, or add the key back to switch to it.`}
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>

@@ -755,6 +755,7 @@ impl CompanyManifest {
         }
 
         problems.extend(self.validate_harnesses());
+        problems.extend(self.validate_agent_pairs());
 
         problems.extend(self.validate_users());
 
@@ -1034,17 +1035,54 @@ impl CompanyManifest {
             }
         }
 
-        // Issue #1245's per-agent follow-up: `agent.model` only means anything
-        // on an `acp` harness, exactly like `[harness.acp].model` above — see
-        // `validate_acp_harness`'s own doctrine on why silently accepting it
-        // elsewhere is worse than refusing it. Skipped when the agent names an
-        // unknown harness: the loop above already reports that, and piling a
-        // second, confusing complaint about its model on top would not help.
+        problems
+    }
+
+    /// Validates each agent's `model` (and, on a `built_in` harness, `provider`)
+    /// against the harness it is bound to (keys rework slice 3a, issue #2306).
+    ///
+    /// Deliberately **not** nested inside [`validate_harnesses`](Self::validate_harnesses):
+    /// that function returns early when the manifest declares no `[[harness]]`
+    /// at all (the implicit-`built_in`-default case, which is what every
+    /// shipped company without an explicit block has), and this check must
+    /// still run for that case — [`harness_for`](Self::harness_for) already
+    /// resolves it to the synthesized implicit harness, so calling it directly
+    /// here rather than living downstream of that early return is what makes
+    /// the pair rule apply to the common manifest instead of only to one that
+    /// bothers to declare `[[harness]]`.
+    ///
+    /// - On an `acp` harness: `model` follows the pre-existing per-agent
+    ///   doctrine (issue #1245) unchanged — valid, forwarded to the agent's own
+    ///   session, except on a `runner` transport, which cannot carry it.
+    ///   `provider` is refused outright: an ACP agent brings its own credential.
+    /// - On a `built_in` harness: `provider` and `model` are a pair — both set
+    ///   or neither. Neither means "follow the company default". `provider` is
+    ///   checked for slug shape only (`store::slugify`/`MAX_PROVIDER_NAME_CHARS`);
+    ///   `model` through the shared [`check_model_id`](super::inference::store::check_model_id).
+    ///   Never checked against the company's actual provider list — that list
+    ///   is console data a manifest cannot see, so a slug nothing has yet
+    ///   fails the agent's first turn (F6) rather than at load.
+    fn validate_agent_pairs(&self) -> Vec<String> {
+        use super::inference::store;
+
+        let mut problems = Vec::new();
+
         for agent in &self.agents {
-            let Some(model) = agent.model.as_deref() else {
+            let provider = agent.provider.as_deref();
+            let model = agent.model.as_deref();
+            if provider.is_none() && model.is_none() {
                 continue;
-            };
-            if model.trim().is_empty() {
+            }
+
+            if provider.is_some_and(|p| p.trim().is_empty()) {
+                problems.push(format!(
+                    "agent `{}`'s `provider` is set but empty. Drop the key to use the \
+                     company default provider and model.",
+                    agent.id
+                ));
+                continue;
+            }
+            if model.is_some_and(|m| m.trim().is_empty()) {
                 problems.push(format!(
                     "agent `{}`'s `model` is set but empty. Drop the key to use the harness's \
                      own default, rather than naming an empty one.",
@@ -1052,26 +1090,64 @@ impl CompanyManifest {
                 ));
                 continue;
             }
-            match self.harness_for(&agent.id) {
-                Some(harness) if harness.kind == "acp" => {
-                    if harness.acp.as_ref().map(|a| a.transport.as_str()) == Some("runner") {
-                        problems.push(format!(
-                            "agent `{}` names a `model` but its harness `{}` uses \
-                             `transport = \"runner\"`. Model overrides aren't supported for a \
-                             runner yet — the runner wire protocol doesn't carry them.",
-                            agent.id, harness.id
-                        ));
-                    }
-                }
-                Some(harness) => {
+
+            // Skipped when the agent names an unknown harness: `validate_harnesses`
+            // already reports that (it runs whether or not `[[harness]]` is
+            // declared), and piling a second, confusing complaint about the
+            // pair on top would not help. `harness_for` is total for every
+            // other manifest shape (falls back to the default, or to the
+            // implicit local ACP harness), so `None` here means exactly that.
+            let Some(harness) = self.harness_for(&agent.id) else {
+                continue;
+            };
+
+            if harness.kind == "acp" {
+                if provider.is_some() {
                     problems.push(format!(
-                        "agent `{}` names a `model` but runs on harness `{}` (`kind = \"{}\"`), \
-                         which has no ACP transport to forward it to. Bind this agent to an \
-                         `acp` harness, or drop `model`.",
-                        agent.id, harness.id, harness.kind
+                        "agent `{}` names a `provider` but runs on harness `{}` (`kind = \"acp\"`), \
+                         which brings its own provider. Drop `provider`, or bind a `built_in` harness.",
+                        agent.id, harness.id
                     ));
                 }
-                None => {}
+                if model.is_some()
+                    && harness.acp.as_ref().map(|a| a.transport.as_str()) == Some("runner")
+                {
+                    problems.push(format!(
+                        "agent `{}` names a `model` but its harness `{}` uses \
+                         `transport = \"runner\"`. Model overrides aren't supported for a \
+                         runner yet — the runner wire protocol doesn't carry them.",
+                        agent.id, harness.id
+                    ));
+                }
+                continue;
+            }
+
+            match (provider, model) {
+                (Some(p), Some(m)) => {
+                    if store::slugify(p) != p || p.chars().count() > store::MAX_PROVIDER_NAME_CHARS
+                    {
+                        problems.push(format!(
+                            "agent `{}`'s `provider` `{p}` is not a provider slug: lowercase \
+                             letters, digits and `-`, at most {} characters.",
+                            agent.id,
+                            store::MAX_PROVIDER_NAME_CHARS
+                        ));
+                    }
+                    if let Err(why) = store::check_model_id(m) {
+                        problems.push(format!("agent `{}`'s `model`: {why}", agent.id));
+                    }
+                }
+                (None, Some(_)) => problems.push(format!(
+                    "agent `{}` names a `model` but no `provider`, on harness `{}` \
+                     (`kind = \"{}\"`). Set `provider` too, or bind an `acp` harness.",
+                    agent.id, harness.id, harness.kind
+                )),
+                (Some(_), None) => problems.push(format!(
+                    "agent `{}` names a `provider` but no `model`. Set `model` too, or drop \
+                     `provider` to use the company default.",
+                    agent.id
+                )),
+                (None, None) => unreachable!("both-absent returned above"),
             }
         }
 
@@ -3047,15 +3123,17 @@ provider = "openrouter"
     /// Issue #1245's per-agent follow-up: `agent.model` follows the exact
     /// same doctrine as `[harness.acp].model` — valid on `local`, rejected on
     /// `runner`, rejected when empty — plus one rule the harness-level field
-    /// has no need for: it is meaningless on a `built_in` harness, since
-    /// there is no ACP session to steer a model through.
+    /// has no need for: on a `built_in` harness `model` is now half of the
+    /// keys rework's `{provider, model}` pair (slice 3a), so a bare `model`
+    /// with no `provider` is refused for naming an incomplete pair rather
+    /// than for having nowhere to forward to.
     #[test]
     fn agent_model_follows_the_harness_level_models_own_doctrine() {
         let cases: &[(&str, &str, Option<&str>)] = &[
             (
                 "kind = \"built_in\"\ndefault = true",
                 "model = \"opus-4-5\"",
-                Some("has no ACP transport to forward it to"),
+                Some("names a `model` but no `provider`"),
             ),
             (
                 "kind = \"acp\"\ndefault = true\n\n[harness.acp]\ntransport = \"local\"\nagent = \"claude\"",
@@ -3090,6 +3168,115 @@ provider = "openrouter"
                 ),
             }
         }
+    }
+
+    /// The pair's happy path (keys rework slice 3a): both halves set together
+    /// on a `built_in` harness names no problem about either field.
+    #[test]
+    fn a_built_in_agent_may_pin_provider_and_model_together() {
+        let mut manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\ndefault = true\n"
+        ));
+        manifest.agents[0].provider = Some("anthropic".to_string());
+        manifest.agents[0].model = Some("test-model-large".to_string());
+        let problems = manifest.validate();
+        assert!(
+            !problems
+                .iter()
+                .any(|p| p.contains("provider") || p.contains("model")),
+            "a full pair should be valid: {problems:?}"
+        );
+    }
+
+    /// One half of the pair with no `provider` is refused on a `built_in`
+    /// harness — a model with nothing to serve it is not a config the resolver
+    /// can act on.
+    #[test]
+    fn a_built_in_agent_with_model_but_no_provider_is_refused() {
+        let mut manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\ndefault = true\n"
+        ));
+        manifest.agents[0].model = Some("test-model-large".to_string());
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("names a `model` but no `provider`")),
+            "{problems:?}"
+        );
+    }
+
+    /// The other half missing: a `provider` with no `model` is just as
+    /// incomplete a pair.
+    #[test]
+    fn a_built_in_agent_with_provider_but_no_model_is_refused() {
+        let mut manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\ndefault = true\n"
+        ));
+        manifest.agents[0].provider = Some("anthropic".to_string());
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("names a `provider` but no `model`")),
+            "{problems:?}"
+        );
+    }
+
+    /// An ACP agent brings its own credential — a `provider` naming a
+    /// console-managed one is refused outright, independent of `model`.
+    #[test]
+    fn an_acp_agent_may_not_name_a_provider() {
+        let mut manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"acp\"\ndefault = true\n\n\
+             [harness.acp]\ntransport = \"local\"\nagent = \"claude\"\n"
+        ));
+        manifest.agents[0].provider = Some("anthropic".to_string());
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("which brings its own provider")),
+            "{problems:?}"
+        );
+    }
+
+    /// `provider` is checked for slug shape the same way a console-added
+    /// provider's slug is (`store::slugify`) — a manifest cannot see the
+    /// company's actual provider list, so this is the only check available at
+    /// load time.
+    #[test]
+    fn a_provider_slug_that_is_not_a_slug_is_refused() {
+        let mut manifest = parse(&format!(
+            "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"built_in\"\ndefault = true\n"
+        ));
+        manifest.agents[0].provider = Some("Anthropic API".to_string());
+        manifest.agents[0].model = Some("test-model-large".to_string());
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("is not a provider slug")),
+            "{problems:?}"
+        );
+    }
+
+    /// G2: the pair rule must not go silent on the manifest shape every
+    /// shipped company without an explicit `[[harness]]` block has — the
+    /// implicit `built_in` default. `harness_for` resolves that case to the
+    /// synthesized implicit harness, so the incomplete-pair refusal still
+    /// fires with no `[[harness]]` section anywhere in the manifest.
+    #[test]
+    fn a_pair_on_a_manifest_with_no_harness_section_is_validated() {
+        let mut manifest = parse(BASE);
+        manifest.agents[0].provider = Some("anthropic".to_string());
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("names a `provider` but no `model`")),
+            "the pair rule must run even with no `[[harness]]` declared: {problems:?}"
+        );
     }
 
     #[test]

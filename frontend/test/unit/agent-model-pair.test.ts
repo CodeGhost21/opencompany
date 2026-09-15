@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  agentDisplayName,
   agentPairBrokenCopy,
   companyDefaultLabel,
   pairEdits,
@@ -215,8 +216,31 @@ describe("agentPairBrokenCopy — a pinned pair naming a gone or disabled provid
     );
   });
 
-  it("falls back to 'This teammate' for a manifest agent with no name", () => {
-    const manifest = agent({ name: undefined, provider: "gone", model: "x" });
-    expect(agentPairBrokenCopy(manifest, providers)).toContain("This teammate uses gone");
+  it("names a manifest or global-baseline agent by its role, not a generic 'This teammate' (KR-L2-02)", () => {
+    // Most agents are exactly this shape: no chosen name, named by role —
+    // per AgentDetailDto.name's own doc, "Absent for a manifest teammate,
+    // which is named by its role." The pair-broken banner used to skip
+    // straight past that to a generic fallback, unlike its sibling call
+    // into resolveAgentDefault, which already tried `role` first.
+    const manifest = agent({ name: undefined, role: "Page Builder", provider: "gone", model: "x" });
+    expect(agentPairBrokenCopy(manifest, providers)).toBe(
+      "Page Builder uses gone, which is removed. Choose another provider and model for Page Builder, or clear its model to use the company default.",
+    );
+  });
+});
+
+describe("agentDisplayName (round-2 review, KR-L2-02)", () => {
+  it("prefers the chosen name", () => {
+    expect(agentDisplayName({ name: "Researcher", role: "researcher" })).toBe("Researcher");
+  });
+
+  it("falls back to role when there is no chosen name — most agents", () => {
+    expect(agentDisplayName({ name: undefined, role: "Page Builder" })).toBe("Page Builder");
+  });
+
+  it("falls back to a generic label only in the pathological case of neither", () => {
+    expect(agentDisplayName({ name: undefined, role: undefined as unknown as string })).toBe(
+      "This teammate",
+    );
   });
 });

@@ -172,7 +172,7 @@ pub(crate) async fn resolve(
     let may_read_cost = crate::server::approval_visibility::may_read_approval_contents(auth);
     let range: UsageRange = range.into();
     let now = now_millis();
-    let since = now.saturating_sub(range.days().saturating_mul(super::MILLIS_PER_DAY));
+    let since = now.saturating_sub(range.days().saturating_mul(crate::ports::MILLIS_PER_DAY));
     let samples = runtime.usage().query(runtime.id(), since).await?;
 
     let record = runtime.store().load(runtime.id()).await?;

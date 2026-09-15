@@ -71,6 +71,13 @@ async fn state_with_manifest(
     let state = AppState::new(AppConfig::default());
     state.registry().insert(id, std::sync::Arc::new(runtime));
     crate::server::test_support::seed_fixed_admin(&state, company).await;
+    // Keys rework (#2306), slice 4a: `PUT …/credential` fans the account key
+    // out to the LLM TinyHumans slot and probes it before any row or default
+    // write (Q6). Forcing this here — rather than per test — is what keeps
+    // every test in this file from dialing `api.tinyhumans.ai`; a test that
+    // wants a different answer (a rejection, an endpoint failure) overrides
+    // it again after this call.
+    super::prober_override::set(company, Ok(vec!["acme/test-model".to_string()]));
     state
 }
 
@@ -178,26 +185,24 @@ async fn the_key_round_trips_write_only_and_reports_the_company_tier() {
         "the notice must say which key this is NOT: {notice}"
     );
 
-    // The billing consequence, stated before the save rather than discovered on
+    // The fan-out consequence, stated before the save rather than discovered on
     // the next invoice — and stated *conditionally*, because it is conditional
     // twice. This same notice comes back from the paste route and the grant
-    // route, and they do different amounts: a paste writes `tinyhumans/key` and
-    // stops, while `finish_link` also declares the `managed` provider. And the
-    // managed chain has two rungs above this key (a key pasted for TinyHumans
-    // on the LLM page, then the legacy `inference/key`), either of which goes
-    // on answering after this one is set — #2266. A flat "this moves every
-    // agent turn onto the account" would be false on both counts.
+    // route, and they do different amounts: a paste fans the key out to
+    // Composio and the LLM TinyHumans slot and stops there, while `finish_link`
+    // runs the same fan-out and declares no provider of its own (Q10). And the
+    // managed chain has two rungs above the copy this fan-out makes (a key
+    // pasted for TinyHumans on the LLM page directly, then the legacy
+    // `inference/key`), either of which goes on answering after this one is
+    // set — #2266. A flat "this moves every agent turn onto the account" would
+    // be false on both counts.
     assert!(
-        notice.contains("resolve through this same key"),
-        "the notice must say how the thinking reaches this account: {notice}"
+        notice.contains("no key of their own"),
+        "the notice must say the copy never overwrites a key set on its own page: {notice}"
     );
     assert!(
-        notice.contains("outranks it"),
-        "the notice must not promise a move a higher rung would prevent: {notice}"
-    );
-    assert!(
-        notice.contains("leaves the choice of provider alone"),
-        "the notice must not let a paste be read as choosing the provider: {notice}"
+        notice.contains("only when no default is set"),
+        "the notice must not promise a default move a higher rung would prevent: {notice}"
     );
 
     // And it must not overshoot the other way. "It is not the model-provider
@@ -217,10 +222,12 @@ async fn the_key_round_trips_write_only_and_reports_the_company_tier() {
 }
 
 /// Acceptance: a company with its key set can connect a provider without any
-/// per-tenant provider app — the Composio plane must see the company's own
-/// identity, with no Composio token pasted anywhere.
+/// per-tenant provider app — the fan-out (keys rework #2306, slice 4a) copies
+/// the account key straight into `composio/tinyhumans/key`, so the Composio
+/// plane reports the stored-token tier rather than falling through to the
+/// shared brokered-credential seam.
 #[tokio::test]
-async fn setting_the_key_credentials_composio_with_no_composio_token() {
+async fn setting_the_key_fills_the_composio_tinyhumans_key() {
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), "brokered", GRANTED).await;
 
@@ -238,9 +245,11 @@ async fn setting_the_key_credentials_composio_with_no_composio_token() {
     .await;
 
     // The company key alone credentials Composio. This is the issue in one
-    // assertion: no `composio/tinyhumans/key`, no provider app, still connectable.
+    // assertion: no Composio token pasted anywhere, no provider app, still
+    // connectable — via the fan-out's own copy, which reads back as the
+    // stored-token tier (`static`), not the fallback tier (`company`).
     let (_, dto, raw) = send(&state, "brokered", "GET", "/api/v1/company/composio", None).await;
-    assert_eq!(dto["credentialSource"], "company", "{raw}");
+    assert_eq!(dto["credentialSource"], "static", "{raw}");
     assert!(
         !raw.contains(KEY),
         "the Composio status leaked the key: {raw}"
@@ -249,6 +258,14 @@ async fn setting_the_key_credentials_composio_with_no_composio_token() {
 
 /// Acceptance: clearing is real, and reverts to the honest degraded state
 /// rather than stranding the console on a stale "connected" claim.
+///
+/// The first `PUT` fans the key out to `composio/tinyhumans/key`, so the
+/// clear below is exactly what the in-use guard exists for (its Composio copy
+/// still equals the account key) — hence `confirmInUse: true`. Phase-4a's own
+/// plan predates that guard and called this test "unchanged"; applying
+/// `docs/key-reworks/in-use-guards.md` on top is this dispatch's added scope,
+/// and this is the one place it changes what an already-passing test has to
+/// send.
 #[tokio::test]
 async fn clearing_the_key_reverts_to_the_degraded_state() {
     let home_dir = home();
@@ -267,7 +284,7 @@ async fn clearing_the_key_reverts_to_the_degraded_state() {
         "cleared",
         "PUT",
         "/api/v1/company/credential",
-        Some(json!({ "key": "" })),
+        Some(json!({ "key": "", "confirmInUse": true })),
     )
     .await;
     assert_eq!(resp["status"]["configured"], false);
@@ -428,7 +445,9 @@ async fn setting_and_clearing_are_journaled_with_an_actor() {
         "audited",
         "PUT",
         "/api/v1/company/credential",
-        Some(json!({ "key": "" })),
+        // The first PUT already fanned the key out to Composio, so this clear
+        // is guarded (its Composio copy still equals the account key).
+        Some(json!({ "key": "", "confirmInUse": true })),
     )
     .await;
 
@@ -577,6 +596,7 @@ async fn state_with_failing_journal(
     let state = AppState::new(AppConfig::default());
     state.registry().insert(id, std::sync::Arc::new(runtime));
     crate::server::test_support::seed_fixed_admin(&state, company).await;
+    super::prober_override::set(company, Ok(vec!["acme/test-model".to_string()]));
     (state, journal)
 }
 
@@ -632,6 +652,896 @@ async fn a_journal_failure_after_the_key_is_stored_still_leaves_the_key_stored()
         "the key was stored before the journal ever ran, so it stays stored even though the \
          caller was told the request failed: {status_body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The account-key fan-out (keys rework #2306, slice 4a) and its in-use guard.
+// ---------------------------------------------------------------------------
+
+/// One slot's `outcome` field, looked up by slot name rather than by
+/// position — `company_key::fan_out` promises the order, but a test should
+/// not have to remember it to read one entry.
+fn slot_outcome<'a>(resp: &'a Value, slot: &str) -> &'a Value {
+    let entry = resp["slots"]
+        .as_array()
+        .expect("slots array")
+        .iter()
+        .find(|s| s["slot"] == slot)
+        .unwrap_or_else(|| panic!("no {slot} slot in {resp}"));
+    &entry["outcome"]
+}
+
+/// M1 by route: a bare key save on an empty company fills Composio and the
+/// LLM copy, cannot create a row or a default for want of a model, and says
+/// so — the exact JSON shape `phase-4a-account-key-fanout.md` §3.3 quotes.
+#[tokio::test]
+async fn put_credential_answers_slots_and_needs_model() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanm1", GRANTED).await;
+
+    let (status, resp, raw) = send(
+        &state,
+        "fanm1",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    assert_eq!(*slot_outcome(&resp, "composio"), json!("filled"));
+    assert_eq!(*slot_outcome(&resp, "inference"), json!("filled"));
+    assert_eq!(*slot_outcome(&resp, "provider"), json!("skipped"));
+    assert_eq!(*slot_outcome(&resp, "default"), json!("skipped"));
+    assert_eq!(*slot_outcome(&resp, "health"), json!("ok"));
+    assert_eq!(resp["needsModel"], true);
+    assert_eq!(resp["setsDefault"], true);
+    assert!(
+        resp["models"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("acme/test-model")),
+        "{resp}"
+    );
+
+    let (_, inference, raw) = send(&state, "fanm1", "GET", "/api/v1/company/inference", None).await;
+    assert!(
+        inference["providers"].as_array().unwrap().is_empty(),
+        "no row without a model: {raw}"
+    );
+}
+
+/// M2 by route: sending a model with the same save adds the row and, since
+/// none was set, the default.
+#[tokio::test]
+async fn put_credential_with_a_model_adds_the_row_and_default() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanm2", GRANTED).await;
+
+    let (status, resp, raw) = send(
+        &state,
+        "fanm2",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY, "model": "acme/test-model" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(*slot_outcome(&resp, "provider"), json!("filled"));
+    assert_eq!(*slot_outcome(&resp, "default"), json!("filled"));
+    assert_eq!(resp["needsModel"], false);
+
+    let (_, inference, raw) = send(&state, "fanm2", "GET", "/api/v1/company/inference", None).await;
+    let providers = inference["providers"].as_array().unwrap();
+    let row = providers
+        .iter()
+        .find(|p| p["slug"] == "tinyhumans")
+        .unwrap_or_else(|| panic!("no tinyhumans row: {raw}"));
+    assert_eq!(row["origin"], "indexed");
+    assert_eq!(inference["defaultChoice"]["provider"], "tinyhumans");
+    assert_eq!(inference["defaultChoice"]["model"], "acme/test-model");
+}
+
+/// Q6: a probe classified `auth` rolls the LLM copy back and never touches
+/// the account key or the Composio copy.
+#[tokio::test]
+async fn put_credential_auth_probe_rolls_back_the_llm_copy() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanauth", GRANTED).await;
+    super::prober_override::set(
+        "fanauth",
+        Err(crate::company::inference::probe::ProbeClass::Auth),
+    );
+
+    let (status, resp, raw) = send(
+        &state,
+        "fanauth",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(*slot_outcome(&resp, "inference"), json!("rolledBack"));
+    assert_eq!(
+        *slot_outcome(&resp, "composio"),
+        json!("filled"),
+        "the Composio copy is kept even though the LLM copy is not"
+    );
+    assert_eq!(resp["needsModel"], false);
+    assert_eq!(
+        resp["status"]["configured"], true,
+        "the account key itself is kept"
+    );
+
+    let (_, composio, _) = send(&state, "fanauth", "GET", "/api/v1/company/composio", None).await;
+    assert_eq!(composio["credentialSource"], "static");
+}
+
+/// The key never appears anywhere on the wire — not in the mutation response,
+/// not in either status read it feeds.
+#[tokio::test]
+async fn put_credential_never_echoes_the_key() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanleak", GRANTED).await;
+
+    let (_, _, raw) = send(
+        &state,
+        "fanleak",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY, "model": "acme/test-model" })),
+    )
+    .await;
+    assert!(!raw.contains(KEY), "{raw}");
+
+    let (_, _, raw) = send(&state, "fanleak", "GET", "/api/v1/company/inference", None).await;
+    assert!(!raw.contains(KEY), "{raw}");
+    let (_, _, raw) = send(&state, "fanleak", "GET", "/api/v1/company/composio", None).await;
+    assert!(!raw.contains(KEY), "{raw}");
+}
+
+/// §3.5: one journal line per slot that actually changed, never for the
+/// health slot.
+#[tokio::test]
+async fn put_credential_journals_one_line_per_changed_slot() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanjournal", GRANTED).await;
+    send(
+        &state,
+        "fanjournal",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY, "model": "acme/test-model" })),
+    )
+    .await;
+
+    let id = CompanyId::new("fanjournal");
+    let runtime = state.registry().get(&id).expect("registered");
+    let events = runtime
+        .events()
+        .read_from(&id, crate::ports::types::EventSeq::new(0), 200)
+        .await
+        .expect("events");
+    let changes: Vec<String> = events
+        .iter()
+        .filter_map(|stored| match &stored.event {
+            CompanyEvent::ToolAccessChanged { change, .. } => Some(change.clone()),
+            _ => None,
+        })
+        .collect();
+    for expected in [
+        "company_key_set",
+        "company_key_composio_filled",
+        "company_key_inference_filled",
+        "company_key_provider_filled",
+        "company_key_default_filled",
+    ] {
+        assert!(
+            changes.contains(&expected.to_string()),
+            "missing {expected}: {changes:?}"
+        );
+    }
+    assert!(
+        !changes.iter().any(|c| c.contains("health")),
+        "the health slot never journals: {changes:?}"
+    );
+}
+
+/// The grant runs the same fan-out and, per Q10, declares no provider of its
+/// own: no entry zero appears, and `managed.source` reads as a plain
+/// provider-key credential rather than a declared runtime config.
+#[tokio::test]
+async fn finish_link_runs_the_fan_out_and_writes_no_inference_config() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "fanlink").await;
+
+    let (_, resp, _) = send(
+        &state,
+        "fanlink",
+        "POST",
+        "/api/v1/company/credential/link/start",
+        Some(json!({})),
+    )
+    .await;
+    let url = resp["authorizeUrl"].as_str().unwrap().to_string();
+    let state_value = state_param(&url);
+    let verifier = state
+        .hub_links()
+        .peek_verifier(&state_value)
+        .expect("the start parked a pending link");
+    let state = state.with_hub_identity(std::sync::Arc::new(
+        crate::server::hub_identity::MockHubIdentityExchange::new().with_grant(
+            "grant-code",
+            &verifier,
+            GRANTED_KEY,
+        ),
+    ));
+
+    let (status, _, raw) = send(
+        &state,
+        "fanlink",
+        "POST",
+        "/api/v1/company/credential/link/finish",
+        Some(json!({ "state": state_value, "code": "grant-code" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (_, inference, raw) =
+        send(&state, "fanlink", "GET", "/api/v1/company/inference", None).await;
+    assert!(
+        !inference["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["origin"] == "entryZero"),
+        "a grant declares no provider of its own: {raw}"
+    );
+    assert_eq!(inference["managed"]["source"], "provider_key", "{raw}");
+}
+
+/// The in-use guard (new scope beyond phase-4a, from
+/// `docs/key-reworks/in-use-guards.md`): clearing the account key while it
+/// backs a `tinyhumans` row and resolves both the LLM and Composio slots is
+/// refused without confirmation, naming both surfaces.
+#[tokio::test]
+async fn clearing_the_account_key_when_it_backs_the_llm_row_is_refused_without_confirmation() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanguard", GRANTED).await;
+    send(
+        &state,
+        "fanguard",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY, "model": "acme/test-model" })),
+    )
+    .await;
+
+    let (status, body, raw) = send(
+        &state,
+        "fanguard",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["code"], "in_use", "{body}");
+    let surfaces: Vec<&str> = body["usedBy"]["surfaces"]
+        .as_array()
+        .expect("surfaces")
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(surfaces.contains(&"llm"), "{body}");
+    assert!(surfaces.contains(&"composio"), "{body}");
+
+    // Refused, so nothing changed.
+    let (_, dto, _) = send(
+        &state,
+        "fanguard",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(
+        dto["configured"], true,
+        "a refused clear must not have stored anything"
+    );
+}
+
+/// The same clear, confirmed: proceeds exactly as §6's C1 describes (the row
+/// and the default survive; only the key copies clear) and echoes the
+/// `usedBy` it would have refused with.
+#[tokio::test]
+async fn a_confirmed_clear_of_the_account_key_proceeds_and_echoes_used_by() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanconfirm", GRANTED).await;
+    send(
+        &state,
+        "fanconfirm",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY, "model": "acme/test-model" })),
+    )
+    .await;
+
+    let (status, resp, raw) = send(
+        &state,
+        "fanconfirm",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "", "confirmInUse": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    let surfaces: Vec<&str> = resp["usedBy"]["surfaces"]
+        .as_array()
+        .expect("usedBy echoed on a confirmed clear")
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(surfaces.contains(&"llm"), "{resp}");
+    assert!(surfaces.contains(&"composio"), "{resp}");
+
+    assert_eq!(*slot_outcome(&resp, "composio"), json!("cleared"));
+    assert_eq!(*slot_outcome(&resp, "inference"), json!("cleared"));
+    assert_eq!(*slot_outcome(&resp, "provider"), json!("skipped"));
+    assert_eq!(*slot_outcome(&resp, "default"), json!("skipped"));
+
+    let (_, inference, raw) = send(
+        &state,
+        "fanconfirm",
+        "GET",
+        "/api/v1/company/inference",
+        None,
+    )
+    .await;
+    assert!(
+        inference["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["slug"] == "tinyhumans"),
+        "the row stays: {raw}"
+    );
+    assert_eq!(
+        inference["defaultChoice"]["provider"], "tinyhumans",
+        "the default stays: {raw}"
+    );
+}
+
+/// Custom keys everywhere (matrix shape M6/C2): the account key's clear
+/// touches nothing either derived slot still resolves through, so it needs no
+/// confirmation and echoes no `usedBy` at all.
+#[tokio::test]
+async fn clearing_when_nothing_depends_on_it_needs_no_confirmation() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanclean", GRANTED).await;
+    send(
+        &state,
+        "fanclean",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    // A custom key pasted directly on both the Composio and LLM pages, which
+    // the fan-out never overwrites (Q7) and which the guard must not treat as
+    // still depending on the account key.
+    send(
+        &state,
+        "fanclean",
+        "PUT",
+        "/api/v1/company/composio/token",
+        Some(json!({ "token": "custom-composio-token" })),
+    )
+    .await;
+    send(
+        &state,
+        "fanclean",
+        "PUT",
+        "/api/v1/company/inference/managed/key",
+        Some(json!({ "key": "custom-llm-key" })),
+    )
+    .await;
+
+    let (status, resp, raw) = send(
+        &state,
+        "fanclean",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert!(
+        resp.get("usedBy").is_none(),
+        "nothing depends on the account key any more: {resp}"
+    );
+    assert_eq!(*slot_outcome(&resp, "composio"), json!("kept"));
+    assert_eq!(*slot_outcome(&resp, "inference"), json!("kept"));
+}
+
+/// KR-L3-01: `GET …/credential` carries the same `usedBy` a clear would be
+/// refused with, computed the moment the page loads rather than only after a
+/// stale-UI 409 — the Remove-key dialog's first-open text.
+#[tokio::test]
+async fn status_reports_used_by_when_a_clear_would_strand_dependents() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "statususedby", GRANTED).await;
+    send(
+        &state,
+        "statususedby",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY, "model": "acme/test-model" })),
+    )
+    .await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "statususedby",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    let surfaces: Vec<&str> = dto["usedBy"]["surfaces"]
+        .as_array()
+        .expect("usedBy on the status DTO")
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(surfaces.contains(&"llm"), "{raw}");
+    assert!(surfaces.contains(&"composio"), "{raw}");
+}
+
+/// The other half: nothing set, or nothing left depending on the account key
+/// (matrix M6/C2's shape) — `usedBy` is absent, never an empty object, so a
+/// plain `"usedBy" in dto` check on the console reads false.
+#[tokio::test]
+async fn status_reports_no_used_by_when_nothing_depends_on_it() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "statusnousedby", GRANTED).await;
+
+    let (_, empty_dto, raw) = send(
+        &state,
+        "statusnousedby",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert!(empty_dto.get("usedBy").is_none(), "no key set yet: {raw}");
+
+    send(
+        &state,
+        "statusnousedby",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    send(
+        &state,
+        "statusnousedby",
+        "PUT",
+        "/api/v1/company/composio/token",
+        Some(json!({ "token": "custom-composio-token" })),
+    )
+    .await;
+    send(
+        &state,
+        "statusnousedby",
+        "PUT",
+        "/api/v1/company/inference/managed/key",
+        Some(json!({ "key": "custom-llm-key" })),
+    )
+    .await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "statusnousedby",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert!(
+        dto.get("usedBy").is_none(),
+        "both slots hold their own key, not the account key's copy: {raw}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P1-1 (keys rework #2306, KR-L3-01 review): the composio/mode gate and the
+// legacy managed entry-zero decision, pinned by dedicated tests.
+// ---------------------------------------------------------------------------
+
+/// P1-1 (a): BYOK mode with an account key equal to the Composio copy — no
+/// row exists either, so nothing at all could be stranded, and clearing needs
+/// no confirmation. This isolates the composio/mode gate specifically:
+/// `composio/tinyhumans/key` still equals the account key (`decide_copy`
+/// would `Clear` it), but a company on `byok` has nothing live resolving
+/// through that slot (`in-use-guards.md` §2's `"composio"` row).
+#[tokio::test]
+async fn p1_1_byok_mode_with_a_matching_composio_copy_needs_no_confirmation() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "p11byok", GRANTED).await;
+    let id = CompanyId::new("p11byok");
+    // No model: no `tinyhumans` row is created, so nothing can make "llm"
+    // appear either.
+    send(
+        &state,
+        "p11byok",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    // Switch Composio to BYOK directly at the store, bypassing
+    // `PUT …/composio/api-key` and the real network probe it would run in
+    // this feature build — this test is about the mode gate, not the probe.
+    // `composio/tinyhumans/key` is untouched by this — it still holds the
+    // fan-out's own copy of the account key.
+    let runtime = state.registry().get(&id).expect("registered");
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::composio::MODE_KEY,
+            crate::ports::types::SecretValue("byok".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (status, resp, raw) = send(
+        &state,
+        "p11byok",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert!(
+        resp.get("usedBy").is_none(),
+        "byok has nothing live resolving through composio/tinyhumans/key: {resp}"
+    );
+}
+
+/// P1-1 (b): the mirror image of (a) — managed mode (the default), same
+/// matching Composio copy, same absence of a row. Refused with `409`,
+/// naming `"composio"` and nothing else.
+#[tokio::test]
+async fn p1_1_managed_mode_with_a_matching_composio_copy_is_refused() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "p11managed", GRANTED).await;
+    send(
+        &state,
+        "p11managed",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+
+    let (status, body, raw) = send(
+        &state,
+        "p11managed",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["code"], "in_use", "{body}");
+    let surfaces: Vec<&str> = body["usedBy"]["surfaces"]
+        .as_array()
+        .expect("surfaces")
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(surfaces, vec!["composio"], "{body}");
+}
+
+/// P1-1 (c): a company still on the legacy managed entry zero — no indexed
+/// `tinyhumans` row at all, but `inference/config` already names
+/// `tinyhumans` — counts as `"llm"` in use too (the KR-L3-01 review decision
+/// recorded in `docs/key-reworks/in-use-guards.md` §2's `"llm"` row).
+/// `row_exists` alone only ever sees indexed rows; this pins that the
+/// entry-zero path is deliberately counted as well, with an explicit
+/// assertion rather than leaving the decision undertested.
+#[tokio::test]
+async fn p1_1_legacy_managed_entry_zero_counts_as_llm_in_use() {
+    use crate::company::inference::RuntimeInference;
+
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "p11entryzero", GRANTED).await;
+    let id = CompanyId::new("p11entryzero");
+    let runtime = state.registry().get(&id).expect("registered");
+
+    // The account key, and the SAME value at the legacy flat slot
+    // `inference/key` — the address `load_managed_key`'s own entry-zero
+    // fallback reads, so the guard's `decide_copy` sees a copy that still
+    // equals the account key.
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::company_key::KEY_KEY,
+            crate::ports::types::SecretValue(KEY.to_string()),
+        )
+        .await
+        .unwrap();
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::inference::KEY_KEY,
+            crate::ports::types::SecretValue(KEY.to_string()),
+        )
+        .await
+        .unwrap();
+    crate::company::inference::save_runtime_config(
+        &id,
+        runtime.secrets().as_ref(),
+        &RuntimeInference {
+            provider: crate::company::inference::MANAGED_SLUG.to_string(),
+            base_url: None,
+            models: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let (status, body, raw) = send(
+        &state,
+        "p11entryzero",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["code"], "in_use", "{body}");
+    let surfaces: Vec<&str> = body["usedBy"]["surfaces"]
+        .as_array()
+        .expect("surfaces")
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(
+        surfaces.contains(&"llm"),
+        "entry-zero legacy managed config counts as llm in use: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `slot_facts` — the account-key dialog's own-key booleans (keys rework
+// #2306, slice 4b). See `docs/key-reworks/phase-4b-account-dialog.md` §3.1/§6.
+// ---------------------------------------------------------------------------
+
+/// A fresh company reports no own keys anywhere and no default — the
+/// dialog's starting state, where saving would fill both derived slots.
+#[tokio::test]
+async fn status_reports_no_own_keys_on_an_empty_company() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factsempty", GRANTED).await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "factsempty",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(dto["inferenceHasOwnKey"], false, "{raw}");
+    assert_eq!(dto["composioHasOwnKey"], false, "{raw}");
+    assert_eq!(dto["defaultSet"], false, "{raw}");
+}
+
+/// A copy that merely equals the account key is not "its own" — Q7's whole
+/// point is that such a copy is filled again on the next rotation.
+#[tokio::test]
+async fn a_copy_equal_to_the_account_key_is_not_an_own_key() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factscopy", GRANTED).await;
+    send(
+        &state,
+        "factscopy",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "factscopy",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(
+        dto["inferenceHasOwnKey"], false,
+        "the fan-out's own copy is not an own key: {raw}"
+    );
+    assert_eq!(
+        dto["composioHasOwnKey"], false,
+        "the fan-out's own copy is not an own key: {raw}"
+    );
+}
+
+/// A key pasted directly on the LLM page is that slot's own key, and the
+/// dialog must be able to tell.
+#[tokio::test]
+async fn a_key_set_on_the_llm_page_is_an_own_key() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factsllm", GRANTED).await;
+    send(
+        &state,
+        "factsllm",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    send(
+        &state,
+        "factsllm",
+        "PUT",
+        "/api/v1/company/inference/managed/key",
+        Some(json!({ "key": "th-not-a-real-key-custom" })),
+    )
+    .await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "factsllm",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(dto["inferenceHasOwnKey"], true, "{raw}");
+}
+
+/// A legacy `composio/token` (the pre-1a address, never mirrored to the new
+/// one) still counts as the Composio slot's own key —
+/// `load_tinyhumans_key`'s own fallback read. The account key is written
+/// **raw** here, not through `PUT …/credential`: that route's own fan-out
+/// would fill the new `composio/tinyhumans/key` address and this test needs
+/// it to stay empty, exactly the M14 shape (a company whose Composio
+/// credential was only ever read through the legacy address).
+#[tokio::test]
+async fn a_legacy_composio_token_counts_as_the_composio_slot() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factslegacy", GRANTED).await;
+
+    let id = CompanyId::new("factslegacy");
+    let runtime = state.registry().get(&id).expect("registered");
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::company_key::KEY_KEY,
+            crate::ports::types::SecretValue(KEY.to_string()),
+        )
+        .await
+        .unwrap();
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::composio::LEGACY_TOKEN_KEY,
+            crate::ports::types::SecretValue("th-not-a-real-key-custom".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (_, dto, raw) = send(
+        &state,
+        "factslegacy",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(dto["composioHasOwnKey"], true, "{raw}");
+}
+
+/// A bare provider slug (Q1: "provider chosen, model not chosen") still
+/// counts as a set default — never overwritten, and the dialog must not
+/// promise a default move that would not happen.
+#[tokio::test]
+async fn default_set_is_true_for_a_bare_slug() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factsdefault", GRANTED).await;
+
+    let id = CompanyId::new("factsdefault");
+    let runtime = state.registry().get(&id).expect("registered");
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::inference::store::DEFAULT_PROVIDER_KEY,
+            crate::ports::types::SecretValue("openrouter".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (_, dto, raw) = send(
+        &state,
+        "factsdefault",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(dto["defaultSet"], true, "{raw}");
+}
+
+/// None of the three new booleans ever needs to echo a value to compute —
+/// the status body carries neither fake key, whatever is set on either slot.
+#[tokio::test]
+async fn status_never_carries_a_key_when_reporting_own_key_facts() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factsleak", GRANTED).await;
+    send(
+        &state,
+        "factsleak",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    send(
+        &state,
+        "factsleak",
+        "PUT",
+        "/api/v1/company/inference/managed/key",
+        Some(json!({ "key": "th-not-a-real-key-custom" })),
+    )
+    .await;
+    let id = CompanyId::new("factsleak");
+    let runtime = state.registry().get(&id).expect("registered");
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::composio::LEGACY_TOKEN_KEY,
+            crate::ports::types::SecretValue("th-not-a-real-key-custom".to_string()),
+        )
+        .await
+        .unwrap();
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::inference::store::DEFAULT_PROVIDER_KEY,
+            crate::ports::types::SecretValue("openrouter".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (_, _, raw) = send(
+        &state,
+        "factsleak",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert!(!raw.contains(KEY), "{raw}");
+    assert!(!raw.contains("th-not-a-real-key-custom"), "{raw}");
 }
 
 // ---------------------------------------------------------------------------
@@ -740,8 +1650,12 @@ async fn starting_a_link_sends_the_console_to_the_hub_with_a_challenge_not_a_sec
     assert!(url.contains(&crate::server::hub_link::challenge_for(&link.verifier)));
 }
 
+/// The grant runs the same fan-out `PUT …/credential` does, and — per Q10 —
+/// declares no provider of its own: `finish_link_runs_the_fan_out_and_writes_no_inference_config`
+/// pins the "no entry zero, no `inference/config`" half of that; this test
+/// keeps the acceptance shape (one grant, no key echoed, single-use).
 #[tokio::test]
-async fn finishing_a_link_stores_the_minted_key_as_both_the_company_and_inference_credential() {
+async fn finishing_a_link_copies_the_minted_key_without_declaring_a_provider() {
     let home_dir = home();
     let state = state_with_hub(home_dir.path(), "acme").await;
 
@@ -782,19 +1696,14 @@ async fn finishing_a_link_stores_the_minted_key_as_both_the_company_and_inferenc
     .await;
     assert_eq!(status, StatusCode::OK, "{raw}");
 
-    // One grant, both credentials. An admin who had to run this twice — once
-    // for Connections, once for Inference — would be back to two errands.
+    // One grant, and the agents already think through it by resolution
+    // (`resolve_effective` reads the account key for a managed provider) — no
+    // second declaration needed for Connections to report the identity.
     assert_eq!(resp["status"]["configured"], true);
     assert_eq!(resp["status"]["source"], "company");
     assert!(
         !raw.contains(GRANTED_KEY),
         "the minted key must never be echoed to the console: {raw}"
-    );
-
-    let (_, inference, raw) = send(&state, "acme", "GET", "/api/v1/company/inference", None).await;
-    assert_eq!(
-        inference["keyConfigured"], true,
-        "the same grant must arm inference: {raw}"
     );
 
     // Single-use: the same handle and code cannot be spent again.
@@ -953,6 +1862,81 @@ async fn a_member_can_read_billing_without_admin_rights() {
     .await;
     assert_eq!(status, StatusCode::OK, "{raw}");
     assert_eq!(dto["configured"], false, "{raw}");
+}
+
+// ---------------------------------------------------------------------------
+// KR-ACCT-01 (2026-09-15): the wire spellings `frontend/src/api/credential.ts`
+// reads — `CompanyCredentialMutation.restartRequired` and
+// `CompanyCredentialStatus.inferenceHasModel` — pinned directly against the
+// DTOs' own `Serialize` impl, independent of any route or runtime.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn restart_required_serializes_camel_case_and_is_omitted_when_false() {
+    let mut response = super::MutationResponse {
+        status: minimal_status(),
+        note: "note".to_string(),
+        slots: Vec::new(),
+        needs_model: false,
+        sets_default: false,
+        models: Vec::new(),
+        used_by: None,
+        restart_required: true,
+    };
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        json["restartRequired"],
+        Value::Bool(true),
+        "must match frontend/src/api/credential.ts's CompanyCredentialMutation.restartRequired: {json}"
+    );
+
+    // Never serialized as `false` — the console reads an absent field as "did
+    // not say" and a present `false` would be a second, contradictory way to
+    // say the same thing.
+    response.restart_required = false;
+    let json = serde_json::to_value(&response).unwrap();
+    assert!(
+        !json.as_object().unwrap().contains_key("restartRequired"),
+        "restartRequired must be omitted rather than sent as false: {json}"
+    );
+}
+
+#[test]
+fn inference_has_model_serializes_camel_case() {
+    let mut status = minimal_status();
+    status.inference_has_model = true;
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        json["inferenceHasModel"],
+        Value::Bool(true),
+        "must match frontend/src/api/credential.ts's CompanyCredentialStatus.inferenceHasModel: {json}"
+    );
+
+    status.inference_has_model = false;
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        json["inferenceHasModel"],
+        Value::Bool(false),
+        "unlike restartRequired, this field is a plain bool and is always present: {json}"
+    );
+}
+
+/// The smallest [`super::CredentialStatusDto`] that serializes without
+/// panicking — every field the two tests above don't care about set to its
+/// most inert value.
+fn minimal_status() -> super::CredentialStatusDto {
+    super::CredentialStatusDto {
+        configured: false,
+        source: crate::company::credentials::CredentialSource::None,
+        notice: String::new(),
+        account: None,
+        hub_link: false,
+        inference_has_own_key: false,
+        composio_has_own_key: false,
+        default_set: false,
+        inference_has_model: false,
+        used_by: None,
+    }
 }
 
 // ---------------------------------------------------------------------------

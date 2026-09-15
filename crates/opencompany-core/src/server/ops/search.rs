@@ -47,7 +47,7 @@
 //! fetches an operator-supplied address that is allowed to be on a private
 //! network.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::company::search::catalogue::{self, SearchProviderInfo};
+use crate::company::search::copy::{self, ProviderGone};
 use crate::company::search::probe::{self, ProbeClass};
 use crate::company::search::resolve::Candidate;
 use crate::company::search::store::{self, SearchProvider};
@@ -62,6 +63,7 @@ use crate::company::search::{
     API_KEY_SECRET, ENDPOINT_SECRET, MANAGED_PROVIDER, PROVIDER_SECRET, SUPPORTED_PROVIDERS,
     provider_requires_endpoint, provider_requires_key, resolve,
 };
+use crate::error::{OpenCompanyError, UsedBy};
 use crate::ports::types::SecretValue;
 use crate::server::error::ApiError;
 use crate::server::ops::scope::{AdminScopedCompany, ScopedCompany, scoped};
@@ -100,6 +102,19 @@ pub struct SearchProviderView {
     /// "Default" without the console knowing whether it was chosen or inherited
     /// — the operator sees the same answer either way.
     pub is_default: bool,
+    /// Who still depends on this row (keys rework, issue #2306;
+    /// `docs/key-reworks/in-use-guards.md` §1/§6): `default: true` iff the
+    /// **bare stored** `search/default` marker names this slug — not the
+    /// resolved `is_default` above, which can differ from the marker when
+    /// the marked provider is disabled or incomplete (D-never-clear-default /
+    /// X14: the marker is never silently moved off a provider the operator
+    /// chose). Search has no agent pairs and is never itself a `surfaces`
+    /// target for another guard, so `agents` and `surfaces` are always empty
+    /// here — the only shape this ever carries is `{ "default": true }` or
+    /// omitted entirely. Omitted (not `null`, not `{}`) when nothing depends
+    /// on this row, so `"usedBy" in row` is itself the in-use check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_by: Option<UsedBy>,
 }
 
 /// The non-secret view of a company's search configuration.
@@ -140,6 +155,18 @@ pub struct SearchStatus {
     pub managed_daily_call_cap: u32,
     /// The providers a company can connect.
     pub supported_providers: Vec<String>,
+    /// Set when `search/default` names a provider that no longer exists or is
+    /// switched off (keys rework #2306, decision D-never-clear-default / X14:
+    /// a disable or delete no longer clears the marker itself). An actionable
+    /// sentence naming the provider and where to fix it, from
+    /// `crate::company::search::copy::default_provider_unavailable`, for the
+    /// console to show as a banner rather than the marker silently pointing at
+    /// nothing. `None` when the default is unset, or names a connected,
+    /// enabled provider — whether or not that provider is *complete* is a
+    /// different, pre-existing condition, already covered by `needs_api_key`
+    /// and `needs_endpoint` above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_notice: Option<String>,
 }
 
 /// The ops router for search settings.
@@ -283,8 +310,10 @@ async fn status_of(runtime: &CompanyRuntime) -> Result<SearchStatus, ApiError> {
 
     let providers = candidates
         .iter()
-        .map(|candidate| view_of(candidate, active_slug.as_deref()))
+        .map(|candidate| view_of(candidate, active_slug.as_deref(), marked.as_deref()))
         .collect();
+
+    let default_notice = default_notice_for(&candidates, marked.as_deref());
 
     let effective = resolve::effective_slug(active).to_string();
 
@@ -329,11 +358,57 @@ async fn status_of(runtime: &CompanyRuntime) -> Result<SearchStatus, ApiError> {
             .iter()
             .map(|provider| (*provider).to_string())
             .collect(),
+        default_notice,
     })
 }
 
+/// The catalogue label for `slug`, or the slug itself when this build's
+/// catalogue does not (or no longer does) know it — a row can outlive the
+/// catalogue entry that named it, and a guard/status sentence still has to
+/// name *something*.
+fn label_for(slug: &str) -> String {
+    catalogue::entry(slug)
+        .map(|info| info.label.to_string())
+        .unwrap_or_else(|| slug.to_string())
+}
+
+/// The `usedBy` a search provider's disable, removal, or key clear would
+/// carry (`docs/key-reworks/in-use-guards.md` §1/§6, extended to search by
+/// Agent A's scope note in §1): `default: true` iff the **bare stored**
+/// `search/default` marker names this slug. Search has no agent pairs and is
+/// never itself a `surfaces` target for another guard, so this is the only
+/// shape the search guard ever produces.
+fn used_by_for(marked: Option<&str>, slug: &str) -> Option<UsedBy> {
+    (marked == Some(slug)).then(|| UsedBy {
+        default: true,
+        ..Default::default()
+    })
+}
+
+/// `SearchStatus.default_notice`: `Some(sentence)` when `marked` names a slug
+/// that either has no row at all (a confirmed delete) or has a row that is
+/// switched off (a confirmed disable) — the two states decision
+/// D-never-clear-default (X14) now lets the marker sit in indefinitely.
+/// `None` when nothing is marked, or the marked provider is connected and
+/// enabled (whether or not it is *complete* — see the doc on
+/// [`SearchStatus::default_notice`] for why that is a different, pre-existing
+/// condition this does not cover).
+fn default_notice_for(candidates: &[Candidate], marked: Option<&str>) -> Option<String> {
+    let slug = marked?;
+    let why = match candidates.iter().find(|c| c.provider.slug == slug) {
+        None => ProviderGone::Removed,
+        Some(candidate) if !candidate.provider.enabled => ProviderGone::TurnedOff,
+        Some(_) => return None,
+    };
+    Some(copy::default_provider_unavailable(&label_for(slug), why))
+}
+
 /// One row, from a candidate.
-fn view_of(candidate: &Candidate, active_slug: Option<&str>) -> SearchProviderView {
+fn view_of(
+    candidate: &Candidate,
+    active_slug: Option<&str>,
+    marked: Option<&str>,
+) -> SearchProviderView {
     let slug = candidate.provider.slug.clone();
     let info = catalogue::entry(&slug);
     SearchProviderView {
@@ -347,6 +422,7 @@ fn view_of(candidate: &Candidate, active_slug: Option<&str>) -> SearchProviderVi
         key_configured: candidate.has_key,
         takes_key: provider_requires_key(&slug),
         takes_endpoint: provider_requires_endpoint(&slug),
+        used_by: used_by_for(marked, &slug),
         endpoint: candidate.provider.endpoint.clone(),
         complete: candidate.is_complete(),
         is_default: active_slug == Some(slug.as_str()),
@@ -628,6 +704,13 @@ struct UpdateBody {
     /// A new instance address, for a self-hosted provider.
     #[serde(default)]
     endpoint: Option<String>,
+    /// Confirms a disable that the in-use guard would otherwise refuse
+    /// (`docs/key-reworks/in-use-guards.md` §2). Ignored on an enable or a
+    /// re-address alone — only a disable is guarded — and ignored when there
+    /// is nothing to confirm. Defaults to `false`, so a caller that has never
+    /// heard of this field gets the guarded path.
+    #[serde(default)]
+    confirm_in_use: bool,
 }
 
 /// `PUT …/search/providers/{slug}` — enable, disable, or re-address.
@@ -669,16 +752,51 @@ async fn update_provider(
         }
     }
     if let Some(enabled) = body.enabled {
-        store::set_enabled(runtime.id(), runtime.secrets().as_ref(), &slug, enabled).await?;
+        // Only a disable is guarded (in-use-guards.md §1/§2): turning a
+        // provider ON cannot strand anything this company already had. The
+        // marked-default read, the in-use check, and the write are one
+        // critical section under the store's index lock (KR review comment
+        // 4012261309) — the row survives a disable (unlike a delete), so
+        // `status_of`'s own `used_by` for this slug reports the same thing
+        // afterwards.
+        match store::set_enabled_guarded(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            &slug,
+            enabled,
+            body.confirm_in_use,
+        )
+        .await?
+        {
+            store::GuardedWrite::Blocked => {
+                return Err(ApiError(OpenCompanyError::InUse {
+                    message: copy::provider_in_use_message(info.label),
+                    used_by: used_by_for(Some(&slug), &slug)
+                        .expect("Blocked only returned when slug is the marked default"),
+                }));
+            }
+            store::GuardedWrite::NotConnected | store::GuardedWrite::Applied => {}
+        }
     }
 
     Ok(Json(status_of(runtime).await?))
+}
+
+/// `?confirmInUse=true` on [`remove_provider`]
+/// (`docs/key-reworks/in-use-guards.md` §2: "as the query parameter
+/// `?confirmInUse=true` for DELETE, which has no body on this API").
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmInUseQuery {
+    #[serde(default)]
+    confirm_in_use: bool,
 }
 
 /// `DELETE …/search/providers/{slug}` — remove a provider and its credential.
 async fn remove_provider(
     company: AdminScopedCompany,
     Path(SlugPath { slug }): Path<SlugPath>,
+    Query(ConfirmInUseQuery { confirm_in_use }): Query<ConfirmInUseQuery>,
     State(_state): State<AppState>,
 ) -> Result<Json<SearchStatus>, ApiError> {
     let runtime = &company.runtime;
@@ -689,7 +807,31 @@ async fn remove_provider(
     if !slug_is_addressable(&slug) {
         return Err(invalid("that is not a provider slug"));
     }
-    store::delete_provider(runtime.id(), runtime.secrets().as_ref(), &slug).await?;
+    // The marked-default read, the in-use check, and the removal are one
+    // critical section under the store's index lock (KR review comment
+    // 4012261309), so a confirmed removal echoes exactly what it would have
+    // refused with rather than a stale read from before a concurrent
+    // `set_default_if_connected` landed. The row is gone after this, so —
+    // unlike a disable — there is no surviving row for `status_of`'s own
+    // `used_by` to echo it through; the caller already saw this (from a prior
+    // GET, or from a first unconfirmed 409) before confirming.
+    match store::delete_provider_guarded(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &slug,
+        confirm_in_use,
+    )
+    .await?
+    {
+        store::GuardedWrite::Blocked => {
+            return Err(ApiError(OpenCompanyError::InUse {
+                message: copy::provider_in_use_message(&label_for(&slug)),
+                used_by: used_by_for(Some(&slug), &slug)
+                    .expect("Blocked only returned when slug is the marked default"),
+            }));
+        }
+        store::GuardedWrite::NotConnected | store::GuardedWrite::Applied => {}
+    }
     Ok(Json(status_of(runtime).await?))
 }
 
@@ -700,6 +842,12 @@ struct KeyBody {
     /// The new key (write-only). An empty value clears it.
     #[serde(default)]
     api_key: Option<String>,
+    /// Confirms a clear that the in-use guard would otherwise refuse
+    /// (`docs/key-reworks/in-use-guards.md` §2). Ignored on a set/rotate —
+    /// only a clear is guarded — and ignored when there is nothing to
+    /// confirm. Defaults to `false`.
+    #[serde(default)]
+    confirm_in_use: bool,
 }
 
 /// `PUT …/search/providers/{slug}/key` — replace or clear one credential.
@@ -718,6 +866,12 @@ async fn replace_key(
     if !info.needs_key() {
         return Err(invalid(format!("{} does not take an API key", info.label)));
     }
+    let key = supplied(body.api_key.as_deref()).unwrap_or_default();
+    // Only a clear is guarded (in-use-guards.md §1/§6): a clear is
+    // functionally equivalent to disabling the row from a dependent's point
+    // of view — a key-less row cannot serve the default — while a rotate
+    // keeps serving whatever already depended on it.
+    //
     // **Replace**, so there has to be something to replace. Without this a
     // direct `PUT …/search/providers/exa/key` for a provider with no row wrote
     // a credential to `search/provider/exa/key` that the status route never
@@ -726,17 +880,35 @@ async fn replace_key(
     // cannot delete is the orphaned-secret shape this module keeps refusing
     // elsewhere, and it does not get an exception here.
     //
-    // Checked and written in one critical section rather than two: a removal
-    // landing between them would leave the credential at an address absent from
-    // the index, which the status route never reports and `DELETE …/search/key`
-    // never clears, because both walk the index.
-    let key = supplied(body.api_key.as_deref()).unwrap_or_default();
-    if !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), &slug, &key).await?
+    // The marked-default read, the in-use check, the existence check, and the
+    // write are one critical section under the store's index lock (KR review
+    // comment 4012261309): a removal or a default change landing between them
+    // used to be able to leave the credential at an address absent from the
+    // index, or let an unconfirmed clear through against a marker that was
+    // stale by the time it was read.
+    match store::store_key_guarded(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &slug,
+        &key,
+        body.confirm_in_use,
+    )
+    .await?
     {
-        return Err(invalid(format!(
-            "{} is not connected — connect it instead",
-            info.label
-        )));
+        store::GuardedWrite::Blocked => {
+            return Err(ApiError(OpenCompanyError::InUse {
+                message: copy::provider_in_use_message(info.label),
+                used_by: used_by_for(Some(&slug), &slug)
+                    .expect("Blocked only returned when slug is the marked default"),
+            }));
+        }
+        store::GuardedWrite::NotConnected => {
+            return Err(invalid(format!(
+                "{} is not connected — connect it instead",
+                info.label
+            )));
+        }
+        store::GuardedWrite::Applied => {}
     }
     Ok(Json(status_of(runtime).await?))
 }
@@ -932,6 +1104,21 @@ async fn put_search(
     };
 
     if provider == MANAGED_PROVIDER {
+        // DEPRECATED(keys-rework #2306): the legacy single-slot `PUT
+        // …/search` route's own "select managed" branch, clearing
+        // `search/default` below; replaced by the indexed
+        // `search/providers`/`search/default` flow, which never clears the
+        // marker on a confirmed disable or removal
+        // (X14/D-never-clear-default, `docs/key-reworks/in-use-guards.md`
+        // §4). This branch still does, and — unlike every guarded route on
+        // this page — that is an intentional, documented carve-out rather
+        // than an oversight: the console has no caller for this route
+        // (`saveSearch` in `frontend/src/api/search.ts` is defined but never
+        // called; confirmed by grepping `frontend/src` for it), so nothing
+        // reachable today exercises this clear. See in-use-guards.md §4 for
+        // the full note. Removable when the route itself is removed, no
+        // earlier — routes are not removed silently.
+        //
         // Selecting managed has always meant "stop using my own account", and
         // the honest expression of that is still NOT to store `managed` as
         // though it were a connection.
@@ -1039,11 +1226,44 @@ async fn apply_to(
 /// The [`SecretStore`](crate::ports::SecretStore) port has no delete, so a
 /// cleared credential is stored as the empty string; every read site treats an
 /// empty value as unset, and resolution then falls back to managed search.
+///
+/// Guarded like every other destructive action on this page
+/// (`docs/key-reworks/in-use-guards.md` §1/§2, keys rework #2306): refused
+/// with `409 in_use` unless `?confirmInUse=true` when `search/default` is
+/// currently set to **any** provider — this is the bulk form of the same
+/// disable/remove/key-clear guard, so `usedBy` here is always exactly
+/// `{ "default": true }` rather than naming one specific slug the way a
+/// single-row guard's `usedBy` does. On a confirmed disconnect-all,
+/// `search/default` is **not** cleared (X14/D-never-clear-default, §4): the
+/// marker is left in place so `SearchStatus.default_notice` picks up that it
+/// now names a removed provider, exactly as a confirmed single-row removal
+/// already does.
 async fn delete_search(
     company: AdminScopedCompany,
+    Query(ConfirmInUseQuery { confirm_in_use }): Query<ConfirmInUseQuery>,
     State(_state): State<AppState>,
 ) -> Result<Json<SearchStatus>, ApiError> {
     let runtime = &company.runtime;
+    // Computed before the delete, per in-use-guards.md §3, so a confirmed
+    // disconnect-all echoes exactly what it would have refused with — named by
+    // whichever provider is currently marked, the same label a single-row
+    // guard would use for it. The bulk action just sweeps every row rather
+    // than one.
+    let marked = store::load_default_slug(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+    if let Some(slug) = marked.as_deref()
+        && !confirm_in_use
+    {
+        return Err(ApiError(OpenCompanyError::InUse {
+            message: copy::provider_in_use_message(&label_for(slug)),
+            used_by: UsedBy {
+                default: true,
+                ..Default::default()
+            },
+        }));
+    }
+
     // Every provider goes, not just the active one: this route has always meant
     // "disconnect my own search", and leaving a second account's key behind
     // under a page that now says "managed" would be storing a credential the
@@ -1058,7 +1278,9 @@ async fn delete_search(
         .map(|key| (key, String::new()))
         .collect();
     write_all(runtime, &cleared).await?;
-    store::clear_default_slug(runtime.id(), runtime.secrets().as_ref()).await?;
+    // X14 (`in-use-guards.md` §4): never clear the marker, even confirmed —
+    // `default_notice_for` is what turns a marker now naming nothing into the
+    // console's banner.
     Ok(Json(status_of(runtime).await?))
 }
 
@@ -1416,10 +1638,15 @@ mod tests {
         )
         .await;
 
+        // The legacy `PUT …/search` route marks whatever it connects as the
+        // default, so this disconnect-all is exactly the case item 1's guard
+        // exists for (`in-use-guards.md` §1/§2) — hence `confirmInUse: true`.
+        // This test is about the cleanup's scope (provider AND endpoint, not
+        // just the key), not the guard, so it confirms.
         let (status, cleared) = call(
             &state,
             "DELETE",
-            "/api/v1/companies/acme/search/key",
+            "/api/v1/companies/acme/search/key?confirmInUse=true",
             &admin,
             None,
         )
@@ -1583,6 +1810,51 @@ mod tests {
         assert_eq!(
             back["effectiveProvider"], "exa",
             "the round trip has to come back: {back}"
+        );
+    }
+
+    /// DEPRECATED(keys-rework #2306) carve-out, pinned: unlike every guarded
+    /// route on this page (X14/D-never-clear-default,
+    /// `docs/key-reworks/in-use-guards.md` §4), the legacy `PUT …/search`
+    /// route's "select managed" branch still clears `search/default` outright
+    /// rather than leaving the marker in place — so no `defaultNotice` banner
+    /// ever appears afterward, even though the provider it just switched off
+    /// is exactly the shape that banner exists for. §4 now documents this as
+    /// the accepted, intentional exception: the route has no console caller
+    /// (`saveSearch` in `frontend/src/api/search.ts` is defined but never
+    /// called), so nothing reachable is affected by the discrepancy — but it
+    /// must not drift further in silence, which is what this test is for.
+    #[tokio::test]
+    async fn legacy_select_managed_clears_the_default_marker_unlike_the_guarded_routes() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "exa", "apiKey": "exa-not-a-real-key"})),
+        )
+        .await;
+
+        let (status, after) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "managed"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        // If the marker had survived (the guarded routes' behavior under
+        // X14), this would read "The search default uses Exa, which is
+        // turned off. …". It does not: the legacy route's own clear removed
+        // the marker outright.
+        assert!(
+            after.get("defaultNotice").is_none(),
+            "pinning the legacy route's own clear of search/default: {after}"
         );
     }
 
@@ -1810,5 +2082,363 @@ mod tests {
                  equally fine: {slug}: {body}"
             );
         }
+    }
+
+    // ── in-use guards (#2306): confirmInUse gates a disable/remove/key-clear
+    //    of the search default, and the marker survives every one of them ──
+
+    /// Connects `exa` and `brave`, and marks `exa` as the default. Returns the
+    /// state and admin cookie, ready for a guarded mutation on `exa`.
+    ///
+    /// Goes through the legacy `PUT …/search` route (`select_provider`)
+    /// rather than `POST …/search/providers` (`connect_provider`): the modern
+    /// connect route always probes the provider over the network
+    /// (`check`/`probe::probe`), which a fake key like `exa-not-a-real-key`
+    /// would fail as an `Auth`-class rejection and roll back — exactly the
+    /// network dependency the existing tests in this module avoid by using
+    /// this same legacy route with fake keys. `select_provider` writes the
+    /// row and marks it default with no probe, and calling it once per slug,
+    /// **exa last**, connects both and leaves `exa` as the final default
+    /// (each call unconditionally re-marks the named provider — see
+    /// `switching_providers_does_not_hand_one_providers_key_to_another`
+    /// above for the same ordering trick).
+    async fn state_with_two_providers_exa_default(home: &std::path::Path) -> (AppState, String) {
+        let state = state_with_company(home, true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+        for (slug, key) in [
+            ("brave", "brave-not-a-real-key"),
+            ("exa", "exa-not-a-real-key"),
+        ] {
+            call(
+                &state,
+                "PUT",
+                "/api/v1/companies/acme/search",
+                &admin,
+                Some(json!({"provider": slug, "apiKey": key})),
+            )
+            .await;
+        }
+        (state, admin)
+    }
+
+    #[tokio::test]
+    async fn disabling_the_search_default_is_refused_without_confirmation() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/exa",
+            &admin,
+            Some(json!({"enabled": false})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "in_use", "{body}");
+        assert_eq!(body["error"], "Exa is the search default.", "{body}");
+        assert_eq!(body["usedBy"]["default"], true, "{body}");
+        assert!(body["usedBy"]["agents"].is_null(), "{body}");
+        assert!(body["usedBy"]["surfaces"].is_null(), "{body}");
+
+        // Refused means unchanged: still enabled, still the default.
+        let (_, after) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        let exa = after["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .find(|row| row["slug"] == "exa")
+            .expect("exa row");
+        assert_eq!(exa["enabled"], true, "{after}");
+    }
+
+    #[tokio::test]
+    async fn disabling_the_search_default_with_confirmation_succeeds_and_keeps_the_marker() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, after) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/exa",
+            &admin,
+            Some(json!({"enabled": false, "confirmInUse": true})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{after}");
+        let exa = after["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .find(|row| row["slug"] == "exa")
+            .expect("exa row");
+        assert_eq!(
+            exa["enabled"], false,
+            "the row is actually disabled: {after}"
+        );
+        // X14: the marker is never rewritten, so the row's own `usedBy` still
+        // reports it, echoing what the refusal above carried.
+        assert_eq!(exa["usedBy"]["default"], true, "{after}");
+        // And the resolved view degrades gracefully — `brave` takes over,
+        // rather than nothing answering.
+        assert_eq!(after["effectiveProvider"], "brave", "{after}");
+        // The status banner names what happened.
+        assert_eq!(
+            after["defaultNotice"],
+            "The search default uses Exa, which is turned off. Choose a new search \
+             default in Connections \u{2192} API Keys \u{2192} Search.",
+            "{after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_the_search_default_is_refused_without_confirmation_and_succeeds_with_it() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, body) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/providers/exa",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "in_use", "{body}");
+        assert_eq!(body["usedBy"]["default"], true, "{body}");
+
+        let (status, after) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/providers/exa?confirmInUse=true",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert!(
+            after["providers"]
+                .as_array()
+                .expect("providers")
+                .iter()
+                .all(|row| row["slug"] != "exa"),
+            "exa's row is gone: {after}"
+        );
+        // X14: the marker survives even though nothing now answers to it.
+        assert_eq!(after["effectiveProvider"], "brave", "{after}");
+        assert_eq!(
+            after["defaultNotice"],
+            "The search default uses Exa, which is removed. Choose a new search \
+             default in Connections \u{2192} API Keys \u{2192} Search.",
+            "{after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_the_search_defaults_key_is_refused_without_confirmation_and_succeeds_with_it()
+    {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/exa/key",
+            &admin,
+            Some(json!({"apiKey": ""})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["usedBy"]["default"], true, "{body}");
+
+        let (status, after) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/exa/key",
+            &admin,
+            Some(json!({"apiKey": "", "confirmInUse": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        let exa = after["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .find(|row| row["slug"] == "exa")
+            .expect("exa row");
+        assert_eq!(exa["keyConfigured"], false, "{after}");
+        // A key-less exa is not complete, so managed — not exa — resolves,
+        // but the row is still enabled and still the marked default.
+        assert_eq!(exa["enabled"], true, "{after}");
+        assert_eq!(exa["usedBy"]["default"], true, "{after}");
+    }
+
+    /// A rotate (a non-empty replacement key) is never guarded — it keeps
+    /// serving whatever already depended on it — matching
+    /// `docs/key-reworks/in-use-guards.md` §2's rotate carve-out.
+    #[tokio::test]
+    async fn rotating_the_search_defaults_key_needs_no_confirmation() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, after) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/exa/key",
+            &admin,
+            Some(json!({"apiKey": "exa-rotated-not-a-real-key"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+    }
+
+    #[tokio::test]
+    async fn disabling_or_removing_a_provider_that_is_not_the_default_needs_no_confirmation() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, after) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/brave",
+            &admin,
+            Some(json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        let brave = after["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .find(|row| row["slug"] == "brave")
+            .expect("brave row");
+        assert!(brave.get("usedBy").is_none(), "{after}");
+
+        let (status, after) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/providers/brave",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+    }
+
+    // ── disconnect-all (`DELETE …/search/key`): the same guard, applied in
+    //    bulk (item 1, keys rework #2306 review) ──
+
+    #[tokio::test]
+    async fn disconnect_all_is_refused_without_confirmation_when_a_default_is_set() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, body) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/key",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "in_use", "{body}");
+        assert_eq!(body["error"], "Exa is the search default.", "{body}");
+        assert_eq!(body["usedBy"]["default"], true, "{body}");
+        assert!(body["usedBy"]["agents"].is_null(), "{body}");
+        assert!(body["usedBy"]["surfaces"].is_null(), "{body}");
+
+        // Refused, so nothing was touched: both rows survive.
+        let (_, after) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        let slugs: Vec<&str> = after["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .map(|row| row["slug"].as_str().unwrap())
+            .collect();
+        assert!(slugs.contains(&"exa"), "{after}");
+        assert!(slugs.contains(&"brave"), "{after}");
+    }
+
+    #[tokio::test]
+    async fn disconnect_all_confirmed_clears_every_provider_but_keeps_the_default_marker() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, after) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/key?confirmInUse=true",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert!(
+            after["providers"].as_array().expect("providers").is_empty(),
+            "every row is gone: {after}"
+        );
+        // X14: the marker is never cleared, even by a confirmed disconnect-all
+        // — `search/default` still names Exa, and the status banner says so.
+        assert_eq!(after["effectiveProvider"], "managed", "{after}");
+        assert_eq!(
+            after["defaultNotice"],
+            "The search default uses Exa, which is removed. Choose a new search \
+             default in Connections \u{2192} API Keys \u{2192} Search.",
+            "{after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_all_needs_no_confirmation_when_nothing_is_marked() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        // Nothing connected, nothing marked — there is nothing a disconnect-all
+        // could strand.
+        let (status, after) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/key",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert!(after.get("defaultNotice").is_none(), "{after}");
+    }
+
+    #[tokio::test]
+    async fn no_default_notice_when_nothing_is_marked_or_the_marked_provider_is_healthy() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        // Nothing connected, nothing marked.
+        let (_, unconfigured) =
+            call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        assert!(
+            unconfigured.get("defaultNotice").is_none(),
+            "{unconfigured}"
+        );
+
+        // Connected, marked, enabled and complete. The legacy `PUT …/search`
+        // route (`select_provider`), not `POST …/search/providers`, which
+        // probes over the network — see `state_with_two_providers_exa_default`
+        // above for why that would be flaky with a fake key.
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "exa", "apiKey": "exa-not-a-real-key"})),
+        )
+        .await;
+        let (_, healthy) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        assert!(healthy.get("defaultNotice").is_none(), "{healthy}");
     }
 }

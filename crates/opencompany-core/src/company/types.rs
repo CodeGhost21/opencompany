@@ -706,37 +706,25 @@ pub struct Agent {
     ///
     /// Not a credential, for the same reason [`AcpHarness::model`] is not
     /// one — the ACP agent already holds its own. Meaningful only when this
-    /// agent resolves to an `acp` harness with `transport = "local"`;
-    /// validation rejects it on a `built_in`-harness agent rather than
-    /// silently ignoring it, matching the harness-level field's own
-    /// doctrine. Two agents sharing one `local` acp harness process still
-    /// share the subprocess — the override steers that agent's own ACP
-    /// *session* (`session/set_config_option`), not the process env.
+    /// agent resolves to an `acp` harness with `transport = "local"`; on a
+    /// `built_in` harness it is instead the model half of this agent's own
+    /// `{provider, model}` pair — see [`provider`](Self::provider).
     #[serde(default)]
     pub model: Option<String>,
-    /// The provider half of this agent's own `{provider, model}` pair on a
-    /// `built_in` harness (keys rework, issue #2306, slice 3a) — a company
-    /// provider list slug (`crate::company::inference::store::get_provider`),
-    /// never a manifest-authored value: nothing in `AgentFile`/`company.toml`
-    /// parsing populates this, it exists only so
-    /// [`CompanyRecord::effective_manifest_agent`] can project an
-    /// [`crate::ports::types::AgentOverride::provider`] pin onto the same
-    /// `Agent` shape [`Self::model`] already uses for the ACP case. Always set
-    /// together with [`Self::model`] (both `Some` or both `None`), and
-    /// meaningful only on `built_in` — an `acp` harness keeps [`Self::model`]'s
-    /// existing ACP-hint meaning and refuses this field outright.
+    /// The provider half of this agent's own `{provider, model}` pair (keys
+    /// rework slice 3a, issue #2306): a slug in the company's
+    /// `inference/providers` list, e.g. `anthropic`.
     ///
-    /// Not yet read on the turn path: [`crate::harness::built_in::provider::TenantProvider`]
-    /// resolves every turn through `resolve_for_turn`'s `pin` parameter, which
-    /// this slice does not populate (`// the agent pair: slice 3a passes
-    /// self.pin.clone()` in that module still says `None`) — `TenantProvider`
-    /// is shared across every agent on a harness lane
-    /// (`crate::harness::lanes::built_in_lane`), so routing a single agent's
-    /// turns through a pin it alone chose needs that pooling to become
-    /// per-agent-aware, which is its own change. This field is the persisted,
-    /// round-tripped half: an operator's choice is saved and read back
-    /// honestly; it does not yet steer a turn.
-    #[serde(default)]
+    /// Only on a `built_in` harness, and only together with
+    /// [`model`](Self::model). Both set: this agent's own turns use that
+    /// provider and model, ahead of the harness `[harness.inference]` and
+    /// the company default. Neither set: the agent follows the default. One
+    /// without the other, or `provider` on an `acp` harness, is refused by
+    /// `CompanyManifest::validate`. Never checked against the provider list
+    /// at load — that list is console data a manifest cannot see — so a
+    /// slug that is not there fails the agent's first turn (F6), with no
+    /// fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// Tool grant globs, intersected with `[tools].allow`.
     ///

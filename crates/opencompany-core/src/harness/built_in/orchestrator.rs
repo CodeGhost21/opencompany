@@ -4051,6 +4051,7 @@ impl Tool for AddAgentTool {
         // one id twice.
         let id = record.mint_agent_id(&name);
         let agent = OverlayAgent {
+            provider: None,
             id: id.clone(),
             name: name.clone(),
             role: role.clone(),

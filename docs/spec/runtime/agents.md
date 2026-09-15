@@ -72,6 +72,9 @@ tier = "reasoning"                      # cognition hint; never selects a model
 harness = "deep"                        # which [[harness]] runs this agent's
                                         # turns — see harnesses.md. Omitted
                                         # means the company's default harness.
+provider = "anthropic"                  # this agent's own {provider, model}
+model = "claude-sonnet-5"               # pair — see below. Omit both to
+                                        # follow the company default.
 tools = ["docs.*", "mcp:notion"]        # grant globs — see tools.md
 delegates_to = ["creative"]             # desks this agent may hand work to
 budget_usd_daily = 5.0                  # per-agent daily cap
@@ -106,6 +109,33 @@ models — which is the point of naming more than one.
 Naming a harness the company does not declare is a validation error, reported
 against both the agent and the id. Naming none is not: every roster written
 before `[[harness]]` existed binds nobody, and all of them keep working.
+
+### `provider` and `model`: the agent pair
+
+On a `built_in` harness, `provider` and `model` together are this agent's own
+resolved endpoint (keys rework, issue #2306) — a slug in the company's
+`inference/providers` console list, and the model id that provider serves.
+Set together or not at all: `provider` alone or `model` alone is a validation
+error. Neither set means this agent follows the company default, resolved the
+same way a turn with no pin does.
+
+On an `acp` harness `model` keeps its older, unrelated meaning — the model
+hint forwarded to that coding CLI's own session (see `[harness.acp].model`
+in harnesses.md) — and `provider` is refused outright: an ACP agent brings
+its own credential, so naming a console provider is meaningless.
+
+The manifest cannot see the company's console-side provider list, so a
+`provider` slug is checked only for shape at load — never for existence. A
+typo (`provider = "antropic"`) loads clean and fails the agent's *first
+turn* instead, with a message naming the agent and the fix: `resolve`'s pin
+check refuses before falling back to the default. There is no fallback: a
+pinned agent whose provider is removed or switched off is not silently
+served by the company default.
+
+Resolution order for a `built_in` agent's own turns: this pair, then the
+harness's own `[harness.inference]` (see below), then the company default,
+then an actionable refusal.
+
 ### `context` write access
 
 A bare string in `context` is read-only — routed into the prompt, nothing

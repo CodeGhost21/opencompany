@@ -54,6 +54,7 @@ Rules:
 | The account key (`tinyhumans/key`) clear/disable | **A** | See §2's `surfaces` table below — `"llm"` appears only when a `tinyhumans` provider row exists (D-set/X5) |
 | **Search** provider removal, disable, and the search default | **A** | Corrected from the first draft, which wrongly filed this under C and wrongly guessed search had no default. Search **does** have a default (`search/default`) and **does** get confirm dialogs on removal/disable, on the same `usedBy`/`confirmInUse`/409 contract as everything else here. X14 (§4) extends the same way: disabling or deleting the search default's provider never clears `search/default` — A implements this; kept here so the two never drift. |
 | Console dialogs (LLM, Composio, search) | **C** for LLM/Composio pages, **A** for the search page it owns | A confirm dialog on every destructive action and toggle; `usedBy` rendered in it; a 409 reopens the dialog with fresh `usedBy` |
+| Set-default (`POST …/inference/providers/{slug}/default`) | **B** | **Not a `usedBy` producer and not a 409 case** (round-3a review P2-6) — see §2. Nothing depending on the provider being replaced as default loses anything; the console's own confirm dialog, naming the old and new provider, is the whole guard. |
 
 ## 2. Refusal without confirmation
 
@@ -72,6 +73,19 @@ every dependent it already had, just with a different credential behind it.
 The first draft of this file did not list rotate as guarded, but said it
 imprecisely enough that a reader could infer it was — this line removes that
 reading.
+
+**Set-default (`POST …/inference/providers/{slug}/default`) is never guarded
+either, and it is not a 409 case** (round-3a review P2-6, decided
+2026-09-15). Unlike a delete, disable or key clear, set-default strands
+nothing: the provider being *replaced* as the default keeps existing, keeps
+its key, and keeps serving every agent pair that names it directly — only the
+*unpinned* traffic moves, and moving unpinned traffic to a different provider
+is the one thing this route exists to do. X4 already puts the safeguard on
+the client: the console's confirm dialog names the old and the new provider
+before the request is sent, and that confirmation — not a server-side
+`usedBy`/`confirmInUse`/409 round trip — is the guard. `SetDefault` therefore
+carries no `confirmInUse` field and `provider_used_by` is never called on
+this path.
 
 **Refusal is HTTP 409**, in the repo's existing API error envelope. That
 envelope is `ApiError` (`src/server/error.rs`), built from
@@ -115,6 +129,20 @@ The message names **every** user, in one sentence:
 
 `N agent(s)` is `"1 agent"` or singular-free `"N agents"` — never
 `"1 agents"`.
+
+**Accepted variant (P3-2, keys rework #2306 review):** the account-key
+clear's own message (`account_key_in_use_message`,
+`crate::company::company_key::fan_out`) does not follow the generic
+`surfaces`-only template above. It reads `"Used by TinyHumans on the LLM page
+and by Composio."` (or, with one surface, `"Used by Composio."`) rather than
+`"TinyHumans account key's key is used by llm, composio."` — an accepted
+operator decision (2026-09-15 review): the account key has no single
+`<Label>` a reader would recognize the way a provider's display name reads,
+and naming the surfaces themselves in plain words reads more naturally for a
+one- or two-item list than forcing the raw template's comma join. Every other
+guard in this file (a provider row, a key, Composio's own guard) still uses
+the generic template unchanged; this is the one deliberate, documented
+exception.
 
 ### What each `surfaces` entry means, precisely (P2 fix)
 
@@ -186,7 +214,31 @@ for, on the same footing as a marker naming a disabled one. Concretely, in
   "unset".
 
 Search gets the identical treatment in Agent A's slices: disabling or
-deleting the provider `search/default` names never clears that key either.
+deleting the provider `search/default` names never clears that key either —
+`DELETE …/search/providers/{slug}`, `PUT …/search/providers/{slug}` (disable)
+and `PUT …/search/providers/{slug}/key` (clear) all guard exactly as §1/§2
+describe, and `DELETE …/search/key` (disconnect-all) carries the same guard
+in bulk: `usedBy` is `{ "default": true }` whenever `search/default` names
+*any* provider, refused without `?confirmInUse=true`, and a confirmed
+disconnect-all never clears the marker either.
+
+**Explicit carve-out: the legacy `PUT …/search` route.** Its own
+"select managed" branch (`src/server/ops/search.rs`, `put_search`,
+`provider == MANAGED_PROVIDER`) still clears `search/default` outright on
+every call, unguarded and unconditional — the one place on this surface that
+does not follow X14. This is intentional, not an oversight: the route
+predates the indexed `search/providers` flow, has no console caller today
+(`saveSearch` in `frontend/src/api/search.ts` is defined but unused —
+confirmed by grepping `frontend/src` for callers), and is marked
+`// DEPRECATED(keys-rework #2306)` at the site rather than rewritten to match
+X14, because rewriting dead code's behavior "for consistency" is a change
+with no observable effect and a nonzero chance of quietly breaking whatever
+integration still holds the route by hand. A test in `search.rs` pins the
+current (unchanged) behavior so a future removal of the route — the only
+condition under which this carve-out goes away — is a deliberate decision
+against a known baseline, not silent drift. If this route ever gains a real
+caller again, the same guard-and-never-clear treatment above applies to it
+with no further discussion needed.
 
 ## 5. Turn-time fail-closed messages (F6, D-copy / X9, D-names-in-errors / X7)
 
@@ -221,8 +273,48 @@ default can point at nothing servable, shared by `pair_broken` and
 what. Every sentence above has a test in `copy.rs` asserting the exact text.
 
 These are produced by `resolve_choice` (2b/3a) and the `TenantProvider::resolve`
-pin check (3a), both calling into `copy.rs` rather than formatting their own
-strings.
+pin check (3a). `resolve_choice` calls into `copy.rs`; the pin check's own two
+sentences ("agent `{id}` is set to `{provider}`, which this company does not
+have/is switched off…") are still written inline with the raw agent id and
+provider identifier **in the sentence itself** — a known X7 gap (phase-3a's
+gotcha G7), kept because `HarnessModel::pinned` carries only an id, not the
+agent's display role, and fixing it needs a signature change out of this
+slice's scope. Recorded here rather than silently left inconsistent with the
+"display names only" rule the rest of this table follows.
+
+### 5.1 The fail-closed chat notice, structured (KR-L2-03, 2026-09-15)
+
+A turn that fails **because of resolution** (a pin naming a gone/off
+provider, a broken company default, no model chosen, no key) is reported to
+the chat UI as an ordinary `AgentReply`/history message, additively carrying
+five more fields — present only for this one class of failure, so every other
+turn error (a tool timeout, an empty response, a provider rate limit) is
+unaffected and keeps today's generic "This turn couldn't be finished…"
+wording with none of these fields set:
+
+| Wire key | Type | Meaning |
+|---|---|---|
+| `userFacing` | `boolean` | `true` only for a classified resolution failure. Absent (reads as falsy) on every other failure and on every ordinary reply. |
+| `code` | `string` | One of `no_model_chosen`, `pair_provider_removed`, `pair_provider_off`, `default_provider_removed`, `default_provider_off`, `provider_no_key`, `model_not_listed`. `model_not_listed` is reserved: no resolver check produces it yet (a chosen model is never re-validated against a live catalogue at turn time, by design — see phase-2b/2d), so no test exercises it either. |
+| `message` | `string` | The exact `copy.rs` sentence (X9), with display names — identical to `text` on this same message for a classified failure. |
+| `pairAgentId` | `string?` | The agent id this failure is about, when the resolver could name one **and had a raw id in hand** — today that is only `pair_provider_removed`/`pair_provider_off`, from `TenantProvider::resolve`'s own pin check (§5's G7 note). Absent for every other code, because `copy.rs`'s sentences are display-name-only (X7) and a display name is not a ref-able id. |
+| `providerSlug` | `string?` | The provider slug or label the failure names, on the same terms as `pairAgentId` — a slug for the two pin codes, absent otherwise. |
+
+**Not `agentId`.** The obvious wire name collides with `AgentReply.agent_id` /
+the existing SSE `agentId` key, which is the reply's **author** — always the
+system author for every failure notice, classified or not — and which other
+code (and, presumably, the console) already keys "is this a system notice"
+off. Overwriting it with a teammate's id for a classified failure would make
+a fail-closed notice about `researcher` render as if `researcher` had sent
+it. `pairAgentId` is additive and carries no such collision.
+
+Backend: `resolution_failure(detail: &str)` in `src/server/operator.rs`
+classifies the error text `turn_failure_notice` already receives, by fixed
+substring (mirroring `provider_failure_sentence`'s existing pattern in the
+same file) — there is no structured error type threaded through the
+vendored turn loop to classify on instead. Applies to both the live SSE
+`agent_reply` frame and the persisted `CompanyEvent::AgentReply` (so history
+carries the same fields on reload, via `MessageView`/`ChatHistoryMessageDto`).
 
 ## 6. What counts as "used", precisely (Agent B's scope)
 

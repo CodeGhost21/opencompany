@@ -3541,6 +3541,12 @@ pub struct OverlayAgent {
     /// unchanged from today's hardcoded behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// The provider half of this teammate's `{provider, model}` pair — see
+    /// [`Agent::provider`](crate::company::types::Agent::provider). `None`
+    /// (the default, and every record written before this field) means no
+    /// pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// An operator's runtime edit of a **manifest-declared** teammate.
@@ -3658,6 +3664,12 @@ pub struct AgentOverride {
     /// Cleared the same way as [`Self::model`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// The provider half of the pair, as an overlay on the blueprint.
+    ///
+    /// Cleared the same way as [`Self::model`]: `Some("")` is the stored
+    /// "cleared" form, `None` is "never edited".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -3978,6 +3990,7 @@ impl AgentOverride {
             && self.avatar.is_none()
             && self.model.is_none()
             && self.harness.is_none()
+            && self.provider.is_none()
     }
 }
 
@@ -5679,6 +5692,9 @@ impl CompanyRecord {
             if entry.harness.is_some() {
                 held.harness = entry.harness;
             }
+            if entry.provider.is_some() {
+                held.provider = entry.provider;
+            }
             return;
         }
         self.overlay_agent_edits.push(entry);
@@ -5785,6 +5801,15 @@ impl CompanyRecord {
         }
         if let Some(harness) = entry.harness.as_ref() {
             merged.harness = Some(harness.clone()).filter(|text| !text.is_empty());
+        }
+        // Same empty-means-cleared contract as `model`/`harness` above (keys
+        // rework slice 3a): the pair is edited as one unit, but this merge is
+        // per-field, so a cleared provider with a still-set blueprint model
+        // is possible for one merge pass — `resolve_for_turn`'s pair rule
+        // (provider+model together or neither) is enforced at write time in
+        // `team_agent.rs`, not here.
+        if let Some(provider) = entry.provider.as_ref() {
+            merged.provider = Some(provider.clone()).filter(|text| !text.is_empty());
         }
         std::borrow::Cow::Owned(merged)
     }
@@ -5973,6 +5998,7 @@ impl CompanyRecord {
                 || entry.avatar.is_some()
                 || entry.model.is_some()
                 || entry.harness.is_some()
+                || entry.provider.is_some()
         });
     }
 
@@ -9078,6 +9104,10 @@ mod test {
                 "harness",
                 Box::new(|e: &mut AgentOverride| e.harness = Some("laptop".to_string())),
             ),
+            (
+                "provider",
+                Box::new(|e: &mut AgentOverride| e.provider = Some("anthropic".to_string())),
+            ),
         ] {
             let mut edit = override_entry("ceo", None);
             fill(&mut edit);
@@ -9086,6 +9116,102 @@ mod test {
                 "{field} alone must make the override non-empty"
             );
         }
+
+        // The stored "cleared" form (`Some("")`, keys rework slice 3a) is also
+        // non-empty — it is an edit an operator made, not a no-op, and
+        // `retain_nonempty_agent_edits` must keep the row so the clear itself
+        // is not silently forgotten.
+        let mut cleared_provider = override_entry("ceo", None);
+        cleared_provider.provider = Some(String::new());
+        assert!(
+            !cleared_provider.is_empty(),
+            "a cleared provider must still count as an edit"
+        );
+    }
+
+    /// `upsert_agent_override` carries the provider half of the pair (keys
+    /// rework slice 3a) exactly like `model`, and clearing it with `Some("")`
+    /// reads back as `None` on the effective agent while leaving an
+    /// untouched field (like `name`) alone.
+    #[test]
+    fn an_override_carries_and_clears_the_provider() {
+        let mut record = desk_record(PERSONA_ROSTER, Vec::new());
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            provider: Some("anthropic".to_string()),
+            model: Some("test-model-large".to_string()),
+            ..Default::default()
+        });
+        // Cloned rather than borrowed from `record`: `effective_manifest_agent`
+        // is re-called after each further mutation below, and a borrow held
+        // across those would conflict with `upsert_agent_override`'s `&mut self`.
+        let manifest_agent = record
+            .manifest
+            .agents
+            .iter()
+            .find(|a| a.id == "ceo")
+            .cloned()
+            .expect("ceo is on the manifest");
+        let effective = record.effective_manifest_agent(&manifest_agent);
+        assert_eq!(effective.provider.as_deref(), Some("anthropic"));
+        assert_eq!(effective.model.as_deref(), Some("test-model-large"));
+
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            provider: Some(String::new()),
+            model: Some(String::new()),
+            ..Default::default()
+        });
+        let effective = record.effective_manifest_agent(&manifest_agent);
+        assert_eq!(effective.provider, None);
+        assert_eq!(effective.model, None);
+
+        // An upsert that names neither leaves the stored provider alone.
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            provider: Some("groq".to_string()),
+            model: Some("test-model-small".to_string()),
+            ..Default::default()
+        });
+        record.upsert_agent_override(AgentOverride {
+            agent_id: "ceo".into(),
+            name: Some("Robin".to_string()),
+            ..Default::default()
+        });
+        let effective = record.effective_manifest_agent(&manifest_agent);
+        assert_eq!(effective.provider.as_deref(), Some("groq"));
+        assert_eq!(effective.name.as_deref(), Some("Robin"));
+    }
+
+    /// An `OverlayAgent`'s `provider` round-trips through JSON, and a record
+    /// written before the field existed deserializes to `None` and
+    /// re-serializes with no `provider` key — the same absent-means-unset
+    /// contract `harness` already has.
+    #[test]
+    fn an_overlay_agent_round_trips_its_provider() {
+        let with_provider = OverlayAgent {
+            provider: Some("anthropic".to_string()),
+            id: "a".into(),
+            name: "A".into(),
+            role: "r".into(),
+            description: None,
+            tools: None,
+            model: Some("test-model-large".to_string()),
+            harness: None,
+        };
+        let json = serde_json::to_value(&with_provider).unwrap();
+        assert_eq!(json.get("provider"), Some(&serde_json::json!("anthropic")));
+        let round: OverlayAgent = serde_json::from_value(json).unwrap();
+        assert_eq!(round.provider.as_deref(), Some("anthropic"));
+
+        let legacy: OverlayAgent =
+            serde_json::from_str(r#"{"id":"a","name":"A","role":"r"}"#).expect("legacy overlay");
+        assert_eq!(legacy.provider, None);
+        let legacy_value = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            legacy_value.get("provider").is_none(),
+            "an absent provider must not serialize a `provider` key: {legacy_value}"
+        );
     }
 
     /// The persona overrides round-trip through the `OverlayBlob` the

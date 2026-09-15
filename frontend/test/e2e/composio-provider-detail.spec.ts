@@ -163,10 +163,6 @@ test.afterAll(async ({ playwright }, testInfo) => {
   });
   try {
     if (COMPOSIO_FIXTURE_URL) await request.post(`${COMPOSIO_FIXTURE_URL}/__reset`);
-    // `confirmInUse: true` — see `composio-account-choice.spec.ts`'s cleanup
-    // for why a plain clear here trips Composio's own in-use guard (§2 of
-    // `docs/key-reworks/in-use-guards.md`) while `composio/mode` still reads
-    // `"managed"`, which it does throughout this file.
     const cleared = await request.put("/api/v1/company/composio/token", {
       data: { token: "", confirmInUse: true },
     });

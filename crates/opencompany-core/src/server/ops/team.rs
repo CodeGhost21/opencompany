@@ -665,6 +665,7 @@ async fn add_member(
         }
     }
     let agent = OverlayAgent {
+        provider: None,
         // A readable id derived from the name, unique against the roster this
         // record already holds (issue #686). Minted here rather than pushed and
         // renamed later: the id names the teammate's `agents/<id>/` folder and

@@ -290,6 +290,24 @@ export function pairMissingModel(providerDraft: string, modelDraft: string): boo
   return providerDraft !== "" && checkModelId(modelDraft) !== null;
 }
 
+/**
+ * The one string an agent-facing sentence names it by: its own name, else
+ * its role — every manifest or global-baseline agent (most agents) is named
+ * by its role rather than a chosen name, per {@link AgentDetailDto.name}'s
+ * own doc ("Absent for a manifest teammate, which is named by its role").
+ *
+ * Round-2 review, KR-L2-02: `agentPairBrokenCopy` used to skip straight to a
+ * generic "This teammate" without trying `role` first, which is what
+ * `AgentDetailView.tsx`'s own `agent.name ?? agent.role` (its sibling call
+ * into {@link resolveAgentDefault}) already did correctly — this is the one
+ * helper both now share, so the two cannot drift apart on the same fallback
+ * again. "This teammate" survives only as the last resort for the
+ * pathological case of an agent with neither.
+ */
+export function agentDisplayName(agent: Pick<AgentDetailDto, "name" | "role">): string {
+  return agent.name ?? agent.role ?? "This teammate";
+}
+
 /** "Company default · <provider label> · <model>", or the not-chosen form. */
 export function companyDefaultLabel(
   choice: DefaultChoice | null | undefined,
@@ -352,14 +370,14 @@ export function resolveAgentDefault(
  * facts a turn attempt would fail closed on, said here before any turn runs.
  */
 export function agentPairBrokenCopy(
-  agent: Pick<AgentDetailDto, "name" | "provider" | "model">,
+  agent: Pick<AgentDetailDto, "name" | "role" | "provider" | "model">,
   providers: readonly Pick<Provider, "slug" | "label" | "enabled" | "keyConfigured">[],
 ): string | null {
   if (!agent.provider || !agent.model) return null;
   const state = providerState(agent.provider, providers);
   if (state === "ok") return null;
   const label = providers.find((p) => p.slug === agent.provider)?.label ?? agent.provider;
-  const name = agent.name ?? "This teammate";
+  const name = agentDisplayName(agent);
   if (state === "noKey") {
     return `${name} uses ${label}, which has no key. Add one in ${SETTINGS_PATH}, or choose another provider and model for ${name}.`;
   }

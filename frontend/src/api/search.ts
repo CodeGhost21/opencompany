@@ -51,6 +51,14 @@ export interface SearchStatus {
   managedDailyCallCap: number;
   /** The providers this build can search through. */
   supportedProviders: string[];
+  /**
+   * Set when `search/default` names a provider that no longer exists or is
+   * switched off (keys rework #2306, decision D-never-clear-default / X14: a
+   * disable or delete no longer clears the marker itself). An actionable
+   * sentence naming the provider and where to fix it, for a banner — absent
+   * when nothing is marked, or the marked provider is connected and enabled.
+   */
+  defaultNotice?: string;
 }
 
 /** What a connect or test attempt came back with, beside the new status. */
@@ -107,27 +115,43 @@ export async function connectSearchProvider(
   );
 }
 
-/** Turns one provider on or off, or re-addresses a self-hosted one. */
+/**
+ * Turns one provider on or off, or re-addresses a self-hosted one.
+ *
+ * `confirmInUse` resends a disable after a `409 in_use` named what depends on
+ * this row (`docs/key-reworks/in-use-guards.md` §2/§3) — ignored on an enable
+ * or a re-address alone, and ignored when there is nothing to confirm.
+ */
 export async function updateSearchProvider(
   client: OpenCompanyClient,
   company: string | null,
   slug: string,
   body: { enabled?: boolean; endpoint?: string },
+  confirmInUse?: boolean,
 ): Promise<SearchStatus> {
   return client.put<SearchStatus>(
     `${client.scopeFor(company)}/search/providers/${encodeURIComponent(slug)}`,
-    body,
+    { ...body, confirmInUse },
   );
 }
 
-/** Removes one provider, clearing its credential with it. */
+/**
+ * Removes one provider, clearing its credential with it.
+ *
+ * `confirmInUse` resends a removal after a `409 in_use` (see
+ * {@link updateSearchProvider}) — as the query parameter, since DELETE has no
+ * body on this API (`docs/key-reworks/in-use-guards.md` §2).
+ */
 export async function removeSearchProvider(
   client: OpenCompanyClient,
   company: string | null,
   slug: string,
+  confirmInUse?: boolean,
 ): Promise<SearchStatus> {
   return client.del<SearchStatus>(
-    `${client.scopeFor(company)}/search/providers/${encodeURIComponent(slug)}`,
+    `${client.scopeFor(company)}/search/providers/${encodeURIComponent(slug)}${
+      confirmInUse ? "?confirmInUse=true" : ""
+    }`,
   );
 }
 
@@ -136,16 +160,19 @@ export async function removeSearchProvider(
  *
  * Write-only in both directions: nothing is returned but the status, and the
  * status carries `keyConfigured` rather than anything derived from the key.
+ * `confirmInUse` resends a clear after a `409 in_use` (see
+ * {@link updateSearchProvider}) — ignored on a set/rotate.
  */
 export async function replaceSearchProviderKey(
   client: OpenCompanyClient,
   company: string | null,
   slug: string,
   apiKey: string,
+  confirmInUse?: boolean,
 ): Promise<SearchStatus> {
   return client.put<SearchStatus>(
     `${client.scopeFor(company)}/search/providers/${encodeURIComponent(slug)}/key`,
-    { apiKey },
+    { apiKey, confirmInUse },
   );
 }
 
@@ -178,10 +205,20 @@ export async function testSearchProvider(
   );
 }
 
-/** Clears every connection, falling the company back to managed search. */
+/**
+ * Clears every connection, falling the company back to managed search.
+ *
+ * `confirmInUse` (round-3 review, item 4): resends after a `409 in_use` names
+ * the search default this bulk action would otherwise strand
+ * (`docs/key-reworks/in-use-guards.md` §2) — coded against that contract
+ * ahead of the host's own guard landing on this route.
+ */
 export async function clearSearch(
   client: OpenCompanyClient,
   company: string | null,
+  confirmInUse?: boolean,
 ): Promise<SearchStatus> {
-  return client.del<SearchStatus>(`${client.scopeFor(company)}/search/key`);
+  return client.del<SearchStatus>(
+    `${client.scopeFor(company)}/search/key${confirmInUse ? "?confirmInUse=true" : ""}`,
+  );
 }
