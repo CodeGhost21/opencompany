@@ -4623,6 +4623,7 @@ agent = "claude"
                 "instructions",
                 "avatar",
                 "model",
+                "provider",
                 "harness"
             ],
             "{as_admin}"
