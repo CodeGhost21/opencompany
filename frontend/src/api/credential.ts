@@ -18,6 +18,7 @@
 // TinyHumans backend would present one vendor's credential to another.
 
 import type { OpenCompanyClient } from "./client";
+import type { UsedBy } from "./types";
 
 /**
  * Which identity this company's brokered calls present right now.
@@ -74,6 +75,18 @@ export interface CompanyCredentialStatus {
    * guess.
    */
   account?: HubAccountLinks;
+  /**
+   * The LLM TinyHumans key slot holds a key that is not the account key.
+   * Saving leaves it alone (Q7). Never the key itself — only whether the two
+   * stored values are equal. Optional: an older host omits it, which the
+   * account-key dialog reads as "the host did not say" rather than `false`
+   * (keys rework, issue #2306, slice 4b).
+   */
+  inferenceHasOwnKey?: boolean;
+  /** The same for `composio/tinyhumans/key` (with 1a's legacy read). */
+  composioHasOwnKey?: boolean;
+  /** `inference/default` is set (`ProviderOnly` or `Full`) — never overwritten by a save. */
+  defaultSet?: boolean;
 }
 
 /** The two hub pages the console links out to. */
@@ -84,10 +97,52 @@ export interface HubAccountLinks {
   topUpUrl: string;
 }
 
-/** A mutating response: the resulting status plus a plain-language note. */
+/** One of the five things a single `PUT …/credential` can touch. */
+export type FanOutSlot = "composio" | "inference" | "provider" | "default" | "health";
+
+/** What happened to one {@link FanOutSlot} (the wire spelling of `SlotOutcome`). */
+export type FanOutOutcome =
+  | "filled"
+  | "rotated"
+  | "cleared"
+  | "rolledBack"
+  | "kept"
+  | "skipped"
+  | "failed"
+  | "ok";
+
+/** One slot's report line, from `company_key::fan_out` (keys rework, issue #2306, slice 4a). */
+export interface FanOutSlotReport {
+  slot: FanOutSlot;
+  outcome: FanOutOutcome;
+  /** The camelCase skip reason, `"store"` for a plain failure, or a probe class for the health slot. */
+  detail?: string;
+}
+
+/**
+ * A mutating response: the resulting status plus a plain-language note.
+ *
+ * The fan-out fields (`slots` onward) are present on every host running the
+ * keys rework's slice 4a or later; an older host omits all of them, which
+ * degrades to today's single-step dialog (see `account-fill.ts`).
+ */
 export interface CompanyCredentialMutation {
   status: CompanyCredentialStatus;
   note: string;
+  /** What the fan-out did to each of the five slots it touches, in order composio, inference, provider, default, health. */
+  slots?: FanOutSlotReport[];
+  /** Whether a `tinyhumans` row could not be created or defaulted for want of a model — the dialog's cue to ask for one. */
+  needsModel?: boolean;
+  /** Whether a model sent on a follow-up request would also become the company default. */
+  setsDefault?: boolean;
+  /** Catalog ids to offer, only ever alongside `needsModel`. */
+  models?: string[];
+  /**
+   * Echoes what a **confirmed** clear would have refused with, computed
+   * before the mutation applied. `undefined` on every mutation that is not a
+   * guarded clear, and on a guarded one that had nothing to warn about.
+   */
+  usedBy?: UsedBy;
 }
 
 /** Whether this company has its own credential, and which identity it presents. */
@@ -102,13 +157,23 @@ export function getCompanyCredential(
  * Set / rotate / clear the company's TinyHumans credential. A non-empty value
  * sets or rotates it; an empty string clears it, falling back to the instance's
  * platform identity where there is one. Admin-only — a member gets a 403.
+ *
+ * `model` names the model a `tinyhumans` row should carry if the fan-out
+ * creates one (keys rework, issue #2306, slice 4a) — the account-key dialog's
+ * second step sends this on the follow-up save once the host has answered
+ * `needsModel`. Omitted (never sent as `""`) while clearing or on the first
+ * save, so an older host sees exactly the body it always has.
  */
 export function setCompanyCredential(
   client: OpenCompanyClient,
   company: string | null,
   key: string,
+  model?: string,
 ): Promise<CompanyCredentialMutation> {
-  return client.put<CompanyCredentialMutation>(`${client.scopeFor(company)}/credential`, { key });
+  return client.put<CompanyCredentialMutation>(
+    `${client.scopeFor(company)}/credential`,
+    model ? { key, model } : { key },
+  );
 }
 
 /**

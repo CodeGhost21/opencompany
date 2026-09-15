@@ -1068,6 +1068,228 @@ async fn clearing_when_nothing_depends_on_it_needs_no_confirmation() {
 }
 
 // ---------------------------------------------------------------------------
+// `slot_facts` — the account-key dialog's own-key booleans (keys rework
+// #2306, slice 4b). See `docs/key-reworks/phase-4b-account-dialog.md` §3.1/§6.
+// ---------------------------------------------------------------------------
+
+/// A fresh company reports no own keys anywhere and no default — the
+/// dialog's starting state, where saving would fill both derived slots.
+#[tokio::test]
+async fn status_reports_no_own_keys_on_an_empty_company() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factsempty", GRANTED).await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "factsempty",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(dto["inferenceHasOwnKey"], false, "{raw}");
+    assert_eq!(dto["composioHasOwnKey"], false, "{raw}");
+    assert_eq!(dto["defaultSet"], false, "{raw}");
+}
+
+/// A copy that merely equals the account key is not "its own" — Q7's whole
+/// point is that such a copy is filled again on the next rotation.
+#[tokio::test]
+async fn a_copy_equal_to_the_account_key_is_not_an_own_key() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factscopy", GRANTED).await;
+    send(
+        &state,
+        "factscopy",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "factscopy",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(
+        dto["inferenceHasOwnKey"], false,
+        "the fan-out's own copy is not an own key: {raw}"
+    );
+    assert_eq!(
+        dto["composioHasOwnKey"], false,
+        "the fan-out's own copy is not an own key: {raw}"
+    );
+}
+
+/// A key pasted directly on the LLM page is that slot's own key, and the
+/// dialog must be able to tell.
+#[tokio::test]
+async fn a_key_set_on_the_llm_page_is_an_own_key() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factsllm", GRANTED).await;
+    send(
+        &state,
+        "factsllm",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    send(
+        &state,
+        "factsllm",
+        "PUT",
+        "/api/v1/company/inference/managed/key",
+        Some(json!({ "key": "th-not-a-real-key-custom" })),
+    )
+    .await;
+
+    let (_, dto, raw) = send(
+        &state,
+        "factsllm",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(dto["inferenceHasOwnKey"], true, "{raw}");
+}
+
+/// A legacy `composio/token` (the pre-1a address, never mirrored to the new
+/// one) still counts as the Composio slot's own key —
+/// `load_tinyhumans_key`'s own fallback read. The account key is written
+/// **raw** here, not through `PUT …/credential`: that route's own fan-out
+/// would fill the new `composio/tinyhumans/key` address and this test needs
+/// it to stay empty, exactly the M14 shape (a company whose Composio
+/// credential was only ever read through the legacy address).
+#[tokio::test]
+async fn a_legacy_composio_token_counts_as_the_composio_slot() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factslegacy", GRANTED).await;
+
+    let id = CompanyId::new("factslegacy");
+    let runtime = state.registry().get(&id).expect("registered");
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::company_key::KEY_KEY,
+            crate::ports::types::SecretValue(KEY.to_string()),
+        )
+        .await
+        .unwrap();
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::composio::LEGACY_TOKEN_KEY,
+            crate::ports::types::SecretValue("th-not-a-real-key-custom".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (_, dto, raw) = send(
+        &state,
+        "factslegacy",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(dto["composioHasOwnKey"], true, "{raw}");
+}
+
+/// A bare provider slug (Q1: "provider chosen, model not chosen") still
+/// counts as a set default — never overwritten, and the dialog must not
+/// promise a default move that would not happen.
+#[tokio::test]
+async fn default_set_is_true_for_a_bare_slug() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factsdefault", GRANTED).await;
+
+    let id = CompanyId::new("factsdefault");
+    let runtime = state.registry().get(&id).expect("registered");
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::inference::store::DEFAULT_PROVIDER_KEY,
+            crate::ports::types::SecretValue("openrouter".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (_, dto, raw) = send(
+        &state,
+        "factsdefault",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert_eq!(dto["defaultSet"], true, "{raw}");
+}
+
+/// None of the three new booleans ever needs to echo a value to compute —
+/// the status body carries neither fake key, whatever is set on either slot.
+#[tokio::test]
+async fn status_never_carries_a_key_when_reporting_own_key_facts() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "factsleak", GRANTED).await;
+    send(
+        &state,
+        "factsleak",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    send(
+        &state,
+        "factsleak",
+        "PUT",
+        "/api/v1/company/inference/managed/key",
+        Some(json!({ "key": "th-not-a-real-key-custom" })),
+    )
+    .await;
+    let id = CompanyId::new("factsleak");
+    let runtime = state.registry().get(&id).expect("registered");
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::composio::LEGACY_TOKEN_KEY,
+            crate::ports::types::SecretValue("th-not-a-real-key-custom".to_string()),
+        )
+        .await
+        .unwrap();
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::inference::store::DEFAULT_PROVIDER_KEY,
+            crate::ports::types::SecretValue("openrouter".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (_, _, raw) = send(
+        &state,
+        "factsleak",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    assert!(!raw.contains(KEY), "{raw}");
+    assert!(!raw.contains("th-not-a-real-key-custom"), "{raw}");
+}
+
+// ---------------------------------------------------------------------------
 // The one-click key grant (PKCE). See `server::hub_link`.
 // ---------------------------------------------------------------------------
 
