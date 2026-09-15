@@ -85,6 +85,8 @@ mod moves_test;
 #[cfg(test)]
 mod referral_test;
 #[cfg(test)]
+mod round_test;
+#[cfg(test)]
 mod test;
 
 pub use aside::{ASIDE_MARKER, AsideConfig, SURFACE_MARKER};
