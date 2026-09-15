@@ -36,7 +36,7 @@ Switch companies by editing `OPENCOMPANY_COMPANY` in `.env` and re-running
 For a selectable memory engine, add `tinymemory` (hosted engines —
 Supermemory, Mem0, Cognee — plus the `null` driver) and `tinymemory-embedded`
 (the durable in-pod `namespace` store) to `OPENCOMPANY_FEATURES`, then select
-one with the `OPENCOMPANY_MEMORY*` variables (`deploy/.env.example` has the block;
+one with the `OPENCOMPANY_MEMORY*` variables (`.env.example` here has the block;
 `docs/spec/runtime/memory-engine.md` has the full guide and the
 engine-switch runbook).
 
