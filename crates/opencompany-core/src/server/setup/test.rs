@@ -1804,7 +1804,7 @@ async fn cloud_provider_probe_discovers_a_model_before_chat() {
 
 #[cfg(feature = "openhuman")]
 #[tokio::test]
-async fn probe_tries_later_catalog_models_after_a_model_rejection() {
+async fn probe_prioritises_a_chat_model_after_five_non_chat_entries() {
     let attempted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let attempted_for_route = attempted.clone();
     let app = axum::Router::new()
@@ -1813,7 +1813,11 @@ async fn probe_tries_later_catalog_models_after_a_model_rejection() {
             axum::routing::get(|| async {
                 axum::Json(serde_json::json!({
                     "data": [
-                        { "id": "embedding-test" },
+                        { "id": "embedding-test-0" },
+                        { "id": "embedding-test-1" },
+                        { "id": "embedding-test-2" },
+                        { "id": "embedding-test-3" },
+                        { "id": "embedding-test-4" },
                         { "id": "chat-test" }
                     ]
                 }))
@@ -1826,7 +1830,7 @@ async fn probe_tries_later_catalog_models_after_a_model_rejection() {
                 async move {
                     let model = body["model"].as_str().unwrap().to_string();
                     attempted.lock().unwrap().push(model.clone());
-                    if model == "embedding-test" {
+                    if model.starts_with("embedding-") {
                         return (
                             axum::http::StatusCode::BAD_REQUEST,
                             axum::Json(serde_json::json!({
@@ -1860,10 +1864,7 @@ async fn probe_tries_later_catalog_models_after_a_model_rejection() {
 
     assert!(result.ok, "{:?}", result.error);
     assert_eq!(result.model.as_deref(), Some("chat-test"));
-    assert_eq!(
-        attempted.lock().unwrap().as_slice(),
-        ["embedding-test", "chat-test"]
-    );
+    assert_eq!(attempted.lock().unwrap().as_slice(), ["chat-test"]);
 }
 
 #[cfg(feature = "openhuman")]

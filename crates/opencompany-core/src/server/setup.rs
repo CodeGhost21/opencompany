@@ -1210,6 +1210,22 @@ const MODEL_DISCOVERY_FAILURE: &str = "Could not list models from this provider.
 #[cfg(feature = "openhuman")]
 const MODEL_PROBE_CANDIDATE_LIMIT: usize = 5;
 
+#[cfg(feature = "openhuman")]
+fn probe_model_candidates(
+    mut models: Vec<crate::server::inference_models::InferenceModel>,
+) -> Vec<crate::server::inference_models::InferenceModel> {
+    models.sort_by_key(|model| {
+        let id = model.id.to_ascii_lowercase();
+        ["embed", "rerank", "moderation"]
+            .iter()
+            .any(|marker| id.contains(marker))
+    });
+    models
+        .into_iter()
+        .take(MODEL_PROBE_CANDIDATE_LIMIT)
+        .collect()
+}
+
 /// `POST /api/v1/setup/inference/test` — a live one-turn probe of a credential
 /// the operator has just typed, before anything is written.
 ///
@@ -1360,9 +1376,8 @@ async fn probe_inference<E: EnvSource + Sync>(
     }
 
     let mut last_failure = None;
-    for model in models
+    for model in probe_model_candidates(models)
         .into_iter()
-        .take(MODEL_PROBE_CANDIDATE_LIMIT)
         .map(|model| model.id)
     {
         let candidate = decl.clone().with_chosen_model(model.clone());
