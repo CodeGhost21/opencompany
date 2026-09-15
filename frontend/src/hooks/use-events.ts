@@ -31,6 +31,13 @@ export type CompanyStreamEvent =
       agentId: string;
       text: string;
       /**
+       * The body as the model wrote it — see {@link AgentReplyEvent.cueText}.
+       * Declared here as well as on the callback payload because this arm
+       * rebuilds that payload field by field: a field the host sends and this
+       * shape omits is dropped at the dispatcher and reaches nothing.
+       */
+      cueText?: string;
+      /**
        * The board card this reply is about (issue #246/#185) — the card the
        * turn opened, or the dispatched card it ran for. Absent on an ordinary
        * chat reply.
@@ -1267,6 +1274,11 @@ export function handleEvent(
         chatId: event.chatId,
         agentId: event.agentId,
         text: event.text,
+        // The room's own grammar, which the episode fold counts. `text` has
+        // been rewritten into operator-facing prose by the time it reaches
+        // here, so dropping this would leave a live deliberation undetectable
+        // — the fold would see no moves and render no episode at all.
+        cueText: event.cueText,
         // Issue #483: the host's own id for this message. Carried so the
         // injected line and its later rehydrated twin share an identity.
         seq: event.seq,
