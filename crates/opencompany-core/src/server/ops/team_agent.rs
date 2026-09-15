@@ -3883,6 +3883,7 @@ prompt = "Lead decisively."
                 "instructions",
                 "avatar",
                 "model",
+                "provider",
                 "harness"
             ],
             "{agent}"
