@@ -137,15 +137,16 @@ async fn state_with(
     state
 }
 
-/// The repo's shared skill library (`<crate root>/skills`), the same directory
-/// the serve path derives `skills_root` from.
+/// The repo's `companies/` directory, whose bundles' `skills/` are the skill
+/// registry — the same directory the serve path derives `skills_root` from.
 fn repo_skills_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../companies")
 }
 
-/// Like [`state_with_company`], but with the repo's shared skill library wired
-/// in, so registry reads and server-authoritative installs resolve against real
-/// documents instead of degrading to the empty-registry fallback.
+/// Like [`state_with_company`], but with the repo's shipped bundles wired in as
+/// the skill registry, so registry reads and server-authoritative installs
+/// resolve against real documents instead of degrading to the empty-registry
+/// fallback.
 async fn state_with_registry(home: &std::path::Path) -> AppState {
     // `with_skills_root` consumes and returns the state, so the registered
     // company and seeded admin move along with it.
@@ -2520,12 +2521,12 @@ async fn skills_install_falls_back_to_client_metadata_when_no_registry_is_served
 #[tokio::test]
 async fn skills_install_500s_when_the_configured_library_cannot_load() {
     let home_dir = home();
-    // A skills root that exists but holds a `SKILL.md` with no `description`,
-    // which the parser rejects.
-    let broken_root = home_dir.path().join("broken-skills");
-    std::fs::create_dir_all(broken_root.join("web-research")).expect("skill dir");
+    // A skills root that exists but holds a bundle whose `SKILL.md` has no
+    // `description`, which the parser rejects.
+    let broken_root = home_dir.path().join("broken-companies");
+    std::fs::create_dir_all(broken_root.join("acme/skills/web-research")).expect("skill dir");
     std::fs::write(
-        broken_root.join("web-research/SKILL.md"),
+        broken_root.join("acme/skills/web-research/SKILL.md"),
         "---\nname: Web Research\n---\n# Web Research\n",
     )
     .expect("SKILL.md");
@@ -2570,23 +2571,28 @@ async fn skills_registry_lists_the_live_library_without_bodies() {
     let (status, body) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
     assert_eq!(status, StatusCode::OK);
     let rows = body.as_array().expect("an array");
-    // Counted from disk rather than hardcoded, so adding a skill to the shared
-    // library does not break this test — it still asserts the route lists the
-    // *whole* library.
-    let on_disk = crate::company::load_dir_skills(&repo_skills_root())
-        .expect("the shared library parses")
+    // Counted from disk rather than hardcoded, so adding a skill to a bundle
+    // does not break this test — it still asserts the route lists the *whole*
+    // catalog: every bundle's skills, the baseline's included.
+    let on_disk = crate::company::load_catalog_skills(&repo_skills_root())
+        .expect("the shipped bundles parse")
         .len();
-    assert!(on_disk >= 14, "sanity: the library is populated");
-    assert_eq!(rows.len(), on_disk, "every shared skill is listed");
+    assert!(on_disk >= 14, "sanity: the catalog is populated");
+    assert_eq!(rows.len(), on_disk, "every bundle skill is listed");
 
     for row in rows {
         assert!(
             row.get("body").is_none(),
             "registry rows must never carry a body: {row}"
         );
-        assert_eq!(row["version"], "1.0.0", "{row}");
         assert_eq!(row["publisher"], "OpenCompany", "{row}");
     }
+    // The baseline's skills carry a version, so an install of one is pinned.
+    let research = rows
+        .iter()
+        .find(|r| r["id"] == "web-research")
+        .expect("web-research is in the baseline");
+    assert_eq!(research["version"], "1.0.0", "{research}");
 
     let scan = rows
         .iter()
