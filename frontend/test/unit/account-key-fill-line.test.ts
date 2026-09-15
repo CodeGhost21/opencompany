@@ -5,6 +5,10 @@
 // branch never claims the key "connects" or "is connected" for LLM — the
 // fan-out (4a) never creates a `tinyhumans` row without a model, so a key
 // with no row behind it has done nothing for LLM yet.
+//
+// Round-3b review, P3-4: the LLM clause also hides outright, rather than just
+// softening its wording, once `inferenceHasModel` says the row saving would
+// fill already has a model — there is then no "next" step left to promise.
 
 import { describe, expect, it } from "vitest";
 
@@ -31,13 +35,14 @@ describe("accountFills", () => {
   it("reads false HasOwnKey as a slot this save would fill", () => {
     expect(
       accountFills(status({ inferenceHasOwnKey: false, composioHasOwnKey: false })),
-    ).toEqual({ llm: true, composio: true });
+    ).toEqual({ llm: true, composio: true, llmHasModel: false });
   });
 
   it("reads true HasOwnKey as a slot this save would leave alone", () => {
     expect(accountFills(status({ inferenceHasOwnKey: true, composioHasOwnKey: true }))).toEqual({
       llm: false,
       composio: false,
+      llmHasModel: false,
     });
   });
 
@@ -45,6 +50,7 @@ describe("accountFills", () => {
     expect(accountFills(status({ inferenceHasOwnKey: true, composioHasOwnKey: false }))).toEqual({
       llm: false,
       composio: true,
+      llmHasModel: false,
     });
   });
 
@@ -57,38 +63,71 @@ describe("accountFills", () => {
     );
     expect(accountFills(null)).toBe(null);
   });
+
+  // Round-3b review, P3-4: absent on a host that has not landed the field —
+  // reads as "we don't know", the same direction `inferenceHasOwnKey` itself
+  // falls back to, so an older host's line keeps today's wording rather than
+  // guessing the row has no model.
+  it("reads inferenceHasModel as false when the host does not say", () => {
+    expect(
+      accountFills(status({ inferenceHasOwnKey: false, composioHasOwnKey: false })),
+    ).toEqual(
+      expect.objectContaining({ llmHasModel: false }),
+    );
+  });
+
+  it("reads a true inferenceHasModel through", () => {
+    expect(
+      accountFills(
+        status({ inferenceHasOwnKey: false, composioHasOwnKey: false, inferenceHasModel: true }),
+      ),
+    ).toEqual({ llm: true, composio: true, llmHasModel: true });
+  });
 });
 
 describe("accountFillLine", () => {
   it("names both slots without claiming LLM is connected", () => {
-    const line = accountFillLine({ llm: true, composio: true });
+    const line = accountFillLine({ llm: true, composio: true, llmHasModel: false });
     expect(line).toBe(
-      "Saving also adds this key to TinyHumans on the LLM page — choose a model there to finish — and connects it for Composio.",
+      "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and connects it for Composio.",
     );
     expect(line?.toLowerCase()).not.toContain("connects tinyhumans for llm");
     expect(line?.toLowerCase()).not.toContain("llm is connected");
   });
 
   it("names only the LLM slot, and says a model is still needed", () => {
-    const line = accountFillLine({ llm: true, composio: false });
+    const line = accountFillLine({ llm: true, composio: false, llmHasModel: false });
     expect(line).toBe(
-      "Saving also adds this key to TinyHumans on the LLM page — choose a model there to finish.",
+      "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next.",
     );
     expect(line?.toLowerCase()).not.toContain("connects");
   });
 
   it("names only the Composio slot — unaffected by the LLM wording override", () => {
-    expect(accountFillLine({ llm: false, composio: true })).toBe(
+    expect(accountFillLine({ llm: false, composio: true, llmHasModel: false })).toBe(
       "Saving also connects TinyHumans for Composio.",
     );
   });
 
   it("is null when saving would fill neither slot", () => {
-    expect(accountFillLine({ llm: false, composio: false })).toBe(null);
+    expect(accountFillLine({ llm: false, composio: false, llmHasModel: false })).toBe(null);
   });
 
   it("is null when the host did not say (accountFills returned null)", () => {
     expect(accountFillLine(null)).toBe(null);
+  });
+
+  // Round-3b review, P3-4's actual fix: a row that already has a model gets
+  // no LLM clause at all, not just softer wording — there is no "next" step
+  // left to promise.
+  it("drops the LLM clause entirely once the row already has a model", () => {
+    expect(accountFillLine({ llm: true, composio: false, llmHasModel: true })).toBe(null);
+  });
+
+  it("keeps only the Composio clause when LLM already has a model but Composio would still be filled", () => {
+    expect(accountFillLine({ llm: true, composio: true, llmHasModel: true })).toBe(
+      "Saving also connects TinyHumans for Composio.",
+    );
   });
 });
 

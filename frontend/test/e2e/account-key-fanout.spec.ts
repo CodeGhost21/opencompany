@@ -137,7 +137,7 @@ test.describe("the fill line names only the slots saving would fill", () => {
 
     const line = page.getByTestId("account-key-fill-line");
     await expect(line).toContainText(
-      "Saving also adds this key to TinyHumans on the LLM page — choose a model there to finish — and connects it for Composio.",
+      "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and connects it for Composio.",
     );
     await expect(line).not.toContainText("connects TinyHumans for LLM");
     await expect(page.getByTestId("account-key-llm-link")).toBeVisible();
@@ -153,7 +153,7 @@ test.describe("the fill line names only the slots saving would fill", () => {
 
     const line = page.getByTestId("account-key-fill-line");
     await expect(line).toContainText(
-      "Saving also adds this key to TinyHumans on the LLM page — choose a model there to finish.",
+      "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next.",
     );
     await expect(page.getByTestId("account-key-llm-link")).toBeVisible();
     await expect(page.getByTestId("account-key-composio-link")).toHaveCount(0);
@@ -217,7 +217,7 @@ test("saving asks for a model when the host needs one, then reposts the key with
   await openAccount(page);
   await page.getByTestId("account-add-key").click();
   await expect(page.getByTestId("account-key-fill-line")).toContainText(
-    "Saving also adds this key to TinyHumans on the LLM page — choose a model there to finish — and connects it for Composio.",
+    "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and connects it for Composio.",
   );
 
   await page.getByTestId("account-key-input").fill(KEY_A);

@@ -10,6 +10,14 @@
 // with no row is not "set" for LLM — saving only ADDS the key there, and a
 // model still needs choosing before it does anything. The line says exactly
 // that rather than "connects"/"is connected".
+//
+// Round-3b review, P3-4: the old wording ("choose a model there to finish")
+// showed even when the `tinyhumans` row saving would fill already has a
+// model of its own — a save that only rotates an already-working row, where
+// there is nothing left to "finish". `inferenceHasModel` (speculative field,
+// not yet on every host — see `@/api/credential`) is what tells the two
+// cases apart; `llmHasModel` below hides the LLM clause entirely rather than
+// promising a step two the save will not actually need.
 
 import type { CompanyCredentialStatus } from "@/api/credential";
 import { connectionsHref } from "@/views/connection-pages";
@@ -22,6 +30,13 @@ export const COMPOSIO_PAGE_HREF = connectionsHref("composio");
 export interface AccountFills {
   llm: boolean;
   composio: boolean;
+  /**
+   * Whether the `tinyhumans` row `llm` would fill already has a model of its
+   * own — `false` on a host that has not landed `inferenceHasModel` yet,
+   * which keeps today's wording rather than assuming a row has no model when
+   * the host simply did not say (round-3b review, P3-4).
+   */
+  llmHasModel: boolean;
 }
 
 /**
@@ -37,13 +52,17 @@ export function accountFills(status: CompanyCredentialStatus | null): AccountFil
   ) {
     return null;
   }
-  return { llm: !status.inferenceHasOwnKey, composio: !status.composioHasOwnKey };
+  return {
+    llm: !status.inferenceHasOwnKey,
+    composio: !status.composioHasOwnKey,
+    llmHasModel: status.inferenceHasModel === true,
+  };
 }
 
 /**
  * The one conditional line Q9 asks for, naming only the slots this save would
- * fill — or `null` for no line at all (neither slot would be touched, or the
- * host did not say).
+ * fill — or `null` for no line at all (neither slot would be touched, the
+ * only slot it would touch already has a model, or the host did not say).
  *
  * The LLM branch never says "connects" or "is connected": the fan-out adds
  * the key to `provider/tinyhumans/key` but creates no `tinyhumans` row
@@ -51,14 +70,19 @@ export function accountFills(status: CompanyCredentialStatus | null): AccountFil
  * no row behind it does nothing for LLM yet. Composio has no such gate — a
  * bearer with no row concept still serves live calls — so its wording keeps
  * the plain "connects".
+ *
+ * `llmHasModel` (round-3b review, P3-4) drops the LLM clause instead of
+ * softening it: once a model is already chosen there is no "next" step to
+ * promise, and "with the model you choose next" would simply be false.
  */
 export function accountFillLine(fills: AccountFills | null): string | null {
   if (!fills) return null;
-  if (fills.llm && fills.composio) {
-    return "Saving also adds this key to TinyHumans on the LLM page — choose a model there to finish — and connects it for Composio.";
+  const llm = fills.llm && !fills.llmHasModel;
+  if (llm && fills.composio) {
+    return "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and connects it for Composio.";
   }
-  if (fills.llm) {
-    return "Saving also adds this key to TinyHumans on the LLM page — choose a model there to finish.";
+  if (llm) {
+    return "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next.";
   }
   if (fills.composio) {
     return "Saving also connects TinyHumans for Composio.";

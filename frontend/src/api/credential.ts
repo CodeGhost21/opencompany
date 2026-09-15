@@ -85,6 +85,16 @@ export interface CompanyCredentialStatus {
   inferenceHasOwnKey?: boolean;
   /** The same for `composio/tinyhumans/key` (with 1a's legacy read). */
   composioHasOwnKey?: boolean;
+  /**
+   * Whether the `tinyhumans` row saving would fill already carries a model —
+   * so saving here would not leave anything for step two to ask, and the
+   * dialog's fill line has nothing to promise about "finishing" LLM
+   * (round-3b review, P3-4). Absent on a host that has not landed this fact
+   * on `SlotFacts` yet, which `accountFills` reads the same way it reads a
+   * missing `inferenceHasOwnKey` — "did not say", so the line keeps today's
+   * wording rather than guessing a row has no model when it might.
+   */
+  inferenceHasModel?: boolean;
   /** `inference/default` is set (`ProviderOnly` or `Full`) — never overwritten by a save. */
   defaultSet?: boolean;
   /**
@@ -154,6 +164,21 @@ export interface CompanyCredentialMutation {
    * guarded clear, and on a guarded one that had nothing to warn about.
    */
   usedBy?: UsedBy;
+  /**
+   * Whether the config this write just landed needs a restart before agents
+   * actually run on it — same wire name and meaning as
+   * `InferenceStatusDto.restartRequired` (`@/api/inference`), computed by the
+   * same host-side function (KR-ACCT-01, 2026-09-15). The Account dialog has
+   * no `cognition`/running-brain state of its own to compare against the way
+   * the LLM page does, so this is carried directly on the mutation rather
+   * than inferred: a save can create or complete a `tinyhumans` row that a
+   * company already booted past, and only a restart puts it to work. Absent
+   * (never `false`) on a host that predates this field, which the dialog
+   * reads as "did not say" and — the safe direction here, since the fallback
+   * is silence rather than a wrong guess — simply offers no restart action,
+   * the same as it always has.
+   */
+  restartRequired?: boolean;
 }
 
 /** Whether this company has its own credential, and which identity it presents. */
