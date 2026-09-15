@@ -33,9 +33,11 @@ use axum::http::HeaderMap;
 use crate::AppState;
 use crate::company::company_key::{self, account_key_used_by, key_configured, load, resolve};
 use crate::company::credentials::CredentialSource;
+use crate::company::inference::store as inference_store;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::{OpenCompanyError, UsedBy};
 use crate::ports::types::CompanyEvent;
+use crate::server::cognition::InferenceResolution;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 use crate::server::users::token::OsTokens;
@@ -146,6 +148,15 @@ struct CredentialStatusDto {
     composio_has_own_key: bool,
     /// `inference/default` is set (`ProviderOnly` or `Full`).
     default_set: bool,
+    /// Whether the `tinyhumans` row saving would fill already carries a
+    /// model — so saving here would not leave anything for step two to ask
+    /// (KR-ACCT-01, 2026-09-15). `true` only when the row exists (the fan-out's
+    /// own `Slot::Provider` origin, `ProviderOrigin::Indexed`) **and**
+    /// [`inference_store::Provider::model`] resolves to exactly one id —
+    /// mirroring the same test [`company_key::fan_out`]'s own "picked" logic
+    /// applies when it decides whether a save can complete the row without a
+    /// `model` in the request body.
+    inference_has_model: bool,
     /// What a **clear** of this key would strand right now — the same
     /// [`account_key_used_by`] computation [`company_key::fan_out`]'s own
     /// guard runs atomically under its lock (P3-6, keys rework #2306 review),
@@ -199,6 +210,23 @@ struct MutationResponse {
     /// one that had nothing to warn about.
     #[serde(skip_serializing_if = "Option::is_none")]
     used_by: Option<UsedBy>,
+    /// Whether the config this write just landed needs a restart before
+    /// agents actually run on it (KR-ACCT-01, 2026-09-15) — same wire name
+    /// and meaning as `ops::inference`'s own
+    /// `InferenceStatusDto.restart_required`, computed the identical way
+    /// ([`restart_required_for`]) so the Account page and the LLM page can
+    /// never disagree about the same company. The fan-out can create the
+    /// first `tinyhumans` row and make it the default, but a company that
+    /// booted with no inference configured is already running the
+    /// echo/hosted brain and an unwired workflow runner
+    /// (`RuntimeBuilder::build` picks the brain once, at boot) — so a save
+    /// here can leave the company *reporting* a working default while turns
+    /// keep running on the old brain until an operator restarts. Never
+    /// serialized as `false` — the same "absent means nothing to report"
+    /// convention [`UsedBy::default`](crate::error::UsedBy) uses — so an
+    /// older console reads a missing field exactly as it always has.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    restart_required: bool,
 }
 
 /// Wire spelling of one [`company_key::SlotReport`] — moved to
@@ -349,6 +377,7 @@ async fn effective_status(
     let used_by = account_key_used_by(runtime.id(), secrets.as_ref())
         .await
         .map_err(ApiError)?;
+    let inference_has_model = tinyhumans_row_has_model(runtime).await?;
     Ok(CredentialStatusDto {
         configured,
         source,
@@ -365,8 +394,48 @@ async fn effective_status(
         inference_has_own_key: facts.inference_has_own_key,
         composio_has_own_key: facts.composio_has_own_key,
         default_set: facts.default_set,
+        inference_has_model,
         used_by,
     })
+}
+
+/// Whether the `tinyhumans` row exists and already carries exactly one model
+/// — see [`CredentialStatusDto::inference_has_model`]'s doc for why "exactly
+/// one" is the bar rather than merely "non-empty": it mirrors the same test
+/// [`company_key::fan_out`]'s own default-slot logic applies to a row's
+/// `models` map (`ModelOnRow::One` only) when it decides whether a follow-up
+/// save can complete the row without a `model` of its own.
+async fn tinyhumans_row_has_model(runtime: &CompanyRuntime) -> Result<bool, ApiError> {
+    let row = inference_store::list_providers(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?
+        .into_iter()
+        .find(|p| {
+            p.origin == inference_store::ProviderOrigin::Indexed
+                && p.slug == crate::company::inference::MANAGED_SLUG
+        });
+    Ok(row.is_some_and(|p| matches!(p.model(), inference_store::ModelOnRow::One(_))))
+}
+
+/// Whether this company needs a restart before a mutation here actually
+/// reaches agent turns (KR-ACCT-01, 2026-09-15) — see
+/// [`MutationResponse::restart_required`]'s doc for why.
+///
+/// Computed the identical way [`super::inference`]'s own
+/// `InferenceStatusDto.restart_required` is: whether a tenant config resolves
+/// *now* ([`super::inference::inference_resolution`], folding an unreadable
+/// manifest into "not configured" exactly as that function already does for
+/// the LLM page), fed through [`super::inference::restart_pending`]. One
+/// reader shared by both surfaces, so they cannot drift apart on the same
+/// company. Never fails — an unreadable manifest reads as "not configured",
+/// which answers `false` here rather than surfacing a second error on top of
+/// whatever the fan-out itself already reported.
+async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
+    let configured = matches!(
+        super::inference::inference_resolution(runtime).await,
+        InferenceResolution::Resolved
+    );
+    super::inference::restart_pending(runtime, configured)
 }
 
 /// `GET …/credential` — whether this company has its own key, and which identity
@@ -453,6 +522,7 @@ async fn set_key(
         sets_default: report.sets_default,
         models: report.models.clone(),
         used_by,
+        restart_required: restart_required_for(runtime).await,
     }))
 }
 
@@ -696,6 +766,7 @@ async fn finish_link(
         sets_default: report.sets_default,
         models: report.models.clone(),
         used_by: None,
+        restart_required: restart_required_for(runtime).await,
     }))
 }
 

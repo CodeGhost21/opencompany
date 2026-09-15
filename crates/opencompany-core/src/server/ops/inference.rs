@@ -853,7 +853,7 @@ pub(crate) fn designs_profiles(_runtime: &CompanyRuntime) -> bool {
 /// 1. a tenant config resolves *now* (the same predicate `build` tests),
 /// 2. the company is **not** on the harness path, and
 /// 3. the harness path is reachable here, so a restart would actually change it.
-fn restart_pending(runtime: &CompanyRuntime, configured: bool) -> bool {
+pub(crate) fn restart_pending(runtime: &CompanyRuntime, configured: bool) -> bool {
     configured
         && runtime.cognition().path != crate::ports::brain::HARNESS_PATH
         && harness_reachable(runtime)

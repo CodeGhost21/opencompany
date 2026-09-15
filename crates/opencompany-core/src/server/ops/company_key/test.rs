@@ -1865,6 +1865,81 @@ async fn a_member_can_read_billing_without_admin_rights() {
 }
 
 // ---------------------------------------------------------------------------
+// KR-ACCT-01 (2026-09-15): the wire spellings `frontend/src/api/credential.ts`
+// reads — `CompanyCredentialMutation.restartRequired` and
+// `CompanyCredentialStatus.inferenceHasModel` — pinned directly against the
+// DTOs' own `Serialize` impl, independent of any route or runtime.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn restart_required_serializes_camel_case_and_is_omitted_when_false() {
+    let mut response = super::MutationResponse {
+        status: minimal_status(),
+        note: "note".to_string(),
+        slots: Vec::new(),
+        needs_model: false,
+        sets_default: false,
+        models: Vec::new(),
+        used_by: None,
+        restart_required: true,
+    };
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        json["restartRequired"],
+        Value::Bool(true),
+        "must match frontend/src/api/credential.ts's CompanyCredentialMutation.restartRequired: {json}"
+    );
+
+    // Never serialized as `false` — the console reads an absent field as "did
+    // not say" and a present `false` would be a second, contradictory way to
+    // say the same thing.
+    response.restart_required = false;
+    let json = serde_json::to_value(&response).unwrap();
+    assert!(
+        !json.as_object().unwrap().contains_key("restartRequired"),
+        "restartRequired must be omitted rather than sent as false: {json}"
+    );
+}
+
+#[test]
+fn inference_has_model_serializes_camel_case() {
+    let mut status = minimal_status();
+    status.inference_has_model = true;
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        json["inferenceHasModel"],
+        Value::Bool(true),
+        "must match frontend/src/api/credential.ts's CompanyCredentialStatus.inferenceHasModel: {json}"
+    );
+
+    status.inference_has_model = false;
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        json["inferenceHasModel"],
+        Value::Bool(false),
+        "unlike restartRequired, this field is a plain bool and is always present: {json}"
+    );
+}
+
+/// The smallest [`super::CredentialStatusDto`] that serializes without
+/// panicking — every field the two tests above don't care about set to its
+/// most inert value.
+fn minimal_status() -> super::CredentialStatusDto {
+    super::CredentialStatusDto {
+        configured: false,
+        source: crate::company::credentials::CredentialSource::None,
+        notice: String::new(),
+        account: None,
+        hub_link: false,
+        inference_has_own_key: false,
+        composio_has_own_key: false,
+        default_set: false,
+        inference_has_model: false,
+        used_by: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Where the grant comes back to
 // ---------------------------------------------------------------------------
 
