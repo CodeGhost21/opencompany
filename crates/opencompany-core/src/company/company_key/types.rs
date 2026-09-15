@@ -8,6 +8,8 @@
 
 use serde::Serialize;
 
+use crate::error::UsedBy;
+
 /// One of the five things a single `PUT …/credential` can touch.
 ///
 /// Always reported in this order — see [`FanOutReport::slots`] — because that
@@ -112,6 +114,12 @@ pub struct SlotReport {
 pub struct FanOutRequest<'a> {
     pub key: &'a str,
     pub model: Option<&'a str>,
+    /// Confirms a clear the in-use guard would otherwise refuse
+    /// (`docs/key-reworks/in-use-guards.md` §2). Ignored on a set/rotate,
+    /// which [`fan_out`](super::fan_out) never guards. `finish_link`'s grant
+    /// flow passes `true` unconditionally — a grant never clears (Q10), so
+    /// the flag never gates anything there.
+    pub confirm_in_use: bool,
 }
 
 /// Everything a `PUT …/credential` needs to answer with, once the fan-out
@@ -144,4 +152,13 @@ pub struct FanOutReport {
     /// this to say specifically that the LLM page still uses the *previous*
     /// key, rather than only that the new one "was not kept".
     pub rollback_had_prior_key: bool,
+    /// What a clear would strand, computed atomically under `slot_guard`
+    /// before anything is written (P3-6, keys rework #2306 review) —
+    /// `Some` only on a **confirmed** clear that had something to warn
+    /// about, so a caller can echo it in a success response exactly as
+    /// `docs/key-reworks/in-use-guards.md` §3 asks. `None` on every other
+    /// report: a set/rotate, an unconfirmed clear (which never reaches a
+    /// report — it returns `Err` instead), or a clear with nothing to warn
+    /// about.
+    pub used_by: Option<UsedBy>,
 }

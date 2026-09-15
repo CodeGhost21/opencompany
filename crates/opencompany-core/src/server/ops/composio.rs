@@ -1185,12 +1185,25 @@ async fn copy_account_key(company: AdminScopedCompany) -> Result<Json<MutationRe
     // so this response (and every read after it) reflects the new credential
     // rather than the previous one's.
     evict_catalog_cache(runtime);
-    journal(&company, "company_key_composio_filled", None).await?;
 
     let filled = report
         .slots
         .iter()
         .any(|s| matches!(s.outcome, SlotOutcome::Filled));
+    // P3-3 (keys rework #2306 review): journal only when the copy actually
+    // changed stored state, matching 4a §3.5's convention ("one entry per
+    // slot whose outcome changed stored state ... no entry for kept, skipped,
+    // failed"). `copy_account_key_to_composio`'s own doc comment says its
+    // successful report only ever carries `Filled` or `Kept(AlreadyCurrent)`
+    // — a `CustomKey` conflict returns `Err` before any `FanOutReport` exists,
+    // and this call never rotates or clears — so `filled` is exactly the
+    // right and only test: a `Kept` outcome changed nothing, and an audit
+    // line for it would misreport "this admin changed something" for an
+    // action that did not.
+    if filled {
+        journal(&company, "company_key_composio_filled", None).await?;
+    }
+
     let note = if filled {
         "Composio now uses your account key. A key you created by hand may lack the \
          connections permission Composio needs."

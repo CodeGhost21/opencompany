@@ -31,10 +31,10 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 
 use crate::AppState;
-use crate::company::company_key::{self, key_configured, load, resolve};
+use crate::company::company_key::{self, account_key_used_by, key_configured, load, resolve};
 use crate::company::credentials::CredentialSource;
 use crate::company::runtime::CompanyRuntime;
-use crate::error::{OpenCompanyError, UsedBy, UsedBySurface};
+use crate::error::{OpenCompanyError, UsedBy};
 use crate::ports::types::CompanyEvent;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
@@ -147,9 +147,10 @@ struct CredentialStatusDto {
     /// `inference/default` is set (`ProviderOnly` or `Full`).
     default_set: bool,
     /// What a **clear** of this key would strand right now — the same
-    /// [`account_key_used_by`] computation [`set_key`]'s guard runs, exposed
-    /// here so the Remove-key dialog can name dependents the moment it opens
-    /// rather than only after a refused, uninformed attempt
+    /// [`account_key_used_by`] computation [`company_key::fan_out`]'s own
+    /// guard runs atomically under its lock (P3-6, keys rework #2306 review),
+    /// exposed here so the Remove-key dialog can name dependents the moment
+    /// it opens rather than only after a refused, uninformed attempt
     /// (`docs/key-reworks/in-use-guards.md` §1-2; keys rework #2306, KR-L3-01).
     /// `None` when the key is unset or nothing would be stranded.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -232,131 +233,6 @@ struct SetKey {
     model: Option<String>,
     #[serde(default)]
     confirm_in_use: bool,
-}
-
-/// The `usedBy` an account-key **clear** would carry
-/// (`docs/key-reworks/in-use-guards.md` §1's account-key row, §2's `surfaces`
-/// table): grounded in the exact rule [`company_key::fan_out`] itself applies
-/// (`company_key::decide_copy`), so "what would a clear touch" can never
-/// disagree with what a clear actually does.
-///
-/// `"llm"` appears only when a clear would actually clear
-/// `provider/tinyhumans/key` (its current value equals the account key,
-/// i.e. `decide_copy` would `Clear` it) **and** a `tinyhumans` row already
-/// exists (indexed) **or** entry zero itself is the legacy managed config
-/// (P1-1, keys rework #2306, KR-L3-01 review — see the `llm_in_use` comment
-/// below for why entry-zero counts) — a key with no row and no legacy managed
-/// entry zero behind it is not "set" (D-set/X5), so it can never make
-/// `"llm"` appear. `"composio"` appears whenever the same is true of
-/// `composio/tinyhumans/key` **and** `composio/mode` currently selects the
-/// managed slot this clear would touch (P1-1: the same rule
-/// [`super::composio::composio_used_by`] already applies to Composio's own
-/// guard — a company on `byok` has nothing live resolving through
-/// `composio/tinyhumans/key`, so clearing the account key cannot strand a
-/// Composio workload even though the copy would still be cleared).
-///
-/// `None` when the account key itself is unset, or when neither derived slot
-/// would actually be cleared (both already hold a custom key of their own, or
-/// composio is on `byok`) — the account-key clear equivalent of matrix rows
-/// M6/C2.
-async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>, ApiError> {
-    let secrets = runtime.secrets();
-    let secrets = secrets.as_ref();
-    let old_account = secrets
-        .get(runtime.id(), company_key::KEY_KEY)
-        .await
-        .map_err(ApiError)?
-        .map(|crate::ports::types::SecretValue(v)| v.trim().to_string())
-        .unwrap_or_default();
-    if old_account.is_empty() {
-        return Ok(None);
-    }
-
-    let composio_now = crate::company::composio::load_tinyhumans_key(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?
-        .map(|v| v.trim().to_string())
-        .unwrap_or_default();
-    let inference_now = crate::company::inference::load_managed_key(
-        runtime.id(),
-        secrets,
-        &crate::company::inference::HarnessScope::default(),
-    )
-    .await
-    .map_err(ApiError)?
-    .trim()
-    .to_string();
-    let providers = crate::company::inference::store::list_providers(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?;
-    let row_exists = providers.iter().any(|p| {
-        p.origin == crate::company::inference::store::ProviderOrigin::Indexed
-            && p.slug == crate::company::inference::MANAGED_SLUG
-    });
-    // P1-1 decision (keys rework #2306, KR-L3-01 review): count a company
-    // still on the legacy managed entry zero (`inference/config`,
-    // `ProviderOrigin::EntryZero`) as "llm in use" too, not just an indexed
-    // row. `row_exists` alone only sees `Indexed` rows, so an entry-zero-managed
-    // company clearing the account key got no `"llm"` warning even though the
-    // clear strands that company's managed inference (`provider/tinyhumans/key`
-    // and, via it, `inference/key`) exactly the way an indexed row would be
-    // stranded. Recorded here, and in `docs/key-reworks/in-use-guards.md` §2's
-    // `"llm"` row, so the two cannot drift apart on this point again.
-    let entry_zero_managed = providers.iter().any(|p| {
-        p.origin == crate::company::inference::store::ProviderOrigin::EntryZero
-            && p.slug == crate::company::inference::MANAGED_SLUG
-    });
-    let llm_in_use = row_exists || entry_zero_managed;
-
-    // P1-1: `"composio"` only when `composio/mode` currently selects the slot
-    // this clear would touch — see the doc comment above and
-    // `in-use-guards.md` §2's surfaces table.
-    let composio_mode = crate::company::composio::load_mode(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?;
-
-    let mut surfaces = Vec::new();
-    let clears = |current: &str| {
-        matches!(
-            company_key::decide_copy(current, &old_account, ""),
-            company_key::CopyDecision::Clear
-        )
-    };
-    if clears(&inference_now) && llm_in_use {
-        surfaces.push(UsedBySurface::Llm);
-    }
-    if clears(&composio_now) && composio_mode == crate::company::composio::ComposioMode::Managed {
-        surfaces.push(UsedBySurface::Composio);
-    }
-
-    if surfaces.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(UsedBy {
-        surfaces,
-        ..Default::default()
-    }))
-}
-
-/// One plain sentence naming every surface a clear would strand, e.g. "Used
-/// by TinyHumans on the LLM page and by Composio." or, with one surface,
-/// "Used by Composio." Matches the operator's pattern (2026-09-15 review) —
-/// the upfront copy in `CredentialStatusDto.used_by` and this 409 message are
-/// built from the same phrases so they can never disagree.
-fn account_key_in_use_message(surfaces: &[UsedBySurface]) -> String {
-    let phrases: Vec<&str> = surfaces
-        .iter()
-        .map(|s| match s {
-            UsedBySurface::Llm => "TinyHumans on the LLM page",
-            UsedBySurface::Composio => "Composio",
-            UsedBySurface::Search => "Search",
-        })
-        .collect();
-    match phrases.split_last() {
-        None => String::new(),
-        Some((last, [])) => format!("Used by {last}."),
-        Some((last, rest)) => format!("Used by {} and by {last}.", rest.join(", ")),
-    }
 }
 
 /// The real inference prober in production, or a per-company override in
@@ -465,7 +341,9 @@ async fn effective_status(
     let facts = company_key::slot_facts(runtime.id(), secrets.as_ref())
         .await
         .map_err(ApiError)?;
-    let used_by = account_key_used_by(runtime).await?;
+    let used_by = account_key_used_by(runtime.id(), secrets.as_ref())
+        .await
+        .map_err(ApiError)?;
     Ok(CredentialStatusDto {
         configured,
         source,
@@ -504,9 +382,13 @@ async fn get_status(
 ///
 /// Only a **clear** is guarded (`docs/key-reworks/in-use-guards.md` §2): a
 /// set/rotate cannot strand a dependent, since the credential it presents only
-/// gets more likely to resolve. The `usedBy` check runs, and — if it refuses —
-/// returns, before `fan_out` writes anything, so a refused clear leaves every
-/// slot exactly as it was.
+/// gets more likely to resolve. The `usedBy` check now runs **inside**
+/// `fan_out` itself (P3-6, keys rework #2306 review) — atomically, right after
+/// it takes its own lock and before it writes anything — rather than here
+/// beforehand, which used to leave an unlocked window between the check and
+/// the write a concurrent save could land in. A refused clear still leaves
+/// every slot exactly as it was; `fan_out`'s `Err` just now guarantees that
+/// rather than this handler's own pre-check.
 async fn set_key(
     State(state): State<AppState>,
     company: AdminScopedCompany,
@@ -515,21 +397,6 @@ async fn set_key(
     let runtime = company.runtime.as_ref();
     let clearing = body.key.trim().is_empty();
 
-    let used_by = if clearing {
-        account_key_used_by(runtime).await?
-    } else {
-        None
-    };
-    if clearing
-        && !body.confirm_in_use
-        && let Some(used_by) = used_by.clone()
-    {
-        return Err(ApiError(OpenCompanyError::InUse {
-            message: account_key_in_use_message(&used_by.surfaces),
-            used_by,
-        }));
-    }
-
     let prober = prober_for(runtime);
     let report = company_key::fan_out(
         runtime.id(),
@@ -537,11 +404,17 @@ async fn set_key(
         company_key::FanOutRequest {
             key: &body.key,
             model: body.model.as_deref(),
+            confirm_in_use: body.confirm_in_use,
         },
         prober.as_ref(),
     )
     .await
     .map_err(ApiError)?;
+    // Echoes what a confirmed clear would have refused with
+    // (`in-use-guards.md` §3) — computed by `fan_out` itself, atomically,
+    // before it wrote anything; `None` on a set/rotate or a clear with
+    // nothing to warn about.
+    let used_by = report.used_by.clone();
 
     // The credential decides which account the backend resolves, so a change can
     // change which Composio catalog this company gets. Drop the cached one
@@ -790,6 +663,10 @@ async fn finish_link(
         company_key::FanOutRequest {
             key: &key,
             model: None,
+            // A grant never clears (Q10) — this flag never gates anything on
+            // this path, so it is set unconditionally rather than threaded
+            // from a request that has no such field.
+            confirm_in_use: true,
         },
         prober.as_ref(),
     )

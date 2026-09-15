@@ -116,6 +116,20 @@ The message names **every** user, in one sentence:
 `N agent(s)` is `"1 agent"` or singular-free `"N agents"` — never
 `"1 agents"`.
 
+**Accepted variant (P3-2, keys rework #2306 review):** the account-key
+clear's own message (`account_key_in_use_message`,
+`crate::company::company_key::fan_out`) does not follow the generic
+`surfaces`-only template above. It reads `"Used by TinyHumans on the LLM page
+and by Composio."` (or, with one surface, `"Used by Composio."`) rather than
+`"TinyHumans account key's key is used by llm, composio."` — an accepted
+operator decision (2026-09-15 review): the account key has no single
+`<Label>` a reader would recognize the way a provider's display name reads,
+and naming the surfaces themselves in plain words reads more naturally for a
+one- or two-item list than forcing the raw template's comma join. Every other
+guard in this file (a provider row, a key, Composio's own guard) still uses
+the generic template unchanged; this is the one deliberate, documented
+exception.
+
 ### What each `surfaces` entry means, precisely (P2 fix)
 
 `surfaces` is populated **per credential/row being guarded**, not globally —
