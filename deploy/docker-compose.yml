@@ -7,9 +7,10 @@
 #
 # Or from the repository root:
 #
-#   docker compose --project-directory deploy up --build
+#   docker compose -f deploy/docker-compose.yml up --build
 #
-# Build contexts and bind mounts are relative to this file, hence the `..`.
+# Build contexts and bind mounts are relative to the project directory — this
+# file's directory unless --project-directory says otherwise — hence the `..`.
 #
 # The switch is OPENCOMPANY_COMPANY: an example directory name
 # (venture_capital, marketing_agency, …) or an alias (fund,

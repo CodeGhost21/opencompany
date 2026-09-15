@@ -76,7 +76,7 @@ echo "opencompany: ${action} '${company}' (Compose project: ${project})"
 if [ "$action" = "up" ]; then
     # Intentionally attached: Ctrl-C stops the stack and returns to the shell.
     OPENCOMPANY_COMPANY="$company" docker compose \
-        --project-directory "$REPO_ROOT" \
+        --project-directory "${REPO_ROOT}/deploy" \
         --project-name "$project" \
         --file "$compose_file" \
         --file "$dev_compose_file" \
@@ -84,14 +84,14 @@ if [ "$action" = "up" ]; then
 else
     if [ "$volume_flag" = "-v" ]; then
         OPENCOMPANY_COMPANY="$company" docker compose \
-            --project-directory "$REPO_ROOT" \
+            --project-directory "${REPO_ROOT}/deploy" \
             --project-name "$project" \
             --file "$compose_file" \
             --file "$dev_compose_file" \
             down --remove-orphans --volumes
     else
         OPENCOMPANY_COMPANY="$company" docker compose \
-            --project-directory "$REPO_ROOT" \
+            --project-directory "${REPO_ROOT}/deploy" \
             --project-name "$project" \
             --file "$compose_file" \
             --file "$dev_compose_file" \
