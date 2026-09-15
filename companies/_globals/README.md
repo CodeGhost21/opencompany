@@ -41,7 +41,7 @@ validation error, not a silently ignored line.
 Global agents load **after** the company's own roster, and no global agent is
 tagged `tier = "orchestrator"`. Both facts protect the same thing: which
 teammate runs the company is decided by the company, and
-[`orchestrator_id`](../src/company/types.rs) falls back to the first agent
+[`orchestrator_id`](../../crates/opencompany-core/src/company/types.rs) falls back to the first agent
 declared when nobody is tagged.
 
 ## Ledgers are seeded, not resolved
