@@ -281,7 +281,8 @@ pub fn tasks() -> &'static [crate::company::TaskSeed] {
     &baseline().tasks
 }
 
-/// The shared-library skills installed in every company.
+/// The baseline's skills (`companies/_globals/skills/`, named by `[skills].always`),
+/// installed in every company.
 pub fn skills() -> &'static [SkillDoc] {
     &baseline().skills
 }
