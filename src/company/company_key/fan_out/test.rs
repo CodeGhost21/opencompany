@@ -134,6 +134,7 @@ impl InferenceProber for FakeProber {
             Err(class) => Err(probe::ProbeFailure {
                 class: *class,
                 raw: "fake".to_string(),
+                truncated: false,
             }),
         }
     }

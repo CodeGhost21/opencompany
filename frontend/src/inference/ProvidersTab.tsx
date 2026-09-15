@@ -221,6 +221,14 @@ export function ProvidersTab({
     resetConnectState();
     setConnecting(next.connecting);
     setEditing(next.editing);
+    // Live lane 1, KR-L1-02: the outer "Add a provider" picker is a separate
+    // `open` boolean (`adding`) from the inner connect dialog, and choosing
+    // an option opens the second without ever closing the first — so the
+    // picker was still technically open underneath, and reappeared (marking
+    // the whole page `aria-hidden` again) the instant the connect dialog
+    // unmounted on a successful or cancelled add. Opening the connect dialog
+    // always closes the picker, whether or not it happened to be open.
+    setAdding(false);
   };
 
   async function submitConnect(draft: ConnectDraft) {

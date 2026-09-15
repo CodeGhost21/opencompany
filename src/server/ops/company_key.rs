@@ -435,6 +435,7 @@ mod prober_override {
                 Err(class) => Err(ProbeFailure {
                     class: *class,
                     raw: "forced".to_string(),
+                    truncated: false,
                 }),
             }
         }

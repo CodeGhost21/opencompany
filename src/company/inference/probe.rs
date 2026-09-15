@@ -644,13 +644,38 @@ fn loopback(policy: ProbePolicy) -> Result<(), EndpointRefusal> {
 /// which is a non-destructive class — nothing is lost by giving up early.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How much of a response body is read before the rest is discarded.
+/// How much of a **failure** response body is read before the rest is
+/// discarded.
 ///
-/// The body is wanted for one thing only — the wording a vendor puts in an error
-/// — and 64 KiB is far more than any of them use. Without a cap, an endpoint
-/// that streams indefinitely holds this connection open for the whole timeout
-/// and buffers whatever it sent into this process's memory, once per probe.
+/// The body is wanted for one thing only — the wording a vendor puts in an
+/// error — and 64 KiB is far more than any of them use. Without a cap, an
+/// endpoint that streams indefinitely holds this connection open for the
+/// whole timeout and buffers whatever it sent into this process's memory,
+/// once per probe.
 const PROBE_BODY_CAP: usize = 64 * 1024;
+
+/// How much of a **successful** model-catalog body is read before it is
+/// refused as too large (bug KR-L1-01, keys rework issue #2306).
+///
+/// A real catalog is not an error message: OpenRouter's `/models` alone is
+/// ~910 KB for ~600 models, comfortably past the old 64 KiB failure-body cap
+/// this used to share. That cap silently truncated the JSON mid-string,
+/// [`parse_model_ids`] swallowed the resulting parse failure by design (a
+/// body it cannot parse is meant to read as "connected to something that is
+/// not a catalog"), and the Add dialog opened on free text reporting a
+/// perfectly healthy connection with zero models — the operator's key was
+/// never at fault, and nothing said so.
+///
+/// 16 MiB is the shared budget both catalog readers refuse past: this
+/// module's [`probe_get`] for the Add-flow's draft probe, and
+/// [`crate::server::inference_models::fetch_catalog`]/`fetch_paged_catalog`
+/// for the Edit-flow's live model list — one limit, so an operator meets the
+/// same behaviour connecting a provider and editing one, and a catalog that
+/// exceeds it is refused with an explicit error rather than silently read as
+/// empty. A page of the TinyHumans paged envelope has its own, smaller
+/// [`super::paged_catalog::PAGE_BODY_CAP`] (4 MiB) for the same reason at a
+/// tighter budget, since it never needs to hold more than one page.
+pub(crate) const CATALOG_BODY_CAP: usize = 16 * 1024 * 1024;
 
 /// How many redirects a probe will follow.
 ///
@@ -689,6 +714,13 @@ pub struct ProbeFailure {
     pub class: ProbeClass,
     /// The upstream text, for a detail or console channel only.
     pub raw: String,
+    /// Whether this is specifically a model-catalog body that ran past
+    /// [`CATALOG_BODY_CAP`] (bug KR-L1-01) — set only by
+    /// [`Self::catalog_too_large`]. A caller that needs to say "the model
+    /// list could not be read", rather than [`describe`]'s generic `Unknown`
+    /// wording, checks this rather than re-deriving it from `raw`, which is
+    /// upstream/log text and never meant to be pattern-matched on.
+    pub truncated: bool,
 }
 
 impl ProbeFailure {
@@ -697,6 +729,7 @@ impl ProbeFailure {
         Self {
             class: classify(&raw),
             raw,
+            truncated: false,
         }
     }
 
@@ -712,6 +745,7 @@ impl ProbeFailure {
         Self {
             class: classify(classify_on),
             raw,
+            truncated: false,
         }
     }
 
@@ -721,6 +755,7 @@ impl ProbeFailure {
         Self {
             class: ProbeClass::Endpoint,
             raw: refusal.to_string(),
+            truncated: false,
         }
     }
 
@@ -736,6 +771,25 @@ impl ProbeFailure {
         Self {
             class: ProbeClass::Unknown,
             raw,
+            truncated: false,
+        }
+    }
+
+    /// A model-catalog body that ran past [`CATALOG_BODY_CAP`] (bug
+    /// KR-L1-01, keys rework issue #2306).
+    ///
+    /// `Unknown`, exactly like [`Self::unreadable`] and for the same reason:
+    /// a catalog too large to read says nothing about the credential, so it
+    /// must never roll one back. Distinguished from an ordinary `Unknown` by
+    /// [`Self::truncated`] so the caller can say "the model list could not
+    /// be read" specifically, instead of the generic "the check did not
+    /// complete" — a real, valid, hundreds-of-models catalog is not the same
+    /// failure as a check that never got an answer at all.
+    fn catalog_too_large(raw: String) -> Self {
+        Self {
+            class: ProbeClass::Unknown,
+            raw,
+            truncated: true,
         }
     }
 }
@@ -876,7 +930,7 @@ pub async fn probe_models(
         return Ok(collector.finish().into_iter().map(|e| e.id).collect());
     }
 
-    let body = probe_get(&client, &url, auth, credential, PROBE_BODY_CAP).await?;
+    let body = probe_get(&client, &url, auth, credential, CATALOG_BODY_CAP).await?;
     Ok(parse_model_ids(&body))
 }
 
@@ -885,10 +939,12 @@ pub async fn probe_models(
 /// 2a) — the request, transport-error and HTTP-failure handling used to live
 /// inline in [`probe_models`]; extracted so a page is not a second copy of it.
 ///
-/// `success_cap` bounds a **successful** body (a page can run to
-/// [`super::paged_catalog::PAGE_BODY_CAP`], larger than an ordinary probe's
-/// [`PROBE_BODY_CAP`]); a failure body always reads at the smaller
-/// `PROBE_BODY_CAP`, because nothing needs more of an error to classify it.
+/// `success_cap` bounds a **successful** body — [`CATALOG_BODY_CAP`] for the
+/// plain OpenAI-shaped read, [`super::paged_catalog::PAGE_BODY_CAP`] for one
+/// page of the TinyHumans envelope; a failure body always reads at the
+/// smaller [`PROBE_BODY_CAP`], because nothing needs more of an error to
+/// classify it. A success body that runs past `success_cap` is refused
+/// outright (bug KR-L1-01) rather than parsed truncated.
 async fn probe_get(
     client: &reqwest::Client,
     url: &str,
@@ -909,11 +965,14 @@ async fn probe_get(
     })?;
     let status = response.status();
     if !status.is_success() {
-        let body = read_capped_to(response, PROBE_BODY_CAP).await;
+        let (body, _truncated) = read_capped_to(response, PROBE_BODY_CAP).await;
         // The body is included in the string the classifier reads, and only
         // there: vendors put "invalid api key" and "model not found" in the
         // body rather than the reason phrase, so classifying on the status
-        // alone would read every one of them as `unknown`.
+        // alone would read every one of them as `unknown`. A failure body
+        // running past its (small) cap is not reported as truncated — an
+        // error message is never legitimately this large, and the cap here
+        // exists only to bound a misbehaving endpoint, not to accommodate one.
         let classified = build_failure_text(status, body.trim());
         // The reason phrase is for a human reading the log, and stays out of the
         // text above. See `build_failure_text`.
@@ -930,7 +989,19 @@ async fn probe_get(
         );
         return Err(ProbeFailure::classified_as(&classified, detail));
     }
-    Ok(read_capped_to(response, success_cap).await)
+    // Bug KR-L1-01: a body that ran past `success_cap` is refused outright
+    // rather than handed to the parser truncated mid-string — the parser
+    // cannot tell "this JSON is malformed" from "this JSON was cut off", and
+    // treating the second as the first is how a real, valid, hundreds-of-
+    // models catalog used to read as a healthy connection with zero models.
+    let (body, truncated) = read_capped_to(response, success_cap).await;
+    if truncated {
+        return Err(ProbeFailure::catalog_too_large(format!(
+            "{named}: the model list is larger than the {}-byte cap",
+            success_cap
+        )));
+    }
+    Ok(body)
 }
 
 /// The text [`classify`] reads for an HTTP failure: the status code and the
@@ -1072,18 +1143,32 @@ fn base64_standard(input: &[u8]) -> String {
 /// it is now a parameter so a successful TinyHumans catalog page (keys rework,
 /// slice 2a) can read up to [`super::paged_catalog::PAGE_BODY_CAP`] while a
 /// failure body still reads at the smaller, fixed cap.
-async fn read_capped_to(mut response: reqwest::Response, cap: usize) -> String {
+/// Reads at most `cap` bytes, and says whether there was more.
+///
+/// The second element is `true` when the body kept sending after `cap` bytes
+/// had already arrived — the signal [`probe_get`] needs to tell "this body is
+/// too large to trust" (bug KR-L1-01) apart from "this body ended, and is not
+/// what we hoped for", which are different failures with different remedies.
+/// Detected by reading one chunk past the cap rather than stopping exactly at
+/// it: a body that ends its stream precisely at `cap` bytes is complete, not
+/// truncated, and the two are indistinguishable without that one extra read.
+async fn read_capped_to(mut response: reqwest::Response, cap: usize) -> (String, bool) {
     let mut buf: Vec<u8> = Vec::new();
-    while buf.len() < cap {
+    let mut truncated = false;
+    while buf.len() <= cap {
         match response.chunk().await {
             Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
             // A body that stops mid-stream is still worth classifying on what
             // did arrive — the status code is usually the whole signal anyway.
             Ok(None) | Err(_) => break,
         }
+        if buf.len() > cap {
+            truncated = true;
+            break;
+        }
     }
     buf.truncate(cap);
-    String::from_utf8_lossy(&buf).into_owned()
+    (String::from_utf8_lossy(&buf).into_owned(), truncated)
 }
 
 /// The model ids in an OpenAI-compatible `{ "data": [{ "id": ... }] }` body.
@@ -1574,6 +1659,116 @@ mod tests {
         server.abort();
 
         assert_eq!(failure.class, ProbeClass::Unknown);
+    }
+
+    // ---- the catalog body cap (bug KR-L1-01, keys rework issue #2306) ------
+
+    /// The regression test for the bug itself: a realistic OpenRouter-sized
+    /// catalog (600 ids, comfortably past the old 64 KiB failure-body cap
+    /// this success read used to share) is read to the last id, not silently
+    /// truncated into an empty list.
+    #[tokio::test]
+    async fn a_realistic_sized_catalog_past_the_old_64kib_cap_is_read_in_full() {
+        const COUNT: usize = 600;
+        // Padding per entry so the whole body lands comfortably past 900 KB —
+        // the measured size of OpenRouter's real `/models` response — while
+        // staying far under `CATALOG_BODY_CAP` (16 MiB).
+        let filler = "x".repeat(1600);
+        let entries: Vec<_> = (0..COUNT)
+            .map(|i| {
+                serde_json::json!({"id": format!("acme/test-model-{i}"), "description": filler})
+            })
+            .collect();
+        let body = serde_json::json!({"data": entries}).to_string();
+        assert!(
+            body.len() > 900_000,
+            "test fixture must exceed 900 KB to reproduce the bug: {} bytes",
+            body.len()
+        );
+
+        let app = axum::Router::new().route(
+            "/models",
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let ids = probe_models(
+            &format!("http://{address}"),
+            Some("sk-not-a-real-key"),
+            catalogue::AuthStyle::Bearer,
+            LOCAL_OFFERED,
+            catalogue::CatalogShape::OpenAi,
+        )
+        .await
+        .expect("a large but valid catalog must be read in full, not truncated");
+        server.abort();
+
+        assert_eq!(ids.len(), COUNT, "every id must survive the read");
+        assert_eq!(ids[0], "acme/test-model-0");
+        assert_eq!(ids[COUNT - 1], format!("acme/test-model-{}", COUNT - 1));
+    }
+
+    /// A body that runs past `CATALOG_BODY_CAP` is refused outright, as a
+    /// classified `Unknown`/`truncated` failure — never silently parsed as an
+    /// empty catalog. This is the exact failure mode the bug report measured
+    /// against real OpenRouter: the body is cut mid-string, which as raw text
+    /// would be garbage JSON, and the fix is to never hand that text to the
+    /// parser at all.
+    #[tokio::test]
+    async fn a_catalog_body_over_the_cap_is_an_explicit_error_not_an_empty_list() {
+        // One entry whose `description` alone is bigger than the whole cap —
+        // the cheapest way to produce a real, over-the-wire body that exceeds
+        // `CATALOG_BODY_CAP` without generating and comparing 16 MiB of
+        // meaningful content.
+        let oversized = "x".repeat(CATALOG_BODY_CAP + 1024);
+        let body = format!(r#"{{"data":[{{"id":"acme/test-model","description":"{oversized}"#);
+
+        let app = axum::Router::new().route(
+            "/models",
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let failure = probe_models(
+            &format!("http://{address}"),
+            Some("sk-not-a-real-key"),
+            catalogue::AuthStyle::Bearer,
+            LOCAL_OFFERED,
+            catalogue::CatalogShape::OpenAi,
+        )
+        .await
+        .expect_err("a body over the cap must be an explicit failure, not Ok(vec![])");
+        server.abort();
+
+        assert!(
+            failure.truncated,
+            "the failure must be flagged as a truncated catalog, not a generic Unknown"
+        );
+        assert_eq!(
+            failure.class,
+            ProbeClass::Unknown,
+            "still non-destructive — a huge catalog says nothing about the credential"
+        );
     }
 
     // ---- the SSRF guard -----------------------------------------------------

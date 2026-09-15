@@ -601,7 +601,16 @@ async fn add_provider(
                 )));
             }
             record_health(runtime, &provider.slug, failure.class.as_str()).await;
-            let message = probe::describe(failure.class, &advisory_subject(&provider));
+            // Bug KR-L1-01: a catalog too large to read is not "the check did
+            // not complete" — the connection and the credential are both
+            // fine, and the operator needs to know it is specifically the
+            // model list that could not be read, never a silent zero-models
+            // "ok".
+            let message = if failure.truncated {
+                format!("The model list from {} could not be read.", provider.label)
+            } else {
+                probe::describe(failure.class, &advisory_subject(&provider))
+            };
             (
                 Some(ProbeResultDto {
                     ok: false,
@@ -1949,10 +1958,15 @@ async fn test_managed(
                 "managed inference test failed",
             );
             record_health(runtime, inference::MANAGED_SLUG, failure.class.as_str()).await;
+            let message = if failure.truncated {
+                format!("The model list from {subject} could not be read.")
+            } else {
+                probe::describe(failure.class, &subject)
+            };
             Ok(Json(ProbeResultDto {
                 ok: false,
                 class: Some(failure.class.as_str().to_string()),
-                message: Some(probe::describe(failure.class, &subject)),
+                message: Some(message),
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),
@@ -2242,10 +2256,15 @@ async fn test_provider(
             // destroying it would make the button that reports a problem the
             // button that causes one.
             record_health(runtime, &provider.slug, failure.class.as_str()).await;
+            let message = if failure.truncated {
+                format!("The model list from {} could not be read.", provider.label)
+            } else {
+                probe::describe(failure.class, &advisory_subject(&provider))
+            };
             Ok(Json(ProbeResultDto {
                 ok: false,
                 class: Some(failure.class.as_str().to_string()),
-                message: Some(probe::describe(failure.class, &advisory_subject(&provider))),
+                message: Some(message),
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),
@@ -2314,10 +2333,21 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
             // the answer is "that endpoint did not work". A gateway status would
             // make the console's error handling treat a correct answer as a
             // broken host.
+            //
+            // Bug KR-L1-01: a catalog too large to read is not "the check did
+            // not complete" — the credential is not in question, and the
+            // model step must say specifically that its list could not be
+            // read rather than silently opening on free text with `ok: true`
+            // and zero models.
+            let message = if failure.truncated {
+                format!("The model list from {subject} could not be read.")
+            } else {
+                probe::describe(failure.class, &subject)
+            };
             Json(ProbeResultDto {
                 ok: false,
                 class: Some(failure.class.as_str().to_string()),
-                message: Some(probe::describe(failure.class, &subject)),
+                message: Some(message),
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),

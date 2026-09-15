@@ -364,3 +364,125 @@ test.describe("the catalogue combobox, once a probe actually succeeds", () => {
     await expect(page.getByTestId("inference-provider-groq")).toBeVisible({ timeout: 10_000 });
   });
 });
+
+test.describe("KR-L1-02: the Add-a-provider picker does not reopen after a successful add", () => {
+  test("adding Ollama leaves no dialog open, and the page stays interactive", async ({ page }) => {
+    await stubStatus(page, status({ providers: [] }));
+    await openInference(page);
+
+    await page.route(isProbe, async (route) => {
+      await route.fulfill({ status: 200, json: { ok: false, modelCount: 0, message: "connection refused" } });
+    });
+    await page.route(
+      (url) => /\/inference\/providers$/.test(url.pathname),
+      async (route: Route) => {
+        if (route.request().method() !== "POST") return route.fallback();
+        await route.fulfill({
+          json: {
+            status: status({
+              providers: [
+                { id: "prv_ollama", slug: "ollama", label: "Ollama", kind: "ollama", baseUrl: "http://localhost:11434/v1", models: {}, model: "llama3", modelAmbiguous: false, enabled: true, keyConfigured: false, origin: "indexed", isDefault: true },
+              ],
+            }),
+            note: "Ollama connected.",
+          },
+        });
+      },
+    );
+
+    await page.getByTestId("inference-add-open").click();
+    await expect(page.getByTestId("inference-add-provider")).toBeVisible();
+    await page.locator("#inference-add-local").click();
+    await page.getByRole("option", { name: /^Ollama/ }).click();
+    await expect(page.getByTestId("inference-connect-provider")).toBeVisible();
+    // The picker must already be gone — this is the state KR-L1-02 found
+    // stuck `true` underneath the connect dialog.
+    await expect(page.getByTestId("inference-add-provider")).toHaveCount(0);
+
+    await page.getByTestId("inference-connect-submit").click();
+    await expect(page.getByTestId("inference-connect-model-step")).toBeVisible();
+    await page.locator("#inference-connect-model").fill("llama3");
+    await page.getByTestId("inference-connect-submit").click();
+
+    await expect(page.getByTestId("inference-provider-ollama")).toBeVisible({ timeout: 10_000 });
+    // Neither dialog remains, and the page's own content is reachable again
+    // (KR-L1-02's actual symptom was the rest of the page staying
+    // `aria-hidden` — a `getByRole` query below the page heading is exactly
+    // what that broke).
+    await expect(page.getByTestId("inference-connect-provider")).toHaveCount(0);
+    await expect(page.getByTestId("inference-add-provider")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "LLM", exact: true })).toBeVisible();
+    await expect(page.getByTestId("inference-add-open")).toBeEnabled();
+
+    // And it stays closed — reopening the picker starts fresh, not on top
+    // of a phantom instance.
+    await page.getByTestId("inference-add-open").click();
+    await expect(page.getByTestId("inference-add-provider")).toBeVisible();
+    await expect(page.getByTestId("inference-add-provider")).toHaveCount(1);
+  });
+
+  test("cancelling the connect dialog also leaves the picker closed", async ({ page }) => {
+    await stubStatus(page, status({ providers: [] }));
+    await openInference(page);
+
+    await page.getByTestId("inference-add-open").click();
+    await page.getByTestId("inference-add-custom").click();
+    await expect(page.getByTestId("inference-connect-provider")).toBeVisible();
+    await expect(page.getByTestId("inference-add-provider")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByTestId("inference-connect-provider")).toHaveCount(0);
+    await expect(page.getByTestId("inference-add-provider")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "LLM", exact: true })).toBeVisible();
+  });
+});
+
+test.describe("KR-L1-05: a confirm dialog's own busy flag always clears, even when Escape is tried mid-request", () => {
+  test("Escape does nothing while the remove is in flight; once it settles, a different row's confirm is not left stuck disabled", async ({
+    page,
+  }) => {
+    await stubStatus(page, status());
+    await openInference(page);
+
+    let resolveDelete: (() => void) | undefined;
+    const deleteStarted = new Promise<void>((resolve) => {
+      page.route(
+        (url) => /\/inference\/providers\/beta$/.test(url.pathname),
+        async (route: Route) => {
+          if (route.request().method() !== "DELETE") return route.fallback();
+          resolve();
+          await new Promise<void>((r) => {
+            resolveDelete = r;
+          });
+          await route.fulfill({ json: { status: status({ providers: [status().providers[0]] }), note: "Beta removed." } });
+        },
+      );
+    });
+
+    await page.getByTestId("inference-provider-beta-menu").click();
+    await page.getByTestId("inference-provider-beta-remove").click();
+    const removeDialog = page.getByTestId("inference-remove-dialog");
+    await expect(removeDialog).toBeVisible();
+
+    await page.getByTestId("inference-remove-confirm").click();
+    await deleteStarted;
+
+    // In flight: Escape must not close this dialog (KR-L1-05's own ask —
+    // every close path has to leave `busy` in a state a later dialog can
+    // trust, and the simplest way is to not let this one close early at
+    // all while its own request is still pending).
+    await page.keyboard.press("Escape");
+    await expect(removeDialog).toBeVisible();
+
+    resolveDelete?.();
+    await expect(removeDialog).toBeHidden({ timeout: 10_000 });
+    await expect(page.getByTestId("inference-provider-beta")).toHaveCount(0);
+
+    // A completely different row's confirm dialog opens ready to use —
+    // not carrying a stale `busy` from the request that just finished.
+    await page.getByTestId("inference-provider-acme-toggle").click();
+    const toggleDialog = page.getByTestId("inference-remove-dialog");
+    await expect(toggleDialog).toBeVisible();
+    await expect(page.getByTestId("inference-remove-confirm")).toBeEnabled();
+  });
+});
