@@ -19,11 +19,20 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Every bundle directory under `dir`. An underscore-prefixed entry is not a
+/// bundle: `companies/_globals` is the global baseline, which has no
+/// `company.toml` and is covered by the `globals` tests instead.
 fn subdirs(dir: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|err| panic!("read {}: {err}", dir.display()))
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.is_dir())
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('_'))
+        })
         .collect();
     dirs.sort();
     dirs
@@ -1512,7 +1521,10 @@ fn every_shipped_setup_card_is_pickable() {
         })
         .collect();
     // The baseline is held to exactly the same rules as a vertical's own file.
-    companies.push(("globals".to_string(), repo_root().join("globals")));
+    companies.push((
+        "globals".to_string(),
+        repo_root().join("companies").join("_globals"),
+    ));
 
     for (name, dir) in companies {
         if !super::has_task_file(&dir) {
