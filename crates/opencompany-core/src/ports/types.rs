@@ -5779,6 +5779,9 @@ impl CompanyRecord {
         if let Some(model) = entry.model.as_ref() {
             merged.model = Some(model.clone()).filter(|text| !text.is_empty());
         }
+        if let Some(provider) = entry.provider.as_ref() {
+            merged.provider = Some(provider.clone()).filter(|text| !text.is_empty());
+        }
         if let Some(harness) = entry.harness.as_ref() {
             merged.harness = Some(harness.clone()).filter(|text| !text.is_empty());
         }
