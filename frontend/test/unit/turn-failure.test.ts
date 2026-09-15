@@ -28,14 +28,14 @@ describe("toTurnFailure", () => {
       userFacing: true,
       code: "no_model_chosen",
       message: wire().message,
-      agentId: undefined,
+      pairAgentId: undefined,
       providerSlug: undefined,
     });
   });
 
-  it("carries agentId and providerSlug through when present", () => {
-    const failure = toTurnFailure(wire({ agentId: "writer", providerSlug: "acme" }));
-    expect(failure?.agentId).toBe("writer");
+  it("carries pairAgentId and providerSlug through when present", () => {
+    const failure = toTurnFailure(wire({ pairAgentId: "writer", providerSlug: "acme" }));
+    expect(failure?.pairAgentId).toBe("writer");
     expect(failure?.providerSlug).toBe("acme");
   });
 
@@ -65,12 +65,12 @@ describe("turnFailureAction — one test per code the dispatch named", () => {
   });
 
   it("pair_provider_removed opens that agent's Model tab", () => {
-    const action = turnFailureAction({ code: "pair_provider_removed", agentId: "page_builder" });
+    const action = turnFailureAction({ code: "pair_provider_removed", pairAgentId: "page_builder" });
     expect(action).toEqual({ label: "Open Model settings", href: "#/company/agent/page_builder?tab=model" });
   });
 
   it("pair_provider_off opens that agent's Model tab", () => {
-    const action = turnFailureAction({ code: "pair_provider_off", agentId: "researcher" });
+    const action = turnFailureAction({ code: "pair_provider_off", pairAgentId: "researcher" });
     expect(action).toEqual({ label: "Open Model settings", href: "#/company/agent/researcher?tab=model" });
   });
 
@@ -85,7 +85,7 @@ describe("turnFailureAction — one test per code the dispatch named", () => {
   });
 
   it("provider_no_key opens LLM settings", () => {
-    const action = turnFailureAction({ code: "provider_no_key", agentId: "writer" });
+    const action = turnFailureAction({ code: "provider_no_key", pairAgentId: "writer" });
     expect(action).toEqual({ label: "Open LLM settings", href: "#/connections/inference" });
   });
 
@@ -108,7 +108,7 @@ describe("turnFailureAction — one test per code the dispatch named", () => {
     ]);
   });
 
-  it("a pair code with no agentId has nothing useful to link, so no button", () => {
+  it("a pair code with no pairAgentId has nothing useful to link, so no button", () => {
     expect(turnFailureAction({ code: "pair_provider_removed" })).toBeNull();
   });
 

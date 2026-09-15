@@ -63,7 +63,7 @@ test("a pair case: the agent's own sentence, and a button to that agent's Model 
       code: "pair_provider_off",
       message:
         "Engineer uses E2E Rec A, which is switched off. Switch it on in Connections → API Keys → LLM, or choose another in Team → engineer → Model.",
-      agentId: TEAMMATE,
+      pairAgentId: TEAMMATE,
       providerSlug: "e2e-rec-a",
     }),
   ]);
