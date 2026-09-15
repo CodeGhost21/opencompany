@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use serde::Serialize;
 
 use crate::app::config::{AuthMode, BrainMode, EnvSource, redacted};
-use crate::company::{CredentialSource, SkillDoc, TinyhumansTokenSource, load_dir_skills};
+use crate::company::{CredentialSource, SkillDoc, TinyhumansTokenSource, load_catalog_skills};
 use crate::ports::normalize_email;
 use crate::ports::types::{CompanyId, SecretValue};
 use crate::runtime::CompanyRegistry;
@@ -443,13 +443,14 @@ pub struct AppState {
     /// as [`Self::auth_mode_override`] — a choice an operator makes while the
     /// process is running, which telling them to restart for would defeat.
     memory_overlay: Arc<RwLock<Option<crate::store::MemoryOverlay>>>,
-    /// The repo-level shared skill library directory (`skills/`), set on the
-    /// serve path. `None` in platform-provisioned mode (no repo checkout), where
-    /// the `skillRegistry` query degrades to empty.
+    /// The `companies/` directory whose bundles' `skills/` form the skill
+    /// registry (`crate::company::load_catalog_skills`), set on the serve path.
+    /// `None` in platform-provisioned mode (no repo checkout), where the
+    /// `skillRegistry` query degrades to empty.
     skills_root: Option<std::path::PathBuf>,
-    /// Cache of the repo-level shared skill registry (`skills/*/SKILL.md`).
+    /// Cache of the skill registry (`companies/*/skills/*/SKILL.md`).
     /// Populated on first read via [`AppState::skill_registry`]; never
-    /// invalidated because the repo's skill library is immutable at runtime.
+    /// invalidated because the shipped bundles are immutable at runtime.
     skill_registry: Arc<OnceLock<Arc<[SkillDoc]>>>,
     /// The GraphQL read-plane schema, built once at construction and reused for
     /// every `/graphql` request (per-request auth is injected as request data).
@@ -798,7 +799,7 @@ impl AppState {
         self.config_root.as_deref().unwrap_or(&self.home)
     }
 
-    /// Sets the repo-level shared skill library directory (`skills/`) backing the
+    /// Sets the `companies/` directory whose bundles' `skills/` back the
     /// top-level `skillRegistry` query. Set on the serve path; unset in
     /// platform-provisioned mode.
     pub fn with_skills_root(mut self, skills_root: impl Into<std::path::PathBuf>) -> Self {
@@ -882,17 +883,19 @@ impl AppState {
             .expect("memory overlay poisoned") = overlay;
     }
 
-    /// The repo-level shared skill registry, loaded from `dir` and cached.
+    /// The skill registry, loaded from the `companies/` directory `dir` and
+    /// cached.
     ///
-    /// The first successful call parses `dir/*/SKILL.md` and caches the result;
-    /// later calls return the cached registry and ignore `dir`, since the
-    /// repo's skill library is immutable at runtime.
+    /// The first successful call parses every bundle's `skills/*/SKILL.md`
+    /// (`load_catalog_skills`) and caches the result; later calls return the
+    /// cached registry and ignore `dir`, since the shipped bundles are
+    /// immutable at runtime.
     pub fn skill_registry(&self, dir: &Path) -> crate::Result<Arc<[SkillDoc]>> {
         if let Some(cached) = self.skill_registry.get() {
             return Ok(cached.clone());
         }
-        // A *configured* library that is missing or not a directory is a host
-        // misconfiguration, not a parse failure `load_dir_skills` would flag —
+        // A *configured* catalog that is missing or not a directory is a host
+        // misconfiguration, not a parse failure `load_catalog_skills` would flag —
         // it returns `Ok(empty)` for a nonexistent `dir`, which would silently
         // downgrade a server-authoritative install to a client-authored one
         // (the exact invariant `shared_skill_registry`'s doc forbids). Reject it
@@ -903,7 +906,7 @@ impl AppState {
                 dir.display()
             )));
         }
-        // `load_dir_skills` reports a parse/validation failure via the same
+        // `load_catalog_skills` reports a parse/validation failure via the same
         // `DataParse`/`DataInvalid` variants a per-company workflow file uses,
         // where the HTTP mapping (issue #1017) treats them as the *caller's*
         // bad input (400/422). Here the "file" is the operator-provisioned
@@ -911,7 +914,7 @@ impl AppState {
         // would misreport a host misconfiguration as a client error. Recast
         // as `Config` — already the crate's "runtime setup is broken" variant
         // (see `app/config.rs`) — so it renders the 500 documented above.
-        let registry: Arc<[SkillDoc]> = load_dir_skills(dir)
+        let registry: Arc<[SkillDoc]> = load_catalog_skills(dir)
             .map_err(|error| {
                 crate::OpenCompanyError::Config(format!(
                     "shared skill library at {} failed to load: {error}",
@@ -924,7 +927,7 @@ impl AppState {
         Ok(self.skill_registry.get().cloned().unwrap_or(registry))
     }
 
-    /// The repo-level shared skill registry, empty when nothing backs it.
+    /// The skill registry, empty when nothing backs it.
     ///
     /// Empty means exactly one thing: no [`skills_root`](Self::skills_root) is
     /// configured, so this host serves no shared library (platform-provisioned
@@ -1689,9 +1692,9 @@ mod tests {
     }
 
     #[test]
-    fn skill_registry_loads_the_repo_library_and_caches() {
+    fn skill_registry_loads_the_shipped_bundles_and_caches() {
         let state = AppState::new(AppConfig::default());
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../companies");
 
         let first = state.skill_registry(&dir).expect("registry loads");
         assert!(first.iter().any(|skill| skill.slug == "web-research"));
@@ -1701,7 +1704,7 @@ mod tests {
         let debrief = first
             .iter()
             .find(|skill| skill.slug == "call-debrief")
-            .expect("call-debrief is in the shared library");
+            .expect("call-debrief is in the registry (enterprise_sales ships it)");
         assert_eq!(debrief.name, "Call Debrief");
         assert_eq!(debrief.category.as_deref(), Some("Ops"));
         assert!(debrief.body.contains("## Steps"), "{}", debrief.body);
@@ -1717,7 +1720,7 @@ mod tests {
     #[test]
     fn skill_registry_rejects_a_configured_but_missing_library() {
         // A configured `skills_root` that does not exist is a host
-        // misconfiguration. `load_dir_skills` returns `Ok(empty)` for a missing
+        // misconfiguration. `load_catalog_skills` returns `Ok(empty)` for a missing
         // dir, so without the `is_dir` guard the registry would silently flatten
         // to empty — downgrading a server-authoritative install to a
         // client-authored one, the invariant `shared_skill_registry` forbids.

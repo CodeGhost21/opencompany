@@ -2429,15 +2429,14 @@ async fn async_main() -> Result<()> {
             // test send and outbound mail. Absent the features these stay `None`
             // and the surfaces degrade to "not wired yet" (404).
             state = state.with_connections(connections_runtime()?);
-            // The repo-level shared skill library (`skills/`) sits beside the
-            // `companies/` dir; derive it from the first loaded company's source
-            // dir so the `skillRegistry` query resolves the committed library.
-            if let Some(skills_root) = companies.first().and_then(|path| {
-                let dir = company_source_dir(path);
-                dir.parent()
-                    .and_then(|companies_dir| companies_dir.parent())
-                    .map(|repo_root| repo_root.join("skills"))
-            }) {
+            // The skill registry is every bundle's `skills/` under the
+            // `companies/` dir; derive that dir from the first loaded company's
+            // source dir so the `skillRegistry` query resolves the committed
+            // bundles, the baseline's included.
+            if let Some(skills_root) = companies
+                .first()
+                .and_then(|path| company_source_dir(path).parent().map(Path::to_path_buf))
+            {
                 state = state.with_skills_root(skills_root);
             }
             // Issue #290: with every builder input above now resolved, this host
