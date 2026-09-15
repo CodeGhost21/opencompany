@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { restoreSharedInference } from "./shared-inference";
+
 /**
  * Proof for issue #264: an agent can be opened, read, and edited **from the
  * Console**, against the live host.
@@ -266,28 +268,23 @@ test("an agent defined in the console can be read back and edited", async ({ pag
 /**
  * Undoes the pin test below, after it — even when it timed out.
  *
- * The `e2e-pair` row points at an unreachable endpoint, and the host resolves
- * an unset workload through the *primary* provider — the first enabled one
- * (`company::inference::resolve`). The whole `e2e:live` run shares one host
- * and one company, so a row left connected here is not confined to this spec:
- * it becomes the route every agent turn in every later spec file takes, and
- * every one of them fails with `inference request failed …
- * 127.0.0.1:9/v1/chat/completions`. That is what happened when this test
- * timed out and its in-body `finally` never ran — Playwright abandons a
- * timed-out test function, `finally` included. A hook runs regardless, with a
- * request context that still works. Both calls are idempotent (a clear on an
- * unpinned agent, a delete on a missing slug), so this needs no bookkeeping.
+ * The `e2e-pair` row points at an unreachable endpoint, and connecting it to
+ * the one company the whole run shares makes it that company's default (X1)
+ * — so, left behind, it is where every agent turn in every later spec file
+ * goes. That is what happened when this test timed out and its in-body
+ * `finally` never ran: Playwright abandons a timed-out test function,
+ * `finally` included, and thirty-odd unrelated specs failed with
+ * `inference request failed … 127.0.0.1:9`. A hook runs regardless. What
+ * restoring the company actually takes is in `restoreSharedInference`.
+ *
+ * The pin is cleared first so the delete is not refused as in-use by it; a
+ * clear on an unpinned agent is a no-op.
  */
-test.afterEach(async ({ request }, testInfo) => {
-  const fs = await import("node:fs");
-  const log = (m: string) => fs.appendFileSync("/tmp/claude-1000/-home-enamakel-work-workflow-opencompany-opencompany/5e898ddc-46ef-4b1f-a5b5-1fa221d9a1f4/scratchpad/hook.log", `${new Date().toISOString()} ${testInfo.title} ${testInfo.status}: ${m}\n`);
-  log("hook start");
-  const a = await request
+test.afterEach(async ({ request }) => {
+  await request
     .patch("/api/v1/company/team/researcher", { data: { provider: null, model: null } })
-    .catch((e) => e);
-  log(`patch -> ${typeof a?.status === "function" ? a.status() : String(a)}`);
-  const b = await request.delete("/api/v1/company/inference/providers/e2e-pair?confirmInUse=true").catch((e) => e);
-  log(`delete -> ${typeof b?.status === "function" ? `${b.status()} ${(await b.text())}` : String(b)}`);
+    .catch(() => {});
+  await restoreSharedInference(request, ["e2e-pair"]);
 });
 
 test("an admin pins an agent to a provider and model, then clears it (keys rework, issue #2306, slice 3b)", async ({
