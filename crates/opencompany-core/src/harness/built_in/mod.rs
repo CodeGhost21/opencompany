@@ -5997,6 +5997,11 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         // to be an `acp` one — a `built_in` engine simply has no lever that
         // reads it, the same as it ignores `AcpHarness::model`.
         model: overlay.model.clone(),
+        // Keys rework (#2306), slice 3a: carried straight through, the same
+        // way `model` just above is — see `Agent::provider`'s own doc for why
+        // this field exists on `Agent` at all despite never being
+        // manifest-authored.
+        provider: overlay.provider.clone(),
     }
 }
 
