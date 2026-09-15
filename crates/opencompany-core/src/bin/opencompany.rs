@@ -3040,6 +3040,32 @@ mod test {
         assert_eq!(company_source_dir(&dir.join("company.toml")), dir);
     }
 
+    #[test]
+    fn skills_root_for_normalizes_a_relative_dot_source_dir() {
+        // Codex review, PR #2326: `--company .` makes `company_source_dir`
+        // return `.`, whose `Path::parent()` is the empty path — an empty
+        // `skills_root` then fails `AppState::skill_registry`'s directory
+        // check even though the company loaded fine. `skills_root_for` must
+        // resolve `.` against the real working directory before taking its
+        // parent, so the catalog root comes back as the actual `companies/`
+        // dir rather than empty.
+        let dot = std::path::Path::new(".");
+        let root = skills_root_for(dot).expect("skills_root_for must resolve `.`");
+        assert_ne!(
+            root.as_os_str(),
+            "",
+            "skills_root_for must not return the empty path for `.`"
+        );
+        assert_eq!(
+            root,
+            std::env::current_dir()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        );
+    }
+
     #[tokio::test]
     async fn register_company_accepts_a_manifest_file_path() {
         let home = std::env::temp_dir().join(format!("oc-bin-file-{}", std::process::id()));
