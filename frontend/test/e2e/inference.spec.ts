@@ -317,17 +317,37 @@ test("the add dialog stops offering a provider once it is connected", async ({ p
   // but a key the vendor rejects now stops on the key field with no "Add
   // anyway" at all (round-2 review, P1-8: the escape hatch is for an endpoint
   // that cannot be reached, never for a credential that is wrong), so there
-  // is no longer any honest way to a connected cloud row without a real key.
-  // Ollama asks for an endpoint and no key; pointed at `UNREACHABLE` its
-  // probe fails as `endpoint`, the model step opens in free text, and the add
-  // is stored amber — the same path every custom-provider spec here takes, and
-  // one that needs no network beyond loopback.
+  // is no honest way to a connected cloud row without a real key, and no
+  // reason for a merge gate to depend on a vendor's network being reachable.
   await openInference(page);
 
+  // Through the dialog first: a local runtime that is not running is rolled
+  // back rather than stored looking connected (`probe::rolls_back` —
+  // category-aware, the opposite of what the same class means for a cloud
+  // provider), and the dialog says so and keeps the operator on the model
+  // step. No row appears.
   await choose(page, "local", "Ollama");
   await page.locator("#inference-connect-url").fill(UNREACHABLE);
   await page.getByTestId("inference-connect-submit").click();
   await pickModel(page, "e2e-model");
+  await expect(page.getByTestId("inference-connect-error")).toContainText(
+    "so it was not connected",
+    { timeout: 30_000 },
+  );
+  await expect(page.getByTestId("inference-provider-ollama")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  // Then the escape hatch, at the route the dialog itself posts to: `addAnyway`
+  // is the documented way to store a row whose endpoint the probe could not
+  // reach, and it is the only way to a connected catalogue row on a host with
+  // nothing real behind it. The page is reloaded so what is asserted below is
+  // what the list route reports, not what a dialog left in component state.
+  const added = await page.request.post("/api/v1/company/inference/providers", {
+    data: { kind: "ollama", baseUrl: UNREACHABLE, model: "e2e-model", addAnyway: true },
+  });
+  expect(added.ok()).toBeTruthy();
+  await page.reload();
+  await openInference(page);
   await expect(page.getByTestId("inference-provider-ollama")).toBeVisible({ timeout: 30_000 });
 
   await page.getByTestId("inference-add-open").click();
