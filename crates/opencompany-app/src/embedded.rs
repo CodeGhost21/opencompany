@@ -221,6 +221,7 @@ pub async fn start_with(
             config_file.as_ref(),
         )?
     };
+    let api_url = config.api_url.clone();
     let state = AppState::new(config)
         .with_home(instance.home().to_path_buf())
         // Issue #1245: the desktop is the one place with an
@@ -236,7 +237,20 @@ pub async fn start_with(
         //
         // Wired before any company registers, matching `serve`, so the first
         // edit on a freshly booted host already has a rebuilder to reach for.
-        .with_rebuilder(std::sync::Arc::new(opencompany::desktop::DesktopRebuilder));
+        .with_rebuilder(std::sync::Arc::new(opencompany::desktop::DesktopRebuilder))
+        // Without this `hub_identity()` is `None`, and every surface that asks
+        // the hub whose token this is answers as though the host belonged to no
+        // ecosystem: the Account page reports the balance unknown, and
+        // `credential/link/start` refuses before it builds a URL. Unconditional
+        // rather than `#[cfg]`-guarded, for the same reason
+        // `install_into_embedded_core` above is: this crate's `opencompany`
+        // dependency enables `tinyhumans` outright, so a desktop build without
+        // the exchange is not a shape that exists — and if that dependency line
+        // ever loses the feature, this stops compiling rather than shipping a
+        // host that silently disowns its own account.
+        .with_hub_identity(std::sync::Arc::new(
+            opencompany::server::hub_identity::HttpHubIdentityExchange::new(api_url),
+        ));
     // Read before `state` moves into `bind`. Minting here rather than on the
     // first `/spec` also means the console can be told who this host is without
     // waiting to contact it — which is the whole point, since the address it
@@ -473,6 +487,30 @@ mod test {
         );
     }
 
+    /// The account surfaces stop disowning the host.
+    ///
+    /// Unwired, `hub_identity()` is `None` and every surface that asks the hub
+    /// whose credential this is answers that the host belongs to no TinyHumans
+    /// ecosystem — the Account page reports the balance unknown, and
+    /// `credential/link/start` refuses before it builds a URL. The exchange is
+    /// wired at boot now, so the route answers about providers rather than
+    /// about the host's existence.
+    #[tokio::test]
+    async fn the_host_knows_it_belongs_to_an_ecosystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+
+        let answered = reqwest::get(format!("{}/api/v1/company/auth/hub", host.base_url()))
+            .await
+            .expect("the route answers");
+        let status = answered.status();
+        let body = answered.text().await.unwrap_or_default();
+
+        assert!(
+            !body.contains("not part of a TinyHumans ecosystem"),
+            "the host must not disown its own account: {status} {body}"
+        );
+    }
 
     /// The starter company is seeded once, not per launch.
     #[tokio::test]
