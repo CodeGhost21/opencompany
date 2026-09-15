@@ -856,6 +856,27 @@ async fn set_api_key(
     } else {
         ComposioMode::Byok
     };
+
+    // This route writes `composio/mode` — the same fact the account-key
+    // fan-out's in-use check (`company_key::account_key_used_by`) reads to
+    // decide whether an UNCONFIRMED account-key clear may touch
+    // `composio/tinyhumans/key` (round-2 review comment 4012457339, keys
+    // rework #2306). Without sharing the fan-out's `slot_guard`, a mode
+    // switch landing here and a concurrent account-key clear could each see
+    // the OTHER's pre-image: the clear sees the OLD mode and decides the
+    // managed slot is inactive so an unconfirmed clear is safe, the switch
+    // then lands and makes the managed slot active — and now it is keyless,
+    // with neither request ever having confirmed that outcome. Taking the
+    // same guard here closes the window the same way `set_token` already
+    // does for `composio/tinyhumans/key` itself.
+    //
+    // Held only around the reads/decision below and the final write, never
+    // across the network probe: a probe can take seconds, and blocking every
+    // other account-key/Composio route on this company for that long — to
+    // say nothing of holding a lock across a call to a third party — is the
+    // wrong trade. (Lock order, for any future caller that also needs
+    // `inference_store::index_lock`: this guard first, never the reverse.)
+    let guard = crate::company::company_key::slot_guard(runtime.id()).await;
     let before_mode = load_mode(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
@@ -884,10 +905,13 @@ async fn set_api_key(
             used_by,
         }));
     }
+    drop(guard);
 
     // Probe the DRAFT, before anything is written. The clear path is never
     // probed — withdrawing a credential is always allowed, and there would be
     // nothing to check — and `skipVerify` is the operator's explicit opt-out.
+    // Unguarded (see above): this is the network round trip the lock must
+    // never be held across.
     let probe = if api_key.is_empty() || body.skip_verify {
         None
     } else {
@@ -904,9 +928,29 @@ async fn set_api_key(
             describe(class).to_string(),
         )));
     }
+
+    // Re-acquire, and re-check `composio/mode` before writing: the probe ran
+    // unguarded, so a concurrent write to `composio/mode` — another
+    // `set_api_key` call — could have landed in that window. `before_mode`
+    // above is what this request's `switching`/`used_by`/confirmation
+    // decision was computed against; writing over a mode that has since moved
+    // would silently apply that stale decision to a different transition than
+    // the one actually confirmed. Refuse and ask the caller to retry rather
+    // than guess.
+    let guard = crate::company::company_key::slot_guard(runtime.id()).await;
+    let mode_now = load_mode(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+    if mode_now != before_mode {
+        return Err(ApiError(crate::error::OpenCompanyError::Conflict(
+            "Composio's mode changed while this key was being checked; reload and try again."
+                .to_string(),
+        )));
+    }
     let mode = store_api_key(runtime.id(), runtime.secrets().as_ref(), api_key)
         .await
         .map_err(ApiError)?;
+    drop(guard);
     evict_catalog_cache(runtime);
     journal(
         &company,
@@ -4567,6 +4611,62 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
         assert!(body.get("usedBy").is_none(), "{body}");
+        assert_eq!(
+            crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            crate::company::composio::ComposioMode::Byok
+        );
+    }
+
+    /// Round-2 review, comment 4012457339 (keys rework #2306): `set_api_key`
+    /// writes `composio/mode`, the same fact `company_key::fan_out`'s own
+    /// in-use check reads to decide whether an unconfirmed account-key clear
+    /// may touch `composio/tinyhumans/key`. Before this fix the route took no
+    /// lock at all, so a confirmed mode switch landing here and a concurrent,
+    /// unconfirmed account-key clear could each act on the OTHER's pre-image
+    /// — the clear sees the old mode and decides the managed slot is
+    /// inactive, the switch then makes it active, and it is left keyless with
+    /// neither request ever having confirmed that outcome.
+    ///
+    /// This proves the route now shares `company_key::fan_out`'s own
+    /// `slot_guard`: while a test holds that company's guard directly (the
+    /// same acquisition `fan_out` makes for the whole of an account-key
+    /// save), the real `PUT …/composio/api-key` handler must not complete —
+    /// it has to be waiting on the same lock, not racing past it.
+    #[tokio::test]
+    async fn set_api_key_blocks_while_the_account_keys_fan_out_lock_is_held() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "composio-lock-blocks", GRANTED).await;
+        let runtime = runtime_of(&state, "composio-lock-blocks");
+        super::probe_override::set("composio-lock-blocks", Ok(()));
+
+        // The exact acquisition `company_key::fan_out` makes for the whole of
+        // an account-key save.
+        let held = crate::company::company_key::slot_guard(runtime.id()).await;
+
+        let request = send_for(
+            &state,
+            "composio-lock-blocks",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_not_a_real_key_0123456789" })),
+        );
+        tokio::pin!(request);
+        tokio::select! {
+            _ = &mut request => panic!(
+                "set_api_key must not write composio/mode while the account-key \
+                 fan-out's own lock is held elsewhere"
+            ),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+
+        drop(held);
+        let (status, _body, raw) =
+            tokio::time::timeout(std::time::Duration::from_millis(1000), request)
+                .await
+                .expect("set_api_key proceeds once the lock is released");
+        assert_eq!(status, StatusCode::OK, "{raw}");
         assert_eq!(
             crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
                 .await
