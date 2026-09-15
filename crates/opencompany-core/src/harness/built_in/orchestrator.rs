@@ -4058,7 +4058,6 @@ impl Tool for AddAgentTool {
             description,
             tools: tools.clone(),
             model: None,
-            provider: None,
             harness: None,
         };
         record.overlay_agents.push(agent);

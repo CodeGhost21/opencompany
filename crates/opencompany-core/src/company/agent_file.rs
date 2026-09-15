@@ -299,11 +299,6 @@ fn parse_agent_file(
         // this same parser reads both a company's `agents/` and `globals/`.
         global: false,
         model: file.model,
-        // Never manifest-authored (`Agent::provider`'s own doc explains why —
-        // it exists only so the operator-override projection has somewhere to
-        // land, not as an `agents/*.toml` key), so every file-parsed agent
-        // starts with no pin.
-        provider: None,
     })
 }
 
