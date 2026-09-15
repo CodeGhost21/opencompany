@@ -743,6 +743,7 @@ async fn finish_link(
             // this path, so it is set unconditionally rather than threaded
             // from a request that has no such field.
             confirm_in_use: true,
+            proxy_base_url: Some(&state.config().api_url),
         },
         prober.as_ref(),
     )
