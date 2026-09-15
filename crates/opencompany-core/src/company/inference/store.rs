@@ -52,7 +52,8 @@
 //! behind is not untidiness: re-adding that slug would silently inherit a
 //! credential the operator thought they had removed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,57 @@ use super::{KEY_KEY, RuntimeInference, normalize_provider};
 /// The [`SecretStore`] key holding the provider index — every provider *except*
 /// entry zero, without credentials.
 pub const PROVIDER_INDEX_KEY: &str = "inference/providers";
+
+// ---------------------------------------------------------------------------
+// The per-company inference-config lock
+// ---------------------------------------------------------------------------
+
+/// One process-wide lock per company, guarding every mutation that reads an
+/// in-use guard and then writes: provider delete, disable and key clear
+/// (`server::ops::inference::providers`), the agent-pair PATCH
+/// (`server::ops::team_agent`), set-default, and the X1 first-add
+/// auto-default. [`company::company_key::fan_out`](crate::company::company_key::fan_out)'s
+/// account-key save also takes it before writing [`PROVIDER_INDEX_KEY`] or the
+/// default marker, so a fan-out save and a provider-page edit can never both
+/// pass their checks against the same pre-write state.
+///
+/// Mirrors `company_key::fan_out::slot_guard`'s pattern exactly — itself
+/// copied from `search::store`'s `INDEX_LOCKS` — one `tokio::sync::Mutex` per
+/// company id in a process-wide map. This serialises mutations **within one
+/// process**, which is the whole of a deployment (one container per tenant);
+/// it is not a distributed lock and does nothing across replicas.
+///
+/// Never hold the guard across a network call: probe a provider's catalog
+/// before taking it, or after releasing it, never while it is held. Take it,
+/// re-read the state the guard check depends on, check, write, drop.
+///
+/// **Lock order:** a caller that also holds
+/// [`slot_guard`](crate::company::company_key::fan_out::slot_guard) — today
+/// only the account-key fan-out — must take `slot_guard` first and this lock
+/// second. No path here takes `slot_guard` at all, so that order is the only
+/// one that can ever be built; keep it that way rather than introducing a
+/// second acquisition order two call sites could deadlock on.
+static INDEX_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// Takes this company's inference-config lock, held until the returned guard
+/// is dropped.
+///
+/// The inner `std` mutex is held only long enough to clone an `Arc` — never
+/// across an `await` — so a panicking holder cannot poison anything a later
+/// request needs.
+pub async fn index_lock(company: &CompanyId) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = INDEX_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(company.as_ref().to_string())
+            .or_default()
+            .clone()
+    };
+    lock.lock_owned().await
+}
 
 /// The credential slot for one provider.
 ///
@@ -1242,6 +1294,50 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+
+    // ---- index_lock (keys rework, issue #2306, round-3b lock coordination) -
+
+    #[tokio::test]
+    async fn index_lock_serialises_two_holders_on_the_same_company() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let company = CompanyId::new("acme-co");
+        let inside = Arc::new(AtomicBool::new(false));
+        let overlapped = Arc::new(AtomicBool::new(false));
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let company = company.clone();
+            let inside = inside.clone();
+            let overlapped = overlapped.clone();
+            tasks.push(tokio::spawn(async move {
+                let _guard = index_lock(&company).await;
+                if inside.swap(true, Ordering::SeqCst) {
+                    overlapped.store(true, Ordering::SeqCst);
+                }
+                tokio::task::yield_now().await;
+                inside.store(false, Ordering::SeqCst);
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert!(
+            !overlapped.load(Ordering::SeqCst),
+            "two holders of the same company's lock ran inside the guarded section at once"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_lock_does_not_block_a_different_company() {
+        let a = CompanyId::new("acme-co");
+        let b = CompanyId::new("other-co");
+        let _guard_a = index_lock(&a).await;
+        // A different company's lock must not wait on this one.
+        tokio::time::timeout(std::time::Duration::from_secs(2), index_lock(&b))
+            .await
+            .expect("a different company's lock must not wait on this one");
+    }
 
     // ---- check_model_id (keys rework, issue #2306, slice 2c) ---------------
 

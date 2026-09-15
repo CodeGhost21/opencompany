@@ -57,7 +57,7 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::inference::{TierVocabulary, catalogue, paged_catalog, probe, resolve, store};
+use crate::company::inference::{catalogue, paged_catalog, probe, resolve, store};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -154,9 +154,9 @@ struct AddProvider {
     /// optional. **The field that was missing, and the reason the reported
     /// 404 existed**: `add_provider` used to write `models: BTreeMap::new()`
     /// with no way to supply one at all, so a provider whose catalog
-    /// published neither the tier names nor the shipped ids was connected
-    /// with four tiers unmapped — and `model_for_tier`'s `Unknown` arm then
-    /// put the bare tier on the wire.
+    /// published no vocabulary this host recognised was connected with four
+    /// tiers unmapped — and the bare tier name went out on the wire (no
+    /// longer possible at all since slice 2d's `model_on_the_wire`).
     #[serde(default)]
     model: Option<String>,
     /// Also make this row the company default `{provider, model}` (keys
@@ -267,23 +267,16 @@ struct ProbeResultDto {
     model_known: Option<bool>,
     /// The ids the endpoint published, so the add dialog can offer one.
     ///
-    /// **This is what closes the loop `TierVocabulary::Unknown` was built to
-    /// open.** That variant exists to refuse to guess, and `tier_defaults()`
-    /// returns an empty map for it *so the console will ask* — but nothing on
-    /// the add path ever consulted it, so the empty map shipped straight to a
-    /// turn. The catalog is already in hand at the moment of the probe; sending
-    /// it means the operator is asked with the answers in front of them rather
-    /// than told no after a round trip.
+    /// The catalog is already in hand at the moment of the probe; sending it
+    /// means the operator is asked with the answers in front of them —
+    /// choosing from the real list — rather than typing one blind or being
+    /// told no after a round trip. Every kind asks for a model now (2c), so
+    /// this is always worth sending when the endpoint published anything.
     ///
     /// Capped, because a catalog can run to hundreds of ids and this rides on
     /// every probe response. The console offers free text alongside the list.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     models: Vec<String>,
-    /// Whether this endpoint cannot serve a workload until a model is named.
-    ///
-    /// Decided from the published catalog, never from the kind — see
-    /// [`needs_an_explicit_model`].
-    needs_model: bool,
 }
 
 // `catalogue_offer` (the published ids to offer, sorted, deduplicated and
@@ -474,6 +467,41 @@ async fn add_provider(
     let existing = store::list_providers(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
+    // Decision X1 (round-3a review P0, 2026-09-15): auto-default requires more
+    // than "no stored default" — every company that predates this rework has
+    // no stored default, so that test alone would silently move an existing
+    // company's traffic (entry zero, a manifest `[inference]` section, an env
+    // default, or the managed chain) onto whatever it "tried out" next, with
+    // no confirm. X1 means "the first provider this company has ever
+    // connected", so both must hold, read from the state as it stood before
+    // this add:
+    //   (a) there were zero provider rows;
+    //   (b) nothing else resolves for the company at all — `resolve_effective`
+    //       is the one seam that already answers exactly that question, for
+    //       the turn path and the boot path alike.
+    //
+    // Must run **before** this add's own row exists: asked afterwards, (b)
+    // would trivially see this very row resolving as sole positional primary
+    // and answer "nothing else" regardless of what was true before. Locked
+    // only for this read — released here, long before the write below and
+    // the network probe further down; re-validated under the lock again,
+    // narrowly, at the point that actually writes the default.
+    let first_provider_ever = if existing.is_empty() {
+        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
+        let (manifest, _harness_id) = super::manifest_inference(runtime).await?;
+        let platform = super::platform_default(&crate::app::config::ProcessEnv);
+        crate::company::inference::resolve_effective(
+            runtime.id(),
+            &manifest,
+            platform.as_ref(),
+            secrets,
+        )
+        .await
+        .map_err(ApiError)?
+        .is_none()
+    } else {
+        false
+    };
     // The catalogue check applies to a *typed* name only. Adding the catalogue's
     // own `groq` entry should take the slug `groq` — that is the same provider,
     // not a collision.
@@ -541,7 +569,7 @@ async fn add_provider(
             label: plan.label.clone(),
             kind: plan.kind.clone(),
             base_url: plan.base_url.clone(),
-            models: tier_overrides(Some(&model)),
+            models: uniform_models(Some(&model)),
             // New providers arrive on. Adding something and then having to
             // switch it on is a second step for a decision already made.
             enabled: true,
@@ -607,7 +635,6 @@ async fn add_provider(
                     model_count: models.len(),
                     model_known: None,
                     models: paged_catalog::catalogue_offer(&models),
-                    needs_model: needs_an_explicit_model(&models),
                 }),
                 format!("{} is connected and answering.", provider.label),
             )
@@ -655,7 +682,6 @@ async fn add_provider(
                     model_count: 0,
                     model_known: None,
                     models: Vec::new(),
-                    needs_model: false,
                 }),
                 message,
             )
@@ -678,19 +704,12 @@ async fn add_provider(
     // Two reasons this runs, matched independently rather than one flag:
     // - `body.make_default` (2c): the operator explicitly ticked "Make this
     //   the default", which is honoured whatever the default already held.
-    // - Decision D-first-default (X1, 2026-09-15): the *first* provider a
-    //   company ever connects becomes its default automatically, with no
-    //   opt-out — `load_default()` is `Unset` only for a company that has
-    //   never set one, so this never overwrites an operator's existing
-    //   choice (X1's second half: "adding never changes it").
-    let auto_default = !body.make_default
-        && matches!(
-            store::load_default(runtime.id(), secrets)
-                .await
-                .map_err(ApiError)?,
-            store::DefaultChoice::Unset
-        );
-    let note = if body.make_default || auto_default {
+    // - Decision D-first-default / X1 (round-3a review P0, 2026-09-15): the
+    //   *first* provider a company has ever connected becomes its default
+    //   automatically, with no opt-out — gated on `first_provider_ever`
+    //   above, not merely on `load_default` reading `Unset` (X1's second
+    //   half, "adding never changes it", still holds either way).
+    let note = if body.make_default {
         let choice = store::ModelChoice {
             provider: provider.slug.clone(),
             model: model.clone(),
@@ -707,12 +726,49 @@ async fn add_provider(
                     error = %err,
                     "added a provider but could not make it the default",
                 );
-                if body.make_default {
-                    format!("{note} It could not be made the default. Use Set as default.")
-                } else {
+                format!("{note} It could not be made the default. Use Set as default.")
+            }
+        }
+    } else if first_provider_ever {
+        // Re-validated under the lock right before the write: the snapshot
+        // above was taken before this add's own row was written and before
+        // its probe ran, both of which took real time a concurrent request
+        // could have used to add a second row or set an explicit default —
+        // either of which means this is no longer "the first provider ever".
+        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
+        let still_unset = matches!(
+            store::load_default(runtime.id(), secrets)
+                .await
+                .map_err(ApiError)?,
+            store::DefaultChoice::Unset
+        );
+        let still_only_row = store::list_providers(runtime.id(), secrets)
+            .await
+            .map_err(ApiError)?
+            .len()
+            == 1;
+        if still_unset && still_only_row {
+            let choice = store::ModelChoice {
+                provider: provider.slug.clone(),
+                model: model.clone(),
+            };
+            match store::set_default_choice(runtime.id(), secrets, &choice).await {
+                Ok(()) => format!(
+                    "{note} New work now goes through {} · {model}.",
+                    provider.label
+                ),
+                Err(err) => {
+                    tracing::warn!(
+                        company = %runtime.id(),
+                        provider = %provider.slug,
+                        error = %err,
+                        "added a provider but could not make it the default",
+                    );
                     note
                 }
             }
+        } else {
+            note
         }
     } else {
         note
@@ -862,29 +918,16 @@ fn is_the_only_thing_that_can_answer(
     table_is_empty && !managed_answers && sole
 }
 
-/// Whether a catalog leaves every tier unresolvable, so a row over it is
-/// unusable until a model is named.
+/// One model id stored under every tier key: a storage encoding, not a
+/// selection (keys rework, issue #2306, slice 2d).
 ///
-/// **Keyed on what the endpoint published, never on its kind or its hostname.**
-/// "Direct vendor APIs need a model, gateways do not" is the right intuition and
-/// the wrong rule: a self-hosted LiteLLM that publishes `agentic-v1` resolves
-/// tiers no matter who runs it, and a vendor that starts publishing them would
-/// have to be removed from a hand-kept list nobody would remember to edit.
-/// [`TierVocabulary::from_catalog_ids`] already answers this from evidence, and
-/// one evidence-based rule covers cloud, local and gateway alike.
-fn needs_an_explicit_model(models: &[String]) -> bool {
-    TierVocabulary::from_catalog_ids(models.iter().map(String::as_str)) == TierVocabulary::Unknown
-}
-
-/// One model id, pinned to every tier.
-///
-/// A provider that cannot resolve tier names needs a concrete id for each one,
-/// and the add dialog asks for a single model rather than four: at the moment
-/// something is connected there is no reason to believe its four workloads want
-/// different models, and the Routing tab is where that decision belongs. This
-/// writes the same id to all four so no tier is left to fall through to the
-/// passthrough that produced the 404.
-fn tier_overrides(model: Option<&str>) -> BTreeMap<String, String> {
+/// A row's `models` map holds one tier-keyed shape for every provider,
+/// whatever it can resolve — the legacy arm's
+/// [`legacy_tiers::configured_model_for_tier`](crate::company::inference::legacy_tiers::configured_model_for_tier)
+/// reads whichever tier a request names, and 2c's `check_model_id` already
+/// refuses to store a tier name as the value, so this never has to guess
+/// which of the four a turn will ask for.
+fn uniform_models(model: Option<&str>) -> BTreeMap<String, String> {
     let Some(model) = model else {
         return BTreeMap::new();
     };
@@ -1276,7 +1319,7 @@ async fn edit_provider(
         None => None,
     };
     let models = match &model {
-        Some(m) => tier_overrides(Some(m)),
+        Some(m) => uniform_models(Some(m)),
         None => existing.models.clone(),
     };
 
@@ -1709,7 +1752,7 @@ async fn set_default(
     let rewrite = provider.origin == store::ProviderOrigin::Indexed
         && !matches!(provider.model(), store::ModelOnRow::One(ref m) if *m == model);
     if rewrite {
-        store::put_provider(runtime.id(), secrets, draft(tier_overrides(Some(&model))))
+        store::put_provider(runtime.id(), secrets, draft(uniform_models(Some(&model))))
             .await
             .map_err(ApiError)?;
     }
@@ -1983,7 +2026,6 @@ async fn test_managed(
                 model_count: models.len(),
                 model_known: None,
                 models: paged_catalog::catalogue_offer(&models),
-                needs_model: needs_an_explicit_model(&models),
             }))
         }
         Err(failure) => {
@@ -2006,7 +2048,6 @@ async fn test_managed(
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),
-                needs_model: false,
             }))
         }
     }
@@ -2275,7 +2316,6 @@ async fn test_provider(
                 model_count: models.len(),
                 model_known,
                 models: paged_catalog::catalogue_offer(&models),
-                needs_model: needs_an_explicit_model(&models),
             }))
         }
         Err(failure) => {
@@ -2304,7 +2344,6 @@ async fn test_provider(
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),
-                needs_model: false,
             }))
         }
     }
@@ -2354,7 +2393,6 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
             message: None,
             model_count: models.len(),
             model_known: None,
-            needs_model: needs_an_explicit_model(&models),
             models: paged_catalog::catalogue_offer(&models),
         })
         .into_response(),
@@ -2387,7 +2425,6 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),
-                needs_model: false,
             })
             .into_response()
         }
@@ -2712,66 +2749,11 @@ mod tests {
         assert!(plan_add("ollama", None, None, false).is_ok());
     }
 
-    // ---- a tier-unaware provider must not reach a turn --------------------
-
-    fn ids(values: &[&str]) -> Vec<String> {
-        values.iter().map(|v| (*v).to_string()).collect()
-    }
-
-    /// The reported defect: Anthropic connected with no model, the row rendered
-    /// healthy, and every turn came back
-    /// `404 {"message": "model: agentic-v1"}` because the tier name went out as
-    /// the model id. Anthropic's catalog publishes neither the tier names nor
-    /// the ids `DEFAULT_TIER_MODELS` ships, so nothing could have mapped it.
-    #[test]
-    fn a_direct_vendor_catalog_needs_a_model_named() {
-        assert!(needs_an_explicit_model(&ids(&[
-            "claude-sonnet-5",
-            "claude-opus-5",
-            "claude-haiku-4",
-        ])));
-    }
-
-    /// The same is true of a local runtime, which is why this is not a rule
-    /// about cloud vendors: Ollama publishes its own pulled tags and would 404
-    /// `agentic-v1` exactly as Anthropic does.
-    #[test]
-    fn a_local_runtime_catalog_needs_a_model_named() {
-        assert!(needs_an_explicit_model(&ids(&[
-            "llama3:latest",
-            "qwen2.5-coder:7b",
-        ])));
-    }
-
-    /// And an endpoint that resolves tiers itself does not, whoever runs it —
-    /// the managed endpoint and a self-hosted gateway are the same case. A
-    /// static per-kind flag would get this wrong for a self-hosted LiteLLM.
-    #[test]
-    fn a_tier_native_catalog_needs_nothing_named() {
-        assert!(!needs_an_explicit_model(&ids(&[
-            "chat-v1",
-            "reasoning-v1",
-            "agentic-v1",
-            "vision-v1",
-        ])));
-    }
-
-    /// Nor does one publishing the shipped ids, which is what the substitution
-    /// in `model_for_tier` is for.
-    #[test]
-    fn a_catalog_of_shipped_ids_needs_nothing_named() {
-        let shipped: Vec<String> = crate::company::inference::DEFAULT_TIER_MODELS
-            .iter()
-            .map(|(_, model)| (*model).to_string())
-            .collect();
-        assert!(!needs_an_explicit_model(&shipped));
-    }
-
     /// A named model is written to every tier, so no workload is left to fall
     /// through to the passthrough that produced the 404.
     #[test]
     fn a_named_model_covers_every_tier() {
-        let overrides = tier_overrides(Some("claude-sonnet-5"));
+        let overrides = uniform_models(Some("claude-sonnet-5"));
         assert_eq!(overrides.len(), crate::company::INFERENCE_TIERS.len());
         for tier in crate::company::INFERENCE_TIERS {
             assert_eq!(
@@ -2779,7 +2761,7 @@ mod tests {
                 Some("claude-sonnet-5")
             );
         }
-        assert!(tier_overrides(None).is_empty());
+        assert!(uniform_models(None).is_empty());
     }
 
     // ---- the one case where routing a new provider is not a guess ---------
