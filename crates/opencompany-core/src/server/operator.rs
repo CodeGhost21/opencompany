@@ -1644,7 +1644,29 @@ fn project_event_for_viewer(
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
-            o["text"] = json!(text);
+            // The same pair `MessageView` ships on reload: the operator-facing
+            // body, and the body as the model wrote it. They differ only on a
+            // desk that deliberates, where `readable_moves` turns
+            // `!support #topic ^3` into prose — see `MessageView::cue_text`.
+            //
+            // Order matters here, and cost a PR to learn: the grammar has to
+            // reach `cueText` before `text` may lose it. The fold reads the
+            // room's moves to know an episode happened at all, so cleaning
+            // `text` while it was the only body on this frame took the
+            // deliberation panel with it.
+            o["cueText"] = json!(text);
+            // What the operator reads, rewritten exactly as the reload already
+            // rewrites it. A room's grammar is addressed to the fold, and the
+            // journal keeps it — a room whose own transcript had been cleaned
+            // could not count itself — so this lives at the display edge and
+            // nowhere earlier. Every agent-facing path (`EpisodePrompt`,
+            // `elsewhere_for`, `referral_prompt`, `chat_seed`) still reads the
+            // stored line, which is how a seat can cite `^16` against a row it
+            // can identify.
+            //
+            // A reply carrying no move is returned unchanged, which is every
+            // reply on every desk that does not deliberate.
+            o["text"] = json!(crate::server::chat_history::readable_moves(text.clone()));
             // Keys rework #2306, round-2 review KR-L2-03: re-classifies the
             // same bare X9 sentence `spawn_chat_turn` wrote into `text` for
             // exactly this class of failure. Omitted (reads as absent/false)
@@ -4718,6 +4740,21 @@ struct ChatHistoryMessageDto {
     author: String,
     /// The message text.
     text: String,
+    /// **The body as the model wrote it** — [`MessageView::cue_text`], which
+    /// is [`Self::text`] before `readable_moves` rewrote the room's grammar
+    /// into operator-facing prose.
+    ///
+    /// `AgentSessionMessageDto` has carried this since the raw-turns view
+    /// needed it; this shape did not, so a reader that needs the *moves*
+    /// rather than the prose had nothing to read them from on the reload path.
+    /// The episode fold is such a reader, which is why a deliberation panel
+    /// never survived a refresh.
+    ///
+    /// Omitted when it is byte-equal to [`Self::text`], which is every row
+    /// carrying no move — so the wire shape is unchanged for every reply on
+    /// every desk that does not deliberate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cue_text: Option<String>,
     /// Set only when another desk's referral caused this line. Absent on every
     /// ordinary message, so the wire shape is unchanged for them.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4902,7 +4939,12 @@ impl From<MessageView> for ChatHistoryMessageDto {
         // text back). Cloned before `view.text` moves into the `text` field
         // below.
         let message = view.resolution_user_facing.then(|| view.text.clone());
+        // Only when the two differ, which is only on a desk that deliberates:
+        // `readable_moves` returns a body carrying no move untouched, so an
+        // ordinary reply adds nothing to the wire.
+        let cue_text = (view.cue_text != view.text).then(|| view.cue_text.clone());
         Self {
+            cue_text,
             aside_conversation: view.aside_conversation.map(|aside| AsideConversationDto {
                 members: aside.members,
                 lines: aside
@@ -14532,6 +14574,75 @@ mode = "full"
         assert_eq!(v["steps"][0]["status"], "ok");
         // A channel reply names no thread, so the legacy frame is unchanged.
         assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
+    }
+
+    /// **The live frame carries the model's own body, not only the operator's.**
+    ///
+    /// `MessageView` has shipped both since it gained `cue_text`; the live frame
+    /// had only `text`, so anything needing the room's grammar had to scrape it
+    /// back out of the operator-facing body. `frontend/src/lib/hive/episode.ts`
+    /// does exactly that (`moveOf(m.text)`), which is why rewriting `text` here
+    /// costs the deliberation panel rather than merely tidying a bubble.
+    ///
+    /// Pinned now, while the two are equal, so the step that rewrites `text`
+    /// cannot quietly take `cueText` with it.
+    #[test]
+    fn projects_the_agents_own_body_beside_the_operators() {
+        let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "returns".into(),
+            agent_id: "refunds".into(),
+            text: "!support #kettle ^16 the swap is the customer's first preference".into(),
+            steps: Vec::new(),
+        });
+        let value = super::project_event_for_viewer(
+            &stored,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("agent_reply is an attention signal");
+
+        assert_eq!(
+            value["cueText"], "!support #kettle ^16 the swap is the customer's first preference",
+            "the room's grammar is what the fold reads; it must survive on this frame: {value}"
+        );
+        assert_eq!(
+            value["text"], "the swap is the customer's first preference",
+            "and the operator reads prose, exactly as the reload already gives them: {value}"
+        );
+    }
+
+    /// And on a desk that does not deliberate the two are byte-equal, so no
+    /// consumer has to choose between them for an ordinary reply.
+    #[test]
+    fn a_reply_with_no_move_carries_the_same_body_twice() {
+        let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "general".into(),
+            agent_id: "ceo".into(),
+            text: "here is the summary you asked for".into(),
+            steps: Vec::new(),
+        });
+        let value = super::project_event_for_viewer(
+            &stored,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("agent_reply is an attention signal");
+
+        assert_eq!(value["cueText"], value["text"]);
     }
 
     #[test]

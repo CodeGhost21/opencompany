@@ -2620,6 +2620,10 @@ export function AppShell({
             // the turn live keeps an agent-style bubble hydration never
             // corrects.
             makeMessage(from, event.text, {
+              // The grammar the fold counts, when the host sent it — see
+              // `ChatMessage.cueText`. Carried so a live turn folds into the
+              // episode panel exactly as the reloaded one does.
+              cueText: event.cueText,
               channel: event.agentId,
               taskId: event.taskId,
               outputs: event.outputs,

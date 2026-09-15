@@ -31,6 +31,13 @@ export type CompanyStreamEvent =
       agentId: string;
       text: string;
       /**
+       * The body as the model wrote it — see {@link AgentReplyEvent.cueText}.
+       * Declared here as well as on the callback payload because this arm
+       * rebuilds that payload field by field: a field the host sends and this
+       * shape omits is dropped at the dispatcher and reaches nothing.
+       */
+      cueText?: string;
+      /**
        * The board card this reply is about (issue #246/#185) — the card the
        * turn opened, or the dispatched card it ran for. Absent on an ordinary
        * chat reply.
@@ -699,6 +706,16 @@ export interface AgentReplyEvent {
   agentId: string;
   text: string;
   /**
+   * **The body as the model wrote it**, mirroring `MessageView.cueText` on the
+   * reload path — `text` before the host rewrote the room's grammar into
+   * operator-facing prose.
+   *
+   * Equal to {@link text} on every row carrying no move, and absent from a host
+   * that predates the field. The episode fold reads it because it counts
+   * `!propose`/`!support`/`^N`, which the operator-facing body no longer has.
+   */
+  cueText?: string;
+  /**
    * The **host-side** id of this message (issue #483) — the stream envelope's
    * `seq`. `chat/history` projects its own `id` from the same `StoredEvent`
    * sequence, so a live line stamped with this carries the identity a later
@@ -1257,6 +1274,11 @@ export function handleEvent(
         chatId: event.chatId,
         agentId: event.agentId,
         text: event.text,
+        // The room's own grammar, which the episode fold counts. `text` has
+        // been rewritten into operator-facing prose by the time it reaches
+        // here, so dropping this would leave a live deliberation undetectable
+        // — the fold would see no moves and render no episode at all.
+        cueText: event.cueText,
         // Issue #483: the host's own id for this message. Carried so the
         // injected line and its later rehydrated twin share an identity.
         seq: event.seq,

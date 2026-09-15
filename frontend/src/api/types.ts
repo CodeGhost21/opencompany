@@ -545,6 +545,17 @@ export interface ChatHistoryMessageDto {
   channel: string;
   author: string;
   text: string;
+  /**
+   * **The body as the model wrote it** — {@link text} before the host rewrote
+   * the room's grammar into operator-facing prose.
+   *
+   * Absent when the two are equal, which is every row carrying no move, and
+   * absent from a host predating the field. Read it wherever the *moves* are
+   * the point rather than the prose: the episode fold counts
+   * `!propose`/`!support`/`^N`, and reading {@link text} there is why a
+   * deliberation panel never survived a refresh.
+   */
+  cueText?: string;
   referredFrom?: ReferredFromDto;
   referralConversation?: ReferralConversationDto;
   asideConversation?: AsideConversationDto;
