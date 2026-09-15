@@ -13,6 +13,7 @@ companies/_globals/
   agents/*.toml     # one file per global teammate
   workflows/*.toml  # one file per global graph
   ledgers/*.toml    # one file per baseline ledger
+  skills/*/SKILL.md # the skills [skills].always installs everywhere
 ```
 
 The code is [`crate::globals`](../../../src/globals/mod.rs), and the shipped
