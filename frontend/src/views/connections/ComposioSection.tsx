@@ -23,13 +23,15 @@ import type { ComposioSubmitOutcome } from "@/composio/classify";
 import { ComposioRowList } from "@/composio/ComposioRowList";
 import { guardedOutcome } from "@/composio/in-use";
 import { ProbeAdvisory } from "@/composio/ProbeAdvisory";
-import { ReuseAccountKeyBanner } from "@/composio/ReuseAccountKeyBanner";
+// Shared with the LLM page (round-3b review, item 6) — moved out of
+// `@/composio/**`, which held it alone until now.
+import { ReuseAccountKeyBanner } from "@/inference/ReuseAccountKeyBanner";
 import {
   readDismissed,
   reuseDismissKey,
   showsComposioReuseBanner,
   writeDismissed,
-} from "@/composio/reuse-banner";
+} from "@/inference/reuse-banner";
 import {
   composioForm,
   composioRows,

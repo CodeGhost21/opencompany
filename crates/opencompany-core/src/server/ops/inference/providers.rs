@@ -273,18 +273,20 @@ struct ProbeResultDto {
     /// told no after a round trip. Every kind asks for a model now (2c), so
     /// this is always worth sending when the endpoint published anything.
     ///
-    /// Capped, because a catalog can run to hundreds of ids and this rides on
-    /// every probe response. The console offers free text alongside the list.
+    /// Sorted and deduplicated, never truncated below what the paged read
+    /// returned (round-3a review P2-5: a 500-id cap used to filter a large
+    /// catalog by name, which is exactly what this feature promises never to
+    /// do). The console offers free text alongside the list regardless.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     models: Vec<String>,
 }
 
-// `catalogue_offer` (the published ids to offer, sorted, deduplicated and
-// capped) moved to `paged_catalog::catalogue_offer` (keys rework #2306, P3-7
-// review): the account-key fan-out (`company::company_key::fan_out`) needs
-// the same "sort, dedupe, cap" this probe route decided, and `company` must
-// never import from `server` — so the one place that decides it lives at a
-// layer both already reach.
+// `catalogue_offer` (the published ids to offer, sorted and deduplicated —
+// never capped, round-3a review P2-5) moved to `paged_catalog::catalogue_offer`
+// (keys rework #2306, P3-7 review): the account-key fan-out
+// (`company::company_key::fan_out`) needs the same "sort, dedupe" this probe
+// route decided, and `company` must never import from `server` — so the one
+// place that decides it lives at a layer both already reach.
 
 /// What `POST …/providers/{slug}/test` may be asked.
 #[derive(Debug, Default, Deserialize)]
@@ -337,29 +339,76 @@ struct ProviderMutation {
 /// the whole guard: the `default` half still answers, and a company whose
 /// record cannot be read has bigger problems than an incomplete advisory.
 ///
-/// `pub(super)`: also called from `provider_list` in the parent module
-/// (`ops/inference.rs`) to fill `ProviderDto.usedBy` on every status read,
-/// not only inside a guarded mutation.
+/// The pure half of the guard: from an already-resolved default and an
+/// already-loaded record, whether `slug` is used, and by what.
+///
+/// Split out (round-3a review P3-6) so a status read computing this for every
+/// row in the list can load the default and the record **once** for the
+/// whole request — see `ops::inference::provider_list` — instead of each row
+/// repeating both reads through [`provider_used_by`].
+///
+/// `default` is read from the [`store::DefaultChoice`] itself, not
+/// re-fetched, precisely so a caller that could not read the real one can
+/// pass [`store::DefaultChoice::Unset`] and get an honest "not the default"
+/// rather than this function silently going back to the store a second time
+/// and hitting the same failure.
+///
+/// `pub(super)`: `ops::inference::provider_list` calls this directly, once
+/// per row, over one default and one record loaded for the whole request.
+pub(super) fn used_by_from(
+    default: &store::DefaultChoice,
+    record: Option<&crate::ports::types::CompanyRecord>,
+    slug: &str,
+) -> Option<crate::error::UsedBy> {
+    let is_default = default.provider().is_some_and(|p| p == slug);
+    let agents = record
+        .map(|r| agents_pinned_to(r, slug))
+        .unwrap_or_default();
+    let used_by = crate::error::UsedBy {
+        default: is_default,
+        agents,
+        surfaces: Vec::new(),
+    };
+    (!used_by.is_empty()).then_some(used_by)
+}
+
+/// `pub(super)`: called from the three guarded mutations below (delete,
+/// disable, key clear) and from the agent-pair PATCH
+/// (`server::ops::team_agent`) — never from a read path, which computes
+/// [`used_by_from`] directly over data it already loaded once for the whole
+/// request (round-3a review P3-6).
+///
+/// **A guard fails closed, a read degrades — this is the guard half**
+/// (round-3a review P2-1). The company record is read fresh here because a
+/// mutation's whole job is to decide whether it is safe to proceed *right
+/// now*; a load error therefore propagates as `Err` rather than reading as
+/// "no agents named", which used to let a transient store error turn an
+/// unconfirmed delete, disable or key clear on a pinned-only provider into a
+/// silent 200. `Ok(None)` — the record genuinely does not exist — still reads
+/// as no agents: that is not a failure to recover from, it is the company
+/// having nothing to strand.
+///
+/// The stored default, by contrast, is read leniently
+/// ([`store::load_default_lenient`], round-3a review P2-4): a corrupt or
+/// unreadable `inference/default` must never block an otherwise-unrelated
+/// delete, disable or key clear — the guard still answers about `agents`, and
+/// `default` reads as `false` rather than the whole request failing.
 pub(super) async fn provider_used_by(
     runtime: &CompanyRuntime,
     slug: &str,
 ) -> Result<Option<crate::error::UsedBy>, ApiError> {
     let secrets = runtime.secrets().as_ref();
-    let default = store::load_default(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?
-        .provider()
-        .is_some_and(|p| p == slug);
-    let agents = match runtime.store().load(runtime.id()).await {
-        Ok(Some(record)) => agents_pinned_to(&record, slug),
-        Ok(None) | Err(_) => Vec::new(),
-    };
-    let used_by = crate::error::UsedBy {
-        default,
-        agents,
-        surfaces: Vec::new(),
-    };
-    Ok((!used_by.is_empty()).then_some(used_by))
+    let (default, unreadable) = store::load_default_lenient(runtime.id(), secrets).await;
+    if unreadable {
+        tracing::warn!(
+            company = %runtime.id(),
+            slug = %slug,
+            "computing usedBy for a guarded mutation with an unreadable default; treating it \
+             as not the default rather than refusing the mutation",
+        );
+    }
+    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
+    Ok(used_by_from(&default, record.as_ref(), slug))
 }
 
 /// Every effective roster agent whose own pair names `slug` (keys rework,
@@ -1291,6 +1340,15 @@ async fn edit_provider(
         ))));
     }
 
+    // Keys rework (#2306), round-3a review P2-2: held from the key-clear
+    // guard's check through every write below, so a concurrent request (a
+    // pin, a delete, another edit) cannot pass its own check against a row
+    // this request is about to change out from under it. Nothing under this
+    // guard makes a network call — every write here is to the secret store —
+    // so it is dropped before `effective_status` rebuilds the response,
+    // never held across a probe.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
+
     // Keys rework (#2306), slice 2c: an edit that **clears** the key
     // (`key: Some("")`) is a guard the same way a disable is — a row with no
     // credential cannot serve the default or an agent pair that names it any
@@ -1428,6 +1486,7 @@ async fn edit_provider(
         }
     }
 
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note: format!("{} updated.", provider.label),
@@ -1486,6 +1545,14 @@ async fn delete_provider(
                 .to_string(),
         )));
     }
+
+    // Keys rework (#2306), round-3a review P2-2: held from the guard's check
+    // through every write below, so a concurrent pin or edit cannot pass its
+    // own check against a row this delete is about to remove out from under
+    // it. Every write in this span is a secret-store write — no network call
+    // — and the guard is dropped before `effective_status` rebuilds the
+    // response.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
 
     // Keys rework (#2306), slice 2c: a delete is a removal in the fullest
     // sense — refused unless confirmed, same as a disable or a key clear.
@@ -1574,6 +1641,7 @@ async fn delete_provider(
             }
         )
     };
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note,
@@ -1607,6 +1675,14 @@ async fn set_enabled(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let provider = require_provider(runtime, &params.slug).await?;
+
+    // Keys rework (#2306), round-3a review P2-2: held from the guard's check
+    // through the switch below, so a concurrent pin or delete cannot pass its
+    // own check against a row this request is about to disable out from
+    // under it. Every write in this span is a secret-store write — no
+    // network call — and the guard is dropped before `effective_status`
+    // rebuilds the response.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
 
     // Keys rework (#2306), slice 2c: a disable is guarded the same way a
     // delete is — the row keeps existing, but it stops being able to serve
@@ -1695,6 +1771,7 @@ async fn set_enabled(
             if parked.len() == 1 { "is" } else { "are" }
         ),
     };
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note,
@@ -1729,6 +1806,15 @@ async fn set_default(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let model = store::check_model_id(body.model.as_deref().unwrap_or("")).map_err(ApiError)?;
+    // Keys rework (#2306), round-3a review P2-2: held from the enabled check
+    // through both writes below, so a concurrent disable or delete of this
+    // same provider cannot land between this handler's check and its write.
+    // Set-default carries no `usedBy` guard of its own (round-3a review P2-6:
+    // the console's own confirmation, naming the old and new provider, is the
+    // guard — see `docs/key-reworks/in-use-guards.md` §1); this lock is only
+    // about not racing the row's own state, and it never holds across a
+    // network call.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
     let provider = require_provider(runtime, &params.slug).await?;
     if !provider.enabled {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
@@ -1780,6 +1866,7 @@ async fn set_default(
         return Err(ApiError(err));
     }
 
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note: format!("New work now goes through {} · {model}.", provider.label),

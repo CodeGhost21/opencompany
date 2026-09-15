@@ -11,6 +11,7 @@ import {
   type CompanyBilling,
   type CompanyCredentialStatus,
 } from "@/api/credential";
+import { restartInference } from "@/api/inference";
 import { accountFills } from "@/views/connections/account-fill";
 import {
   accountKeyUsedByMessage,
@@ -153,6 +154,19 @@ export function ApiKeyView({ client, company }: Props) {
   const pendingKey = useRef<string | null>(null);
   /** Non-null once the host has answered `needsModel` — the dialog's step two. */
   const [modelStep, setModelStep] = useState<AccountKeyModelStep | null>(null);
+  /**
+   * Invalidates a stale save attempt (round-3b review, P2-4). Bumped whenever
+   * the key dialog actually closes or is opened fresh — mirrors
+   * `ProvidersTab`'s connect-dialog `attempt` ref exactly. Without it, a Save
+   * that is still in flight when Cancel is pressed could have its late
+   * `needsModel` answer land after the dialog already closed and silently
+   * reopen it on step two the next time it is opened, with a key the operator
+   * never chose to see through to step two. Belt-and-suspenders alongside
+   * `closeKeyDialog`'s own busy guard below, which is what stops the race from
+   * `Cancel` in the first place — this still protects against a stale result
+   * from any other close path.
+   */
+  const attempt = useRef(0);
 
   // Discards the result of a request that is no longer the latest one asked
   // for — a monotonic counter rather than "is this still the wanted company",
@@ -242,6 +256,28 @@ export function ApiKeyView({ client, company }: Props) {
   }, [client, company]);
 
   /**
+   * KR-ACCT-01: performs the same restart the LLM page's own "Restart now"
+   * button does (`POST …/inference/restart`, `@/api/inference`'s
+   * `restartInference`) — a save here can create or complete the
+   * `tinyhumans` row for a company that already booted, and only a restart
+   * puts the new config to work. Offered as a toast action rather than a
+   * standing banner: the Account page has no persistent "restart required"
+   * state of its own to render one from (unlike `ProvidersTab`'s
+   * `state.status.restartRequired`) — `restartRequired` here is a one-shot
+   * fact about the write that just landed, not a fact this page keeps
+   * polling for.
+   */
+  const doRestart = useCallback(async () => {
+    try {
+      await restartInference(client, company);
+      toast.success("Restarted.");
+      setGeneration((n) => n + 1);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't restart.");
+    }
+  }, [client, company]);
+
+  /**
    * Set, rotate or (with an empty value) clear the company's key.
    *
    * `confirmInUse` matters only on a clear (`mode === "clear"`): it is what
@@ -253,6 +289,7 @@ export function ApiKeyView({ client, company }: Props) {
    */
   const write = useCallback(
     async (key: string, mode: "save" | "clear", confirmInUse = false) => {
+      const myAttempt = attempt.current;
       setBusy(true);
       setKeyError(null);
       try {
@@ -263,6 +300,15 @@ export function ApiKeyView({ client, company }: Props) {
         // dialog stays open on step two rather than closing on a save that is
         // only half done.
         if (mode === "save" && result.needsModel === true) {
+          // Round-3b review, P2-4: if Cancel landed while this request was in
+          // flight (bumping `attempt`), this answer is stale — the row still
+          // refreshes (the key really did save), but nothing here may reopen
+          // the dialog on step two behind a Cancel the operator already
+          // pressed.
+          if (myAttempt !== attempt.current) {
+            setGeneration((n) => n + 1);
+            return;
+          }
           pendingKey.current = key;
           setModelStep({
             models: result.models ?? [],
@@ -274,9 +320,28 @@ export function ApiKeyView({ client, company }: Props) {
         }
         // Unconditional: the write really did land, and an admin who navigated
         // away mid-request is still owed that fact.
-        toast.success(mode === "save" ? "Key saved." : "Key removed.", {
-          description: result.note,
-        });
+        //
+        // KR-ACCT-01: `result.note` can say things like "…is now the default
+        // for new work", true of the *saved configuration* but not of what
+        // agents are currently running on — a bare "Key saved." beside that
+        // note reads as "and it's live now." `restartRequired` is what tells
+        // the two apart, so the headline names the restart explicitly and the
+        // toast carries the same "Restart now" action the LLM page offers,
+        // rather than leaving the operator to notice the gap on their own.
+        const wantsRestart = mode === "save" && result.restartRequired === true;
+        toast.success(
+          mode === "save"
+            ? wantsRestart
+              ? "Key saved — restart required to use it."
+              : "Key saved."
+            : "Key removed.",
+          {
+            description: result.note,
+            action: wantsRestart
+              ? { label: "Restart now", onClick: () => void doRestart() }
+              : undefined,
+          },
+        );
         setEditing(false);
         setRemoving(false);
         setRemoveReason(null);
@@ -292,7 +357,14 @@ export function ApiKeyView({ client, company }: Props) {
         // Composio's and Search's own guarded dialogs already give every
         // other in-use mutation on this host.
         if (mode === "save") {
-          setKeyError(err instanceof ApiError ? err.message : "Couldn't save the key.");
+          // Same staleness guard as the needsModel branch above: a Cancel that
+          // landed first must not have a late refusal paint an error into a
+          // dialog that has since closed (and been reopened fresh — its own
+          // `openKeyDialog` already clears `keyError`, but only at the moment
+          // it opens, not for whatever lands after).
+          if (myAttempt === attempt.current) {
+            setKeyError(err instanceof ApiError ? err.message : "Couldn't save the key.");
+          }
         } else {
           const outcome = guardedOutcome(err, confirmInUse);
           if (outcome.action === "reopen") {
@@ -307,7 +379,7 @@ export function ApiKeyView({ client, company }: Props) {
         setBusy(false);
       }
     },
-    [client, company],
+    [client, company, doRestart],
   );
 
   /**
@@ -328,7 +400,17 @@ export function ApiKeyView({ client, company }: Props) {
       setKeyError(null);
       try {
         const result = await setCompanyCredential(client, company, key, model);
-        toast.success("Key saved.", { description: result.note });
+        // KR-ACCT-01: the same restart-honesty fix as `write`'s own success
+        // toast, above — step two is the save that actually completes the
+        // `tinyhumans` row with a model, so it is at least as likely as step
+        // one to need a restart before anything runs on it.
+        const wantsRestart = result.restartRequired === true;
+        toast.success(wantsRestart ? "Key saved — restart required to use it." : "Key saved.", {
+          description: result.note,
+          action: wantsRestart
+            ? { label: "Restart now", onClick: () => void doRestart() }
+            : undefined,
+        });
         pendingKey.current = null;
         setModelStep(null);
         setEditing(false);
@@ -341,21 +423,34 @@ export function ApiKeyView({ client, company }: Props) {
         setBusy(false);
       }
     },
-    [client, company],
+    [client, company, doRestart],
   );
 
   /**
    * The dialog's own `onOpenChange`. Any close forgets the pending key and
    * step two's state — reopening must start over at step one, never resume a
    * half-finished model save against a key nobody can see any more.
+   *
+   * Ignores a close while `busy` (round-3b review, P2-4) — the same guard
+   * `ProviderConnectDialog` uses on the LLM page: `AccountKeyDialog`'s Dialog
+   * only ever calls `onOpenChange(false)` from Escape, a backdrop click, or
+   * its own Cancel button (which this page also disables while busy, but
+   * Escape and the backdrop go straight through this callback regardless of
+   * any button's `disabled`). Refusing the close here is what actually stops
+   * a save in flight from being cancelled out from under itself — the
+   * `attempt` counter above is the backstop for whatever this guard does not
+   * catch, not the primary fix.
    */
-  const closeKeyDialog = useCallback((next: boolean) => {
-    setEditing(next);
-    if (!next) {
+  const closeKeyDialog = useCallback(
+    (next: boolean) => {
+      if (next || busy) return;
+      attempt.current += 1;
+      setEditing(false);
       pendingKey.current = null;
       setModelStep(null);
-    }
-  }, []);
+    },
+    [busy],
+  );
 
   /**
    * Opens the Remove-key dialog, seeded with whatever the page already knows
@@ -391,6 +486,11 @@ export function ApiKeyView({ client, company }: Props) {
   const removable = canRemoveKey(status);
   const actions = headerActions(status, canManage);
   const openKeyDialog = () => {
+    // Also bumps `attempt`: opening fresh (the row menu and header button are
+    // both disabled while `busy`, so this only ever runs once any earlier
+    // save has actually settled) must not let that earlier attempt's result
+    // land in this new, unrelated open.
+    attempt.current += 1;
     setKeyError(null);
     setEditing(true);
   };

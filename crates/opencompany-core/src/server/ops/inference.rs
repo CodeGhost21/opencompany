@@ -355,6 +355,13 @@ struct InferenceStatusDto {
     /// the "no default" answer, distinct from the field being missing on an
     /// older host.
     default_choice: Option<DefaultChoiceDto>,
+    /// Round-3a review P2-4: `true` when `inference/default` holds something
+    /// that could not be read — a store error, or a value that failed to
+    /// parse — so `default_choice` above reads `null` (unset) even though the
+    /// operator may have set one. Never written back and never a 500: see
+    /// [`inference::store::load_default_lenient`]'s own doc. Delete, disable
+    /// and key clear all keep working while this is `true`.
+    default_unreadable: bool,
 }
 
 /// The company's stored `{provider, model}` default, on the wire (`store::DefaultChoice`).
@@ -363,22 +370,61 @@ struct InferenceStatusDto {
 struct DefaultChoiceDto {
     provider: String,
     model: Option<String>,
+    /// Round-3a review P2-3: `true` when this is a **full** `{provider,
+    /// model}` default and the provider it names is missing or switched off.
+    /// F6 means a turn never falls back to a different provider in that
+    /// case — it fails closed — so `false` here is not "this default is
+    /// fine", only "nothing here contradicts the turn path"; see
+    /// [`default_full_broken`]. Always `false` for a bare-slug
+    /// (`ProviderOnly`) default: D-legacy's fallback to the first enabled
+    /// provider *is* the real turn-time behaviour there.
+    broken: bool,
 }
 
 /// Maps a parsed [`inference::store::DefaultChoice`] to the wire shape, pure
 /// so the bare-slug and unset cases are unit-tested without a store.
-fn default_choice_dto(choice: inference::store::DefaultChoice) -> Option<DefaultChoiceDto> {
+fn default_choice_dto(
+    choice: &inference::store::DefaultChoice,
+    broken: bool,
+) -> Option<DefaultChoiceDto> {
     use inference::store::DefaultChoice;
     match choice {
         DefaultChoice::Unset => None,
         DefaultChoice::ProviderOnly(provider) => Some(DefaultChoiceDto {
-            provider,
+            provider: provider.clone(),
             model: None,
+            broken: false,
         }),
         DefaultChoice::Full(c) => Some(DefaultChoiceDto {
-            provider: c.provider,
-            model: Some(c.model),
+            provider: c.provider.clone(),
+            model: Some(c.model.clone()),
+            broken,
         }),
+    }
+}
+
+/// Round-3a review P2-3: whether a **full** default names a provider this
+/// company no longer holds, or holds switched off.
+///
+/// Only a full default can be "broken" by this definition. A bare-slug
+/// (`ProviderOnly`) default naming a gone or disabled provider is a
+/// different, already-handled case: D-legacy keeps its pre-existing
+/// behaviour of falling back to the first enabled provider there, so a row
+/// claiming `isDefault` in that fallback is describing the truth, not
+/// contradicting it. `resolve_for_turn`'s F6 fail-closed rule is what makes a
+/// **full** default different: nothing falls back to it, ever, so a status
+/// read that let some other row claim `isDefault` in its place — or said
+/// nothing was wrong — would describe a company that can think when every
+/// unpinned turn on it fails with `copy::default_broken`.
+fn default_full_broken<'a>(
+    default: &inference::store::DefaultChoice,
+    mut providers: impl Iterator<Item = (&'a str, bool)>,
+) -> bool {
+    match default {
+        inference::store::DefaultChoice::Full(choice) => {
+            !providers.any(|(slug, enabled)| slug == choice.provider && enabled)
+        }
+        _ => false,
     }
 }
 
@@ -559,7 +605,16 @@ struct ProviderHealthDto {
 /// themselves derive no `Serialize`; this is the shape that does, and it holds
 /// no credential field. Those two facts have to be checked together every time
 /// either is edited.
-async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, ApiError> {
+///
+/// `default` is loaded once by the caller (round-3a review P3-6: this used to
+/// load it again here via `load_default_slug`, on top of every row's own
+/// `provider_used_by` loading it a third time) — passed in rather than
+/// re-read, so a status response reads `inference/default` exactly once no
+/// matter how many providers this company holds.
+async fn provider_list(
+    runtime: &CompanyRuntime,
+    default: &inference::store::DefaultChoice,
+) -> Result<Vec<ProviderDto>, ApiError> {
     use crate::company::inference::store;
 
     let secrets = runtime.secrets().as_ref();
@@ -569,13 +624,40 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
     let health = store::load_health(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
+    // Round-3a review P2-3: a *full* default whose provider is gone or off
+    // fails every turn closed (F6) — nothing falls back to it — so no row may
+    // claim `isDefault` in its place. See `default_full_broken`'s own doc.
+    let broken = default_full_broken(
+        default,
+        providers.iter().map(|p| (p.slug.as_str(), p.enabled)),
+    );
     // Resolved through the same function the turn path uses, so the row the
-    // console marks and the provider a turn actually reaches cannot disagree.
-    let marked = store::load_default_slug(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?;
-    let primary = crate::company::inference::resolve::primary(&providers, marked.as_deref())
-        .map(|p| p.slug.clone());
+    // console marks and the provider a turn actually reaches cannot disagree
+    // — except in the `broken` case just above, where nothing actually
+    // reaches any row and no row may say otherwise.
+    let primary = if broken {
+        None
+    } else {
+        crate::company::inference::resolve::primary(&providers, default.provider())
+            .map(|p| p.slug.clone())
+    };
+    // Round-3a review P2-1 / P3-6: loaded once for the whole list rather than
+    // once per row through `provider_used_by`. This is a read, not a guard
+    // (see `providers::used_by_from`'s own doc on the fail-closed/degrade
+    // split), so a load failure here degrades to "no agents named" with a
+    // warning instead of failing the whole status response.
+    let record = match runtime.store().load(runtime.id()).await {
+        Ok(record) => record,
+        Err(err) => {
+            tracing::warn!(
+                company = %runtime.id(),
+                error = %err,
+                "could not read the company record while listing providers; showing no agent \
+                 usage on any row",
+            );
+            None
+        }
+    };
     let mut out = Vec::with_capacity(providers.len());
     for provider in providers {
         let key_configured = store::provider_key_configured(runtime.id(), secrets, &provider)
@@ -587,7 +669,7 @@ async fn provider_list(runtime: &CompanyRuntime) -> Result<Vec<ProviderDto>, Api
         });
         // Read before `provider.models` moves into the struct literal below.
         let (model, model_ambiguous) = model_on_row_dto(provider.model());
-        let used_by = providers::provider_used_by(runtime, &provider.slug).await?;
+        let used_by = providers::used_by_from(default, record.as_ref(), &provider.slug);
         out.push(ProviderDto {
             is_default: primary.as_deref() == Some(provider.slug.as_str()),
             id: provider.id.as_str().to_string(),
@@ -948,7 +1030,22 @@ async fn effective_status_with(
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
-    let providers = provider_list(runtime).await?;
+    // Keys rework (#2306), slice 2c; round-3a review P2-4: the stored
+    // default, independent of `decl` — a company can have a full default
+    // that names a now-gone provider (X14) and still have `decl` resolve
+    // through the legacy chain underneath it. Read leniently and once for
+    // the whole status response (P3-6): a corrupt or unreadable value must
+    // never 500 this route, and `provider_list` below reuses this same
+    // value rather than reading it again per row.
+    let (default, default_unreadable) =
+        inference::store::load_default_lenient(runtime.id(), secrets).await;
+    if default_unreadable {
+        tracing::warn!(
+            company = %runtime.id(),
+            "inference default could not be read for the status response; reporting it as unset",
+        );
+    }
+    let providers = provider_list(runtime, &default).await?;
     let routes = routing_table(runtime).await?;
     let mut managed = managed_state(runtime, platform).await?;
     // Keys rework (#2306), slice 2a: exactly one TinyHumans row is ever shown
@@ -961,14 +1058,12 @@ async fn effective_status_with(
         managed.configured && !providers.iter().any(|p| p.slug == inference::MANAGED_SLUG);
     // D-key-without-row (X5): moot once the legacy row itself is hidden.
     managed.needs_model = managed.legacy_row && managed.configured;
-    // Keys rework (#2306), slice 2c: the stored default, independent of
-    // `decl` — a company can have a full default that names a now-gone
-    // provider (X14) and still have `decl` resolve through the legacy chain
-    // underneath it.
     let default_choice = default_choice_dto(
-        inference::store::load_default(runtime.id(), secrets)
-            .await
-            .map_err(ApiError)?,
+        &default,
+        default_full_broken(
+            &default,
+            providers.iter().map(|p| (p.slug.as_str(), p.enabled)),
+        ),
     );
     Ok(match decl {
         Some(d) => InferenceStatusDto {
@@ -989,6 +1084,7 @@ async fn effective_status_with(
             routes,
             managed,
             default_choice,
+            default_unreadable,
         },
         None => InferenceStatusDto {
             provider: "managed".to_string(),
@@ -1014,6 +1110,7 @@ async fn effective_status_with(
             routes,
             managed,
             default_choice,
+            default_unreadable,
         },
     })
 }
@@ -3879,11 +3976,13 @@ base_url = "https://byo.example/v1"
         )
         .await;
 
-        // Switched off: the **derived** `isDefault`/`default_slug` view moves
-        // to the first enabled provider (`resolve::primary`'s existing
-        // fallback), even though the stored marker itself is left exactly as
-        // it was (X14) — see `a_delete_disable_or_key_clear_never_rewrites_the_stored_default_marker`
-        // below for the direct assertion on the raw value.
+        // Switched off: the stored marker itself is left exactly as it was
+        // (X14) — see `a_delete_disable_or_key_clear_never_rewrites_the_stored_default_marker`
+        // below for the direct assertion on the raw value — but the
+        // **derived** `isDefault`/`default_slug` view reports no row at all
+        // (round-3a review P2-3), not the first enabled provider. F6 means a
+        // turn never falls back to `first` once the full default is broken —
+        // it fails closed — so no row may claim to be serving in its place.
         send(
             &state,
             "POST",
@@ -3893,10 +3992,12 @@ base_url = "https://byo.example/v1"
         .await;
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
         assert_eq!(
-            default_slug(&dto).as_deref(),
-            Some("first"),
-            "a disabled provider is never the reported default"
+            default_slug(&dto),
+            None,
+            "a broken full default must not be reported as served by a different row"
         );
+        assert_eq!(dto["defaultChoice"]["provider"], "second");
+        assert_eq!(dto["defaultChoice"]["broken"], true);
 
         // And a delete leaves the same derived view unchanged.
         send(
@@ -3921,16 +4022,22 @@ base_url = "https://byo.example/v1"
         )
         .await;
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
-        assert_eq!(default_slug(&dto).as_deref(), Some("first"));
+        assert_eq!(
+            default_slug(&dto),
+            None,
+            "a deleted full default's row is gone entirely — still no fallback claims it"
+        );
+        assert_eq!(dto["defaultChoice"]["broken"], true);
     }
 
     /// Keys rework (#2306), decision D-never-clear-default (X14, 2026-09-15):
     /// disabling, clearing the key of, or deleting the provider
-    /// `inference/default` names never rewrites that **stored** value — only
-    /// the derived `isDefault`/`defaultChoice` view changes, via
-    /// `resolve::primary`'s existing first-enabled fallback. This is the
-    /// regression `disabling_or_deleting_the_default_never_leaves_it_marked`
-    /// above cannot catch, because it only reads that derived view (which
+    /// `inference/default` names never rewrites that **stored** value.
+    /// Round-3a review P2-3: the derived `isDefault`/`defaultChoice` view
+    /// reports the break honestly instead — no row falls back to claiming
+    /// `isDefault` in the broken default's place. This is the regression
+    /// `disabling_or_deleting_the_default_never_leaves_it_marked` above
+    /// cannot catch, because it only reads that derived view (which
     /// already looked the same whether or not the raw marker was cleared).
     #[tokio::test]
     async fn a_delete_disable_or_key_clear_never_rewrites_the_stored_default_marker() {
@@ -4012,9 +4119,14 @@ base_url = "https://byo.example/v1"
         );
 
         // The derived view still degrades gracefully — this is what the
-        // console's status read and banner are for.
+        // console's status read and banner are for. No row claims to be the
+        // default in `second`'s place (round-3a review P2-3), and the status
+        // still names `second` as the (broken) stored choice rather than
+        // hiding it.
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
-        assert_eq!(default_slug(&dto).as_deref(), Some("first"));
+        assert_eq!(default_slug(&dto), None);
+        assert_eq!(dto["defaultChoice"]["provider"], "second");
+        assert_eq!(dto["defaultChoice"]["broken"], true);
     }
 
     #[tokio::test]
@@ -4215,19 +4327,75 @@ base_url = "https://byo.example/v1"
     fn the_status_maps_a_bare_slug_default_to_a_null_model() {
         use crate::company::inference::store::{DefaultChoice, ModelChoice};
 
-        assert!(default_choice_dto(DefaultChoice::Unset).is_none());
+        assert!(default_choice_dto(&DefaultChoice::Unset, false).is_none());
 
-        let bare = default_choice_dto(DefaultChoice::ProviderOnly("acme".to_string())).unwrap();
+        let bare =
+            default_choice_dto(&DefaultChoice::ProviderOnly("acme".to_string()), false).unwrap();
         assert_eq!(bare.provider, "acme");
         assert!(bare.model.is_none());
+        assert!(!bare.broken, "a bare-slug default is never reported broken");
 
-        let full = default_choice_dto(DefaultChoice::Full(ModelChoice {
-            provider: "acme".to_string(),
-            model: "acme/other-model".to_string(),
-        }))
+        let full = default_choice_dto(
+            &DefaultChoice::Full(ModelChoice {
+                provider: "acme".to_string(),
+                model: "acme/other-model".to_string(),
+            }),
+            false,
+        )
         .unwrap();
         assert_eq!(full.provider, "acme");
         assert_eq!(full.model.as_deref(), Some("acme/other-model"));
+        assert!(!full.broken);
+
+        let full_broken = default_choice_dto(
+            &DefaultChoice::Full(ModelChoice {
+                provider: "acme".to_string(),
+                model: "acme/other-model".to_string(),
+            }),
+            true,
+        )
+        .unwrap();
+        assert!(full_broken.broken);
+    }
+
+    /// Round-3a review P2-3: only a *full* default can be reported broken —
+    /// see `default_full_broken`'s own doc for why a bare slug never is.
+    #[test]
+    fn default_full_broken_only_ever_fires_for_a_full_default() {
+        use crate::company::inference::store::{DefaultChoice, ModelChoice};
+
+        let full = |slug: &str| {
+            DefaultChoice::Full(ModelChoice {
+                provider: slug.to_string(),
+                model: "m".to_string(),
+            })
+        };
+
+        // The named provider is gone entirely.
+        assert!(default_full_broken(
+            &full("gone"),
+            [("acme", true)].into_iter()
+        ));
+        // The named provider exists but is switched off.
+        assert!(default_full_broken(
+            &full("acme"),
+            [("acme", false)].into_iter()
+        ));
+        // The named provider exists and is on: not broken.
+        assert!(!default_full_broken(
+            &full("acme"),
+            [("acme", true)].into_iter()
+        ));
+        // A bare slug is never "broken" by this predicate, however stale.
+        assert!(!default_full_broken(
+            &DefaultChoice::ProviderOnly("gone".to_string()),
+            std::iter::empty()
+        ));
+        // Unset is never broken.
+        assert!(!default_full_broken(
+            &DefaultChoice::Unset,
+            std::iter::empty()
+        ));
     }
 
     /// Pure: `ModelOnRow` collapses to the DTO's `(model, modelAmbiguous)`.
