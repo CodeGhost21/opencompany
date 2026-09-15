@@ -593,6 +593,17 @@ pub(super) struct EditAgent {
     /// teammate's own detail" character `tools` does, not a name or a role.
     #[serde(default, deserialize_with = "double_option")]
     model: Option<Option<String>>,
+    /// The provider half of this teammate's own `{provider, model}` pair on a
+    /// `built_in` harness (keys rework, issue #2306, slice 3a). Same
+    /// double-option shape and the same admin gate as `model`: absent leaves
+    /// it alone, `null` clears it back to the company default, and a string
+    /// pins it to one of this company's connected provider slugs
+    /// (`GET {scope}/inference` lists them). Always sent together with
+    /// `model` — [`edit_agent`] refuses either one present without the other,
+    /// and refuses both outright when the resulting harness is `acp`, where
+    /// `model` keeps its existing ACP-hint meaning instead.
+    #[serde(default, deserialize_with = "double_option")]
+    provider: Option<Option<String>>,
     /// Which declared `[[harness]]` this teammate runs on (issue #1245's
     /// harness-picker follow-up). Same double-option shape and the same
     /// admin gate as `model` — see [`edit_agent`]. `null` clears it back to
