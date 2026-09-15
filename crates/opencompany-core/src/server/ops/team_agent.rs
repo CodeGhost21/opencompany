@@ -1030,6 +1030,13 @@ async fn edit_agent(
         if let Some(model) = model {
             entry.model = Some(model.unwrap_or_default());
         }
+        // Keys rework (#2306), slice 3a: same shape as `model` just above —
+        // blank is the stored form of "cleared", and the `model.is_some() !=
+        // provider.is_some()` check earlier already guarantees this and
+        // `model`'s branch fire together.
+        if let Some(provider) = provider {
+            entry.provider = Some(provider.unwrap_or_default());
+        }
         if let Some(harness) = harness {
             entry.harness = Some(harness.unwrap_or_default());
         }
