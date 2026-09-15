@@ -896,23 +896,74 @@ async fn edit_agent(
         }
     }
 
-    // A model override only means anything on an `acp` harness — the same
-    // rule `CompanyManifest::validate` enforces for a manifest agent's own
-    // `model`, applied here because an overlay teammate never passes through
-    // that validation (it lives on the record, not the parsed manifest).
-    // Resolved against the harness this edit actually leaves the teammate
-    // on: the new binding when one was sent, else its current one — so
-    // setting a model in the same request as switching to an ACP harness
-    // is accepted, not rejected against the stale binding.
+    // Resolved against the harness this edit actually leaves the teammate on:
+    // the new binding when one was sent, else its current one — so setting a
+    // model (or a pair) in the same request as switching harness is accepted,
+    // not rejected against the stale binding.
     let resulting_model = model
         .clone()
         .unwrap_or_else(|| declared_model(&record, &agent_id));
-    if let Some(model_value) = &resulting_model {
-        let resulting_harness_id = harness
-            .clone()
-            .unwrap_or_else(|| declared_harness(&record, &agent_id))
-            .unwrap_or_else(|| record.manifest.default_harness_id());
-        let bound = record.manifest.harness_by_id(&resulting_harness_id);
+    let resulting_provider = provider
+        .clone()
+        .unwrap_or_else(|| declared_provider(&record, &agent_id));
+    let resulting_harness_id = harness
+        .clone()
+        .unwrap_or_else(|| declared_harness(&record, &agent_id))
+        .unwrap_or_else(|| record.manifest.default_harness_id());
+    let bound = record.manifest.harness_by_id(&resulting_harness_id);
+
+    if let Some(provider_slug) = &resulting_provider {
+        // The built-in pair (keys rework, issue #2306, slice 3a): a company
+        // provider list slug plus the one model it serves, instead of the ACP
+        // model hint below. `model.is_some() != provider.is_some()` above
+        // already guarantees `resulting_model` is `Some` here too whenever
+        // `resulting_provider` is.
+        if bound.as_ref().map(|h| h.kind.as_str()) == Some("acp") {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{provider_slug}` names a provider, but harness `{resulting_harness_id}` is \
+                 `acp` — an ACP harness's model comes from `model` alone (its own hint, not a \
+                 company provider pair). Bind this teammate to a built-in harness first, or \
+                 clear the provider."
+            )))
+            .into());
+        }
+        let stored_provider = crate::company::inference::store::get_provider(
+            company.runtime.id(),
+            company.runtime.secrets().as_ref(),
+            provider_slug,
+        )
+        .await
+        .map_err(ApiError)?;
+        let Some(stored_provider) = stored_provider else {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`{provider_slug}` names no provider this company has connected. Connect it \
+                 first in Settings → Inference, or choose a different one."
+            )))
+            .into());
+        };
+        if !stored_provider.enabled {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                "{} is switched off, so a teammate cannot be pinned to it. Switch it on \
+                 first, in Settings → Inference.",
+                stored_provider.label
+            )))
+            .into());
+        }
+        // The model half of the pair is a plain provider-scoped id, not an ACP
+        // hint, so it is checked the same way the LLM page's own connect
+        // dialog checks a typed model (`checkModelId` in `inference/connect.ts`)
+        // — not against the ACP-only rules below, which this branch skips
+        // entirely by returning before reaching them.
+        crate::company::inference::store::check_model_id(
+            resulting_model.as_deref().unwrap_or_default(),
+        )
+        .map_err(ApiError)?;
+    } else if let Some(model_value) = &resulting_model {
+        // A bare model override (no provider) only means anything on an `acp`
+        // harness — the same rule `CompanyManifest::validate` enforces for a
+        // manifest agent's own `model`, applied here because an overlay
+        // teammate never passes through that validation (it lives on the
+        // record, not the parsed manifest).
         if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
             return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
                 "`{model_value}` names a model, but this teammate's harness has no ACP \
