@@ -238,30 +238,27 @@ export function ProvidersTab({
    * Opens the connect dialog fresh — every caller that sets
    * `connecting`/`editing` goes through this.
    *
-   * Also closes the "Add a provider" list dialog. `AddProviderDialog`'s own
-   * `onChoose` calls straight into this without ever setting `adding` back to
-   * `false`, so the list dialog stayed mounted and open *underneath* the
-   * connect dialog it had just opened. Both are Base UI portalled dialogs at
-   * the same z-index, so the connect dialog (rendered later in the DOM)
-   * covered it while open — but the moment the connect dialog closed (submit
-   * success, Escape, or an overlay click), the still-open list dialog
-   * resurfaced with its own overlay and ate every click after it, including a
-   * later `inference-add-open` click meant to open a fresh one. A loop that
+   * Also closes the "Add a provider" list dialog (found twice, independently:
+   * live lane 1's KR-L1-02, and upstream's "handle missing provider in
+   * inference tab"). `AddProviderDialog`'s own `onChoose` calls straight into
+   * this without ever setting `adding` back to `false`, so the outer picker
+   * — a separate `open` boolean from the inner connect dialog — stayed
+   * mounted and open *underneath* the connect dialog it had just opened. Both
+   * are Base UI portalled dialogs at the same z-index, so the connect dialog
+   * (rendered later in the DOM) covered it while open — but the moment the
+   * connect dialog closed (submit success, Escape, or an overlay click), the
+   * still-open picker resurfaced with its own overlay (marking the whole page
+   * `aria-hidden` again) and ate every click after it, including a later
+   * `inference-add-open` click meant to open a fresh one. A loop that
    * connects two providers in one test hit this on the second iteration.
+   * Opening the connect dialog always closes the picker, whether or not it
+   * happened to be open.
    */
   const openConnect = (next: { connecting: string | null; editing: Provider | null }) => {
     resetConnectState();
     setAdding(false);
     setConnecting(next.connecting);
     setEditing(next.editing);
-    // Live lane 1, KR-L1-02: the outer "Add a provider" picker is a separate
-    // `open` boolean (`adding`) from the inner connect dialog, and choosing
-    // an option opens the second without ever closing the first — so the
-    // picker was still technically open underneath, and reappeared (marking
-    // the whole page `aria-hidden` again) the instant the connect dialog
-    // unmounted on a successful or cancelled add. Opening the connect dialog
-    // always closes the picker, whether or not it happened to be open.
-    setAdding(false);
   };
 
   async function submitConnect(draft: ConnectDraft) {
