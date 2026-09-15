@@ -216,10 +216,7 @@ pub async fn start_with(
                 .auth_mode()
                 .unwrap_or(opencompany::app::config::AuthMode::None),
         ),
-        ..AppConfig::resolve_host(
-            &opencompany::app::config::ProcessEnv,
-            config_file.as_ref(),
-        )?
+        ..AppConfig::resolve_host(&opencompany::app::config::ProcessEnv, config_file.as_ref())?
     };
     let api_url = config.api_url.clone();
     let state = AppState::new(config)
