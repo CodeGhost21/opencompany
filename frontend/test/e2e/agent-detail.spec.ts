@@ -305,57 +305,47 @@ test("an admin pins an agent to a provider and model, then clears it (keys rewor
     },
   });
 
-  {
-    await page.goto("/#/company/agent/researcher");
-    await dismissOnboarding(page);
-    await expect(page.getByTestId("agent-name")).toHaveText("Researcher", { timeout: 30_000 });
+  await page.goto("/#/company/agent/researcher");
+  await dismissOnboarding(page);
+  await expect(page.getByTestId("agent-name")).toHaveText("Researcher", { timeout: 30_000 });
 
-    await page.getByRole("tab", { name: "Model" }).click();
-    await page.getByTestId("agent-harness-edit").click();
+  await page.getByRole("tab", { name: "Model" }).click();
+  await page.getByTestId("agent-harness-edit").click();
 
-    // Unpinned: the company default line, not the ACP model picker — this
-    // agent is on the default (`built_in`) harness.
-    await expect(page.getByTestId("agent-provider-select")).toBeVisible();
-    await expect(page.getByTestId("agent-model-select")).toHaveCount(0);
-    await expect(page.getByTestId("agent-model-input")).toHaveCount(0);
+  // Unpinned: the company default line, not the ACP model picker — this
+  // agent is on the default (`built_in`) harness.
+  await expect(page.getByTestId("agent-provider-select")).toBeVisible();
+  await expect(page.getByTestId("agent-model-select")).toHaveCount(0);
+  await expect(page.getByTestId("agent-model-input")).toHaveCount(0);
 
-    await page.getByTestId("agent-provider-select").click();
-    await page.getByRole("option", { name: "E2E Pair", exact: true }).click();
+  await page.getByTestId("agent-provider-select").click();
+  await page.getByRole("option", { name: "E2E Pair", exact: true }).click();
 
-    // Prefilled from the row's own model (`e2e-model`), so an operator who
-    // only wants "this agent, this provider" need not retype it — still
-    // required to be a real, non-tier id (D-model, 2d) before Save unlocks.
-    const model = page.locator("#agent-model-field-input");
-    await expect(model).toHaveValue("e2e-model");
-    await model.fill("test-model-large");
+  // Prefilled from the row's own model (`e2e-model`), so an operator who
+  // only wants "this agent, this provider" need not retype it — still
+  // required to be a real, non-tier id (D-model, 2d) before Save unlocks.
+  const model = page.locator("#agent-model-field-input");
+  await expect(model).toHaveValue("e2e-model");
+  await model.fill("test-model-large");
 
-    await page.getByTestId("agent-harness-save").click();
-    await expect(page.getByTestId("agent-pair-badge")).toContainText("E2E Pair · test-model-large", {
-      timeout: 30_000,
-    });
+  await page.getByTestId("agent-harness-save").click();
+  await expect(page.getByTestId("agent-pair-badge")).toContainText("E2E Pair · test-model-large", {
+    timeout: 30_000,
+  });
 
-    // Host-backed, not local state.
-    await page.reload();
-    await dismissOnboarding(page);
-    await page.getByRole("tab", { name: "Model" }).click();
-    await expect(page.getByTestId("agent-pair-badge")).toContainText("E2E Pair · test-model-large", {
-      timeout: 30_000,
-    });
+  // Host-backed, not local state.
+  await page.reload();
+  await dismissOnboarding(page);
+  await page.getByRole("tab", { name: "Model" }).click();
+  await expect(page.getByTestId("agent-pair-badge")).toContainText("E2E Pair · test-model-large", {
+    timeout: 30_000,
+  });
 
-    // Clear it: back to the company default, in one request (`provider` and
-    // `model` both `null`).
-    await page.getByTestId("agent-harness-edit").click();
-    await page.getByTestId("agent-pair-clear").click();
-    await page.getByTestId("agent-harness-save").click();
-    await expect(page.getByTestId("agent-pair-default")).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId("agent-pair-badge")).toHaveCount(0);
-  } finally {
-    // Clear the pin regardless of where the test above got to, then remove the
-    // row — a provider left pinned or connected would strand the next run of
-    // this spec against a company whose data directory persists between runs.
-    await page
-      .request.patch("/api/v1/company/team/researcher", { data: { provider: null, model: null } })
-      .catch(() => {});
-    await page.request.delete("/api/v1/company/inference/providers/e2e-pair").catch(() => {});
-  }
+  // Clear it: back to the company default, in one request (`provider` and
+  // `model` both `null`).
+  await page.getByTestId("agent-harness-edit").click();
+  await page.getByTestId("agent-pair-clear").click();
+  await page.getByTestId("agent-harness-save").click();
+  await expect(page.getByTestId("agent-pair-default")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("agent-pair-badge")).toHaveCount(0);
 });
