@@ -3074,6 +3074,113 @@ mod tests {
         );
     }
 
+    /// P3-3 (keys rework #2306 review): a `Filled` copy is journaled — the
+    /// counterpart to `copying_an_already_current_key_does_not_journal`
+    /// below, which proves the opposite for `Kept`.
+    #[tokio::test]
+    async fn copying_a_new_composio_key_journals_the_fill() {
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-journal-fill", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-journal-fill");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-account-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let (code, _, raw) = send_for(
+            &state,
+            "reuse-journal-fill",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        let events = runtime
+            .events()
+            .read_from(&CompanyId::new("reuse-journal-fill"), EventSeq::new(0), 100)
+            .await
+            .unwrap();
+        let journaled = events.iter().any(|stored| {
+            matches!(
+                &stored.event,
+                CompanyEvent::ToolAccessChanged { change, .. }
+                    if change == "company_key_composio_filled"
+            )
+        });
+        assert!(journaled, "a Filled copy must be journaled: {events:?}");
+    }
+
+    /// P3-3 (keys rework #2306 review): a copy whose outcome is
+    /// `Kept(AlreadyCurrent)` — the Composio slot already held exactly the
+    /// account key's value — changes no stored state, so it must not add a
+    /// journal entry either, matching 4a §3.5's "no entry for kept" rule.
+    #[tokio::test]
+    async fn copying_an_already_current_key_does_not_journal() {
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-journal-kept", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-journal-kept");
+        const ACCOUNT_KEY: &str = "th-not-a-real-account-key";
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue(ACCOUNT_KEY.into()),
+            )
+            .await
+            .unwrap();
+        // The Composio slot already agrees with the account key, so the copy
+        // is a no-op (`Kept(AlreadyCurrent)`), not a fill.
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::composio::TINYHUMANS_KEY_KEY,
+                crate::ports::types::SecretValue(ACCOUNT_KEY.into()),
+            )
+            .await
+            .unwrap();
+
+        let (code, body, raw) = send_for(
+            &state,
+            "reuse-journal-kept",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(body["slots"][0]["outcome"], "kept", "{body}");
+
+        let events = runtime
+            .events()
+            .read_from(&CompanyId::new("reuse-journal-kept"), EventSeq::new(0), 100)
+            .await
+            .unwrap();
+        let journaled = events.iter().any(|stored| {
+            matches!(
+                &stored.event,
+                CompanyEvent::ToolAccessChanged { change, .. }
+                    if change == "company_key_composio_filled"
+            )
+        });
+        assert!(
+            !journaled,
+            "a Kept(AlreadyCurrent) copy changed nothing and must not journal: {events:?}"
+        );
+    }
+
     /// Copying with no account key on file is refused before any write.
     #[tokio::test]
     async fn the_from_account_route_refuses_without_an_account_key() {
