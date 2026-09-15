@@ -479,6 +479,7 @@ async fn set_key(
             key: &body.key,
             model: body.model.as_deref(),
             confirm_in_use: body.confirm_in_use,
+            proxy_base_url: Some(&state.config().api_url),
         },
         prober.as_ref(),
     )
