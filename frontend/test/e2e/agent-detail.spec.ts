@@ -350,10 +350,17 @@ test("an admin pins an agent to a provider and model, then clears it (keys rewor
   });
 
   // Clear it: back to the company default, in one request (`provider` and
-  // `model` both `null`).
+  // `model` both `null`). Save does not send that request straight away —
+  // clearing an *existing* pin is gated behind its own confirm dialog
+  // (Round-2 review, P2-5: `saveHarnessAndModel` in `AgentDetailView.tsx`
+  // sets `confirmClearPair` instead of writing, the same way every other
+  // action this rework added got a confirm), so the flow is edit → clear the
+  // draft → Save (opens the dialog, no request yet) → confirm (the request
+  // that actually lands).
   await page.getByTestId("agent-harness-edit").click();
   await page.getByTestId("agent-pair-clear").click();
   await page.getByTestId("agent-harness-save").click();
+  await page.getByTestId("agent-pair-clear-confirm-submit").click();
   await expect(page.getByTestId("agent-pair-default")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("agent-pair-badge")).toHaveCount(0);
 });
