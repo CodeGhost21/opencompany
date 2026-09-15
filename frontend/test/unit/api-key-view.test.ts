@@ -2,13 +2,34 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyCredentialStatus } from "@/api/credential";
 import { ApiError } from "@/api/types";
 import { captureKeyLink } from "@/lib/pending-key-link";
-import { ApiKeyView } from "@/views/connections/ApiKeyView";
+
+// KR-ACCT-01: `ApiKeyView`'s restart action calls the same
+// `restartInference` the LLM page's own "Restart now" button does — mocked
+// here so the cancel-race and restart-toast tests can assert on it without a
+// real inference route. Sonner is mocked the same way
+// `credential-clear-confirm.test.ts` mocks it: no `<Toaster/>` is mounted in
+// this jsdom harness, so a real `toast.success` call would render nothing,
+// and asserting on the toast's own headline/action requires seeing the call.
+const api = vi.hoisted(() => ({
+  restartInference: vi.fn(),
+}));
+
+vi.mock("@/api/inference", () => ({
+  restartInference: api.restartInference,
+}));
+
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+}));
+
+const { ApiKeyView } = await import("@/views/connections/ApiKeyView");
+const { toast } = await import("sonner");
 
 let container: HTMLDivElement;
 let root: Root;
@@ -102,6 +123,9 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  api.restartInference.mockReset();
+  vi.mocked(toast.success).mockClear();
+  vi.mocked(toast.error).mockClear();
 });
 
 afterEach(() => {
@@ -846,5 +870,165 @@ describe("ApiKeyView's account-key dialog two-step flow (keys rework #2306, slic
     expect(writes).toEqual([{ key: "th-not-a-real-key" }]);
     expect(document.querySelector('[data-testid="account-key-model-step"]')).toBeNull();
     expect(document.querySelector('[data-testid="account-key-input"]')).toBeNull();
+  });
+
+  // Round-3b review, P2-4: a client whose PUT never resolves until the test
+  // says so — the only way to actually get a Cancel press to land while the
+  // save it started is still in flight.
+  function deferredClient(writes: unknown[]): {
+    client: OpenCompanyClient;
+    resolve: (value: unknown) => void;
+  } {
+    const pending: { resolve: (value: unknown) => void } = { resolve: () => {} };
+    const client = {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) return credential({ configured: false, source: "none" });
+        throw new Error(`unexpected GET ${path}`);
+      },
+      put: async (_path: string, body: unknown) => {
+        writes.push(body);
+        return new Promise((resolve) => {
+          pending.resolve = resolve;
+        });
+      },
+    } as unknown as OpenCompanyClient;
+    return { client, resolve: (value: unknown) => pending.resolve(value) };
+  }
+
+  // The bug this whole item is about: Cancel pressed while step one's save was
+  // still in flight let its late `needsModel` answer land after the dialog
+  // had already closed, silently reopening it on step two the next time it
+  // was opened. The fix is the busy guard on `closeKeyDialog` (Escape and the
+  // backdrop go through it too) plus disabling Cancel itself; the `attempt`
+  // counter is the backstop for whatever that guard does not catch. This test
+  // asserts the outcome rather than which mechanism produced it: pressed
+  // during the save, Cancel must do nothing at all, and the save must still
+  // land normally on step two once it settles.
+  it("Cancel does nothing while the save is in flight, and the dialog still lands on step two once it settles (round-3b review, P2-4)", async () => {
+    const writes: unknown[] = [];
+    const { client, resolve } = deferredClient(writes);
+    await mount(client);
+
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    const cancelButton = Array.from(document.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent?.trim() === "Cancel",
+    );
+    expect(cancelButton?.disabled).toBe(true);
+
+    await pressButtonNamed("Cancel");
+    expect(document.querySelector('[data-testid="account-key-input"]')).not.toBeNull();
+    expect(writes).toHaveLength(1);
+
+    await act(async () => {
+      resolve({
+        status: credential({ source: "none" }),
+        note: "note",
+        needsModel: true,
+        setsDefault: false,
+        models: ["acme/test-model"],
+      });
+    });
+    await act(async () => {});
+
+    expect(document.querySelector('[data-testid="account-key-model-step"]')).not.toBeNull();
+  });
+});
+
+describe("ApiKeyView offers a restart action when the host says one is needed (KR-ACCT-01)", () => {
+  function queuedClient(
+    writes: unknown[],
+    responses: unknown[],
+    status: CompanyCredentialStatus = credential({ configured: false, source: "none" }),
+  ): OpenCompanyClient {
+    let call = 0;
+    return {
+      scopeFor: () => "/api/v1/companies/acme",
+      get: async (path: string) => {
+        if (path.endsWith("/credential/billing")) return { configured: false };
+        if (path.endsWith("/auth/me")) return { role: "admin" };
+        if (path.endsWith("/credential")) return status;
+        throw new Error(`unexpected GET ${path}`);
+      },
+      put: async (_path: string, body: unknown) => {
+        writes.push(body);
+        const response = responses[Math.min(call, responses.length - 1)];
+        call += 1;
+        return response;
+      },
+    } as unknown as OpenCompanyClient;
+  }
+
+  it("save: renames the toast and wires Restart now to the same endpoint the LLM page uses", async () => {
+    const writes: unknown[] = [];
+    await mount(
+      queuedClient(writes, [
+        { status: credential({ source: "company" }), note: "Key saved.", restartRequired: true },
+      ]),
+    );
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    expect(toast.success).toHaveBeenCalledWith(
+      "Key saved — restart required to use it.",
+      expect.objectContaining({ action: expect.objectContaining({ label: "Restart now" }) }),
+    );
+
+    const [, options] = vi.mocked(toast.success).mock.calls.at(-1) ?? [];
+    api.restartInference.mockResolvedValueOnce({});
+    await act(async () => {
+      (options as { action?: { onClick: () => void } })?.action?.onClick();
+    });
+    await act(async () => {});
+
+    expect(api.restartInference).toHaveBeenCalledWith(expect.anything(), "acme");
+  });
+
+  it("does not rename the toast or offer a restart when the host does not say one is needed", async () => {
+    const writes: unknown[] = [];
+    await mount(
+      queuedClient(writes, [{ status: credential({ source: "company" }), note: "Key saved." }]),
+    );
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+
+    expect(toast.success).toHaveBeenCalledWith(
+      "Key saved.",
+      expect.objectContaining({ action: undefined }),
+    );
+  });
+
+  it("step two also offers Restart now when the host says one is needed there", async () => {
+    const writes: unknown[] = [];
+    await mount(
+      queuedClient(writes, [
+        {
+          status: credential({ source: "none" }),
+          note: "note",
+          needsModel: true,
+          setsDefault: false,
+          models: ["acme/test-model"],
+        },
+        { status: credential({ source: "company" }), note: "Key saved.", restartRequired: true },
+      ]),
+    );
+    await press('[data-testid="account-add-key"]');
+    await typeInto('[data-testid="account-key-input"]', "th-not-a-real-key");
+    await press('[data-testid="account-key-save"]');
+    await press('[data-testid="inference-model-enter-id"]');
+    await typeInto("#account-key-model", "acme/test-model");
+    await press('[data-testid="account-key-model-save"]');
+
+    expect(toast.success).toHaveBeenCalledWith(
+      "Key saved — restart required to use it.",
+      expect.objectContaining({ action: expect.objectContaining({ label: "Restart now" }) }),
+    );
   });
 });
