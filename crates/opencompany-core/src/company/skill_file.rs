@@ -290,11 +290,11 @@ mod tests {
 
     const WEB_RESEARCH: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../skills/web-research/SKILL.md"
+        "/../../companies/_globals/skills/web-research/SKILL.md"
     ));
     const WEEKLY_REPORT: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../skills/weekly-report/SKILL.md"
+        "/../../companies/_globals/skills/weekly-report/SKILL.md"
     ));
 
     #[test]
