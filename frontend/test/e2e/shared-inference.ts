@@ -46,11 +46,39 @@ import type { APIRequestContext } from "@playwright/test";
  * outright and an in-body `finally` never runs, which is how the leak
  * happened in the first place. A hook runs after a timed-out test, with a
  * request context that still works.
+ *
+ * A `404` (slug already gone — a test that deleted it itself, or one that
+ * never got as far as creating it) is the one response this treats as
+ * success. Every other non-OK response throws instead of being swallowed
+ * (CodeRabbit review on #2310): a `.catch(() => {})` on the whole request
+ * hid a failed DELETE exactly as quietly as a *successful* one, so a real
+ * cleanup failure — the row still connected, still enabled, still the
+ * company default — reported nothing and left the same poisoned-default
+ * failure this file's own header describes for every spec after it, with
+ * no error pointing back at the cleanup that should have caught it.
  */
-export async function disconnectSharedProviders(request: APIRequestContext, slugs: string[]) {
+export async function disconnectSharedProviders(
+  request: APIRequestContext,
+  slugs: string[],
+) {
+  // Every slug gets its DELETE before anything is reported. Throwing on the
+  // first failure would skip the rest, and a spec that connected two (the
+  // `e2e-one`/`e2e-two` case in `inference.spec.ts`) would then leave the
+  // second one behind — the very leak this helper exists to close. The first
+  // failure is what gets thrown, after the loop.
+  let firstFailure: Error | null = null;
   for (const slug of slugs) {
-    await request
-      .delete(`/api/v1/company/inference/providers/${slug}?confirmInUse=true`)
-      .catch(() => {});
+    const path = `/api/v1/company/inference/providers/${slug}?confirmInUse=true`;
+    const response = await request.delete(path);
+    if (response.ok() || response.status() === 404) continue;
+    const body = await response.text().catch(() => "<body could not be read>");
+    firstFailure ??= new Error(
+      `[shared-inference] DELETE ${path} → ${response.status()} ${response.statusText()}; ` +
+        `body: ${body || "<empty>"}\n` +
+        `Failed to disconnect "${slug}" from the shared E2E company — left connected, it (or ` +
+        "the default it may have become) can poison every later spec's agent turn. See this " +
+        "function's own doc comment.",
+    );
   }
+  if (firstFailure) throw firstFailure;
 }

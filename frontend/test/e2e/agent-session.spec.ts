@@ -22,28 +22,65 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 /**
- * Clears both things that can stand in front of a deep link.
+ * Clears both things that can stand in front of a deep link, and says whether
+ * it had to.
  *
  * "Skip setup" is the activation gate's control and "Skip for now" is the
  * guided tour's — two different surfaces with two different labels, and either
  * can be up on a fresh data directory. Both are tried because which one appears
  * depends on state this test does not own.
+ *
+ * It *waits* for a control before deciding there is none. The gate mounts after
+ * the shell's first data reads, and on a loaded CI runner that is later than an
+ * instant `isVisible()` probe: the neutral visit then saw nothing, the gate
+ * came up under the deep link, and dismissing it there navigated — its redirect
+ * rewrites the hash — so the assertion ran against `#general` instead of the
+ * address the test opened. Callers use the answer to re-open the deep link.
  */
-async function dismissOnboarding(page: Page) {
+async function dismissOnboarding(page: Page): Promise<boolean> {
+  let dismissed = false;
+  const gate = page.getByRole("button", {
+    name: /^(Skip setup|Skip for now)$/,
+  });
+  await gate
+    .first()
+    .waitFor({ state: "visible", timeout: 5_000 })
+    .catch(() => {});
   for (const name of ["Skip setup", "Skip for now"]) {
     const skip = page.getByRole("button", { name });
     for (let attempt = 0; attempt < 5; attempt += 1) {
       if (!(await skip.isVisible().catch(() => false))) break;
+      dismissed = true;
       await skip.click({ force: true }).catch(() => {});
       await page.waitForTimeout(300);
     }
+  }
+  return dismissed;
+}
+
+/**
+ * Opens a deep link and keeps it open.
+ *
+ * If the gate was still up when the link opened, dismissing it navigates
+ * away; the link is then opened once more onto the cleared shell, so what the
+ * test looks at is the address it asked for.
+ */
+async function openDeepLink(page: Page, hash: string) {
+  await page.goto(hash);
+  if (await dismissOnboarding(page)) {
+    await page.goto(hash);
+    await dismissOnboarding(page);
   }
 }
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     const seen = JSON.stringify({ skipped: true, seenAt: Date.now() });
-    for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
+    for (const key of [
+      "oc-tour:single",
+      "oc-tour:e2e-harness-co",
+      "oc-tour:null",
+    ]) {
       window.localStorage.setItem(key, seen);
     }
   });
@@ -56,8 +93,7 @@ test("a teammate's session opens from its own address", async ({ page }) => {
   await page.goto("/");
   await dismissOnboarding(page);
 
-  await page.goto("/#/company/agent/engineer?tab=session");
-  await dismissOnboarding(page);
+  await openDeepLink(page, "/#/company/agent/engineer?tab=session");
 
   // The tab resolved from the hash rather than defaulting to Overview — the
   // whole point of `useHashTab`, and what makes the link shareable.
@@ -85,7 +121,9 @@ test("a teammate's session opens from its own address", async ({ page }) => {
   if (await stream.isVisible().catch(() => false)) {
     const rows = await page.getByTestId("agent-session-row").count();
     if (rows > 0) {
-      expect(await page.getByTestId("agent-session-channel").count()).toBe(rows);
+      expect(await page.getByTestId("agent-session-channel").count()).toBe(
+        rows,
+      );
     }
   }
 });
@@ -102,8 +140,7 @@ test("a teammate's raw turns open from their own address", async ({ page }) => {
   await page.goto("/");
   await dismissOnboarding(page);
 
-  await page.goto("/#/company/agent/engineer?tab=session&raw");
-  await dismissOnboarding(page);
+  await openDeepLink(page, "/#/company/agent/engineer?tab=session&raw");
 
   const tab = page.getByTestId("agent-tab-session");
   await expect(tab).toBeVisible({ timeout: 30_000 });
@@ -161,8 +198,7 @@ test("a DM opens on the teammate's raw turns when the address asks", async ({
   await page.goto("/");
   await dismissOnboarding(page);
 
-  await page.goto("/#/chat/dm:engineer?raw");
-  await dismissOnboarding(page);
+  await openDeepLink(page, "/#/chat/dm:engineer?raw");
 
   // The control is present at all — which is the half of this the operator
   // complained about. It exists only in a DM; the channel case is below.
@@ -198,8 +234,7 @@ test("a channel offers no raw-turns toggle", async ({ page }) => {
   await page.goto("/");
   await dismissOnboarding(page);
 
-  await page.goto("/#/chat/general");
-  await dismissOnboarding(page);
+  await openDeepLink(page, "/#/chat/general");
 
   // Wait for the header to exist before asserting a control is absent from it,
   // or this passes against a page that simply had not rendered yet.

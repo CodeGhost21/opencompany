@@ -59,7 +59,8 @@ export default async function globalSetup(config: FullConfig) {
   // that case — writing no session, and leaving every spec to fail on a
   // storage-state file nobody had created. The env var still wins where it is
   // set: the config honours it first.
-  const storageState = config.projects[0]?.use.storageState as string | undefined;
+  const storageState = config.projects[0]?.use.storageState as
+    string | undefined;
   if (!storageState) return;
 
   const context = await request.newContext({ baseURL });
@@ -126,9 +127,17 @@ export default async function globalSetup(config: FullConfig) {
   }
 }
 
+/** This bootstrap's own slug and model — read back by name, so both the
+ * duplicate-detection and the default-repair paths agree on what they are
+ * looking for with whatever `mock-brain.mjs` is listening on for THIS run. */
+const ANCHOR_SLUG = "e2e-anchor-default";
+const ANCHOR_MODEL = "e2e-anchor-model";
+/** The anchor's stored credential — a placeholder the mock brain never checks. */
+const ANCHOR_KEY = "pw-e2e-anchor";
+
 /**
  * Connects one permanent, reachable provider before any spec runs, on the
- * live-brain lane only.
+ * live-brain lane only, and makes sure it is (still) the company default.
  *
  * Decision D-first-default (X1, keys rework issue #2306,
  * `server/ops/inference/providers.rs`): the *first* provider a company ever
@@ -165,40 +174,131 @@ export default async function globalSetup(config: FullConfig) {
  * turn is not compiled in, so a stale default there has no later spec to
  * poison — confirmed by CI, where that lane's only failures were the
  * provider-page specs themselves, never a downstream one.
+ *
+ * ## Three things a reused host (`reuseExistingServer`, a repeat local run
+ * against `target/e2e/data`) needs that a fresh one does not, all from
+ * Codex/CodeRabbit review on #2310
+ *
+ * 1. **The anchor might already be the default, but a stale one might not
+ *    be.** An earlier run's spec could have connected and later deleted a
+ *    throwaway provider *before* this bootstrap existed, or `X14` could have
+ *    left the default pointed at a row nothing here created. Reading the
+ *    status and explicitly `POST`ing `…/default` whether or not the anchor
+ *    row is new closes both: an already-current default is a no-op write,
+ *    and a stale one is repointed.
+ * 2. **A reused anchor row can carry a stale `baseUrl`.** `PW_MOCK_BRAIN_BIND`
+ *    can differ between two local runs (this file's own isolation story:
+ *    several `PW_*` port variables exist precisely so concurrent runs on one
+ *    box do not collide). A leftover row still named `ANCHOR_SLUG` but
+ *    pointed at a `mock-brain.mjs` from a *different* run's port would make
+ *    every turn in *this* run fail to connect. Compared and repaired via
+ *    `PUT` before trusting it.
+ * 3. **Read state, don't parse an error message for it.** The previous
+ *    version detected "already exists" from `add_provider`'s `400` body
+ *    text. That still works, but a `GET` first is the same idempotency check
+ *    without depending on error-message wording, and it is what supplies the
+ *    stored `baseUrl` finding (2) needs anyway.
  */
-async function connectAnchorProvider(context: APIRequestContext): Promise<void> {
-  const response = await context.post("/api/v1/company/inference/providers", {
-    data: {
-      kind: "custom",
-      label: "E2E Anchor Default",
-      baseUrl: `http://${MOCK_BRAIN_BIND}/v1`,
-      key: "pw-e2e-anchor",
-      model: "e2e-anchor-model",
-    },
-  });
-  if (response.ok()) return;
-  const body = await response.text().catch(() => "<body could not be read>");
-  // Idempotent across a repeat run against a reused data root (`reuseExistingServer`
-  // outside CI, or a rerun with `--last-failed`) — this bootstrap has no more
-  // useful action to take than a plain add either way, the identity check
-  // above already guarantees the response is this run's own host, and the
-  // anchor from the earlier run is exactly as good as a fresh one.
-  //
-  // NOT a `409`: `add_provider` maps a taken slug through `check_slug` to
-  // `OpenCompanyError::InvalidRequest`, which `server/error.rs` renders as a
-  // plain `400` — matched on the message `check_slug`'s `SlugError::Taken`
-  // produces (`store.rs`), not the status code, so a change to the wording
-  // fails this loudly (an error, not a silently-wrong idempotency check)
-  // rather than start throwing on every repeat run again.
-  if (response.status() === 400 && body.includes("already has a provider with that name")) {
-    return;
+async function connectAnchorProvider(
+  context: APIRequestContext,
+): Promise<void> {
+  const anchorUrl = `http://${MOCK_BRAIN_BIND}/v1`;
+  const existing = await findAnchorProvider(context);
+  if (existing) {
+    if (existing.baseUrl !== anchorUrl) {
+      // The key goes with the move. A stale anchor from another run's
+      // `PW_MOCK_BRAIN_BIND` is almost always a different *origin* (another
+      // port), and `edit_provider` refuses to carry a stored credential across
+      // origins unless the request re-enters it — a blank key field means
+      // "unchanged", which is exactly what must not happen when the host
+      // changes. The anchor's key is this file's own placeholder, so resending
+      // it is free and turns a 400 into the repoint this branch exists for.
+      const edited = await context.put(
+        `/api/v1/company/inference/providers/${ANCHOR_SLUG}`,
+        {
+          data: { baseUrl: anchorUrl, key: ANCHOR_KEY },
+        },
+      );
+      if (!edited.ok()) {
+        throw await setupError(
+          "PUT",
+          `/api/v1/company/inference/providers/${ANCHOR_SLUG}`,
+          edited,
+          "the anchor exists from an earlier run but points at a stale mock-brain address, and " +
+            "repointing it failed",
+        );
+      }
+    }
+  } else {
+    const created = await context.post("/api/v1/company/inference/providers", {
+      data: {
+        kind: "custom",
+        label: "E2E Anchor Default",
+        baseUrl: anchorUrl,
+        key: ANCHOR_KEY,
+        model: ANCHOR_MODEL,
+      },
+    });
+    if (!created.ok()) {
+      throw await setupError(
+        "POST",
+        "/api/v1/company/inference/providers",
+        created,
+        "connecting the permanent anchor default failed",
+      );
+    }
   }
-  throw new Error(
-    `[e2e global-setup] POST /api/v1/company/inference/providers → ${response.status()} ` +
-      `${response.statusText()}; body: ${body || "<empty>"}\n` +
-      "Connecting the permanent anchor default failed, so every later spec's " +
-      "agent turn would resolve through whatever the first test-created " +
-      "provider leaves behind instead — see connectAnchorProvider's doc comment.",
+  // Whether the row above is new or was already there: make it the default
+  // unconditionally. `add_provider` only auto-selects a *new* row into an
+  // `Unset` default, so a reused host whose default was left pointed at
+  // something else (or at nothing, per X14) needs this explicit write
+  // regardless — a POST that finds it already the default is a no-op.
+  const defaulted = await context.post(
+    `/api/v1/company/inference/providers/${ANCHOR_SLUG}/default`,
+    { data: { model: ANCHOR_MODEL } },
+  );
+  if (!defaulted.ok()) {
+    throw await setupError(
+      "POST",
+      `/api/v1/company/inference/providers/${ANCHOR_SLUG}/default`,
+      defaulted,
+      "the anchor row exists and is reachable but could not be made the company default",
+    );
+  }
+}
+
+/** The one field `connectAnchorProvider` needs off each row `GET …/inference` reports. */
+async function findAnchorProvider(
+  context: APIRequestContext,
+): Promise<{ baseUrl: string } | undefined> {
+  const response = await context.get("/api/v1/company/inference");
+  if (!response.ok()) {
+    throw await setupError(
+      "GET",
+      "/api/v1/company/inference",
+      response,
+      "could not read this company's inference status to check for an existing anchor",
+    );
+  }
+  const status = (await response.json()) as {
+    providers?: { slug: string; baseUrl: string }[];
+  };
+  return status.providers?.find((p) => p.slug === ANCHOR_SLUG);
+}
+
+/** One consistently-shaped error for every `connectAnchorProvider` request that fails. */
+async function setupError(
+  method: string,
+  path: string,
+  response: APIResponse,
+  why: string,
+): Promise<Error> {
+  const body = await response.text().catch(() => "<body could not be read>");
+  return new Error(
+    `[e2e global-setup] ${method} ${path} → ${response.status()} ${response.statusText()}; ` +
+      `body: ${body || "<empty>"}\n` +
+      `${why}, so every later spec's agent turn would resolve through whatever the first ` +
+      "test-created provider leaves behind instead — see connectAnchorProvider's doc comment.",
   );
 }
 
@@ -210,7 +310,10 @@ async function connectAnchorProvider(context: APIRequestContext): Promise<void> 
  * under the responder's own data root. Read in this order, a root of ours with
  * no file is proof the responder does not serve it. See `host-identity.ts`.
  */
-async function identifyServer(context: APIRequestContext, baseURL: string): Promise<void> {
+async function identifyServer(
+  context: APIRequestContext,
+  baseURL: string,
+): Promise<void> {
   const url = `${baseURL.replace(/\/$/, "")}${SPEC_PATH}`;
 
   let response: APIResponse;
@@ -234,7 +337,9 @@ async function identifyServer(context: APIRequestContext, baseURL: string): Prom
     body: await response.text().catch(() => "<body could not be read>"),
     expectedInstanceId: EXPECTED_INSTANCE_ID,
     home: MANAGED_HOST_HOME,
-    homeInstanceId: MANAGED_HOST_HOME ? readHomeInstanceId(MANAGED_HOST_HOME) : undefined,
+    homeInstanceId: MANAGED_HOST_HOME
+      ? readHomeInstanceId(MANAGED_HOST_HOME)
+      : undefined,
   });
 
   if (failure) throw new Error(`[e2e global-setup] ${failure}`);

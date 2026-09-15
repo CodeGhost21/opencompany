@@ -133,6 +133,18 @@ test.afterAll(async ({ playwright }, testInfo) => {
     for (const id of ["ca_ops", "ca_billing"]) {
       await request.delete(`/api/v1/company/composio/connections/${id}/default`);
     }
+    // `confirmInUse: true`: this company's route is still `managed` (nothing
+    // in this file switches it to BYOK), so clearing the managed token trips
+    // Composio's own in-use guard (`docs/key-reworks/in-use-guards.md` §2 —
+    // `composio_used_by` in `src/server/ops/composio.rs`) exactly as it would
+    // for an operator with connected toolkits: `composio/mode` still reads
+    // `"managed"`, and Composio counts as depending on its own managed key
+    // regardless of whether a toolkit is actually pinned. Without this flag
+    // the PUT answers `409 in_use` and `cleared.ok()` below throws — which is
+    // not hypothetical, it is exactly the failure that left the token set and
+    // poisoned `connections-native-not-offered.spec.ts` and
+    // `oauth-onboarding-resume.spec.ts` two files later with a Slack tile this
+    // file had left connected.
     const cleared = await request.put("/api/v1/company/composio/token", {
       data: { token: "", confirmInUse: true },
     });
