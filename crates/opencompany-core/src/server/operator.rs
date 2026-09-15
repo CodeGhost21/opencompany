@@ -1645,6 +1645,22 @@ fn project_event_for_viewer(
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
             o["text"] = json!(text);
+            // The same pair `MessageView` ships on reload: the operator-facing
+            // body, and the body as the model wrote it. They differ only on a
+            // desk that deliberates, where `readable_moves` turns
+            // `!support #topic ^3` into prose — see `MessageView::cue_text`.
+            //
+            // Live carried only one of them, and a reader that needs the
+            // grammar had no choice but to scrape it back out of `text`. That
+            // is what `frontend/src/lib/hive/episode.ts` does today
+            // (`moveOf(m.text)`), and it is why cleaning `text` on this frame
+            // silently costs the deliberation panel: the room's own moves are
+            // how the fold knows an episode happened at all.
+            //
+            // Additive and inert on its own — nothing reads it yet, and it is
+            // byte-equal to `text` on every row `readable_moves` leaves alone,
+            // which is every reply on every desk that does not deliberate.
+            o["cueText"] = json!(text);
             // Keys rework #2306, round-2 review KR-L2-03: re-classifies the
             // same bare X9 sentence `spawn_chat_turn` wrote into `text` for
             // exactly this class of failure. Omitted (reads as absent/false)
@@ -14532,6 +14548,71 @@ mode = "full"
         assert_eq!(v["steps"][0]["status"], "ok");
         // A channel reply names no thread, so the legacy frame is unchanged.
         assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
+    }
+
+    /// **The live frame carries the model's own body, not only the operator's.**
+    ///
+    /// `MessageView` has shipped both since it gained `cue_text`; the live frame
+    /// had only `text`, so anything needing the room's grammar had to scrape it
+    /// back out of the operator-facing body. `frontend/src/lib/hive/episode.ts`
+    /// does exactly that (`moveOf(m.text)`), which is why rewriting `text` here
+    /// costs the deliberation panel rather than merely tidying a bubble.
+    ///
+    /// Pinned now, while the two are equal, so the step that rewrites `text`
+    /// cannot quietly take `cueText` with it.
+    #[test]
+    fn projects_the_agents_own_body_beside_the_operators() {
+        let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "returns".into(),
+            agent_id: "refunds".into(),
+            text: "!support #kettle ^16 the swap is the customer's first preference".into(),
+            steps: Vec::new(),
+        });
+        let value = super::project_event_for_viewer(
+            &stored,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("agent_reply is an attention signal");
+
+        assert_eq!(
+            value["cueText"], "!support #kettle ^16 the swap is the customer's first preference",
+            "the room's grammar is what the fold reads; it must survive on this frame: {value}"
+        );
+    }
+
+    /// And on a desk that does not deliberate the two are byte-equal, so no
+    /// consumer has to choose between them for an ordinary reply.
+    #[test]
+    fn a_reply_with_no_move_carries_the_same_body_twice() {
+        let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "general".into(),
+            agent_id: "ceo".into(),
+            text: "here is the summary you asked for".into(),
+            steps: Vec::new(),
+        });
+        let value = super::project_event_for_viewer(
+            &stored,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("agent_reply is an attention signal");
+
+        assert_eq!(value["cueText"], value["text"]);
     }
 
     #[test]
