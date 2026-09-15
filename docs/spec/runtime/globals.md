@@ -5,7 +5,7 @@ studio, a recruiting company. The **global baseline** is the part that is the
 same in all of them: the teammates, workflow graphs, and skills every company
 has whichever vertical it was started from, plus the tool belt it starts with.
 
-The authored source is `companies/_globals/`, beside `companies/`:
+The authored source is `companies/_globals/`, beneath `companies/`, where every bundle it merges into lives:
 
 ```text
 companies/_globals/
@@ -16,7 +16,7 @@ companies/_globals/
 ```
 
 The code is [`crate::globals`](../../../src/globals/mod.rs), and the shipped
-contents are described in [`companies/_globals/README.md`](../../../globals/README.md).
+contents are described in [`companies/_globals/README.md`](../../../companies/_globals/README.md).
 
 ## Embedded, not read from disk
 
