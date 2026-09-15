@@ -322,7 +322,9 @@ test.afterAll(async ({ playwright }, testInfo) => {
       reseeded.ok(),
       `restoring the composio fixture catalog failed: ${reseeded.status()}`,
     ).toBeTruthy();
-    const cleared = await request.put("/api/v1/company/composio/token", { data: { token: "" } });
+    const cleared = await request.put("/api/v1/company/composio/token", {
+      data: { token: "", confirmInUse: true },
+    });
     expect(
       cleared.ok(),
       `clearing the composio token failed: ${cleared.status()} ${await cleared.text()}`,

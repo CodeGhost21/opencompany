@@ -178,18 +178,30 @@ test.describe("clearing the managed-route token", () => {
   test("a stale read: mode said nothing at open, still gets a 409, and the confirmed retry succeeds", async ({
     page,
   }) => {
-    // Overrides the `beforeEach` stub with a status that does NOT yet say
-    // this key is in use — the stale-UI case, where a switch to managed mode
-    // happened after this page's own status read.
-    await stubStatus(page, { ...managedStatus(), mode: "byok" });
-
+    // `Remove` only ever renders while `mode` reads "managed" — the row's own
+    // `removeKey: onManaged && managedTokenStored` (`composioRows`, pinned by
+    // `test/unit/composio-rows.test.ts`'s "never rotates or removes a
+    // credential on the row a company is not on") — so the mount's own read
+    // has to stay "managed" for this test to reach the row at all. The
+    // staleness this test is actually about is the read `requestClearManagedToken`
+    // takes the moment `Remove` is clicked (P1-2's "re-read on open"): swapped
+    // in here, after mount, to "byok" — a switch that landed between this
+    // page's mount and this click — so the console's own optimism
+    // (`composioUsesThisKey`) has nothing to go on, and only the real
+    // backend's own check (stubbed 409 below) still knows the token is used.
+    //
+    // `openComposio` runs first, against `beforeEach`'s "managed" stub, so
+    // mount sees the row and renders `Remove` — only THEN does the stub swap
+    // to "byok", ahead of the click that triggers the re-read.
     await openComposio(page);
+    await stubStatus(page, { ...managedStatus(), mode: "byok" });
 
     await page.getByTestId("composio-row-managed-remove").click();
 
     const dialog = page.getByTestId("composio-clear-token-dialog");
     await expect(dialog).toBeVisible();
-    // Nothing shown as used yet — this read says mode is byok, not managed.
+    // Nothing shown as used yet — the re-read this dialog opened with says
+    // mode is byok, not managed.
     await expect(dialog).not.toContainText("Composio uses this key.");
     await expect(dialog).not.toContainText(IN_USE_ERROR);
 

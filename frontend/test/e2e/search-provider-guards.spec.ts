@@ -302,7 +302,12 @@ test.describe("removing the search default needs confirmation", () => {
     const first = await firstAttempt;
     expect(new URL(first.url()).searchParams.get("confirmInUse")).not.toBe("true");
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText("Used by 1 agent: Researcher.");
+    // The reopened dialog shows the host's own refusal message verbatim
+    // (`confirmCopy`'s documented "a live refusal still wins over the
+    // up-front usage sentence" rule, pinned in
+    // `test/unit/search-providers.test.ts`) — not a client-recomputed
+    // `usedBySentence` from the fresh `usedBy` the 409 also carries.
+    await expect(dialog).toContainText(AGENT_IN_USE_BODY.error);
 
     // Second click, now informed: sends `confirmInUse=true` and succeeds.
     const confirmedRetry = page.waitForRequest(
