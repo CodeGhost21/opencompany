@@ -131,9 +131,8 @@ const PROVIDERS_THIS_FILE_CREATES = [
 /**
  * Disconnects what each test connected, after it — even one that timed out.
  *
- * Every spec here (bar the legacy single-slot one at the bottom, which has its
- * own "Reset to default" cleanup) connects a provider that points at
- * `UNREACHABLE` to the one company the whole run shares — and the first
+ * Every spec here that adds a provider points it at `UNREACHABLE`, on the one
+ * company the whole run shares — and the first
  * provider a company connects becomes its default (X1), so a row left behind
  * is where every agent turn in every *later* spec file goes. That turned a
  * workspace note attaching and a workflow running into `inference request
@@ -157,9 +156,8 @@ test.afterEach(async ({ request }) => {
 /**
  * Removes a provider this file connected, so it cannot outlive its test.
  *
- * Every spec in this file (bar the legacy single-slot one below, which has its
- * own "Reset to default" cleanup) runs against the one company the whole `npm
- * run e2e:live` run shares (`playwright.config.ts`'s `managesHost` path — one
+ * Every spec in this file runs against the one company the whole `npm run
+ * e2e:live` run shares (`playwright.config.ts`'s `managesHost` path — one
  * host process, one company, for every spec file that is not first-run/Euler/
  * live-LLM/visual). `resolve_effective`'s unset-workload fallback is the
  * *primary* provider — the first enabled one (`company::inference::resolve`)
