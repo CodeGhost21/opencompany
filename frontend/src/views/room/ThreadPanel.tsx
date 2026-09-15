@@ -10,9 +10,9 @@ import type { TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
-import { FailedSendNotice } from "./MessageRow";
+import { FailedSendNotice, OutputLinkRow, TurnFailureNotice } from "./MessageRow";
 import { MessageAttachments } from "./MessageAttachments";
-import { ReferralChip, ReferralConversation, StepTimeline } from "./StepTimeline";
+import { AsideConversation, ReferralChip, ReferralConversation, StepTimeline } from "./StepTimeline";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -484,18 +484,26 @@ function Line({
             {formatTime(message.at)}
           </span>
         </div>
-        <Markdown
-          mentions={message.mentions}
-          className={cn(
-            "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
-            // Same rule and the same reason as `MessageRow` (B-099): a threaded
-            // reply that never left the browser must not read as delivered just
-            // because this panel draws replies with its own renderer.
-            message.sendFailed !== undefined && "text-muted-foreground",
-          )}
-        >
-          {message.text}
-        </Markdown>
+        {message.turnFailure ? (
+          // KR-L2-03, same rule as `MessageRow`: a fail-closed turn's own
+          // exact sentence, verbatim, plus the action that fixes it — a
+          // threaded reply must not fall back to the generic text just
+          // because this panel draws replies with its own renderer.
+          <TurnFailureNotice failure={message.turnFailure} />
+        ) : (
+          <Markdown
+            mentions={message.mentions}
+            className={cn(
+              "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
+              // Same rule and the same reason as `MessageRow` (B-099): a threaded
+              // reply that never left the browser must not read as delivered just
+              // because this panel draws replies with its own renderer.
+              message.sendFailed !== undefined && "text-muted-foreground",
+            )}
+          >
+            {message.text}
+          </Markdown>
+        )}
         {message.sendFailed !== undefined && (
           <FailedSendNotice
             reason={message.sendFailed || "something went wrong"}
@@ -516,6 +524,9 @@ function Line({
             of itself anywhere, even after the panel was closed (Codex on
             #2069). */}
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
+        {message.outputs && message.outputs.length > 0 && (
+          <OutputLinkRow outputs={message.outputs} />
+        )}
         {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
         {/* And the crossings, for the same reason the steps are here: a room's
             turns are threaded, so this panel is the only surface a deliberating
@@ -534,6 +545,9 @@ function Line({
         )}
         {message.referralConversation && (
           <ReferralConversation crossing={message.referralConversation} />
+        )}
+        {message.asideConversation && (
+          <AsideConversation aside={message.asideConversation} />
         )}
       </div>
     </div>

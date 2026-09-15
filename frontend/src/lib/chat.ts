@@ -2,8 +2,10 @@ import type {
   AttachmentDto,
   ChatHistoryMessageDto,
   ChatMentionDto,
+  ChatOutput,
   TurnStep,
 } from "@/api/types";
+import { toTurnFailure, type TurnFailure } from "./turn-failure";
 
 /**
  * The company's main line, by thread id.
@@ -227,6 +229,14 @@ export interface ChatMessage {
   /** The crossing this report brought home, rendered as one collapsed line. */
   referralConversation?: import("@/api/types").ReferralConversationDto;
   /**
+   * The private aside behind this line, rendered as one collapsed line.
+   *
+   * Carried the same way `referralConversation` is, and for the same reason:
+   * only the host knows an aside produced this message, so it rides the message
+   * rather than being inferred from the text here.
+   */
+  asideConversation?: import("@/api/types").AsideConversationDto;
+  /**
    * Who reacted to this line with what — one row per person per emoji, not a
    * count (issue #364).
    *
@@ -248,6 +258,8 @@ export interface ChatMessage {
    * chip linking to `#/tasks/<id>`.
    */
   taskId?: string;
+  /** Workspace nodes and artifacts produced by this reply's turn. */
+  outputs?: ChatOutput[];
   /**
    * Files attached to this line (issue #1682), each a reference into the
    * company workspace. Set on your own message from the composer's pending
@@ -288,6 +300,15 @@ export interface ChatMessage {
    * landed (see `ChatView`'s `send` on why a throw is ambiguous).
    */
   sendFailed?: string;
+  /**
+   * The exact, actionable reason a fail-closed turn could not run (keys
+   * rework, issue #2306, round-2 review KR-L2-03) - set only on a `company`
+   * reply the host marked `userFacing`, from either the live reply or a
+   * rehydrated history entry. See `src/lib/turn-failure.ts` for what this
+   * unlocks (the sentence rendered verbatim, plus an action button) and the
+   * note on this being coded against a contract B has not yet documented.
+   */
+  turnFailure?: TurnFailure;
 }
 
 /**
@@ -439,10 +460,13 @@ export function makeMessage(
     parentId?: string;
     steps?: TurnStep[];
     taskId?: string;
+    outputs?: ChatOutput[];
     messageId?: string;
     attachments?: AttachmentDto[];
     /** Mention spans the host resolved against this message, for chip rendering. */
     mentions?: Mention[];
+    /** The fail-closed reason (KR-L2-03), already narrowed by `toTurnFailure`. */
+    turnFailure?: TurnFailure;
   } = {},
 ): ChatMessage {
   return {
@@ -454,6 +478,8 @@ export function makeMessage(
     parentId: opts.parentId,
     steps: opts.steps,
     taskId: opts.taskId,
+    turnFailure: opts.turnFailure,
+    outputs: opts.outputs?.length ? opts.outputs : undefined,
     // Issue #1682: an empty list is dropped to `undefined` so a line with no
     // attachment stays exactly the shape it was before the field existed.
     attachments: opts.attachments?.length ? opts.attachments : undefined,
@@ -584,6 +610,7 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // caused this line, and nothing here may infer it.
       referredFrom: entry.referredFrom,
       referralConversation: entry.referralConversation,
+      asideConversation: entry.asideConversation,
       // Reactions come through whoever the host said reacted; nothing is
       // inferred here, `mine` included.
       reactions: entry.reactions?.length ? entry.reactions : undefined,
@@ -606,10 +633,19 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // Only your own lines never have one — you did not open a card by
       // speaking.
       taskId: from === "you" ? undefined : entry.taskId,
+      // Keep the produced-file buttons on exactly the same durable path as the
+      // card chip above. A live-only field vanishes on the first thread switch
+      // or page reload and makes a valid output look broken.
+      outputs: from === "you" || !entry.outputs?.length ? undefined : entry.outputs,
       // Rehydrate the operator's attachments (issue #1682) so a bubble carries
       // the same chips on reload it showed live. Empty drops to `undefined`,
       // keeping the pre-#1682 line shape.
       attachments: entry.attachments?.length ? entry.attachments : undefined,
+      // Rehydrate the fail-closed reason (KR-L2-03) so a reload shows the
+      // same sentence and button the live reply did, rather than losing it
+      // back to generic text. Company-only, like `steps` above — a system or
+      // your-own line is never the host's turn-failure notice.
+      turnFailure: from === "company" ? toTurnFailure(entry) : undefined,
     };
   });
 }

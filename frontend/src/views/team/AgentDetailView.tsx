@@ -48,6 +48,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { useHashFlag } from "@/hooks/use-hash-flag";
 import {
+  agentDisplayName,
   agentEdits,
   agentPairBrokenCopy,
   companyCovers,
@@ -89,6 +90,7 @@ import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
 import { AgentFields } from "@/views/team/AgentFields";
 import { AgentRuns } from "@/views/team/AgentRuns";
+import { AgentSession } from "@/views/team/AgentSession";
 
 type Load = "loading" | "ready" | "missing" | "unsupported" | "error";
 
@@ -194,6 +196,11 @@ async function classifyFailure(
  */
 const AGENT_TABS = [
   { id: "overview", label: "Overview", hint: "What it is doing, and what it has done" },
+  // What it has said and heard, across every channel it can read, in one
+  // stream. Second because it is the tab that answers "what is this teammate
+  // actually like to work with" — the question an operator arrives with — and
+  // because everything below it describes configuration rather than conduct.
+  { id: "session", label: "Session", hint: "Everything it has said and heard" },
   { id: "instructions", label: "Instructions", hint: "What it owns and how it is told to work" },
   { id: "tools", label: "Tools", hint: "What it is allowed to call" },
   { id: "model", label: "Model", hint: "The harness and model it thinks with" },
@@ -915,6 +922,15 @@ export function AgentDetailView({
             />
             </PageTabPanel>
 
+            <PageTabPanel idBase="agent" id="session" value={tab}>
+              <AgentSession
+                client={client}
+                company={company}
+                agentId={agent.id}
+                agentName={agent.name?.trim() || agent.role}
+              />
+            </PageTabPanel>
+
             {/* Edit sits in this card, beside the fields it opens (issue #1434
                 revisited). It was on the agent's name row — right while the
                 page was one column and the name row was the only place a
@@ -1249,7 +1265,9 @@ export function AgentDetailView({
       >
         <DialogContent className="sm:max-w-md" data-testid="agent-pair-clear-confirm">
           <DialogHeader>
-            <DialogTitle>Clear {agent?.name ?? "this teammate"}&apos;s pair?</DialogTitle>
+            <DialogTitle>
+              Clear {agent ? agentDisplayName(agent) : "this teammate"}&apos;s pair?
+            </DialogTitle>
             <DialogDescription>
               It goes back to using the company default the moment you confirm — pin another
               provider and model any time to change that.
@@ -2161,7 +2179,7 @@ function PairFallbackLine({
   providers: readonly Provider[];
   defaultChoice: DefaultChoice | null | undefined;
 }) {
-  const resolution = resolveAgentDefault(defaultChoice, providers, agent.name ?? agent.role);
+  const resolution = resolveAgentDefault(defaultChoice, providers, agentDisplayName(agent));
   if (resolution.kind === "full") {
     return (
       <span className="text-sm text-muted-foreground" data-testid="agent-pair-default">

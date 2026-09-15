@@ -38,7 +38,8 @@ RUN apt-get update \
 # Keeping frontend, docs, scripts, and deployment files out of this layer lets
 # their changes reuse the compiled Cargo cache.
 #
-# `build.rs` embeds the shipped company agents and `src/desktop.rs` embeds each
+# `build.rs` embeds the shipped company agents and `src/desktop.rs` (both under
+# `crates/opencompany-core/`) embeds each
 # preset manifest, so the complete companies tree remains a real build input;
 # it also embeds the global baseline (`globals/`) and the shared skills library
 # (`skills/`), which a hosted tenant has no checkout to read from disk.
@@ -47,15 +48,11 @@ RUN apt-get update \
 # The root `Cargo.toml` is a virtual workspace whose members are the manifests
 # under `crates/`. Cargo refuses to load a workspace with a listed member
 # missing, so the tui crate is copied even though only the host binary is
-# built; the host's own sources still live at the root and its member manifest
-# points at them.
-COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
-COPY crates/opencompany-core/Cargo.toml ./crates/opencompany-core/Cargo.toml
+# built. The host crate — manifest, `build.rs`, `src/`, `tests/`, `benches/`,
+# `examples/` — lives under `crates/opencompany-core/`.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/opencompany-core ./crates/opencompany-core
 COPY crates/opencompany-tui ./crates/opencompany-tui
-COPY src ./src
-COPY benches ./benches
-COPY tests ./tests
-COPY examples ./examples
 COPY vendor ./vendor
 COPY companies ./companies
 COPY globals ./globals

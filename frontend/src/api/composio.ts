@@ -189,6 +189,28 @@ export interface ComposioStatus {
 export type ComposioProbeClass =
   "auth" | "endpoint" | "quota" | "timeout" | "unknown";
 
+/**
+ * One slot the account-key fan-out touched, and what happened to it (keys
+ * rework, issue #2306, slices 4a/4c) — `docs/key-reworks/phase-4a-account-key-fanout.md`
+ * §3.1. `outcome` is one of `filled | rotated | cleared | rolledBack | kept |
+ * skipped | failed | ok`; `detail` is present alongside `kept`/`skipped`
+ * (why), a plain `failed` (always `"store"`), or a health-slot `failed`
+ * (`auth` | `endpoint` | `quota` | `timeout` | `unknown`).
+ */
+export interface SlotReport {
+  slot: "composio" | "inference" | "provider" | "default" | "health";
+  outcome:
+    | "filled"
+    | "rotated"
+    | "cleared"
+    | "rolledBack"
+    | "kept"
+    | "skipped"
+    | "failed"
+    | "ok";
+  detail?: string;
+}
+
 /** A mutating response: the resulting status plus a plain-language note. */
 export interface ComposioMutation {
   status: ComposioStatus;
@@ -211,6 +233,14 @@ export interface ComposioMutation {
    * clear/switch, and on a guarded one that had nothing to warn about.
    */
   usedBy?: UsedBy;
+  /**
+   * What {@link copyAccountKeyToComposio} did to the Composio slot (keys
+   * rework, issue #2306, slice 4c) — always exactly one entry, `slot:
+   * "composio"`, when present. Absent (never an empty array) on every other
+   * mutation on this surface, which writes this company's own credential
+   * directly rather than copying the account key.
+   */
+  slots?: SlotReport[];
 }
 
 /**
@@ -564,5 +594,31 @@ export function clearComposioDefaultAccount(
 ): Promise<ComposioDefaultMutation> {
   return client.del<ComposioDefaultMutation>(
     `${client.scopeFor(company)}/composio/connections/${encodeURIComponent(connectionId)}/default`,
+  );
+}
+
+/**
+ * Copy this company's TinyHumans account key (set on the Account page) into
+ * `composio/tinyhumans/key` — the reuse banner's "Yes" (keys rework, issue
+ * #2306, slice 4c; `docs/key-reworks/phase-4c-reuse-banner.md`).
+ *
+ * **No arguments beyond the scope.** The key is read from this company's own
+ * store; there is nothing for a request body to name. A single-slot copy,
+ * never a route switch — it does not touch `composio/mode` or
+ * `composio/byok/key`, and it is **not** interchangeable with the full
+ * account-key fan-out (`PUT …/credential`), which rewrites the account key
+ * itself.
+ *
+ * Admin-only: a member gets a 403. Refused with `400 invalid_request` when
+ * there is no account key to reuse, or when the Composio slot already holds a
+ * different, non-empty key of its own — both before any write.
+ */
+export function copyAccountKeyToComposio(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<ComposioMutation> {
+  return client.post<ComposioMutation>(
+    `${client.scopeFor(company)}/composio/tinyhumans/key/from-account`,
+    {},
   );
 }

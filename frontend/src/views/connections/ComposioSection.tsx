@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import {
+  copyAccountKeyToComposio,
   getComposioStatus,
   setComposioApiKey,
   setComposioToken,
@@ -11,6 +12,7 @@ import {
   type ComposioMutation,
   type ComposioStatus,
 } from "@/api/composio";
+import { getCompanyCredential } from "@/api/credential";
 import { ApiError } from "@/api/types";
 import {
   advisoryMessage,
@@ -21,11 +23,19 @@ import type { ComposioSubmitOutcome } from "@/composio/classify";
 import { ComposioRowList } from "@/composio/ComposioRowList";
 import { confirmInUseFor, guardedOutcome } from "@/composio/in-use";
 import { ProbeAdvisory } from "@/composio/ProbeAdvisory";
+import { ReuseAccountKeyBanner } from "@/composio/ReuseAccountKeyBanner";
+import {
+  readDismissed,
+  reuseDismissKey,
+  showsComposioReuseBanner,
+  writeDismissed,
+} from "@/composio/reuse-banner";
 import {
   composioForm,
   composioRows,
   credentialDialogBlurb,
   credentialDialogTitle,
+  managedSourceOf,
   modeOf,
 } from "@/composio/rows";
 import type {
@@ -207,6 +217,21 @@ export function ComposioSection({
     string | null | undefined
   >(undefined);
 
+  // ── Reuse-the-account-key banner (keys rework, issue #2306, slice 4c) ──
+  //
+  // Whether this company has a TinyHumans account key at all
+  // (`GET …/credential`'s existing `configured`) — read alongside the
+  // Composio status in `refresh` below, best-effort: a failure here must not
+  // affect the section's own load state, only hide the banner.
+  const [accountConfigured, setAccountConfigured] = useState(false);
+  // Whether the operator already said "Not now" for this company. Seeded from
+  // `localStorage` and re-seeded whenever `company` changes, in the same
+  // reset effect that clears every other per-company field below.
+  const [reuseDismissed, setReuseDismissed] = useState(() =>
+    readDismissed(reuseDismissKey("composio", company)),
+  );
+  const [reuseBusy, setReuseBusy] = useState(false);
+
   const requestGeneration = useRef(0);
   // Focus in and back out of the switch confirmation. It is a labelled group
   // inside the credential dialog rather than a popup of its own, so nothing
@@ -244,6 +269,17 @@ export function ComposioSection({
       // (issue #1470).
       setLoad(classifyLoadFailure(err));
     }
+    // Best-effort, and deliberately its own try/catch: the reuse banner is a
+    // courtesy, not core status, so a failed read here (or a host predating
+    // `/credential`) must only hide the banner, never the section above.
+    try {
+      const credential = await getCompanyCredential(client, company);
+      if (generation !== requestGeneration.current) return;
+      setAccountConfigured(credential.configured);
+    } catch {
+      if (generation !== requestGeneration.current) return;
+      setAccountConfigured(false);
+    }
   }, [client, company]);
 
   useEffect(() => {
@@ -254,9 +290,11 @@ export function ComposioSection({
     setConfirmSwitch(false);
     setClearTokenPrompt(undefined);
     setGiveBackManagedPrompt(undefined);
+    setAccountConfigured(false);
+    setReuseDismissed(readDismissed(reuseDismissKey("composio", company)));
     setLoad("loading");
     void refresh();
-  }, [refresh]);
+  }, [refresh, company]);
 
   // Opening moves focus onto the confirmation's primary action; cancelling
   // hands it back to the Save button the confirmation replaced.
@@ -280,6 +318,38 @@ export function ComposioSection({
   const rows = composioRows(status);
   const form = composioForm(pending, rows);
   const persistedMode = modeOf(status);
+  const showsReuseBanner = showsComposioReuseBanner({
+    canManage,
+    accountConfigured,
+    mode: status?.mode,
+    managedCredentialSource: managedSourceOf(status),
+    dismissed: reuseDismissed,
+  });
+
+  /** "Yes" on the reuse banner: a single-slot copy, never the full fan-out. */
+  async function reuseAccountKey() {
+    setReuseBusy(true);
+    try {
+      const res = await copyAccountKeyToComposio(client, company);
+      setStatus(res.status);
+      toast.success(res.note);
+      onChanged();
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Could not copy the account key to Composio.",
+      );
+    } finally {
+      setReuseBusy(false);
+    }
+  }
+
+  /** "Not now": remembered per company, so it stays hidden after a reload. */
+  function dismissReuseBanner() {
+    writeDismissed(reuseDismissKey("composio", company));
+    setReuseDismissed(true);
+  }
 
   /**
    * Land a mutation's answer.
@@ -597,6 +667,19 @@ export function ComposioSection({
         <SectionUnreachable label="Couldn't read this company's Composio credential" />
       ) : (
         <>
+          {/* Keys rework, issue #2306, slice 4c: offered only once the account
+              key exists, the managed slot has no key of its own, and the
+              operator has not already dismissed it for this company. */}
+          {showsReuseBanner && (
+            <ReuseAccountKeyBanner
+              testId="composio-reuse-account-key-banner"
+              text="Your TinyHumans account is connected. Use the same key for Composio?"
+              busy={reuseBusy}
+              onYes={() => void reuseAccountKey()}
+              onNotNow={dismissReuseBanner}
+            />
+          )}
+
           {/* Fires only on an explicit not-granted, never on an unchecked grant
               (issue #1478): telling an operator to widen a grant that may
               already be set, off a field that was never read, is the same false

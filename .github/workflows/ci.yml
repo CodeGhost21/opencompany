@@ -240,16 +240,11 @@ jobs:
               - 'scripts/ci/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
-              - 'build.rs'
               - 'rust-toolchain.toml'
               - '.cargo/**'
-              - 'src/**'
-              - 'tests/**'
-              - 'benches/**'
-              - 'examples/**'
-              # The member manifests (the host's declares its features and
-              # dependencies; the tui crate is a workspace member built by the
-              # bare cargo lines below).
+              # The host crate: manifest, build.rs, src/, tests/, benches/,
+              # examples/. The tui crate is a workspace member built by the
+              # bare cargo lines below.
               - 'crates/opencompany-core/**'
               - 'crates/opencompany-tui/**'
               # build.rs embeds these and declares rerun-if-changed on them.

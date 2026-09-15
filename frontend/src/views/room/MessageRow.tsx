@@ -1,4 +1,5 @@
-import { MessageSquareReply, TriangleAlert } from "lucide-react";
+import { useState } from "react";
+import { FileText, MessageSquareReply, Paperclip, TriangleAlert } from "lucide-react";
 
 import type { TaskStatus } from "@/api/tasks";
 import type { CognitionState, TurnStep } from "@/api/types";
@@ -9,8 +10,10 @@ import type { EpisodeTurn } from "@/lib/hive/episode";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Button } from "@/components/ui/button";
 import { consoleHref } from "@/lib/console-paths";
+import { artifactHref } from "@/lib/task-output";
 import { IN_FLIGHT_COLUMNS } from "@/lib/board-columns";
 import { isHostMessageId, type ChatMessage } from "@/lib/chat";
+import { turnFailureAction, type TurnFailure } from "@/lib/turn-failure";
 import { isBudgetPauseNotice } from "@/hooks/use-events";
 import { timeAgo } from "@/lib/language";
 import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
@@ -29,6 +32,7 @@ import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import {
   CardChip,
   ReferralChip,
+  AsideConversation,
   ReferralConversation,
   StepTimeline,
 } from "./StepTimeline";
@@ -412,32 +416,42 @@ export function MessageRow({
                 <MoveChip kind={turn.demoted} demoted />
               </div>
             ) : null}
-            <Markdown
-              mentions={message.mentions}
-              className={cn(
-                "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
-                // A line that never left the browser is dimmed, so the
-                // difference between sent and not-sent is visible in the text
-                // itself and not only in a note under it (B-099). Muted rather
-                // than struck through: the words are still the operator's own
-                // draft, and Retry means they may yet be delivered.
-                //
-                // `!== undefined` rather than truthy: an `ApiError` can carry
-                // an empty `message` when the host's envelope sends
-                // `error: ""` (`httpError`'s `envelope?.error ?? statusMessage(res)`
-                // keeps an empty string as-is, since `??` only falls back on
-                // nullish). A truthy check would silently hide the failed
-                // styling, the notice, and the Retry control for exactly that
-                // response (CodeRabbit review).
-                //
-                // Only this branch needs it: a deliberation move is a line the
-                // host journalled, so it reached the server by definition and
-                // can never carry `sendFailed`.
-                message.sendFailed !== undefined && "text-muted-foreground",
-              )}
-            >
-              {message.text}
-            </Markdown>
+            {message.turnFailure ? (
+              // KR-L2-03: the host computed its own exact, actionable X9
+              // sentence for this fail-closed turn — a switched-off or
+              // deleted pin, a broken company default, no model chosen at
+              // all. Rendered verbatim in place of the generic retry text
+              // `message.text` would otherwise carry, with the one action
+              // that actually fixes it.
+              <TurnFailureNotice failure={message.turnFailure} />
+            ) : (
+              <Markdown
+                mentions={message.mentions}
+                className={cn(
+                  "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
+                  // A line that never left the browser is dimmed, so the
+                  // difference between sent and not-sent is visible in the text
+                  // itself and not only in a note under it (B-099). Muted rather
+                  // than struck through: the words are still the operator's own
+                  // draft, and Retry means they may yet be delivered.
+                  //
+                  // `!== undefined` rather than truthy: an `ApiError` can carry
+                  // an empty `message` when the host's envelope sends
+                  // `error: ""` (`httpError`'s `envelope?.error ?? statusMessage(res)`
+                  // keeps an empty string as-is, since `??` only falls back on
+                  // nullish). A truthy check would silently hide the failed
+                  // styling, the notice, and the Retry control for exactly that
+                  // response (CodeRabbit review).
+                  //
+                  // Only this branch needs it: a deliberation move is a line the
+                  // host journalled, so it reached the server by definition and
+                  // can never carry `sendFailed`.
+                  message.sendFailed !== undefined && "text-muted-foreground",
+                )}
+              >
+                {message.text}
+              </Markdown>
+            )}
           </>
         )}
         {message.sendFailed !== undefined && (
@@ -455,6 +469,9 @@ export function MessageRow({
         )}
 
         {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
+        {message.outputs && message.outputs.length > 0 && (
+          <OutputLinkRow outputs={message.outputs} />
+        )}
         {/* The running turn this message asked for. Opens by default: unlike a
             settled turn's steps — which sit behind a count because the answer
             above them is what the reader came for — there is no answer yet, and
@@ -480,6 +497,9 @@ export function MessageRow({
             reads as its own conversation. */}
         {message.referralConversation && (
           <ReferralConversation crossing={message.referralConversation} />
+        )}
+        {message.asideConversation && (
+          <AsideConversation aside={message.asideConversation} />
         )}
         {message.taskId && (
           <div className="flex flex-wrap items-center gap-2">
@@ -593,6 +613,49 @@ export function FailedSendNotice({ reason, onRetry }: { reason: string; onRetry?
 }
 
 /**
+ * The notice for a fail-closed turn the host has an exact, actionable
+ * sentence for (keys rework, issue #2306, round-2 review KR-L2-03).
+ *
+ * Renders `failure.message` verbatim — never re-derived or paraphrased,
+ * since the host already computed the X9 sentence with display names — plus
+ * the one action that actually fixes it, from {@link turnFailureAction}. A
+ * `role="status"`, like {@link FailedSendNotice}: worth announcing, not an
+ * interruption, since the operator is already looking at this thread.
+ *
+ * Every OTHER failure (a provider outage, a rate limit, a tool that ran out
+ * of wall-clock) has no such structured reason and keeps rendering as plain
+ * text — this notice only ever appears when `message.turnFailure` is set,
+ * which is only when the host marked the reply `userFacing`.
+ *
+ * Exported for `ThreadPanel`'s own `Line`, the same reason
+ * {@link FailedSendNotice} is: a failed-closed turn reaching a thread is not
+ * a lesser message and must not fall back to a second, drifting copy of this
+ * markup.
+ */
+export function TurnFailureNotice({ failure }: { failure: TurnFailure }) {
+  const action = turnFailureAction(failure);
+  return (
+    <div
+      role="status"
+      data-testid="turn-failure-notice"
+      className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1.5"
+    >
+      <TriangleAlert className="size-3.5 shrink-0 text-destructive" aria-hidden />
+      <span className="min-w-0 text-sm text-foreground">{failure.message}</span>
+      {action && (
+        <a
+          href={action.href}
+          data-testid="turn-failure-action"
+          className="inline-flex h-6 shrink-0 items-center rounded-md border border-destructive/40 px-2 text-2xs font-medium text-destructive transition-colors hover:bg-destructive/10"
+        >
+          {action.label}
+        </a>
+      )}
+    </div>
+  );
+}
+
+/**
  * A centred system line — an approval decision, or a dispatch marker (issue
  * #377).
  *
@@ -677,6 +740,69 @@ function SystemPill({
           onClick={() => onReviewCard(taskId, "approve")}
         >
           {reviewInFlight ? "Approving…" : "Approve"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** The reply-level buttons for objects this turn produced. */
+export function OutputLinkRow({ outputs }: { outputs: NonNullable<ChatMessage["outputs"]> }) {
+  const [expanded, setExpanded] = useState(false);
+  const links: {
+    key: string;
+    href: string;
+    label: string;
+    kind: "workspace-node" | "artifact";
+  }[] = [];
+  for (const output of outputs) {
+    if (output.kind === "workspace-node") {
+      links.push({
+        key: `${output.kind}:${output.targetId}`,
+        href: consoleHref("workspace", output.targetId),
+        label: output.title,
+        kind: output.kind,
+      });
+      continue;
+    }
+    if (output.taskId !== undefined && output.version !== undefined) {
+      links.push({
+        key: `${output.kind}:${output.targetId}:${output.version}`,
+        href: artifactHref(output.taskId, output.targetId, output.version),
+        label: output.title,
+        kind: output.kind,
+      });
+    }
+  }
+  if (links.length === 0) return null;
+
+  const visible = expanded ? links : links.slice(0, 1);
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-2" data-chat-output-links>
+      {visible.map((link) => (
+        <a
+          key={link.key}
+          href={link.href}
+          title={`Open ${link.label}`}
+          className="flex h-7 max-w-full min-w-0 items-center gap-1.5 rounded-full bg-muted px-3 text-xs text-muted-foreground transition-opacity hover:opacity-80"
+        >
+          {link.kind === "artifact" ? (
+            <Paperclip className="size-3.5 shrink-0" />
+          ) : (
+            <FileText className="size-3.5 shrink-0" />
+          )}
+          <span className="truncate">{link.label}</span>
+        </a>
+      ))}
+      {links.length > 1 && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 rounded-full px-2 text-xs"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? "Show less" : `+${links.length - 1} more`}
         </Button>
       )}
     </div>
