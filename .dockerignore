@@ -28,7 +28,6 @@ target/
 # file is a compile input — openhuman's own `include_str!`s all resolve in `src/`.
 **/docs/**
 !**/tinyagents/docs/**
-**/docs/SUMMARY.md
 **/website/
 **/paper/
 **/wiki/

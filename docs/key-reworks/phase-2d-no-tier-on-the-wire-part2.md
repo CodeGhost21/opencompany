@@ -378,7 +378,7 @@ In `probe_inference` (`:1244-1354`):
 - **Other tier-vocabulary prose.** Reword it in `docs/modules/inference/`
   (`architecture.md`, `current-state.md`, `routing.md`, `routing-states.md`,
   `staging.md`, `README.md`, `data-model.md`). Find it with
-  `git grep -n "DEFAULT_TIER_MODELS\|TierVocabulary\|model_for_tier\|turn_vocabulary" -- docs gitbooks`.
+  `git grep -n "DEFAULT_TIER_MODELS\|TierVocabulary\|model_for_tier\|turn_vocabulary" -- docs`.
 - **Deploy gate — record it in the PR body.** Before an image with 2d reaches
   hosted tenants, `opencompany-manager` must inject
   `OPENCOMPANY_INFERENCE_MODEL=<a model id from the catalog>`
