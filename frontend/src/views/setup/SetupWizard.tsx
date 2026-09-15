@@ -479,12 +479,6 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
           seeded.auth_mode = "none";
         }
         setValues(seeded);
-        // A host that already reaches a model has answered the model question
-        // on the operator's behalf, so the step is not shown at all (see
-        // `visibleSteps`) and its verdict settles here rather than waiting for
-        // a probe nobody can run. Settled rather than cleared, the same way
-        // "No model" settles: there is nothing left to prove.
-        if (s.inference.ready) setTested({ kind: "hosted" });
         // Pre-fill the model step from what the host already holds. A hosted
         // operator has a credential injected by the control plane, no key of
         // their own, and no way to get one — the step should arrive answered.
@@ -518,6 +512,46 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       cancelled = true;
     };
   }, [client]);
+
+  /**
+   * Prove the house credential before the model step is taken away.
+   *
+   * `inference.ready` is built from the environment: a credential and a URL
+   * resolve, which is not the same fact as the endpoint answering. Hiding the
+   * step on that alone removes the only live connection check in first run, so
+   * an expired key or a URL that no longer resolves finishes setup looking
+   * healthy and surfaces several screens later as a curated team nobody chose.
+   *
+   * The same probe the Test button runs, sent once with no key so the host
+   * resolves its own injected credential (`resolve_endpoint`). A pass settles
+   * `hosted` and the step goes; a failure is a verdict on the model step, which
+   * stays and shows it.
+   */
+  useEffect(() => {
+    if (!status?.inference.ready) return;
+    let cancelled = false;
+    setTested({ kind: "testing" });
+    testInference(client, {
+      provider: status.inference.provider ?? SETUP_INFERENCE_OPTIONS[0].id,
+      key: null,
+      baseUrl: null,
+    })
+      .then((result) => {
+        if (cancelled) return;
+        setTested(
+          result.ok
+            ? { kind: "hosted" }
+            : { kind: "failed", error: result.error ?? "Could not reach the provider." },
+        );
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setTested({ kind: "failed", error: err instanceof Error ? err.message : String(err) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, status]);
 
   const set = useCallback((key: string, value: string) => {
     setValues((prev) => ({ ...prev, [key]: value }));
@@ -611,30 +645,37 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * is absent rather than optional — and an absent step gets no slot in the
    * progress bar either, or the bar counts a screen that will never arrive.
    *
-   * A host that already reaches a model is the same shape of fact. Its operator
-   * has a credential injected by the control plane, no key of their own and no
-   * way to get one, so the model step is a question with one possible answer —
-   * and asking it demands a key from the one person who cannot supply one.
+   * A host whose own model answered is the same shape of fact. Its operator has
+   * a credential injected by the control plane, no key of their own and no way
+   * to get one, so the model step is a question with one possible answer — and
+   * asking it demands a key from the one person who cannot supply one.
+   *
+   * Keyed on the verdict rather than on `inference.ready`, because those are
+   * different claims: readiness says a credential resolved from the
+   * environment, and only `hosted` says the endpoint replied. A host whose
+   * credential is expired or whose URL no longer resolves keeps the step, which
+   * is the one screen able to say so.
    *
    * `status` is null until the first read lands, and that counts as "show it":
    * the mode it would be judged against has not been read yet, and a bar that
    * changes length under someone already looking at it is worse than one that
-   * starts at its longest.
+   * starts at its longest. The probe is the same — the step stays while it is
+   * in flight.
    */
   const visibleSteps = useMemo(
     () =>
       STEPS.filter(
         (s) =>
-          (s.id !== "power" || !status?.inference.ready) &&
+          (s.id !== "power" || tested.kind !== "hosted") &&
           (s.id !== "account" || !status || requiresSignIn(status, values)) &&
           (s.id !== "advanced" || ADVANCED_GROUPS.length > 0),
       ),
-    [status, values],
+    [status, values, tested],
   );
 
   // A position whose step is no longer shown falls back to the start. That is
-  // how a hosted host opens: `stepId` begins on the model step, which the
-  // status it then reads removes.
+  // how a hosted host leaves the model step: `stepId` begins there, and the
+  // probe that answers it removes the screen underneath.
   const step = Math.max(0, visibleSteps.findIndex((s) => s.id === stepId));
 
   const restartKeys = useMemo(() => {
@@ -1228,6 +1269,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
             changed={changed}
             restartKeys={restartKeys}
             status={status}
+            hostModel={tested.kind === "hosted"}
             email={email}
             built={built}
           />
@@ -1593,6 +1635,32 @@ function PowerStep({
   const inlineTest = spec.needsKey ? !(onTheHouse && !override) : spec.needsUrl;
 
   /**
+   * Whether the verdict on screen is about the *host's* credential.
+   *
+   * A blank key box tests what the host already holds, so a failure there is
+   * the host's model not answering rather than anything this operator typed —
+   * and the two need different sentences, because only one of them is theirs
+   * to fix.
+   */
+  const houseUnderTest = onTheHouse && !override && !value.trim();
+
+  const prompt = (): string => {
+    if (houseUnderTest && tested.kind === "failed") {
+      return "This host's model didn't answer. Try again, use a key of your own, or carry on without one.";
+    }
+    if (houseUnderTest && tested.kind === "testing") {
+      return "Checking the model this host provides…";
+    }
+    if (onTheHouse) {
+      return "This host already has a model. Test it and carry on — you don't need a key of your own.";
+    }
+    if (noModel) {
+      return "Carrying on without one. Your team will be a standard one for your industry rather than designed from your answers.";
+    }
+    return "Your agents need a model to work. We'll check it reaches before going any further.";
+  };
+
+  /**
    * What is selected right now, readable from inside a call that started
    * before it.
    *
@@ -1671,12 +1739,8 @@ function PowerStep({
         <Label className="text-base font-medium leading-snug" data-testid="setup-question">
           What should your team think with?
         </Label>
-        <p className="text-xs leading-snug text-muted-foreground">
-          {onTheHouse
-            ? "This host already has a model. Test it and carry on — you don't need a key of your own."
-            : noModel
-              ? "Carrying on without one. Your team will be a standard one for your industry rather than designed from your answers."
-              : "Your agents need a model to work. We'll check it reaches before going any further."}
+        <p className="text-xs leading-snug text-muted-foreground" data-testid="setup-model-prompt">
+          {prompt()}
         </p>
 
         {/* Each option carries its own sentence, inside the popup rather than
@@ -1933,6 +1997,7 @@ function ReviewStep({
   changed,
   restartKeys,
   status,
+  hostModel,
   email,
   built,
 }: {
@@ -1947,6 +2012,12 @@ function ReviewStep({
   changed: Record<string, string | null>;
   restartKeys: string[];
   status: SetupStatus;
+  /**
+   * Whether the host answered for the model itself — reached, not merely
+   * resolved, and never asked about on screen. An operator who saw the model
+   * step and tested it there has already been told, and is not owed the line.
+   */
+  hostModel: boolean;
   email: string;
   /** Non-null once the apply is building, so the button reads as progress. */
   built: number | null;
@@ -2171,7 +2242,7 @@ function ReviewStep({
         {/* Said, because the alternative is an operator who was never asked for
             a model wondering later where theirs came from. A skipped question
             still owes its answer somewhere. */}
-        {status.inference.ready && (
+        {hostModel && (
           <p className="mt-1" data-testid="setup-host-model">
             The model comes with this host, so there was no key to supply and none
             is stored against your company.
