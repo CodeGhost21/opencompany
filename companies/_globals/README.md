@@ -59,4 +59,4 @@ reason. The declarations here are held to every rule
 claim another ledger's derived file, and count against the 12-ledger cap like
 any other, which is why there are three of them and not eight.
 
-The full contract is `../docs/spec/runtime/globals.md`.
+The full contract is `../../docs/spec/runtime/globals.md`.
