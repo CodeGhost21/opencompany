@@ -283,33 +283,43 @@ test("the add dialog stops offering a provider once it is connected", async ({ p
   // Offering to add something twice is how you get two rows for one provider.
   await openInference(page);
 
-  await choose(page, "cloud", "Groq");
-  await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
-  await page.getByTestId("inference-connect-submit").click();
+  try {
+    await choose(page, "cloud", "Groq");
+    await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
+    await page.getByTestId("inference-connect-submit").click();
 
-  // A real vendor is reachable from CI. Its own catalogue read may itself
-  // fail on a made-up key, in which case the model step opens in free text
-  // with the reason said — the step always opens either way (D-model).
-  await expect(page.getByTestId("inference-connect-model-step")).toBeVisible({ timeout: 30_000 });
-  const modelField = page.locator("#inference-connect-model");
-  if (await modelField.count()) await modelField.fill("e2e-model");
-  await page.getByTestId("inference-connect-submit").click();
+    // A real vendor is reachable from CI. Its own catalogue read may itself
+    // fail on a made-up key, in which case the model step opens in free text
+    // with the reason said — the step always opens either way (D-model).
+    await expect(page.getByTestId("inference-connect-model-step")).toBeVisible({
+      timeout: 30_000,
+    });
+    const modelField = page.locator("#inference-connect-model");
+    if (await modelField.count()) await modelField.fill("e2e-model");
+    await page.getByTestId("inference-connect-submit").click();
 
-  // The add itself is refused and rolled back rather than stored looking
-  // green — there is no real Groq credential here to satisfy it, so this test
-  // asserts the refusal and then takes the documented escape hatch, which is
-  // the only honest way to reach a connected catalogue row without a key.
-  await expect(page.getByTestId("inference-connect-error")).toContainText(
-    "rejected the credential",
-    { timeout: 30_000 },
-  );
-  await page.getByTestId("inference-add-anyway").click();
-  await expect(page.getByTestId("inference-provider-groq")).toBeVisible({ timeout: 30_000 });
+    // The add itself is refused and rolled back rather than stored looking
+    // green — there is no real Groq credential here to satisfy it, so this test
+    // asserts the refusal and then takes the documented escape hatch, which is
+    // the only honest way to reach a connected catalogue row without a key.
+    await expect(page.getByTestId("inference-connect-error")).toContainText(
+      "rejected the credential",
+      { timeout: 30_000 },
+    );
+    await page.getByTestId("inference-add-anyway").click();
+    await expect(page.getByTestId("inference-provider-groq")).toBeVisible({ timeout: 30_000 });
 
-  await page.getByTestId("inference-add-open").click();
-  await page.locator("#inference-add-cloud").click();
-  await expect(page.getByRole("option", { name: /^Groq/ })).toHaveCount(0);
-  await page.keyboard.press("Escape");
+    await page.getByTestId("inference-add-open").click();
+    await page.locator("#inference-add-cloud").click();
+    await expect(page.getByRole("option", { name: /^Groq/ })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+  } finally {
+    // A rejected credential does not stop Groq from being connected and
+    // enabled (the point of this test) — and an enabled, unreachable provider
+    // is exactly the shape that becomes the shared company's primary route
+    // (see `deleteProvider`).
+    await deleteProvider(page, "groq");
+  }
 });
 
 test("a custom provider may not take a name the catalogue ships", async ({ page }) => {
