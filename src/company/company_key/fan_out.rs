@@ -212,6 +212,56 @@ fn provider_gate_reason(outcome: &SlotOutcome) -> SkipReason {
 }
 
 // ---------------------------------------------------------------------------
+// slot_facts — read-only, for the account-key dialog (keys rework #2306, 4b)
+// ---------------------------------------------------------------------------
+
+/// What the account-key dialog needs to know **before** it saves, to say which
+/// slots a save would actually touch (Q9).
+///
+/// `docs/key-reworks/phase-4b-account-dialog.md` §3.1: `*_has_own_key` is
+/// deliberately not "is set" — a copy still equal to the account key is filled
+/// again on rotation, so saving does fill it. Only whether the two stored
+/// values are equal is revealed here, never either value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct SlotFacts {
+    /// The LLM TinyHumans key slot holds a key that is not the account key.
+    /// Saving leaves it alone (Q7). Never the key.
+    pub inference_has_own_key: bool,
+    /// The same for `composio/tinyhumans/key` (with 1a's legacy read).
+    pub composio_has_own_key: bool,
+    /// `inference/default` is set (`ProviderOnly` or `Full`).
+    pub default_set: bool,
+}
+
+/// Read-only. The same reads [`fan_out`]'s step 2 makes, so the dialog can
+/// never disagree with what a save would actually do. No lock — a read races
+/// nothing it could corrupt.
+pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Result<SlotFacts> {
+    let account_key = secrets
+        .get(company, KEY_KEY)
+        .await?
+        .map(|SecretValue(v)| v.trim().to_string())
+        .unwrap_or_default();
+    let composio_now = composio::load_tinyhumans_key(company, secrets)
+        .await?
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let inference_now =
+        inference::load_managed_key(company, secrets, &inference::HarnessScope::default())
+            .await?
+            .trim()
+            .to_string();
+    let default_now = inference_store::load_default(company, secrets).await?;
+
+    let has_own_key = |current: &str| !current.is_empty() && current != account_key;
+    Ok(SlotFacts {
+        inference_has_own_key: has_own_key(&inference_now),
+        composio_has_own_key: has_own_key(&composio_now),
+        default_set: !matches!(default_now, inference_store::DefaultChoice::Unset),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // fan_out
 // ---------------------------------------------------------------------------
 

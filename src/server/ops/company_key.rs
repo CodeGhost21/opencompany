@@ -138,6 +138,14 @@ struct CredentialStatusDto {
     /// console renders exactly what it renders today rather than a button that
     /// would 404.
     hub_link: bool,
+    /// The LLM TinyHumans key slot holds a key that is not the account key.
+    /// Saving leaves it alone (Q7). Never the key — see
+    /// [`company_key::SlotFacts`] (keys rework #2306, slice 4b).
+    inference_has_own_key: bool,
+    /// The same for `composio/tinyhumans/key` (with 1a's legacy read).
+    composio_has_own_key: bool,
+    /// `inference/default` is set (`ProviderOnly` or `Full`).
+    default_set: bool,
 }
 
 /// The two account pages the console links out to.
@@ -463,6 +471,9 @@ async fn effective_status(
     .await
     .map_err(ApiError)?
     .source();
+    let facts = company_key::slot_facts(runtime.id(), secrets.as_ref())
+        .await
+        .map_err(ApiError)?;
     Ok(CredentialStatusDto {
         configured,
         source,
@@ -476,6 +487,9 @@ async fn effective_status(
             top_up_url: crate::server::hub_account::top_up_url(&site),
         }),
         hub_link: state.hub_identity().is_some(),
+        inference_has_own_key: facts.inference_has_own_key,
+        composio_has_own_key: facts.composio_has_own_key,
+        default_set: facts.default_set,
     })
 }
 
