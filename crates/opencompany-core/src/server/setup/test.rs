@@ -2020,12 +2020,29 @@ fn typed_probe_failures_choose_copy_from_the_error_type() {
         ),
         (
             404,
-            "That model is not available from this provider for your account.",
+            "Reached the host, but there is no chat endpoint at that URL.",
         ),
         (429, "The provider is rate-limiting this key right now."),
     ] {
         assert_eq!(super::summarise_probe_failure(&provider(status)), expected);
     }
+
+    let unavailable_model = anyhow::Error::new(tinyinference::Error::Provider(Box::new(
+        tinyinference::model::ProviderError {
+            provider: "test".to_string(),
+            status: Some(404),
+            message: concat!(
+                "the configured inference model is not available from the provider",
+                " — choose another model"
+            )
+            .to_string(),
+            ..Default::default()
+        },
+    )));
+    assert_eq!(
+        super::summarise_probe_failure(&unavailable_model),
+        "That model is not available from this provider for your account."
+    );
 }
 
 #[cfg(feature = "openhuman")]

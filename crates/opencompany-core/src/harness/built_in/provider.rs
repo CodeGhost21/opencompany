@@ -1791,6 +1791,13 @@ const MODEL_UNAVAILABLE_SIGNATURES: &[&str] = &[
     "not_found_error",
 ];
 
+const MODEL_UNAVAILABLE_FAILURE_PREFIX: &str =
+    "the configured inference model is not available from the provider";
+
+pub(crate) fn is_model_unavailable_failure(error: &ProviderError) -> bool {
+    error.message.starts_with(MODEL_UNAVAILABLE_FAILURE_PREFIX)
+}
+
 /// Rewrites a provider "unknown/unavailable model" refusal into an
 /// operator-actionable message, or `None` for any other error (issue #1811).
 ///
@@ -1879,7 +1886,7 @@ fn model_unavailable_advice(
     // tickets.
     let models_url = crate::company::inference::catalogue::redact_endpoint(models_url);
     Some(format!(
-        "the configured inference model is not available from the provider — {where_to_fix}, to \
+        "{MODEL_UNAVAILABLE_FAILURE_PREFIX} — {where_to_fix}, to \
          one the provider offers (list them with `GET {models_url}`). {error}"
     ))
 }

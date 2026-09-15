@@ -1443,7 +1443,10 @@ fn summarise_probe_failure(err: &anyhow::Error) -> String {
             tinyinference::Error::Provider(error) => match error.status {
                 Some(401) => "That key was rejected by the provider.",
                 Some(403) => "That key was accepted but is not allowed to use this model.",
-                Some(404) => "That model is not available from this provider for your account.",
+                Some(404) if crate::harness::provider::is_model_unavailable_failure(error) => {
+                    "That model is not available from this provider for your account."
+                }
+                Some(404) => "Reached the host, but there is no chat endpoint at that URL.",
                 Some(429) => "The provider is rate-limiting this key right now.",
                 _ => "Could not get a reply from the provider.",
             },
