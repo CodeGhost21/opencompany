@@ -4740,6 +4740,21 @@ struct ChatHistoryMessageDto {
     author: String,
     /// The message text.
     text: String,
+    /// **The body as the model wrote it** — [`MessageView::cue_text`], which
+    /// is [`Self::text`] before `readable_moves` rewrote the room's grammar
+    /// into operator-facing prose.
+    ///
+    /// `AgentSessionMessageDto` has carried this since the raw-turns view
+    /// needed it; this shape did not, so a reader that needs the *moves*
+    /// rather than the prose had nothing to read them from on the reload path.
+    /// The episode fold is such a reader, which is why a deliberation panel
+    /// never survived a refresh.
+    ///
+    /// Omitted when it is byte-equal to [`Self::text`], which is every row
+    /// carrying no move — so the wire shape is unchanged for every reply on
+    /// every desk that does not deliberate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cue_text: Option<String>,
     /// Set only when another desk's referral caused this line. Absent on every
     /// ordinary message, so the wire shape is unchanged for them.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4924,7 +4939,12 @@ impl From<MessageView> for ChatHistoryMessageDto {
         // text back). Cloned before `view.text` moves into the `text` field
         // below.
         let message = view.resolution_user_facing.then(|| view.text.clone());
+        // Only when the two differ, which is only on a desk that deliberates:
+        // `readable_moves` returns a body carrying no move untouched, so an
+        // ordinary reply adds nothing to the wire.
+        let cue_text = (view.cue_text != view.text).then(|| view.cue_text.clone());
         Self {
+            cue_text,
             aside_conversation: view.aside_conversation.map(|aside| AsideConversationDto {
                 members: aside.members,
                 lines: aside
