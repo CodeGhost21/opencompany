@@ -256,70 +256,53 @@ test("a second provider holds a credential of its own", async ({ page }) => {
   // only slot there was.
   await openInference(page);
 
-  try {
-    for (const name of ["E2E One", "E2E Two"]) {
-      await addCustom(page);
-      await page.locator("#inference-connect-name").fill(name);
-      await page.locator("#inference-connect-url").fill(UNREACHABLE);
-      await page.locator("#inference-connect-key").fill(`pw-e2e-${name}-${Date.now()}`);
-      await page.getByTestId("inference-connect-submit").click();
-      await pickModel(page, "e2e-model");
-      await expect(page.getByTestId("inference-connect-provider")).toHaveCount(0, {
-        timeout: 30_000,
-      });
-    }
-
-    await expect(page.getByTestId("inference-provider-e2e-one")).toContainText("•••• configured");
-    await expect(page.getByTestId("inference-provider-e2e-two")).toContainText("•••• configured");
-  } finally {
-    // Two enabled, unreachable providers left behind is twice the hazard of
-    // one (see `deleteProvider`) — clear both, whatever the assertions found.
-    await deleteProvider(page, "e2e-one");
-    await deleteProvider(page, "e2e-two");
+  for (const name of ["E2E One", "E2E Two"]) {
+    await addCustom(page);
+    await page.locator("#inference-connect-name").fill(name);
+    await page.locator("#inference-connect-url").fill(UNREACHABLE);
+    await page.locator("#inference-connect-key").fill(`pw-e2e-${name}-${Date.now()}`);
+    await page.getByTestId("inference-connect-submit").click();
+    await pickModel(page, "e2e-model");
+    await expect(page.getByTestId("inference-connect-provider")).toHaveCount(0, {
+      timeout: 30_000,
+    });
   }
+
+  await expect(page.getByTestId("inference-provider-e2e-one")).toContainText("•••• configured");
+  await expect(page.getByTestId("inference-provider-e2e-two")).toContainText("•••• configured");
 });
 
 test("the add dialog stops offering a provider once it is connected", async ({ page }) => {
   // Offering to add something twice is how you get two rows for one provider.
   await openInference(page);
 
-  try {
-    await choose(page, "cloud", "Groq");
-    await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
-    await page.getByTestId("inference-connect-submit").click();
+  await choose(page, "cloud", "Groq");
+  await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
+  await page.getByTestId("inference-connect-submit").click();
 
-    // A real vendor is reachable from CI. Its own catalogue read may itself
-    // fail on a made-up key, in which case the model step opens in free text
-    // with the reason said — the step always opens either way (D-model).
-    await expect(page.getByTestId("inference-connect-model-step")).toBeVisible({
-      timeout: 30_000,
-    });
-    const modelField = page.locator("#inference-connect-model");
-    if (await modelField.count()) await modelField.fill("e2e-model");
-    await page.getByTestId("inference-connect-submit").click();
+  // A real vendor is reachable from CI. Its own catalogue read may itself
+  // fail on a made-up key, in which case the model step opens in free text
+  // with the reason said — the step always opens either way (D-model).
+  await expect(page.getByTestId("inference-connect-model-step")).toBeVisible({ timeout: 30_000 });
+  const modelField = page.locator("#inference-connect-model");
+  if (await modelField.count()) await modelField.fill("e2e-model");
+  await page.getByTestId("inference-connect-submit").click();
 
-    // The add itself is refused and rolled back rather than stored looking
-    // green — there is no real Groq credential here to satisfy it, so this test
-    // asserts the refusal and then takes the documented escape hatch, which is
-    // the only honest way to reach a connected catalogue row without a key.
-    await expect(page.getByTestId("inference-connect-error")).toContainText(
-      "rejected the credential",
-      { timeout: 30_000 },
-    );
-    await page.getByTestId("inference-add-anyway").click();
-    await expect(page.getByTestId("inference-provider-groq")).toBeVisible({ timeout: 30_000 });
+  // The add itself is refused and rolled back rather than stored looking
+  // green — there is no real Groq credential here to satisfy it, so this test
+  // asserts the refusal and then takes the documented escape hatch, which is
+  // the only honest way to reach a connected catalogue row without a key.
+  await expect(page.getByTestId("inference-connect-error")).toContainText(
+    "rejected the credential",
+    { timeout: 30_000 },
+  );
+  await page.getByTestId("inference-add-anyway").click();
+  await expect(page.getByTestId("inference-provider-groq")).toBeVisible({ timeout: 30_000 });
 
-    await page.getByTestId("inference-add-open").click();
-    await page.locator("#inference-add-cloud").click();
-    await expect(page.getByRole("option", { name: /^Groq/ })).toHaveCount(0);
-    await page.keyboard.press("Escape");
-  } finally {
-    // A rejected credential does not stop Groq from being connected and
-    // enabled (the point of this test) — and an enabled, unreachable provider
-    // is exactly the shape that becomes the shared company's primary route
-    // (see `deleteProvider`).
-    await deleteProvider(page, "groq");
-  }
+  await page.getByTestId("inference-add-open").click();
+  await page.locator("#inference-add-cloud").click();
+  await expect(page.getByRole("option", { name: /^Groq/ })).toHaveCount(0);
+  await page.keyboard.press("Escape");
 });
 
 test("a custom provider may not take a name the catalogue ships", async ({ page }) => {
@@ -347,44 +330,32 @@ test("turning a provider off and back on both confirm (decision X3)", async ({ p
   // expressible, and neither direction of the toggle scrubs anything.
   await openInference(page);
 
-  try {
-    await addCustom(page);
-    await page.locator("#inference-connect-name").fill("E2E Parked");
-    await page.locator("#inference-connect-url").fill(UNREACHABLE);
-    await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
-    await page.getByTestId("inference-connect-submit").click();
-    await pickModel(page, "e2e-model");
-    await expect(page.getByTestId("inference-provider-e2e-parked")).toBeVisible({
-      timeout: 30_000,
-    });
+  await addCustom(page);
+  await page.locator("#inference-connect-name").fill("E2E Parked");
+  await page.locator("#inference-connect-url").fill(UNREACHABLE);
+  await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
+  await page.getByTestId("inference-connect-submit").click();
+  await pickModel(page, "e2e-model");
+  await expect(page.getByTestId("inference-provider-e2e-parked")).toBeVisible({ timeout: 30_000 });
 
-    // Off, reversible language.
-    await page.getByTestId("inference-provider-e2e-parked-toggle").click();
-    await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn off");
-    await page.getByTestId("inference-remove-confirm").click();
-    await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
-    await page.reload();
-    await openInference(page);
+  // Off, reversible language.
+  await page.getByTestId("inference-provider-e2e-parked-toggle").click();
+  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn off");
+  await page.getByTestId("inference-remove-confirm").click();
+  await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
+  await page.reload();
+  await openInference(page);
 
-    const row = page.getByTestId("inference-provider-e2e-parked");
-    await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "false");
-    await expect(row).toContainText("•••• configured");
+  const row = page.getByTestId("inference-provider-e2e-parked");
+  await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "false");
+  await expect(row).toContainText("•••• configured");
 
-    // On, also confirmed (decision X3: every toggle does). This is the point
-    // of the test, so the cleanup below cannot skip it the way the other
-    // leaky specs in this file skip disabling — it has to delete instead.
-    await row.getByTestId("inference-provider-e2e-parked-toggle").click();
-    await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn on");
-    await page.getByTestId("inference-remove-confirm").click();
-    await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
-    await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "true");
-  } finally {
-    // Deliberately left enabled by the assertions above (that is what "back
-    // on" means) — so, unlike a test that could just leave it disabled, this
-    // one has to remove the row outright or it becomes the shared company's
-    // primary route for every later spec (see `deleteProvider`).
-    await deleteProvider(page, "e2e-parked");
-  }
+  // On, also confirmed (decision X3: every toggle does).
+  await row.getByTestId("inference-provider-e2e-parked-toggle").click();
+  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn on");
+  await page.getByTestId("inference-remove-confirm").click();
+  await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
+  await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "true");
 });
 
 test("deleting a provider removes its row", async ({ page }) => {
