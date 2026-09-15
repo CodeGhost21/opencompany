@@ -533,6 +533,10 @@ function AddSkillDialog({
     setBusy(true);
     try {
       await onAdd({ name, description, category, body });
+      // The caller closes the dialog by flipping `open`, which never reaches
+      // `onOpenChange`, so clearing on dismiss alone leaves the last skill's
+      // fields sitting in the next one.
+      reset();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "could not add the skill");
     } finally {
