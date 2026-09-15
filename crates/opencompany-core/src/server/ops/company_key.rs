@@ -22,6 +22,8 @@
 //! embeddings still resolve from the environment (#585), so "wired to it" is a
 //! smaller set than "brokered" until that lands.
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::Router;
 use axum::routing::{get, post};
