@@ -5,18 +5,24 @@
 //! and that agent's single turn was the whole of the desk's answer. This module
 //! is the alternative for a desk that has somebody to deliberate *with*: the
 //! operator's message opens an **episode**, and the episode runs a sequence of
-//! single turns until the room converges on an option, deadlocks between two,
+//! **rounds** until the room converges on an option, deadlocks between two,
 //! spends its budget, or finds it has nothing to say.
 //!
-//! # One message still means one turn at a time
+//! # One message is still a bounded number of turns
 //!
-//! An episode is not a fan-out. [`tinyhivemind_hive::step`] authorizes exactly
-//! one speaker per step, so the number of turns an operator message can start
-//! is bounded by the desk's turn budget and by nothing else. What the room buys
-//! over a single responder is not parallelism, it is *independence* and a
-//! reason to stop: the opening round is blind, so a member forms its own
-//! position before it reads its peers', and the episode ends on a quorum it can
-//! name rather than when one agent decides it is finished.
+//! An episode is not a fan-out. [`tinyhivemind_hive::step`] authorizes a
+//! *round* — at most `round_width` speakers while the room is blind, at most
+//! `revealed_width` once it can see itself — so the number of turns an operator
+//! message can start is bounded by the desk's turn budget and by nothing else,
+//! exactly as it was when a round was always one. What the room buys over a
+//! single responder is still not parallelism for its own sake, it is
+//! *independence* and a reason to stop: members authorized together cannot read
+//! one another, so a member forms its own position before it reads its peers',
+//! and the episode ends on a quorum it can name rather than when one agent
+//! decides it is finished.
+//!
+//! A width is a bound on what the episode *authorizes*, not an instruction on
+//! how to run it: this host takes a round's turns in series.
 //!
 //! # Nothing here is a second kind of turn
 //!

@@ -765,14 +765,12 @@ fn hive_turn(
         phase: tinyhivemind_hive::Phase::Deliberate,
         visibility,
         reason: tinyhivemind_hive::BidReason::Salience,
-        next_state: tinyhivemind_hive::EpisodeState::opened(
-            tinyhivemind_hive::Conversation {
-                desk_id: "eng".to_owned(),
-                desk_name: "Engineering".to_owned(),
-                thread_root: None,
-            },
-            watermark,
-        ),
+        watermark,
+        // A round of one: nothing was authored concurrently with this
+        // turn, so the round boundary sits above every row and withholds
+        // nothing — which is what made a width-one round bit-identical to
+        // the sequential episode this fixture was written against.
+        round_start: tinyhivemind_hive::Sequence(u64::MAX),
     }
 }
 

@@ -821,14 +821,12 @@ fn the_unspoken_block_is_rendered_from_the_builder() {
         phase: tinyhivemind_hive::Phase::Deliberate,
         visibility: tinyhivemind_hive::Visibility::Full,
         reason: tinyhivemind_hive::BidReason::Salience,
-        next_state: tinyhivemind_hive::EpisodeState::opened(
-            tinyhivemind_hive::Conversation {
-                desk_id: "eng".into(),
-                desk_name: "Engineering".into(),
-                thread_root: None,
-            },
-            tinyhivemind_hive::Sequence(1),
-        ),
+        watermark: tinyhivemind_hive::Sequence(1),
+        // A round of one: nothing was authored concurrently with this
+        // turn, so the round boundary sits above every row and withholds
+        // nothing — which is what made a width-one round bit-identical to
+        // the sequential episode this fixture was written against.
+        round_start: tinyhivemind_hive::Sequence(u64::MAX),
     };
     let rendered = prompt.render(&turn, &[]);
     assert!(
