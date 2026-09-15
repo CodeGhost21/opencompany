@@ -33,4 +33,4 @@ The only mandatory external dependency is the **TinyHumans API key.** Storage is
 
 ## Deeper reference
 
-The in-repo specification under [`docs/spec/`](../../docs/spec/) is the authoritative architecture reference, and [`docs/modules/`](../../docs/modules/) documents the code as it exists today. When the spec and the module docs disagree, the spec wins for new work.
+The in-repo specification under [`docs/spec/`](../spec/) is the authoritative architecture reference, and [`docs/modules/`](../modules/) documents the code as it exists today. When the spec and the module docs disagree, the spec wins for new work.

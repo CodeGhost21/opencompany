@@ -178,7 +178,7 @@ jobs:
   # every job below.
   #
   # Before this, every pull request ran every lane. A pull request that edits
-  # only `gitbooks/` compiled the vendored openhuman tree three times; one that
+  # only `docs/` compiled the vendored openhuman tree three times; one that
   # edits only `frontend/` ran the ~33 minute `Rust (openhuman, tinymemory)`
   # feature matrix, whose twenty feature-scoped suites cannot be affected by a
   # `.tsx` file. The console still gets its Rust: `Console E2E` runs the host

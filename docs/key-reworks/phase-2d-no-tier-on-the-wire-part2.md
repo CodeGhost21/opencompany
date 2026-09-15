@@ -371,7 +371,7 @@ In `probe_inference` (`:1244-1354`):
   default becomes "none". Its description: "a real model id the whole roster
   sends when nothing chooses one; a tier name only selects a configured map
   entry and logs a warning."
-- **`docs/modules/openhuman/README.md:82` and `gitbooks/developers/configuration.md:77`:**
+- **`docs/modules/openhuman/README.md:82` and `docs/developers/configuration.md:77`:**
   the same change.
 - **`docs/spec/runtime/providers.md:218-219`:** delete the `tierVocabulary` and
   `tierDefaults` rows.
