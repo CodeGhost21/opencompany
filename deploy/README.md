@@ -64,7 +64,7 @@ builder, so the nested `vendor/openhuman/vendor/tinyagents` patch resolves.
 Any Droplet with Docker installed runs the Compose file unchanged:
 
 ```sh
-git clone <your-fork> && cd opencompany
+git clone <your-fork> && cd opencompany/deploy
 cp .env.example .env && $EDITOR .env
 docker compose up -d --build
 ```
