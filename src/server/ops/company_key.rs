@@ -243,14 +243,22 @@ struct SetKey {
 /// `"llm"` appears only when a clear would actually clear
 /// `provider/tinyhumans/key` (its current value equals the account key,
 /// i.e. `decide_copy` would `Clear` it) **and** a `tinyhumans` row already
-/// exists — a key with no row behind it is not "set" (D-set/X5), so it can
-/// never make `"llm"` appear. `"composio"` appears whenever the same is true
-/// of `composio/tinyhumans/key`, row or no row (Composio has no such
-/// gate — a bearer with no row concept still serves live calls).
+/// exists (indexed) **or** entry zero itself is the legacy managed config
+/// (P1-1, keys rework #2306, KR-L3-01 review — see the `llm_in_use` comment
+/// below for why entry-zero counts) — a key with no row and no legacy managed
+/// entry zero behind it is not "set" (D-set/X5), so it can never make
+/// `"llm"` appear. `"composio"` appears whenever the same is true of
+/// `composio/tinyhumans/key` **and** `composio/mode` currently selects the
+/// managed slot this clear would touch (P1-1: the same rule
+/// [`super::composio::composio_used_by`] already applies to Composio's own
+/// guard — a company on `byok` has nothing live resolving through
+/// `composio/tinyhumans/key`, so clearing the account key cannot strand a
+/// Composio workload even though the copy would still be cleared).
 ///
 /// `None` when the account key itself is unset, or when neither derived slot
-/// would actually be cleared (both already hold a custom key of their own) —
-/// the account-key clear equivalent of matrix rows M6/C2.
+/// would actually be cleared (both already hold a custom key of their own, or
+/// composio is on `byok`) — the account-key clear equivalent of matrix rows
+/// M6/C2.
 async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>, ApiError> {
     let secrets = runtime.secrets();
     let secrets = secrets.as_ref();
@@ -278,14 +286,34 @@ async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>,
     .map_err(ApiError)?
     .trim()
     .to_string();
-    let row_exists = crate::company::inference::store::list_providers(runtime.id(), secrets)
+    let providers = crate::company::inference::store::list_providers(runtime.id(), secrets)
         .await
-        .map_err(ApiError)?
-        .iter()
-        .any(|p| {
-            p.origin == crate::company::inference::store::ProviderOrigin::Indexed
-                && p.slug == crate::company::inference::MANAGED_SLUG
-        });
+        .map_err(ApiError)?;
+    let row_exists = providers.iter().any(|p| {
+        p.origin == crate::company::inference::store::ProviderOrigin::Indexed
+            && p.slug == crate::company::inference::MANAGED_SLUG
+    });
+    // P1-1 decision (keys rework #2306, KR-L3-01 review): count a company
+    // still on the legacy managed entry zero (`inference/config`,
+    // `ProviderOrigin::EntryZero`) as "llm in use" too, not just an indexed
+    // row. `row_exists` alone only sees `Indexed` rows, so an entry-zero-managed
+    // company clearing the account key got no `"llm"` warning even though the
+    // clear strands that company's managed inference (`provider/tinyhumans/key`
+    // and, via it, `inference/key`) exactly the way an indexed row would be
+    // stranded. Recorded here, and in `docs/key-reworks/in-use-guards.md` §2's
+    // `"llm"` row, so the two cannot drift apart on this point again.
+    let entry_zero_managed = providers.iter().any(|p| {
+        p.origin == crate::company::inference::store::ProviderOrigin::EntryZero
+            && p.slug == crate::company::inference::MANAGED_SLUG
+    });
+    let llm_in_use = row_exists || entry_zero_managed;
+
+    // P1-1: `"composio"` only when `composio/mode` currently selects the slot
+    // this clear would touch — see the doc comment above and
+    // `in-use-guards.md` §2's surfaces table.
+    let composio_mode = crate::company::composio::load_mode(runtime.id(), secrets)
+        .await
+        .map_err(ApiError)?;
 
     let mut surfaces = Vec::new();
     let clears = |current: &str| {
@@ -294,10 +322,10 @@ async fn account_key_used_by(runtime: &CompanyRuntime) -> Result<Option<UsedBy>,
             company_key::CopyDecision::Clear
         )
     };
-    if clears(&inference_now) && row_exists {
+    if clears(&inference_now) && llm_in_use {
         surfaces.push(UsedBySurface::Llm);
     }
-    if clears(&composio_now) {
+    if clears(&composio_now) && composio_mode == crate::company::composio::ComposioMode::Managed {
         surfaces.push(UsedBySurface::Composio);
     }
 
