@@ -1337,6 +1337,7 @@ pub fn build_agent_with_model(
     #[cfg(not(feature = "composio"))]
     let agent_definition_name = manifest_agent.id.as_str();
 
+    super::tool_posture::declare();
     let mut agent = AgentBuilder::default()
         // `HarnessModel` upcasts to the tinyinference `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).

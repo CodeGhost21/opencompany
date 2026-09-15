@@ -175,6 +175,7 @@ pub mod steer;
 pub mod steps;
 pub mod title;
 pub mod tool_dispatcher;
+pub mod tool_posture;
 pub mod toolbelt;
 pub mod triage;
 pub mod turn_outputs;

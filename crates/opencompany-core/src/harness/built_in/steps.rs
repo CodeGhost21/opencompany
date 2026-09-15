@@ -917,7 +917,7 @@ const MAX_ARG_DEPTH: usize = 1;
 
 /// The needle that identifies OpenHuman's approval-gate refusal, taken from the
 /// `PolicyDenial::ApprovalRequired` render in
-/// `vendor/openhuman/src/openhuman/agent/tinyagents/policy_denial.rs`.
+/// `vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/policy_denial.rs`.
 ///
 /// This is a string classifier, which is the anti-pattern — the mitigation is
 /// that `approval_needle_still_appears_in_the_vendored_denial_render` reads
@@ -1606,7 +1606,9 @@ mod tests {
     /// it can then go.
     #[test]
     fn the_vendored_loop_still_labels_a_tool_row_from_its_name_alone() {
-        let src = vendored("vendor/openhuman/src/openhuman/agent/tinyagents/observability.rs");
+        let src = vendored(
+            "vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/observability/event_projection.rs",
+        );
         assert!(
             src.contains("display_label: Some(humanize_tool_name(tool_name))"),
             "the vendored loop no longer labels a tool row from its name — if it now asks \
@@ -1873,7 +1875,9 @@ mod tests {
     /// returning every parked call to reading as a crash.
     #[test]
     fn approval_needle_still_appears_in_the_vendored_denial_render() {
-        let source = vendored("vendor/openhuman/src/openhuman/agent/tinyagents/policy_denial.rs");
+        let source = vendored(
+            "vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/policy_denial.rs",
+        );
         assert!(
             source.contains(APPROVAL_REQUIRED_NEEDLE),
             "'{APPROVAL_REQUIRED_NEEDLE}' is gone from PolicyDenial::render — \
@@ -2355,8 +2359,8 @@ mod tests {
     #[test]
     fn truncation_markers_still_appear_in_the_vendored_tool_pipeline() {
         let sources = [
-            vendored("vendor/openhuman/src/openhuman/agent/tinyagents/middleware.rs"),
-            vendored("vendor/openhuman/src/openhuman/agent/harness/tool_result_artifacts/mod.rs"),
+            vendored("vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/middleware/tool_output.rs"),
+            vendored("vendor/openhuman/crates/openhuman-core/src/agent/harness/tool_result_artifacts/mod.rs"),
         ]
         .concat();
         for marker in TRUNCATION_MARKERS {

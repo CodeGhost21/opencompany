@@ -411,7 +411,7 @@ impl Tool for ProposeWorkflowTool {
     fn name(&self) -> &str {
         // NOT `propose_workflow` (issue #1931 regression, vendor bump to
         // upstream `main`): the vendored `openhuman` runtime compiles in a
-        // `workflows` toolpack (`vendor/openhuman/src/openhuman/tools/toolpacks/
+        // `workflows` toolpack (`vendor/openhuman/crates/openhuman-core/src/tools/toolpacks/
         // registry.rs`) whose member list claims that bare name, owned only by
         // openhuman's OWN `workflow_builder`/`flow_discovery` agents. Every
         // pack defaults to `GroupMode::Withheld`, and `strip_packed_from_visible`

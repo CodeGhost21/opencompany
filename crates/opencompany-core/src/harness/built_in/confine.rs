@@ -314,6 +314,7 @@ pub fn build_confined_agent(
 
     let tools: Vec<Box<dyn Tool>> = Vec::new();
 
+    super::tool_posture::declare();
     AgentBuilder::default()
         .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
