@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { restoreSharedInference } from "./shared-inference";
+import { disconnectSharedProviders } from "./shared-inference";
 
 /**
  * Proof for issue #264: an agent can be opened, read, and edited **from the
@@ -274,17 +274,18 @@ test("an agent defined in the console can be read back and edited", async ({ pag
  * goes. That is what happened when this test timed out and its in-body
  * `finally` never ran: Playwright abandons a timed-out test function,
  * `finally` included, and thirty-odd unrelated specs failed with
- * `inference request failed … 127.0.0.1:9`. A hook runs regardless. What
- * restoring the company actually takes is in `restoreSharedInference`.
+ * `inference request failed … 127.0.0.1:9`. A hook runs regardless.
  *
  * The pin is cleared first so the delete is not refused as in-use by it; a
- * clear on an unpinned agent is a no-op.
+ * clear on an unpinned agent is a no-op. What the delete can and cannot put
+ * back — the row goes, the default it became does not — is in
+ * `disconnectSharedProviders`.
  */
 test.afterEach(async ({ request }) => {
   await request
     .patch("/api/v1/company/team/researcher", { data: { provider: null, model: null } })
     .catch(() => {});
-  await restoreSharedInference(request, ["e2e-pair"]);
+  await disconnectSharedProviders(request, ["e2e-pair"]);
 });
 
 test("an admin pins an agent to a provider and model, then clears it (keys rework, issue #2306, slice 3b)", async ({

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { restoreSharedInference } from "./shared-inference";
+import { disconnectSharedProviders } from "./shared-inference";
 
 /**
  * The LLM page, against a real browser and a real host.
@@ -157,7 +157,7 @@ const PROVIDERS_THIS_FILE_CREATES = [
 ];
 
 /**
- * Puts the shared company back after every test, even one that timed out.
+ * Disconnects what each test connected, after it — even one that timed out.
  *
  * Every spec here (bar the legacy single-slot one at the bottom, which has its
  * own "Reset to default" cleanup) connects a provider that points at
@@ -174,12 +174,12 @@ const PROVIDERS_THIS_FILE_CREATES = [
  *
  * One flat list rather than per-test bookkeeping that could itself be
  * skipped: a slug the test already removed, or never got as far as creating,
- * answers 404 and is ignored. What restoring the company takes beyond the
- * deletes — and why a delete alone is not enough — is in
- * `restoreSharedInference`.
+ * answers 404 and is ignored. What the deletes can and cannot put back — the
+ * rows go, the default the first of them became does not — is in
+ * `disconnectSharedProviders`.
  */
 test.afterEach(async ({ request }) => {
-  await restoreSharedInference(request, PROVIDERS_THIS_FILE_CREATES);
+  await disconnectSharedProviders(request, PROVIDERS_THIS_FILE_CREATES);
 });
 
 /**
