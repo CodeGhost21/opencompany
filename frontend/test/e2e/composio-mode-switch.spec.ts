@@ -146,7 +146,7 @@ test.describe("clearing the managed-route token", () => {
     await stubGuardedRoute(page, isComposioToken, managedStatus(), "Composio token cleared.");
   });
 
-  test("opens a confirm dialog naming the action, and re-opens on a stale-UI 409", async ({
+  test("shows the token is in use up front (mode: managed), and the first click already confirms (round-3 review, P1-2)", async ({
     page,
   }) => {
     await openComposio(page);
@@ -156,22 +156,59 @@ test.describe("clearing the managed-route token", () => {
     const dialog = page.getByTestId("composio-clear-token-dialog");
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("heading", { name: "Disconnect Composio?" })).toBeVisible();
-    // The generic question — this UI has not yet been told anything depends
-    // on the token.
-    await expect(dialog).not.toContainText(IN_USE_ERROR);
+    // Named on the very first open — `status.mode` already reads "managed",
+    // and that alone is the host's own guard rule, so there is nothing to
+    // wait for a refusal to learn.
+    await expect(dialog).toContainText("Composio uses this key.");
 
     const confirm = page.getByTestId("composio-clear-token-confirm");
     await expect(confirm).toHaveText(/Disconnect Composio/);
 
-    // First click: no `confirmInUse` yet, so the stub answers 409. The
-    // dialog must stay open and now show the host's own reason rather than a
-    // generic error toast.
+    const confirmed = page.waitForRequest(
+      (request) =>
+        isComposioToken(new URL(request.url())) &&
+        request.method() === "PUT" &&
+        (request.postDataJSON() as { confirmInUse?: boolean }).confirmInUse === true,
+    );
     await confirm.click();
+    await confirmed;
+    await expect(dialog).toBeHidden({ timeout: 10_000 });
+  });
+
+  test("a stale read: mode said nothing at open, still gets a 409, and the confirmed retry succeeds", async ({
+    page,
+  }) => {
+    // Overrides the `beforeEach` stub with a status that does NOT yet say
+    // this key is in use — the stale-UI case, where a switch to managed mode
+    // happened after this page's own status read.
+    await stubStatus(page, { ...managedStatus(), mode: "byok" });
+
+    await openComposio(page);
+
+    await page.getByTestId("composio-row-managed-remove").click();
+
+    const dialog = page.getByTestId("composio-clear-token-dialog");
+    await expect(dialog).toBeVisible();
+    // Nothing shown as used yet — this read says mode is byok, not managed.
+    await expect(dialog).not.toContainText("Composio uses this key.");
+    await expect(dialog).not.toContainText(IN_USE_ERROR);
+
+    const confirm = page.getByTestId("composio-clear-token-confirm");
+
+    // First click: unconfirmed, since nothing here said the token was in use.
+    // The stub still answers 409 (the real backend's own check is
+    // authoritative regardless of what any GET read said), and the dialog
+    // reopens naming it.
+    const firstAttempt = page.waitForRequest(
+      (request) => isComposioToken(new URL(request.url())) && request.method() === "PUT",
+    );
+    await confirm.click();
+    const first = await firstAttempt;
+    expect((first.postDataJSON() as { confirmInUse?: boolean }).confirmInUse).not.toBe(true);
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText(IN_USE_ERROR);
 
-    // Second click, now informed: this one sends `confirmInUse: true`, the
-    // stub answers 200, and the dialog closes.
+    // Second click, now informed: sends `confirmInUse: true` and succeeds.
     const confirmed = page.waitForRequest(
       (request) =>
         isComposioToken(new URL(request.url())) &&
@@ -212,7 +249,7 @@ test.describe("switching Composio back to the managed route", () => {
     );
   });
 
-  test("opens a confirm dialog naming the action, and sends confirmInUse on the informed retry", async ({
+  test("shows the key is in use up front (mode: byok), and the first click already confirms (round-3 review, P1-2)", async ({
     page,
   }) => {
     await openComposio(page);
@@ -229,18 +266,14 @@ test.describe("switching Composio back to the managed route", () => {
         name: "Switch Composio to the TinyHumans-managed route?",
       }),
     ).toBeVisible();
-    await expect(dialog).not.toContainText(IN_USE_ERROR);
+    // Named on the very first open — `status.mode` already reads "byok".
+    await expect(dialog).toContainText("Composio uses this key.");
 
     const confirm = page.getByTestId("composio-use-managed-confirm");
 
-    // First click: unconfirmed, refused, dialog reopens with the host's own
-    // reason.
-    await confirm.click();
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(IN_USE_ERROR);
-
-    // Second click sends `confirmInUse: true` and an empty `apiKey` — the
-    // clear-and-switch-back this route always performs together.
+    // The first click already sends `confirmInUse: true` and an empty
+    // `apiKey` — the clear-and-switch-back this route always performs
+    // together.
     const confirmed = page.waitForRequest((request) => {
       if (!isComposioApiKey(new URL(request.url())) || request.method() !== "PUT") {
         return false;

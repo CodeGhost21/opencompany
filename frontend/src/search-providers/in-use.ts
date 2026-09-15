@@ -17,7 +17,7 @@
 // one small, already-tiny piece of logic. `SearchView.tsx` calls these; it
 // does not reimplement the decisions inline.
 
-import { ApiError } from "@/api/types";
+import { ApiError, type UsedBy } from "@/api/types";
 
 /**
  * Whether a caught error is the in-use-guards refusal (409 `in_use`) a
@@ -31,17 +31,18 @@ export function isInUseRefusal(err: unknown): err is ApiError {
 /** What a guarded confirm dialog does after an attempt settles. */
 export type GuardedOutcome =
   | { action: "close" }
-  | { action: "reopen"; message: string };
+  | { action: "reopen"; message: string; usedBy?: UsedBy };
 
 /**
  * What a guarded confirm dialog should do with the result of one attempt.
  *
- * Every guarded dialog on this page opens with a plain, generic question — the
- * client does not know in advance what depends on the row, and computing that
- * eagerly would cost every open a round trip to find out something that is
- * usually "nothing" (in-use-guards.md §1: the field is omitted when nothing
- * uses the thing). So the first confirm click sends the mutation WITHOUT
- * `confirmInUse`, and:
+ * Round-3 review, P1-2: a guarded dialog now shows the row's own `usedBy`
+ * on open (read fresh, from the already-loaded list or a re-fetch — see
+ * `SearchView.tsx`'s `openConfirm`), so `alreadyConfirmed` is no longer only
+ * "did a prior 409 already inform this dialog" — it is "did the operator see
+ * a reason before clicking", which the FIRST click can already satisfy. The
+ * `409` path below still exists for a stale read: the row changed between the
+ * dialog opening and the click landing.
  *
  * - it lands (nothing was in use, or `alreadyConfirmed` was already true) →
  *   `"close"`;
@@ -50,8 +51,8 @@ export type GuardedOutcome =
  *   never a generic toast (in-use-guards.md's own UI convention: always the
  *   host's message);
  * - it is refused `409 in_use` and this attempt had not yet confirmed →
- *   `"reopen"` with the host's own sentence, so a SECOND, now-informed click
- *   can resend with `confirmInUse: true`.
+ *   `"reopen"` with the host's own sentence and its own fresher `usedBy`, so a
+ *   SECOND, now-informed click can resend with `confirmInUse: true`.
  *
  * `alreadyConfirmed` distinguishes a stale-UI first attempt from a confirmed
  * attempt that still failed: once a dialog is showing a host-provided notice,
@@ -65,7 +66,7 @@ export function guardedOutcome(
   alreadyConfirmed: boolean,
 ): GuardedOutcome {
   if (!alreadyConfirmed && isInUseRefusal(err)) {
-    return { action: "reopen", message: err.message };
+    return { action: "reopen", message: err.message, usedBy: err.usedBy };
   }
   return { action: "close" };
 }

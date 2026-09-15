@@ -1546,21 +1546,21 @@ async fn resolve_choice(
             // only if a caller resolves a pin without going through 3a's
             // `TenantProvider::resolve` pin check, which runs first there and
             // produces `copy::pair_broken` (with the real agent name) before
-            // this branch is ever reached in practice.
-            ChoiceSource::Pin => format!(
-                "this agent is set to `{slug}`, which this company does not have. \
-                 Choose another provider in Team → the agent → Model."
-            ),
+            // this branch is ever reached in practice. Round-3a review P1-1:
+            // still routed through `copy::pair_broken` rather than a
+            // hand-written sentence, with a neutral display name in its
+            // place — the shared X9 wording and settings path, just without
+            // an agent to name.
+            ChoiceSource::Pin => copy::pair_broken("this agent", slug, copy::ProviderGone::Removed),
             ChoiceSource::Default => copy::default_broken(slug, copy::ProviderGone::Removed),
         }));
     };
     if !provider.enabled {
         let label = provider.label.as_str();
         return Err(OpenCompanyError::Config(match source {
-            ChoiceSource::Pin => format!(
-                "this agent is set to `{label}`, which is switched off. Switch it back on \
-                 in Settings → Inference, or choose another provider in Team → the agent → Model."
-            ),
+            ChoiceSource::Pin => {
+                copy::pair_broken("this agent", label, copy::ProviderGone::TurnedOff)
+            }
             ChoiceSource::Default => copy::default_broken(label, copy::ProviderGone::TurnedOff),
         }));
     }
@@ -1681,6 +1681,39 @@ pub async fn resolve_effective_for_tier(
         resolve::Resolution::Primary => {
             let primary =
                 if scope.is_default || !harness_configures_itself(company, secrets, scope).await? {
+                    // Round-3a review P1-4: a bare-slug default (the only shape
+                    // still standing here — a `Full` default is caught in
+                    // `resolve_for_turn` step 3 whether or not it is broken, so
+                    // it never reaches this function) names a provider on
+                    // purpose. Failing it closed, rather than handing the turn
+                    // to `resolve::primary`'s "first enabled" fallback, is F6:
+                    // an explicit choice that cannot be honoured is an error,
+                    // never a silent substitution for a different account.
+                    // `Unset` (nobody has named a default at all) is the one
+                    // case that legitimately still falls through to
+                    // `decl_for_primary`'s positional pick.
+                    if let store::DefaultChoice::ProviderOnly(slug) =
+                        store::load_default(company, secrets).await?
+                    {
+                        let slug = slug.trim();
+                        if !slug.is_empty() {
+                            match providers.iter().find(|p| p.slug == slug) {
+                                None => {
+                                    return Err(OpenCompanyError::Config(copy::default_broken(
+                                        slug,
+                                        copy::ProviderGone::Removed,
+                                    )));
+                                }
+                                Some(p) if !p.enabled => {
+                                    return Err(OpenCompanyError::Config(copy::default_broken(
+                                        p.label.as_str(),
+                                        copy::ProviderGone::TurnedOff,
+                                    )));
+                                }
+                                Some(_) => {}
+                            }
+                        }
+                    }
                     decl_for_primary(company, secrets, &providers).await?
                 } else {
                     None
@@ -3495,6 +3528,74 @@ mod tests {
             model_on_the_wire(&decl, "reasoning-v1").is_err(),
             "another row's pinned model must not leak onto this one"
         );
+    }
+
+    /// Round-3a review P1-4: a bare-slug default naming a provider this
+    /// company no longer has must fail the turn closed — never silently
+    /// hand it to `resolve::primary`'s first-enabled fallback, which is a
+    /// different account than the one the operator named.
+    #[tokio::test]
+    async fn a_default_naming_a_deleted_provider_fails_the_turn_closed() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        store::set_default_slug(&company, &secrets, "gone")
+            .await
+            .unwrap();
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a default naming a provider this company does not have must fail closed");
+        let text = err.to_string();
+        assert!(text.contains("gone"), "{text}");
+        assert!(text.contains("removed"), "{text}");
+    }
+
+    /// Same decision, for a default naming a provider that still exists but
+    /// is switched off.
+    #[tokio::test]
+    async fn a_default_naming_a_switched_off_provider_fails_the_turn_closed() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        store::put_provider(
+            &company,
+            &secrets,
+            store::ProviderDraft {
+                slug: "second".into(),
+                label: "Second".into(),
+                kind: "openai_compatible".into(),
+                base_url: "https://second.example/v1".into(),
+                models: BTreeMap::new(),
+                enabled: false,
+            },
+        )
+        .await
+        .unwrap();
+        store::set_default_slug(&company, &secrets, "second")
+            .await
+            .unwrap();
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a default naming a switched-off provider must fail closed, not fall back");
+        let text = err.to_string();
+        assert!(text.contains("Second"), "{text}");
+        assert!(text.contains("turned off"), "{text}");
     }
 
     #[tokio::test]

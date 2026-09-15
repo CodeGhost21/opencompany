@@ -14,6 +14,7 @@ import {
   type SearchStatus,
 } from "@/api/search";
 import type { OpenCompanyClient } from "@/api/client";
+import type { UsedBy } from "@/api/types";
 import { AdminOnlyNotice } from "@/components/admin-only-notice";
 import { PageHeader } from "@/components/page-header";
 import { useCanManage } from "@/hooks/use-can-manage";
@@ -45,7 +46,8 @@ import {
   describeTest,
   type TestState,
 } from "@/search-providers/classify";
-import { confirmInUseFor, guardedOutcome } from "@/search-providers/in-use";
+import { guardedOutcome } from "@/search-providers/in-use";
+import { hasUsedBy } from "@/lib/used-by";
 import type {
   ConfirmTarget,
   ProbeClass,
@@ -112,10 +114,15 @@ export function SearchView({ client, company }: Props) {
   // current `confirm` target (`docs/key-reworks/in-use-guards.md` §2/§3):
   // `null` until a guarded attempt is refused, at which point the dialog
   // re-renders showing this instead of its generic question, and the next
-  // attempt sends `confirmInUse: true` (`@/search-providers/in-use`). Reset
-  // whenever the dialog closes, so a later confirm target opens generic
-  // again rather than showing a stale reason from an unrelated row.
+  // attempt sends `confirmInUse: true`. Reset whenever the dialog closes, so
+  // a later confirm target opens generic again rather than showing a stale
+  // reason from an unrelated row.
   const [confirmNotice, setConfirmNotice] = useState<string | null>(null);
+  // The `usedBy` that came with `confirmNotice`'s refusal, when the row
+  // changed between the dialog opening and the click landing (round-3
+  // review, P1-2) — fresher than whatever `openConfirm` read at open time,
+  // so it wins in `shownUsedBy` below.
+  const [confirmRefusalUsedBy, setConfirmRefusalUsedBy] = useState<UsedBy | undefined>(undefined);
   const [tests, setTests] = useState<Record<string, TestState>>({});
   // What the last check learnt about each provider, keyed by slug. Sourced from
   // things that already happen — the connect probe and the manual Test — rather
@@ -236,48 +243,68 @@ export function SearchView({ client, company }: Props) {
   );
 
   /**
+   * Opens a confirm dialog on a fresh read (round-3 review, P1-2 — the same
+   * rule as the LLM page's `openConfirm`): the target's `usedBy` seeds from
+   * whatever this page already has loaded, so the dialog shows something
+   * immediately, and a re-fetch runs in the background so `shownUsedBy` below
+   * has the live answer by the time the operator actually clicks.
+   */
+  const openConfirm = useCallback(
+    (target: ConfirmTarget) => {
+      setConfirmNotice(null);
+      setConfirmRefusalUsedBy(undefined);
+      setConfirm(target);
+      void load();
+    },
+    [load],
+  );
+
+  /**
    * Runs the confirm dialog's pending action, which the host may refuse with
-   * `409 in_use` on a first, uninformed attempt
-   * (`docs/key-reworks/in-use-guards.md` §2). One implementation shared by
-   * every kind `AlertDialog` in this file can confirm — the toggle, remove,
-   * remove-key and disconnect-all targets — so the "reopen with the host's
-   * reason, then resend confirmed" state machine cannot drift between them;
-   * the decisions themselves live in `@/search-providers/in-use`, which is
-   * what is actually under test. `disconnect-all` is never refused by the
+   * `409 in_use` when `confirmInUse` undersells a row that changed underneath
+   * the dialog (`docs/key-reworks/in-use-guards.md` §2). One implementation
+   * shared by every kind `AlertDialog` in this file can confirm — the toggle,
+   * remove, remove-key and disconnect-all targets — so the "reopen with the
+   * host's reason, then resend confirmed" state machine cannot drift between
+   * them; the decisions themselves live in `@/search-providers/in-use`, which
+   * is what is actually under test. `disconnect-all` is never refused by the
    * host today (it carries no guard of its own — see `docs/key-reworks/
    * in-use-guards.md` §1's table, which files search's guard under single-row
    * removal/disable and the default, not the bulk clear), but routing it
    * through the same function costs nothing and keeps one code path rather
    * than two.
    *
-   * `work` always receives `confirmInUse` — `true` exactly when this attempt
-   * follows a prior refusal on the SAME open dialog (`confirmInUseFor`).
+   * `confirmInUse` is the caller's own `confirmInUseNow` at click time — sent
+   * only when the dialog actually showed usage, never blind.
    */
   const runGuarded = useCallback(
     async (
       slug: string,
       done: string,
+      confirmInUse: boolean,
       work: (confirmInUse: boolean) => Promise<SearchStatus>,
       /** Whether success makes this row's last probe result meaningless. */
       changesConfiguration: boolean,
     ) => {
       setBusySlug(slug);
-      const alreadyConfirmed = confirmInUseFor(confirmNotice);
       try {
-        const next = await work(alreadyConfirmed);
+        const next = await work(confirmInUse);
         setStatus(next);
         if (changesConfiguration) forgetHealth(slug === "__all__" ? undefined : slug);
         toast.success(done);
         setConfirm(null);
         setConfirmNotice(null);
+        setConfirmRefusalUsedBy(undefined);
       } catch (err) {
-        const outcome = guardedOutcome(err, alreadyConfirmed);
+        const outcome = guardedOutcome(err, confirmInUse);
         if (outcome.action === "reopen") {
           setConfirmNotice(outcome.message);
+          setConfirmRefusalUsedBy(outcome.usedBy);
           return;
         }
         setConfirm(null);
         setConfirmNotice(null);
+        setConfirmRefusalUsedBy(undefined);
         toast.error(reason(err));
       } finally {
         setBusySlug(null);
@@ -451,6 +478,23 @@ export function SearchView({ client, company }: Props) {
   // report that anything is wrong at all.
   const providers = status.providers ?? [];
 
+  /**
+   * What the dialog currently shows as depending on the target — the
+   * refusal's own fresher answer once one has landed, else the live row (or,
+   * for `disconnect-all`, whether any row holds the search default) from the
+   * latest status read, else whatever `openConfirm` captured at click time.
+   */
+  const shownUsedBy = ((): UsedBy | undefined => {
+    if (confirmRefusalUsedBy) return confirmRefusalUsedBy;
+    if (!confirm) return undefined;
+    if (confirm.kind === "disconnect-all") {
+      return providers.some((p) => p.usedBy?.default) ? { default: true } : confirm.usedBy;
+    }
+    return providers.find((p) => p.slug === confirm.slug)?.usedBy ?? confirm.usedBy;
+  })();
+  /** Sent only when the dialog actually showed usage — never blind (round-3 review, P1-2). */
+  const confirmInUseNow = hasUsedBy(shownUsedBy);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="search-view">
       {header}
@@ -544,11 +588,12 @@ export function SearchView({ client, company }: Props) {
               // on the row (`docs/key-reworks/in-use-guards.md`). The Switch
               // itself does not move until the dialog is confirmed.
               onToggle={(provider, enabled) =>
-                setConfirm({
+                openConfirm({
                   kind: "toggle",
                   slug: provider.slug,
                   label: provider.label,
                   enabling: enabled,
+                  usedBy: provider.usedBy,
                 })
               }
               onTest={(provider) => void onTest(provider)}
@@ -560,10 +605,11 @@ export function SearchView({ client, company }: Props) {
               // never shown back, so an operator who clears the wrong one cannot
               // retype it from the screen.
               onRemoveKey={(provider) =>
-                setConfirm({
+                openConfirm({
                   kind: "remove-key",
                   slug: provider.slug,
                   label: provider.label,
+                  usedBy: provider.usedBy,
                 })
               }
               onEditEndpoint={(provider) =>
@@ -581,10 +627,11 @@ export function SearchView({ client, company }: Props) {
                 )
               }
               onRemove={(provider) =>
-                setConfirm({
+                openConfirm({
                   kind: "remove",
                   slug: provider.slug,
                   label: provider.label,
+                  usedBy: provider.usedBy,
                 })
               }
             />
@@ -608,7 +655,11 @@ export function SearchView({ client, company }: Props) {
             size="sm"
             data-testid="search-disconnect-all"
             onClick={() =>
-              setConfirm({ kind: "disconnect-all", label: "every provider" })
+              openConfirm({
+                kind: "disconnect-all",
+                label: "every provider",
+                usedBy: providers.some((p) => p.usedBy?.default) ? { default: true } : undefined,
+              })
             }
           >
             Disconnect all providers
@@ -631,6 +682,7 @@ export function SearchView({ client, company }: Props) {
           if (open || busySlug !== null) return;
           setConfirm(null);
           setConfirmNotice(null);
+          setConfirmRefusalUsedBy(undefined);
         }}
       >
         <AlertDialogContent data-testid="search-confirm">
@@ -639,7 +691,7 @@ export function SearchView({ client, company }: Props) {
               {confirmCopy(confirm, confirmNotice).title}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {confirmCopy(confirm, confirmNotice).body}
+              {confirmCopy(confirm ? { ...confirm, usedBy: shownUsedBy } : null, confirmNotice).body}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -663,13 +715,15 @@ export function SearchView({ client, company }: Props) {
                   void runGuarded(
                     "__all__",
                     "Disconnected. Searches go through the included account.",
-                    () => clearSearch(client, company),
+                    confirmInUseNow,
+                    (confirmInUse) => clearSearch(client, company, confirmInUse),
                     true,
                   );
                 } else if (pending.kind === "remove") {
                   void runGuarded(
                     pending.slug,
                     `${pending.label} removed.`,
+                    confirmInUseNow,
                     (confirmInUse) =>
                       removeSearchProvider(
                         client,
@@ -683,6 +737,7 @@ export function SearchView({ client, company }: Props) {
                   void runGuarded(
                     pending.slug,
                     `${pending.label} key removed.`,
+                    confirmInUseNow,
                     (confirmInUse) =>
                       replaceSearchProviderKey(
                         client,
@@ -699,6 +754,7 @@ export function SearchView({ client, company }: Props) {
                     pending.enabling
                       ? `${pending.label} enabled.`
                       : `${pending.label} disabled.`,
+                    confirmInUseNow,
                     (confirmInUse) =>
                       updateSearchProvider(
                         client,

@@ -1234,7 +1234,14 @@ pub fn build_agent(
     let chat_model: Arc<dyn HarnessModel> = match &pin {
         Some(choice) => deps
             .provider
-            .pinned(&manifest_agent.id, choice)
+            .pinned(
+                &manifest_agent.id,
+                manifest_agent
+                    .name
+                    .as_deref()
+                    .unwrap_or(manifest_agent.role.as_str()),
+                choice,
+            )
             .unwrap_or_else(|| {
                 tracing::warn!(
                     agent = %manifest_agent.id,
