@@ -287,7 +287,7 @@ test.afterEach(async ({ request }, testInfo) => {
     .catch((e) => e);
   log(`patch -> ${typeof a?.status === "function" ? a.status() : String(a)}`);
   const b = await request.delete("/api/v1/company/inference/providers/e2e-pair?confirmInUse=true").catch((e) => e);
-  log(`delete -> ${typeof b?.status === "function" ? `${b.status()} ${(await b.text()).slice(0,120)}` : String(b)}`);
+  log(`delete -> ${typeof b?.status === "function" ? `${b.status()} ${(await b.text())}` : String(b)}`);
 });
 
 test("an admin pins an agent to a provider and model, then clears it (keys rework, issue #2306, slice 3b)", async ({
