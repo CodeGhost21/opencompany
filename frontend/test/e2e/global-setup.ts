@@ -12,6 +12,7 @@ import {
   identityFailure,
   readHomeInstanceId,
 } from "./host-identity";
+import { LIVE_BRAIN, MOCK_BRAIN_BIND } from "./capabilities";
 
 const ADMIN_EMAIL = "harness-e2e@tinyhumans.ai";
 const REQUEST_PATH = "/api/v1/company/auth/request";
@@ -108,9 +109,97 @@ export default async function globalSetup(config: FullConfig) {
       );
     }
     await context.storageState({ path: storageState });
+    // Not gated on `MANAGED_HOST_HOME !== undefined` (this run bringing the
+    // host up itself): the caller-managed mode (`PW_BASE_URL` + `PW_LIVE_BRAIN=1`,
+    // `playwright.config.ts`'s documented "against a host you brought
+    // yourself, the flag still enables the four specs but the fixtures are
+    // yours to start too") is on the same shared, mutable `e2e_harness`
+    // company and hits the identical X1/X14 poisoning this guards against —
+    // a caller who started `mock-brain.mjs` on the documented default address
+    // is exactly who this is for. See `connectAnchorProvider`'s own doc
+    // comment for the mechanism.
+    if (LIVE_BRAIN) {
+      await connectAnchorProvider(context);
+    }
   } finally {
     await context.dispose();
   }
+}
+
+/**
+ * Connects one permanent, reachable provider before any spec runs, on the
+ * live-brain lane only.
+ *
+ * Decision D-first-default (X1, keys rework issue #2306,
+ * `server/ops/inference/providers.rs`): the *first* provider a company ever
+ * connects becomes its default automatically, with no opt-out on the write
+ * path — `POST …/inference/providers` claims an `Unset` default whatever
+ * `make_default` says. Decision D-never-clear-default (X14): deleting,
+ * disabling, or clearing the key of *that* provider later never rewrites the
+ * default marker — `resolve_for_turn` then fails every later turn closed,
+ * "The company default uses …, which is removed."
+ *
+ * `companies/e2e_harness` starts with an `Unset` default (no `[inference]`
+ * section), so whichever spec happens to run first and connects a provider
+ * claims it. On the live-brain lane that used to be
+ * `agent-detail.spec.ts`'s pin test, which points its own provider at the
+ * discard port and deletes it in an `afterEach` — after which every later
+ * spec in the run, and not just that file's, failed every real agent turn on
+ * the stale default. `frontend/test/e2e/shared-inference.ts` documents the
+ * dead end from the test side: there is no route today that clears or
+ * re-points an already-set default, only ones that refuse to.
+ *
+ * The fix here does not touch that Rust invariant — X14 has its own test
+ * (`a_delete_disable_or_key_clear_never_rewrites_the_stored_default_marker`)
+ * and stays exactly as strict. It wins the race instead: this runs before
+ * `webServer`'s first spec, so it is unconditionally the *first* provider
+ * this company ever connects, and it never disconnects — no spec's cleanup
+ * list names its slug. It points at `mock-brain.mjs`, already up by the time
+ * this runs (`playwright.config.ts`'s `webServer` array starts the fixtures
+ * ahead of the host), so it stays healthy for the rest of the run and every
+ * later spec's default-routed turn reaches a real, scripted answer instead of
+ * a closed door.
+ *
+ * Default-feature `Console E2E` (no `LIVE_BRAIN`) does not need this: without
+ * `--features openhuman` the harness that calls `resolve_for_turn` for a real
+ * turn is not compiled in, so a stale default there has no later spec to
+ * poison — confirmed by CI, where that lane's only failures were the
+ * provider-page specs themselves, never a downstream one.
+ */
+async function connectAnchorProvider(context: APIRequestContext): Promise<void> {
+  const response = await context.post("/api/v1/company/inference/providers", {
+    data: {
+      kind: "custom",
+      label: "E2E Anchor Default",
+      baseUrl: `http://${MOCK_BRAIN_BIND}/v1`,
+      key: "pw-e2e-anchor",
+      model: "e2e-anchor-model",
+    },
+  });
+  if (response.ok()) return;
+  const body = await response.text().catch(() => "<body could not be read>");
+  // Idempotent across a repeat run against a reused data root (`reuseExistingServer`
+  // outside CI, or a rerun with `--last-failed`) — this bootstrap has no more
+  // useful action to take than a plain add either way, the identity check
+  // above already guarantees the response is this run's own host, and the
+  // anchor from the earlier run is exactly as good as a fresh one.
+  //
+  // NOT a `409`: `add_provider` maps a taken slug through `check_slug` to
+  // `OpenCompanyError::InvalidRequest`, which `server/error.rs` renders as a
+  // plain `400` — matched on the message `check_slug`'s `SlugError::Taken`
+  // produces (`store.rs`), not the status code, so a change to the wording
+  // fails this loudly (an error, not a silently-wrong idempotency check)
+  // rather than start throwing on every repeat run again.
+  if (response.status() === 400 && body.includes("already has a provider with that name")) {
+    return;
+  }
+  throw new Error(
+    `[e2e global-setup] POST /api/v1/company/inference/providers → ${response.status()} ` +
+      `${response.statusText()}; body: ${body || "<empty>"}\n` +
+      "Connecting the permanent anchor default failed, so every later spec's " +
+      "agent turn would resolve through whatever the first test-created " +
+      "provider leaves behind instead — see connectAnchorProvider's doc comment.",
+  );
 }
 
 /**
