@@ -41,8 +41,8 @@ RUN apt-get update \
 # `build.rs` embeds the shipped company agents and `src/desktop.rs` (both under
 # `crates/opencompany-core/`) embeds each
 # preset manifest, so the complete companies tree remains a real build input;
-# it also embeds the global baseline (`companies/_globals/`) and the shared skills library
-# (`skills/`), which a hosted tenant has no checkout to read from disk.
+# it also embeds the global baseline (`companies/_globals/`, its skills
+# included), which a hosted tenant has no checkout to read from disk.
 # `vendor/` backs the path dependencies and Cargo patch table.
 #
 # The root `Cargo.toml` is a virtual workspace whose members are the manifests
@@ -55,7 +55,6 @@ COPY crates/opencompany-core ./crates/opencompany-core
 COPY crates/opencompany-tui ./crates/opencompany-tui
 COPY vendor ./vendor
 COPY companies ./companies
-COPY skills ./skills
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
@@ -160,13 +159,12 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /out/opencompany /usr/local/bin/opencompany
-# The company definitions the switch chooses from at runtime.
+# The company definitions the switch chooses from at runtime. They are also
+# the skill registry: the host derives `skills_root` from the loaded company's
+# directory (`companies/<name>` → `companies/`) and lists every bundle's
+# `skills/`, so the console's registry tab and server-authoritative installs
+# come from this tree.
 COPY companies ./companies
-# The shared skill library. The host derives `skills_root` from the loaded
-# company's directory (`companies/<name>` → `<repo>/skills`), so without this
-# the registry resolves to a missing directory and serves nothing: the console's
-# registry tab would be empty and installs would fall back to client metadata.
-COPY skills ./skills
 # The built operator console, served at `/` by the host. World-readable so the
 # unprivileged runtime user (uid 10001 under the platform's securityContext)
 # can read it even with a read-only root filesystem.

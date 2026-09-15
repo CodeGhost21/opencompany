@@ -39,7 +39,6 @@ on:
       - 'crates/opencompany-tui/**' # a workspace member the builder has to COPY
       - 'frontend/**'
       - 'companies/**'
-      - 'skills/**' # COPYed into the runtime image (Dockerfile) as the shared library
       - 'deploy/Dockerfile'
       - 'deploy/Dockerfile.dockerignore'
       - 'deploy/entrypoint.sh' # COPYed in, and the container's ENTRYPOINT

@@ -188,10 +188,11 @@ jobs:
   #
   # The `rust` filter is deliberately wide. It lists `companies/**` because
   # `build.rs` embeds every bundle's `agents/` directory and declares a
-  # `rerun-if-changed` on it, and `skills/**` because `app::types` and
-  # `server::ops::write_test` read that directory from `CARGO_MANIFEST_DIR` at
-  # test time. Neither is a Rust file and both change what the Rust lanes
-  # assert; a filter that only knew about `src/**` would skip the lane that
+  # `rerun-if-changed` on it, and because `app::types` and
+  # `server::ops::write_test` read every bundle's `skills/` from
+  # `CARGO_MANIFEST_DIR` at test time. None of that is a Rust file and all of
+  # it changes what the Rust lanes assert; a filter that only knew about
+  # `src/**` would skip the lane that
   # catches the break. When in doubt a path belongs in the filter — the cost of
   # a false positive is one lane that need not have run, and the cost of a false
   # negative is a green pull request that broke `main`.
@@ -250,8 +251,6 @@ jobs:
               # build.rs embeds every bundle's agents/ and the global baseline
               # at companies/_globals, and declares rerun-if-changed on them.
               - 'companies/**'
-              # Read relative to CARGO_MANIFEST_DIR at test time.
-              - 'skills/**'
               - 'vendor/**'
               - '.gitmodules'
             frontend:
