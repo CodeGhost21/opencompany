@@ -201,7 +201,7 @@ configure it, and goes to your own Sentry project rather than ours —
 | [`docs/repository-layout.md`](docs/repository-layout.md) | Where everything lives in the tree and what each package owns |
 | [`docs/spec/README.md`](docs/spec/README.md) | Architecture reference |
 | [`docs/gitbooks/developers/`](docs/gitbooks/developers/README.md) | Build, CLI, authoring companies, deployment, configuration |
-| [`qa/`](qa/README.md) | Checking a release against a deployed tenant |
+| [`scripts/qa/`](scripts/qa/README.md) | Checking a release against a deployed tenant |
 
 ## Contributing
 

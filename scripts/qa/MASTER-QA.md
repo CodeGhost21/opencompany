@@ -134,12 +134,12 @@ the run check to read `deliveries` was.
 An agent with browser access can run parts 1–3. Paste this:
 
 > You are running the OpenCompany release parity pass against `<TENANT URL>`,
-> which is rolled to commit `<SHA>`. Follow `qa/MASTER-QA.md` in the repo.
+> which is rolled to commit `<SHA>`. Follow `scripts/qa/MASTER-QA.md` in the repo.
 >
 > 1. Confirm the tenant is on `<SHA>` before anything else. If you cannot
 >    confirm it, stop and say so — a pass against a stale tenant is worse than
 >    no pass, because it reports fixed bugs as live.
-> 2. Sign in, open the console, paste `qa/oc-qa.js`, run `OCQA.read()`. Report
+> 2. Sign in, open the console, paste `scripts/qa/oc-qa.js`, run `OCQA.read()`. Report
 >    every row, verdict beside the value it judged. Do not summarise away the
 >    values.
 > 3. Run `OCQA.probe()`. This spends real tokens and writes to the tenant, so

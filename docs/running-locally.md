@@ -136,5 +136,5 @@ The same two images deploy anywhere Docker runs:
 | AWS Fargate | [`deploy/aws-ecs-task-definition.json`](../deploy/aws-ecs-task-definition.json) |
 | Any Docker host | [`deploy/README.md`](../deploy/README.md) |
 
-Checking a release against a deployed tenant is [`qa/`](../qa/README.md): a
+Checking a release against a deployed tenant is [`scripts/qa/`](../scripts/qa/README.md): a
 zero-dependency console script and the checklist that goes with it.

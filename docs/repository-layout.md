@@ -51,7 +51,7 @@ frontend/               Company-agnostic operator console (Vite + React)
 docs/gitbooks/          The published GitBook: overview, get started, developer guide
 docs/spec/              Architecture reference
 docs/modules/           Per-package design docs
-qa/                     Release checks against a deployed tenant
+scripts/qa/             Release checks against a deployed tenant
 vendor/openhuman/       OpenHuman git submodule
 vendor/openhuman/vendor/tinyagents/
                         TinyAgents inherited from OpenHuman
