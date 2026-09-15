@@ -12,6 +12,7 @@ import {
   identityFailure,
   readHomeInstanceId,
 } from "./host-identity";
+import { LIVE_BRAIN, MOCK_BRAIN_BIND } from "./capabilities";
 
 const ADMIN_EMAIL = "harness-e2e@tinyhumans.ai";
 const REQUEST_PATH = "/api/v1/company/auth/request";
