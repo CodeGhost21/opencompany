@@ -273,18 +273,20 @@ struct ProbeResultDto {
     /// told no after a round trip. Every kind asks for a model now (2c), so
     /// this is always worth sending when the endpoint published anything.
     ///
-    /// Capped, because a catalog can run to hundreds of ids and this rides on
-    /// every probe response. The console offers free text alongside the list.
+    /// Sorted and deduplicated, never truncated below what the paged read
+    /// returned (round-3a review P2-5: a 500-id cap used to filter a large
+    /// catalog by name, which is exactly what this feature promises never to
+    /// do). The console offers free text alongside the list regardless.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     models: Vec<String>,
 }
 
-// `catalogue_offer` (the published ids to offer, sorted, deduplicated and
-// capped) moved to `paged_catalog::catalogue_offer` (keys rework #2306, P3-7
-// review): the account-key fan-out (`company::company_key::fan_out`) needs
-// the same "sort, dedupe, cap" this probe route decided, and `company` must
-// never import from `server` — so the one place that decides it lives at a
-// layer both already reach.
+// `catalogue_offer` (the published ids to offer, sorted and deduplicated —
+// never capped, round-3a review P2-5) moved to `paged_catalog::catalogue_offer`
+// (keys rework #2306, P3-7 review): the account-key fan-out
+// (`company::company_key::fan_out`) needs the same "sort, dedupe" this probe
+// route decided, and `company` must never import from `server` — so the one
+// place that decides it lives at a layer both already reach.
 
 /// What `POST …/providers/{slug}/test` may be asked.
 #[derive(Debug, Default, Deserialize)]
