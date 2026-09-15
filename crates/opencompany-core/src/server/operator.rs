@@ -1641,10 +1641,41 @@ fn project_event_for_viewer(
             if !is_admin && agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR {
                 return None;
             }
+            // An episode's closing row is the host summarising a tally whose
+            // inputs are the turns already on screen, and `history_for_desk`
+            // drops it for that reason: rendered as a message it reads as a
+            // *teammate* in a channel where no such teammate exists and none
+            // can — the id is hyphenated precisely so no roster id can equal it.
+            //
+            // Dropped from this projection, never from the journal: the next
+            // episode still folds it as context, the memory note keeps the long
+            // form, and the chat POST still returns it to its caller. Live said
+            // otherwise until now, so a room that settled showed a sixth
+            // "speaker" that vanished on refresh.
+            //
+            // `HIVE_FAILURE_AUTHOR` is deliberately NOT dropped, here as there:
+            // the turn it describes does not exist, so there is no gap for a
+            // reader to notice and nothing else records that a seat was asked
+            // and could not answer.
+            if agent_id == crate::hivemind::HIVE_REPORT_AUTHOR {
+                return None;
+            }
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
-            o["text"] = json!(text);
+            // **The same rewrite the reload does.** A room's grammar — `!move`,
+            // `#topic`, `^N` — is addressed to the fold, and the journal keeps
+            // it so the room can still count itself; only what the operator
+            // reads is rewritten.
+            //
+            // `readable_responses` already did this for a reply the POST hands
+            // back, but a deliberating desk hands nothing back: `EpisodeDriver`
+            // journals every turn itself, so an episode's turns reach a watching
+            // console through *this* frame and never through that one. The one
+            // path that has grammar to clean was the one path not cleaning it,
+            // and the divergence read as `!support #topic ^16 …` live becoming
+            // plain prose on refresh — one message, two renderings.
+            o["text"] = json!(crate::server::chat_history::readable_moves(text.clone()));
             // Keys rework #2306, round-2 review KR-L2-03: re-classifies the
             // same bare X9 sentence `spawn_chat_turn` wrote into `text` for
             // exactly this class of failure. Omitted (reads as absent/false)
@@ -14573,6 +14604,135 @@ mode = "full"
                 { "text": "@everyone", "offset": 5, "label": "everyone", "mine": true, "quiet": true },
             ])
         );
+    }
+
+    /// **A deliberating turn must read live the way it reads after a reload.**
+    ///
+    /// `readable_responses` already cleaned the grammar off a reply the POST
+    /// hands back, and `a_live_reply_reads_as_the_reloaded_one_will` pins that.
+    /// But a deliberating desk hands nothing back — `EpisodeDriver` journals
+    /// every turn itself — so an episode's turns reach a watching console
+    /// through this frame and never through that one. The one path that has
+    /// grammar to clean was the only path not cleaning it.
+    ///
+    /// Reproduced live on `companies/retail_co`: the room's turns rendered as
+    /// `!evidence #hi-this ^10 order #W7678072 is delivered…` while the feed was
+    /// open, and as plain prose after a refresh — one message, two renderings.
+    #[test]
+    fn a_live_deliberation_turn_reads_as_the_reloaded_one_will() {
+        let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "returns".into(),
+            agent_id: "refunds".into(),
+            text: "!support #kettle ^16 the swap is the customer's first preference".into(),
+            steps: Vec::new(),
+        });
+        let value = super::project_event_for_viewer(
+            &stored,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("agent_reply is an attention signal");
+
+        assert_eq!(
+            value["text"], "the swap is the customer's first preference",
+            "the room's grammar is addressed to the fold, not to the operator: {value}"
+        );
+    }
+
+    /// The other half: a reply carrying no move passes through untouched, which
+    /// is every reply on every desk that does not deliberate.
+    #[test]
+    fn a_live_reply_with_no_move_is_not_rewritten() {
+        let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "here is the summary you asked for".into(),
+            steps: Vec::new(),
+        });
+        let value = super::project_event_for_viewer(
+            &stored,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("agent_reply is an attention signal");
+
+        assert_eq!(value["text"], "here is the summary you asked for");
+    }
+
+    /// **A room's closing row is not a teammate, live either.**
+    ///
+    /// `history_for_desk` drops `HIVE_REPORT_AUTHOR` from the projection
+    /// because rendered as a message it reads as a teammate in a channel where
+    /// no such teammate exists. The live feed said otherwise, so a desk that
+    /// settled showed one more "speaker" than it had — and refreshing made it
+    /// vanish. Reproduced on `companies/retail_co`: six replies live, five
+    /// after reload.
+    #[test]
+    fn drops_the_rooms_closing_row_the_way_the_reload_does() {
+        let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "returns".into(),
+            agent_id: crate::hivemind::HIVE_REPORT_AUTHOR.into(),
+            text: "The desk settled after 5 turns.".into(),
+            steps: Vec::new(),
+        });
+        assert!(
+            super::project_event_for_viewer(
+                &stored,
+                &std::collections::HashMap::new(),
+                &Viewer::Operator,
+                true,
+            )
+            .is_none(),
+            "the closing row is the host's summary, not a teammate's turn"
+        );
+    }
+
+    /// The other half, and the reason the rule names one id rather than both:
+    /// a FAILED turn's notice must survive. The turn it describes does not
+    /// exist, so there is no gap for a reader to notice and nothing else
+    /// records that a seat was asked and could not answer.
+    #[test]
+    fn keeps_a_failed_turns_notice_live() {
+        let stored = stored(CompanyEvent::AgentReply {
+            audience: Vec::new(),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            parent: None,
+            task_id: None,
+            outputs: Vec::new(),
+            chat_id: "returns".into(),
+            agent_id: crate::hivemind::HIVE_FAILURE_AUTHOR.into(),
+            text: "@refunds's turn did not finish: the harness timed out".into(),
+            steps: Vec::new(),
+        });
+        let value = super::project_event_for_viewer(
+            &stored,
+            &std::collections::HashMap::new(),
+            &Viewer::Operator,
+            true,
+        )
+        .expect("a failure notice is the only record that a seat was asked");
+        assert_eq!(value["agentId"], crate::hivemind::HIVE_FAILURE_AUTHOR);
     }
 
     /// Issue #1781 review, Codex P1: `history_for_desk` already hides an
