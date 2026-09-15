@@ -898,6 +898,24 @@ async fn edit_agent(
         .unwrap_or_else(|| record.manifest.default_harness_id());
     let bound = record.manifest.harness_by_id(&resulting_harness_id);
 
+    // A provider with no model is never valid — it is a pin with nothing to
+    // pin *to*. Checked on the RESULTING pair, not the request: sending just
+    // `{"model": null}` to clear a legacy ACP hint has always been legal on
+    // its own and must stay legal, so only a `provider` that would be left
+    // standing with no `model` (this edit clearing `model` alone while a
+    // provider is already stored, or setting `provider` without `model`) is
+    // refused here. The reverse — `model` with no `provider` — is exactly
+    // the long-standing ACP case the `else` branch below still handles, and
+    // is never an error by itself.
+    if resulting_provider.is_some() && resulting_model.is_none() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "a provider needs a model to pin a teammate to (keys rework, issue #2306) — set \
+             both together, or clear the provider by sending it as `null`."
+                .to_string(),
+        ))
+        .into());
+    }
+
     if let Some(provider_slug) = &resulting_provider {
         // The built-in pair (keys rework, issue #2306, slice 3a): a company
         // provider list slug plus the one model it serves, instead of the ACP
