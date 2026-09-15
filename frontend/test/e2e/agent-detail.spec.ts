@@ -263,6 +263,28 @@ test("an agent defined in the console can be read back and edited", async ({ pag
   }
 });
 
+/**
+ * Undoes the pin test below, after it — even when it timed out.
+ *
+ * The `e2e-pair` row points at an unreachable endpoint, and the host resolves
+ * an unset workload through the *primary* provider — the first enabled one
+ * (`company::inference::resolve`). The whole `e2e:live` run shares one host
+ * and one company, so a row left connected here is not confined to this spec:
+ * it becomes the route every agent turn in every later spec file takes, and
+ * every one of them fails with `inference request failed …
+ * 127.0.0.1:9/v1/chat/completions`. That is what happened when this test
+ * timed out and its in-body `finally` never ran — Playwright abandons a
+ * timed-out test function, `finally` included. A hook runs regardless, with a
+ * request context that still works. Both calls are idempotent (a clear on an
+ * unpinned agent, a delete on a missing slug), so this needs no bookkeeping.
+ */
+test.afterEach(async ({ request }) => {
+  await request
+    .patch("/api/v1/company/team/researcher", { data: { provider: null, model: null } })
+    .catch(() => {});
+  await request.delete("/api/v1/company/inference/providers/e2e-pair").catch(() => {});
+});
+
 test("an admin pins an agent to a provider and model, then clears it (keys rework, issue #2306, slice 3b)", async ({
   page,
 }) => {
@@ -271,6 +293,8 @@ test("an admin pins an agent to a provider and model, then clears it (keys rewor
   // 2c). Nothing calls the endpoint in this test beyond setup: `UNREACHABLE`
   // means the draft probe and the row's own Test both fail, which is fine —
   // pinning an agent to a provider does not require it to answer.
+  //
+  // Cleanup is the `afterEach` above, not a `finally` here — see it for why.
   await page.request.post("/api/v1/company/inference/providers", {
     data: {
       kind: "custom",
@@ -281,7 +305,7 @@ test("an admin pins an agent to a provider and model, then clears it (keys rewor
     },
   });
 
-  try {
+  {
     await page.goto("/#/company/agent/researcher");
     await dismissOnboarding(page);
     await expect(page.getByTestId("agent-name")).toHaveText("Researcher", { timeout: 30_000 });
