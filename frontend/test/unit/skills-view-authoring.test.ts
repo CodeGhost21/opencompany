@@ -188,6 +188,25 @@ describe("SkillsView authoring", () => {
     expect(posted[0].body).not.toHaveProperty("body");
   });
 
+  it("opens empty after a successful add, rather than carrying the last skill's playbook", async () => {
+    const posted: Posted[] = [];
+    await openDialog(posted);
+
+    await type("skill-name", "Press Outreach");
+    await type("skill-desc", "Pitch journalists a story.");
+    await type("skill-body", "1. Shortlist five reporters.");
+    await click(submitButton());
+
+    // The view closes the dialog by flipping `open`, which never reaches
+    // `onOpenChange` — so a reset that only runs on dismiss never runs at all,
+    // and the next skill inherits a whole procedure nobody wrote for it.
+    await click(button("Add skill"));
+    for (const id of ["skill-name", "skill-desc", "skill-body"]) {
+      const field = document.body.querySelector<HTMLInputElement>(`#${id}`);
+      expect(field?.value).toBe("");
+    }
+  });
+
   it("keeps the submit button live with the playbook empty, and dead without a description", async () => {
     await openDialog([]);
 
