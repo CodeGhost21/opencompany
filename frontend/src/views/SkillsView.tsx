@@ -289,35 +289,22 @@ export function SkillsView({ client, company }: Props) {
           </Alert>
         )}
 
-
-        {/* Issue #569: what install / enable actually buy. A desk agent can list,
-            describe and read a skill and can never run one — deliberate, and
-            pinned by `dispatched_belt_excludes_every_deferred_family` — but this
-            screen's vocabulary is the vocabulary of switching a capability on,
-            so without saying it the operator learns the difference by asking a
+        {/* What install / enable actually buy. A desk agent can list, describe
+            and read a skill and can never run one — deliberate, and pinned by
+            `dispatched_belt_excludes_every_deferred_family` — but this screen's
+            vocabulary is the vocabulary of switching a capability on, so
+            without saying it the operator learns the difference by asking an
             agent to do something and watching nothing happen. */}
         <Alert data-testid="skills-read-only-note">
           <BookOpen className="size-4" />
           <AlertDescription>{SKILLS_READ_ONLY_NOTE}</AlertDescription>
         </Alert>
 
-        {!canManage && (
-          <Alert data-testid="skills-admin-only">
-            <Info className="size-4" />
-            <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
-            <AlertDescription>
-              A skill's content reaches every agent, so an admin installs, removes, enables and
-              adds them. You can see what is installed and enabled.
-            </AlertDescription>
-          </Alert>
-        )}
-
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
-
 
         <PageTabPanel idBase="skills" id="installed" value={tab}>
             {loading ? (
