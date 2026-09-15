@@ -3527,6 +3527,13 @@ pub struct OverlayAgent {
     /// model, unchanged from today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The provider half of this teammate's `{provider, model}` pair on a
+    /// `built_in` harness (keys rework, issue #2306, slice 3a), carried the
+    /// same way as [`Agent::provider`](crate::company::types::Agent::provider)
+    /// — see that field's docs, including why it does not yet steer a turn.
+    /// `None` (the default) means this teammate takes the company default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Which `[[harness]]` this teammate runs its turns on, by id — carried
     /// the same way as [`Agent::harness`](crate::company::types::Agent::harness).
     /// `None` (the default, and how every record written before this field
