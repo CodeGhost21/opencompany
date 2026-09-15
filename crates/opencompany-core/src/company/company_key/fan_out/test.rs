@@ -1387,14 +1387,19 @@ async fn a_model_with_a_clear_is_refused() {
     assert_eq!(raw_get(&secrets, &cid, ACCOUNT_KEY_KEY).await, "");
 }
 
-/// P2-1 (keys rework #2306 review): a read failure AFTER the account key is
-/// already safely stored (step 4, `read_slots`) must not cost that key. A
-/// corrupt `inference/default` blob (invalid JSON behind a `{` prefix, per
-/// `inference::store::parse_default`) makes `read_slots`'s own
-/// `inference_store::load_default` call return `Err`, which `fan_out`
-/// degrades to every derived slot reporting `Failed` in an `Ok` report —
-/// this is the "no bubbled `Err`" half of that contract; `tinyhumans/key`
-/// itself must already hold the minted value regardless.
+/// P2-1 (keys rework #2306 review), updated by the `index_lock` fix
+/// (653b3444a): a corrupt `inference/default` blob (invalid JSON behind a
+/// `{` prefix, per `inference::store::parse_default`) no longer fails
+/// `read_slots` at step 4 — that step carries no default-marker read any
+/// more. `inference_store::load_default` is now read exactly once, under
+/// `index_lock`, in step 9b, **after** the health probe. So a corrupt
+/// default degrades only the two slots that depend on that re-read —
+/// Provider and Default — to `Failed`; Composio and Inference, which read
+/// and write ahead of it, still land as `Filled`, and the probe still runs
+/// once. The corrupt blob itself is never rewritten: nothing here treats a
+/// read failure as license to overwrite what it could not parse. The
+/// account key (`tinyhumans/key`) must hold the minted value regardless —
+/// this is still the "no bubbled `Err`" half of the P2-1 contract.
 #[tokio::test]
 async fn a_read_failure_after_the_account_key_is_stored_still_keeps_the_key() {
     let cid = company("read-fail");
@@ -1422,20 +1427,41 @@ async fn a_read_failure_after_the_account_key_is_stored_still_keeps_the_key() {
         NEW,
         "the account key was already stored before the read that failed"
     );
-    for slot in [
-        Slot::Composio,
-        Slot::Inference,
-        Slot::Provider,
-        Slot::Default,
-        Slot::Health,
-    ] {
-        assert_eq!(
-            outcome(&report, slot),
-            SlotOutcome::Failed,
-            "every derived slot degrades to Failed: {report:?}"
-        );
-    }
-    assert_eq!(prober.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        outcome(&report, Slot::Composio),
+        SlotOutcome::Filled,
+        "Composio does not depend on the default re-read: {report:?}"
+    );
+    assert_eq!(
+        outcome(&report, Slot::Inference),
+        SlotOutcome::Filled,
+        "the LLM key copy does not depend on the default re-read: {report:?}"
+    );
+    assert_eq!(
+        outcome(&report, Slot::Provider),
+        SlotOutcome::Failed,
+        "the provider row read/write is inside the failed index_lock re-read: {report:?}"
+    );
+    assert_eq!(
+        outcome(&report, Slot::Default),
+        SlotOutcome::Failed,
+        "the default marker is inside the failed index_lock re-read: {report:?}"
+    );
+    assert_eq!(
+        outcome(&report, Slot::Health),
+        SlotOutcome::HealthOk,
+        "the health probe runs ahead of the failed default re-read: {report:?}"
+    );
+    assert_eq!(
+        raw_get(&secrets, &cid, inference_store::DEFAULT_PROVIDER_KEY).await,
+        "{",
+        "a default this call could not parse must never be rewritten"
+    );
+    assert_eq!(
+        prober.calls.load(Ordering::SeqCst),
+        1,
+        "the probe runs before the default re-read fails"
+    );
 }
 
 #[tokio::test]
