@@ -21,7 +21,9 @@ services:
   opencompany:
     build:
       context: ..
-      dockerfile: Dockerfile
+      # Named relative to the context. BuildKit then reads the ignore rules
+      # from `deploy/Dockerfile.dockerignore` rather than a root `.dockerignore`.
+      dockerfile: deploy/Dockerfile
       args:
         FEATURES: ${OPENCOMPANY_FEATURES:-}
     image: opencompany:local

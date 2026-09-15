@@ -40,12 +40,12 @@ on:
       - 'frontend/**'
       - 'companies/**'
       - 'skills/**' # COPYed into the runtime image (Dockerfile) as the shared library
-      - 'docker/**' # entrypoint.sh, which is COPYed and is the container's ENTRYPOINT
+      - 'deploy/Dockerfile'
+      - 'deploy/Dockerfile.dockerignore'
+      - 'deploy/entrypoint.sh' # COPYed in, and the container's ENTRYPOINT
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml' # COPYed into the builder; it picks the compiler
-      - 'Dockerfile'
-      - '.dockerignore'
       - 'vendor/**'
       - '.github/workflows/deploy-staging.yml'
   workflow_dispatch:
@@ -158,7 +158,8 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          # `.dockerignore` excludes `.git` and `GITHUB_SHA` does not cross
+          file: deploy/Dockerfile
+          # `deploy/Dockerfile.dockerignore` excludes `.git` and `GITHUB_SHA` does not cross
           # into a build context, so the build script has no way to work out
           # which revision it is compiling — every hosted tenant would report
           # `unknown` forever. `actions/checkout` checked out `github.sha`, so
