@@ -4231,11 +4231,16 @@ prompt = "Lead decisively."
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{connected}");
+        // `team-pair` is the only provider this fresh company has connected,
+        // so it is already the company default (D-first-default, X1) — the
+        // in-use guard refuses a plain disable of it the same way it refuses
+        // a plain delete, and `confirmInUse` is the same escape hatch for
+        // both.
         let (status, disabled) = send(
             &state,
             "POST",
             "/api/v1/company/inference/providers/team-pair/enabled",
-            Some(json!({"enabled": false})),
+            Some(json!({"enabled": false, "confirmInUse": true})),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{disabled}");
