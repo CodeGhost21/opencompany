@@ -282,7 +282,10 @@ test.afterEach(async ({ request }) => {
   await request
     .patch("/api/v1/company/team/researcher", { data: { provider: null, model: null } })
     .catch(() => {});
-  await request.delete("/api/v1/company/inference/providers/e2e-pair").catch(() => {});
+  const r = await request.delete("/api/v1/company/inference/providers/e2e-pair").catch((e) => e);
+  console.log("DEBUG delete e2e-pair:", typeof r?.status === "function" ? `${r.status()} ${await r.text()}` : String(r));
+  const list = await request.get("/api/v1/company/inference");
+  console.log("DEBUG inference after:", (await list.text()).slice(0, 600));
 });
 
 test("an admin pins an agent to a provider and model, then clears it (keys rework, issue #2306, slice 3b)", async ({
