@@ -389,6 +389,37 @@ marker: this is not a deliberation turn, it is an answer to a colleague."
     )
 }
 
+/// How a crossing reads to a desk that will DELIBERATE on it.
+///
+/// [`referral_prompt`] closes by telling its reader "Do not open your reply with
+/// a `!` marker: this is not a deliberation turn, it is an answer to a
+/// colleague." That is right for the seat it was written for and exactly wrong
+/// for a room: `EpisodePrompt`'s own protocol opens with "Reply with ONE line
+/// only, beginning with exactly one of these markers", so handing the
+/// single-seat prompt to a room as its task contradicts the protocol in the
+/// same prompt — and a member that follows the task deposits prose, which the
+/// fold counts for nothing. Three of the first four live crossings ended `idle`
+/// with markerless turns for exactly this reason (CodeRabbit, #2332).
+///
+/// So this says who asked and what they asked, and says nothing about how to
+/// reply: the room already has a protocol, and it is the only thing entitled to
+/// set the shape of a turn on that desk.
+///
+/// The question comes LAST, with no footer after it, so [`asked_message`]
+/// recovers it from this shape exactly as it does from the single-seat one.
+#[must_use]
+pub fn referral_room_prompt(asker_label: &str, asker_desk: &str, question: &str) -> String {
+    format!(
+        "{asker_label} on the {asker_desk} desk has put a question to this desk. Answer it from \
+what this desk knows, and say plainly if it does not know — a wrong answer crossing desks is \
+worse than no answer, because the room that asked cannot check it against anything they have.
+
+Their message:
+
+{question}"
+    )
+}
+
 /// The question out of a [`referral_prompt`], or the text unchanged when it is
 /// not one.
 ///
@@ -412,7 +443,13 @@ pub fn asked_message(text: &str) -> String {
     let Some((_, rest)) = text.split_once(HEAD) else {
         return text.trim().to_string();
     };
-    rest.split_once(TAIL)
+    // From the END. The question is operator- and agent-authored text and may
+    // itself contain the footer's opening sentence; searching forwards then
+    // treats that occurrence as the generated footer and truncates the question
+    // at it — or returns nothing at all when it lands first. The generated
+    // footer is always last, so matching from the end cannot be fooled by a
+    // copy of it inside the question (CodeRabbit, #2332).
+    rest.rsplit_once(TAIL)
         .map_or(rest, |(question, _)| question)
         .trim()
         .to_string()
@@ -910,7 +947,14 @@ impl<'a> EpisodeReferrals<'a> {
         let room = match !by_name && self.deliberates {
             true => match self
                 .runner
-                .deliberate(&referral.to.desk_id, &referral.source_id, &prompt)
+                .deliberate(
+                    &referral.to.desk_id,
+                    &referral.source_id,
+                    // Never `prompt`: that one is addressed to a single seat and
+                    // forbids the very markers a room's protocol requires. See
+                    // `referral_room_prompt`.
+                    &referral_room_prompt(&asker, &asker_desk, &referral.content),
+                )
                 .await
             {
                 Ok(found) => found,

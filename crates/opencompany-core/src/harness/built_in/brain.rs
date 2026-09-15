@@ -5034,8 +5034,21 @@ impl HiveDeskRunner<'_> {
                     chat_id,
                     agent_id,
                     text,
+                    audience,
                     ..
-                } if chat_id == desk_id && !crate::hivemind::is_hive_author(agent_id) => {
+                } if chat_id == desk_id
+                    && !crate::hivemind::is_hive_author(agent_id)
+                    // **An aside is not a turn, and never leaves the desk.**
+                    //
+                    // `!aside @peer` is journaled as an ordinary `AgentReply`
+                    // with the pair in `audience`, so it sits in this span like
+                    // any other row and can even be the last one. Carried home
+                    // it would publish a private exchange to a desk that was
+                    // never in it — across a desk boundary, where nobody there
+                    // can even see that it happened. Only desk-visible turns
+                    // answer a crossing (CodeRabbit, #2332).
+                    && audience.is_empty() =>
+                {
                     Some(format!(
                         "{agent_id}: {}",
                         crate::server::chat_history::readable_moves(text.clone()).trim()
@@ -5198,7 +5211,17 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
                         turns = outcome.turns,
                         "[hive] a referred desk converged but wrote no closing report"
                     );
-                    return Ok(None);
+                    // NOT `Ok(None)`: that means "this desk cannot hold a
+                    // room", and `forward` acts on it by running one more model
+                    // turn. The room has already run and spent its turns here —
+                    // only the append of its closing row failed — so falling
+                    // back would bill the room AND a seat, and credit the answer
+                    // to `@<seat>` instead of the desk. Carry what the room
+                    // said, exactly as the unconverged arm does (CodeRabbit,
+                    // #2332).
+                    return Ok(self
+                        .turns_of(&events, &record.id, &outcome, &far_desk)
+                        .await);
                 };
                 let page = events.read_from(&record.id, report_seq, 1).await?;
                 page.into_iter().find_map(|stored| match stored.event {
@@ -12045,6 +12068,102 @@ members = ["engineer", "designer"]
             brain,
             host,
         }
+    }
+
+    /// **A private aside never crosses a desk boundary in a room's answer.**
+    ///
+    /// `!aside @peer` is journaled as an ordinary `AgentReply` carrying the
+    /// pair in `audience`, so it lands inside the span an unconverged room's
+    /// answer is drawn from and can even be its last row. Carried home it would
+    /// publish a private exchange to a desk that was never in it — and unlike
+    /// an aside on one's own desk, where every teammate at least sees that it
+    /// happened, nobody on the asking desk could see anything to audit.
+    #[tokio::test]
+    async fn a_rooms_answer_leaves_its_asides_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let brain = hive_test_brain(dir.path());
+        let host = ParkingHost::default();
+        // The runner's own turn seam is never reached here — `turns_of` only
+        // reads the journal — so any outcome does.
+        let runner = hive_desk_runner(
+            &brain,
+            &host,
+            crate::harness::built_in::TurnOutcome {
+                reply: String::new(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                abnormal_stop: None,
+                halted_for_spend: None,
+                budget_paused: None,
+            },
+        );
+        // The crate's in-memory journal: `hive_test_brain` wires none, and this
+        // reads a journal rather than running a turn.
+        let events: Arc<dyn crate::ports::events::EventLog> =
+            Arc::new(crate::hivemind::test::MemoryLog::default());
+        let company = crate::hivemind::test::MemoryLog::company();
+
+        let row = |agent: &str, text: &str, audience: Vec<String>| CompanyEvent::AgentReply {
+            chat_id: "returns".to_string(),
+            agent_id: agent.to_string(),
+            text: text.to_string(),
+            steps: Vec::new(),
+            task_id: None,
+            outputs: Vec::new(),
+            parent: None,
+            mentions: Vec::new(),
+            mention_depth: 0,
+            audience,
+        };
+        let first = events
+            .append(
+                &company,
+                row("exchanges", "no refund tool on this seat", Vec::new()),
+            )
+            .await
+            .expect("journal");
+        events
+            .append(
+                &company,
+                row(
+                    "refunds",
+                    "aside @exchanges — do not tell them we are short-staffed",
+                    vec!["exchanges".to_string()],
+                ),
+            )
+            .await
+            .expect("journal");
+        let last = events
+            .append(
+                &company,
+                row("refunds", "i hold the refund tool", Vec::new()),
+            )
+            .await
+            .expect("journal");
+
+        // Spelled out: `EpisodeOutcome` has no `Default`, on purpose — an
+        // episode that never ran has no ending to report.
+        let outcome = crate::hivemind::EpisodeOutcome {
+            ending: crate::hivemind::EpisodeEnding::Idle,
+            turns: 2,
+            first_seq: Some(first),
+            last_seq: Some(last),
+            report_seq: None,
+            violations: Vec::new(),
+            failed_turns: 0,
+            referrals: crate::hivemind::ReferralLedger::default(),
+        };
+        let carried = runner
+            .turns_of(&events, &company, &outcome, "returns")
+            .await
+            .expect("the room said something");
+
+        assert!(carried.contains("no refund tool on this seat"));
+        assert!(carried.contains("i hold the refund tool"));
+        assert!(
+            !carried.contains("short-staffed"),
+            "an aside is not a turn and does not answer a crossing: {carried}"
+        );
     }
 
     /// **A budget-paused hive turn is a hard error, not a folded reply.**

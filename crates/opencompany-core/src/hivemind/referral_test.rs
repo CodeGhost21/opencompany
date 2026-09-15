@@ -1375,6 +1375,54 @@ async fn a_room_that_breaks_does_not_then_ask_a_seat() {
     );
 }
 
+/// **A room's prompt must not forbid the markers its protocol requires.**
+///
+/// `referral_prompt` closes with "Do not open your reply with a `!` marker:
+/// this is not a deliberation turn, it is an answer to a colleague" — correct
+/// for the single seat it was written for. Handed to a room as its task, it
+/// contradicts `EpisodePrompt`'s own protocol ("Reply with ONE line only,
+/// beginning with exactly one of these markers") inside the same prompt, and a
+/// member that obeys the task deposits prose the fold counts for nothing.
+/// Three of the first four live crossings ended `idle` with markerless turns.
+#[test]
+fn the_prompt_a_room_is_handed_does_not_forbid_its_own_protocol() {
+    let seat = referral::referral_prompt("planner", "Engineering", "What is the lag budget?");
+    assert!(
+        seat.contains("Do not open your reply with a `!` marker"),
+        "the single-seat prompt still says so, which is right for a seat:\n{seat}"
+    );
+
+    let room = referral::referral_room_prompt("planner", "Engineering", "What is the lag budget?");
+    assert!(
+        !room.contains('`'),
+        "a room is told nothing about markers — its protocol owns the shape of a turn:\n{room}"
+    );
+    assert!(room.contains("planner on the Engineering desk"));
+    assert!(room.contains("What is the lag budget?"));
+    // Recovered by the same reader, from either shape.
+    assert_eq!(
+        referral::asked_message(&room),
+        "What is the lag budget?",
+        "the room prompt puts the question last, with no footer to strip"
+    );
+}
+
+/// **A question that quotes the footer is not truncated at it.**
+///
+/// The question is operator- and agent-authored, so it can contain the
+/// footer's opening sentence; searching forwards treats that copy as the
+/// generated footer and cuts the question there.
+#[test]
+fn a_question_containing_the_footers_words_survives_unwrapping() {
+    let question = "Answer in a few sentences. is what they told us — what is the lag budget?";
+    let prompt = referral::referral_prompt("planner", "Engineering", question);
+    assert_eq!(
+        referral::asked_message(&prompt),
+        question,
+        "the generated footer is last, so only the last occurrence delimits it"
+    );
+}
+
 #[test]
 fn a_rooms_answer_names_the_desk_and_no_seat_within_it() {
     let note = referral::room_note("Platform", "  !support #stage It holds.  ");

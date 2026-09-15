@@ -717,6 +717,14 @@ impl<'a> EpisodeDriver<'a> {
                         last_seq = Some(aside_seq);
                     }
                 }
+                // **The asker's continuation, held until its own line is
+                // recorded.** `lines` is documented as every line this episode
+                // journaled *in order*, and `remember` depends on that —
+                // `commits.last()` takes the final `!commit` and the pin trim
+                // keeps the LAST pins. Pushed from inside the referral block, a
+                // continuation landed ahead of the line it continues, so a
+                // higher sequence sat earlier in the vec (CodeRabbit, #2332).
+                let mut continuation: Option<(EventSeq, String, String)> = None;
                 // Considered *after* the line is durable and *before* the next
                 // speaker is chosen, which is the whole of the timing. The wiki
                 // measures this as the single largest effect in the mechanism: a
@@ -851,7 +859,7 @@ impl<'a> EpisodeDriver<'a> {
                                     .await?;
                                 scope.record(second_seq);
                                 last_seq = Some(second_seq);
-                                lines.push((second_seq, turn.agent_id.clone(), second));
+                                continuation = Some((second_seq, turn.agent_id.clone(), second));
                             }
                             // The question and its answer are already durable,
                             // and the room can read both. A continuation that
@@ -868,6 +876,10 @@ impl<'a> EpisodeDriver<'a> {
                     }
                 }
                 lines.push((seq, turn.agent_id.clone(), line));
+                // After its own line, never before: see the declaration above.
+                if let Some(second) = continuation {
+                    lines.push(second);
+                }
                 if !spoken.contains(&turn.agent_id) {
                     spoken.push(turn.agent_id.clone());
                 }

@@ -87,7 +87,7 @@ mod referral_test;
 #[cfg(test)]
 mod round_test;
 #[cfg(test)]
-mod test;
+pub(crate) mod test;
 
 pub use aside::{ASIDE_MARKER, AsideConfig, SURFACE_MARKER};
 pub use episode::{EpisodeDriver, HiveTurnRunner};

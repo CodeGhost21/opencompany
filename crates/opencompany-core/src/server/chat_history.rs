@@ -1975,6 +1975,25 @@ async fn attach_referral_origins(
                     _ => Vec::new(),
                 };
                 let reachable: Vec<&StoredEvent> = page.iter().chain(forward_leg.iter()).collect();
+                // The question row this crossing left on the desk it asked, when
+                // it left one: a deliberated crossing journals it there so the
+                // room can read what it is answering, and roots every turn on
+                // it. The thread key for the fold below.
+                let asked_row: Option<EventSeq> = answers.and_then(|seq| {
+                    let forward = reachable.iter().find(|stored| stored.seq.value() == seq)?;
+                    reachable
+                        .iter()
+                        .find(|later| {
+                            later.seq > forward.seq
+                                && matches!(
+                                    &later.event,
+                                    CompanyEvent::OperatorMessage { chat, by, .. }
+                                        if chat.as_deref() == Some(from_desk.as_str())
+                                            && by.as_ref().is_some_and(|a| a.id == *target)
+                                )
+                        })
+                        .map(|stored| stored.seq)
+                });
                 let paired = answers.and_then(|seq| {
                     let forward = reachable.iter().find(|stored| stored.seq.value() == seq)?;
                     // A crossing that ran in the pair's own thread keeps BOTH
@@ -2113,18 +2132,29 @@ async fn attach_referral_origins(
                 // these exist — for a converged room it summarises exactly
                 // these lines, and for one that did not converge it *is* these
                 // lines, joined.
-                // Bounded by the two markers, so a desk's own unrelated
-                // traffic cannot drift in. `answers` is the forward's sequence,
-                // recorded by the host that wrote it; a marker predating that
-                // field carries none and collects nothing rather than guessing
-                // a window.
+                // **Scoped to the crossing's own thread, not to a window.**
+                //
+                // A sequence interval plus `chat_id` is not enough: a desk that
+                // was asked can be running its own episode, or answering an
+                // ordinary message, while the referred room deliberates — and
+                // every one of those rows falls inside the same interval on the
+                // same desk, so an unrelated reply would render as part of this
+                // crossing (CodeRabbit, #2332).
+                //
+                // The referred episode roots every turn on the question row it
+                // journals, which is what `asked_row` names. Matching that
+                // parent is exact rather than probabilistic. A crossing with no
+                // such row — the single-seat path, and every marker written
+                // before it existed — matches nothing here and falls through to
+                // the relayed answer below, which is what it had before.
                 let room: Vec<ReferralLine> = reachable
                     .iter()
                     .filter(|later| {
-                        answers.is_some_and(|forward_seq| {
-                            later.seq.value() > forward_seq
-                                && later.seq.value() < stored.seq.value()
-                        })
+                        matches!(
+                            &later.event,
+                            CompanyEvent::AgentReply { parent: Some(parent), .. }
+                                if asked_row.is_some_and(|root| *parent == root)
+                        )
                     })
                     .filter_map(|later| match &later.event {
                         CompanyEvent::AgentReply {
@@ -4854,46 +4884,72 @@ mod referral_origin_test {
             .await
             .expect("journal");
         // The prompt the room was handed, on the desk being asked — the row a
-        // deliberated crossing journals and the one the matcher finds.
-        let mut events = vec![CompanyEvent::OperatorMessage {
-            text: crate::hivemind::referral::referral_prompt(
-                "software_engineer",
-                "Engineering",
-                "can the error messages be redone?",
-            ),
-            by: Some(Actor {
-                kind: ActorKind::Agent,
-                id: "software_engineer".to_string(),
-            }),
-            chat: Some("design".to_string()),
-            parent: None,
-            deliverable: None,
-            mentions: Vec::new(),
-            attachments: Vec::new(),
-        }];
+        // deliberated crossing journals, the one the matcher finds, and the
+        // thread every turn of that room is rooted on.
+        let root = runtime
+            .events()
+            .append(
+                &id,
+                CompanyEvent::OperatorMessage {
+                    text: crate::hivemind::referral::referral_room_prompt(
+                        "software_engineer",
+                        "Engineering",
+                        "can the error messages be redone?",
+                    ),
+                    by: Some(Actor {
+                        kind: ActorKind::Agent,
+                        id: "software_engineer".to_string(),
+                    }),
+                    chat: Some("design".to_string()),
+                    parent: None,
+                    deliverable: None,
+                    mentions: Vec::new(),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("journal");
         // The room: both seats, plus its closing row, which is the desk's own
-        // bookkeeping and never a line somebody said.
-        for (agent, text) in [
+        // bookkeeping and never a line somebody said. Every one parented on the
+        // question, as a referred episode journals them.
+        let mut events: Vec<CompanyEvent> = [
             (
                 "product_designer",
                 "!propose #copy they read like a copy task",
             ),
             ("researcher", "!support #copy ^1 and the tests agree"),
             (crate::hivemind::HIVE_REPORT_AUTHOR, "The desk settled."),
-        ] {
-            events.push(CompanyEvent::AgentReply {
-                chat_id: "design".to_string(),
-                agent_id: agent.to_string(),
-                text: text.to_string(),
-                steps: Vec::new(),
-                task_id: None,
-                outputs: Vec::new(),
-                parent: None,
-                mentions: Vec::new(),
-                mention_depth: 0,
-                audience: Vec::new(),
-            });
-        }
+        ]
+        .into_iter()
+        .map(|(agent, text)| CompanyEvent::AgentReply {
+            chat_id: "design".to_string(),
+            agent_id: agent.to_string(),
+            text: text.to_string(),
+            steps: Vec::new(),
+            task_id: None,
+            outputs: Vec::new(),
+            parent: Some(root),
+            mentions: Vec::new(),
+            mention_depth: 0,
+            audience: Vec::new(),
+        })
+        .collect();
+        // **Concurrent traffic on the same desk, inside the same window.** A
+        // desk that was asked keeps working while the referred room runs, and a
+        // fold scoped by sequence interval alone renders this as part of the
+        // crossing.
+        events.push(CompanyEvent::AgentReply {
+            chat_id: "design".to_string(),
+            agent_id: "product_designer".to_string(),
+            text: "unrelated: the icon set ships Thursday".to_string(),
+            steps: Vec::new(),
+            task_id: None,
+            outputs: Vec::new(),
+            parent: None,
+            mentions: Vec::new(),
+            mention_depth: 0,
+            audience: Vec::new(),
+        });
         for event in events {
             runtime.events().append(&id, event).await.expect("journal");
         }
@@ -4988,6 +5044,14 @@ mod referral_origin_test {
                 .iter()
                 .all(|line| !line.text.contains("answered the question")),
             "and the relayed note is dropped — it summarises exactly these lines: {:?}",
+            crossing.lines
+        );
+        assert!(
+            crossing
+                .lines
+                .iter()
+                .all(|line| !line.text.contains("icon set")),
+            "and a reply this desk made outside the crossing is not part of it: {:?}",
             crossing.lines
         );
     }
