@@ -6,7 +6,7 @@
 FROM rust:1-slim-bookworm AS builder
 ARG FEATURES=""
 # The revision this image is built from, read by `build.rs` (see
-# `src/build_stamp.rs`). It has to be passed in here: `.dockerignore` excludes
+# `src/build_stamp.rs`). It has to be passed in here: `deploy/Dockerfile.dockerignore` excludes
 # `.git`, so the build script has no repository to ask, and `GITHUB_SHA` does
 # not cross into a build context either. Left unset, the binary stamps the
 # honest string `unknown` — which is what a hosted tenant would otherwise
@@ -134,7 +134,7 @@ COPY frontend/ ./
 RUN npm run build && npm run build:pages-sdk
 
 # ── local development ─────────────────────────────────────────────────────
-# Used by docker-compose.dev.yml. The repository is bind-mounted over
+# Used by deploy/docker-compose.dev.yml. The repository is bind-mounted over
 # /workspace; cargo-watch rebuilds and restarts the host after local edits.
 FROM rust:1-slim-bookworm AS development
 RUN apt-get update \
@@ -171,7 +171,7 @@ COPY skills ./skills
 # unprivileged runtime user (uid 10001 under the platform's securityContext)
 # can read it even with a read-only root filesystem.
 COPY --from=console /console/dist /app/console
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /data
 
 # The switch: which example company this container runs. Override at deploy time.

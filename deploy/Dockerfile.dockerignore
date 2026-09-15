@@ -39,5 +39,5 @@ vendor/openhuman/e2e/
 vendor/openhuman/fastlane/
 
 *.log
-.env
+**/.env
 .DS_Store

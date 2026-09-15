@@ -1,7 +1,15 @@
 # OpenCompany — one command to run a company + its operator console.
 #
+# Run from this directory (`cd deploy`), so Compose reads `.env` from here:
+#
 #   cp .env.example .env       # then set OPENCOMPANY_COMPANY to the module you want
 #   docker compose up --build
+#
+# Or from the repository root:
+#
+#   docker compose --project-directory deploy up --build
+#
+# Build contexts and bind mounts are relative to this file, hence the `..`.
 #
 # The switch is OPENCOMPANY_COMPANY: an example directory name
 # (venture_capital, marketing_agency, …) or an alias (fund,
