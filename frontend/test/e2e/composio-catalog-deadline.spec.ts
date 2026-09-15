@@ -322,7 +322,13 @@ test.afterAll(async ({ playwright }, testInfo) => {
       reseeded.ok(),
       `restoring the composio fixture catalog failed: ${reseeded.status()}`,
     ).toBeTruthy();
-    const cleared = await request.put("/api/v1/company/composio/token", { data: { token: "" } });
+    // `confirmInUse: true` — see `composio-account-choice.spec.ts`'s cleanup
+    // for why a plain clear here trips Composio's own in-use guard (§2 of
+    // `docs/key-reworks/in-use-guards.md`) while `composio/mode` still reads
+    // `"managed"`, which it does throughout this file.
+    const cleared = await request.put("/api/v1/company/composio/token", {
+      data: { token: "", confirmInUse: true },
+    });
     expect(
       cleared.ok(),
       `clearing the composio token failed: ${cleared.status()} ${await cleared.text()}`,
