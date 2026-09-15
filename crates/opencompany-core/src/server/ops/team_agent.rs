@@ -125,7 +125,7 @@ pub(super) enum AgentSource {
 /// about the other, so this is their union. It widens nothing on its own —
 /// `tools`, `model` and `harness` stay admin-gated in [`edit_agent`], and
 /// [`EDITABLE_FIELDS_MEMBER`] is unchanged from what #1530 left it.
-const EDITABLE_FIELDS: [&str; 8] = [
+const EDITABLE_FIELDS: [&str; 9] = [
     "name",
     "role",
     "description",
@@ -133,6 +133,7 @@ const EDITABLE_FIELDS: [&str; 8] = [
     "instructions",
     "avatar",
     "model",
+    "provider",
     "harness",
 ];
 
