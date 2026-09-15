@@ -110,18 +110,6 @@ struct ModelCatalogDto {
     base_url: String,
     /// Every model the endpoint publishes, sorted. Empty when `error` is set.
     models: Vec<crate::server::inference_models::InferenceModel>,
-    /// How this endpoint spells a tier: `tiers` (it publishes the tier names and
-    /// resolves them itself), `concrete` (it publishes the ids
-    /// [`inference::DEFAULT_TIER_MODELS`] names), or `unknown` (neither).
-    /// `null` when the catalog could not be read, which is not the same as
-    /// `unknown` and must not be shown as one.
-    tier_vocabulary: Option<&'static str>,
-    /// The tier → model mapping this endpoint's own vocabulary implies, for the
-    /// console to prefill with. Empty for `unknown` and for an unreadable
-    /// catalog: there is no mapping we can honestly supply, and prefilling one
-    /// we already know the endpoint does not publish is the bug this route was
-    /// on the wrong side of.
-    tier_defaults: BTreeMap<String, String>,
     /// Why the catalog is empty, in the operator's words, or `null` on success.
     ///
     /// Carried in a 200 rather than raised as a 500 on purpose: an empty picker
@@ -191,8 +179,6 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
         return Ok(Json(ModelCatalogDto {
             base_url: String::new(),
             models: Vec::new(),
-            tier_vocabulary: None,
-            tier_defaults: BTreeMap::new(),
             error: Some(
                 "No inference endpoint is configured for this company, so there is no model \
                  catalog to list. Save a provider first."
@@ -213,18 +199,11 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
     )
     .await
     {
-        Ok(models) => {
-            let vocabulary = inference::TierVocabulary::from_catalog_ids(
-                models.iter().map(|model| model.id.as_str()),
-            );
-            Ok(Json(ModelCatalogDto {
-                base_url: catalogue::redact_endpoint(&base_url),
-                models,
-                tier_vocabulary: Some(vocabulary.as_str()),
-                tier_defaults: vocabulary.tier_defaults(),
-                error: None,
-            }))
-        }
+        Ok(models) => Ok(Json(ModelCatalogDto {
+            base_url: catalogue::redact_endpoint(&base_url),
+            models,
+            error: None,
+        })),
         Err(error) => Ok(Json(ModelCatalogDto {
             // Redacted, not raw. `reqwest` masks userinfo in its own `Display`,
             // but this `format!` re-adds it from the endpoint we hold — which
@@ -236,8 +215,6 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
             )),
             base_url: catalogue::redact_endpoint(&base_url),
             models: Vec::new(),
-            tier_vocabulary: None,
-            tier_defaults: BTreeMap::new(),
         })),
     }
 }
@@ -259,25 +236,6 @@ struct InferenceStatusDto {
     base_url: String,
     /// Abstract-tier → concrete model id.
     models: BTreeMap<String, String>,
-    /// The shipped tier → model defaults ([`inference::DEFAULT_TIER_MODELS`]) —
-    /// **OpenRouter's vocabulary**, and nothing wider.
-    ///
-    /// The console's OpenRouter preset used to hard-code its own copy of these
-    /// four ids so switching to OpenRouter had something to prefill the form
-    /// with before an operator typed an override — duplicated data that could
-    /// silently drift from this host's actual defaults the moment
-    /// `DEFAULT_TIER_MODELS` changed. Carrying the live values on every status
-    /// read means the preset is never more than one request stale, on a route
-    /// the console already polls.
-    ///
-    /// It is *only* that preset. These are OpenRouter catalog ids, so they are
-    /// the right prefill for the OpenRouter provider and meaningless for any
-    /// other endpoint. What the **configured** endpoint wants is a different
-    /// question, answered from that endpoint's own catalog by
-    /// [`ModelCatalogDto::tier_defaults`] on `GET …/inference/models`; treating
-    /// this field as a universal default is what put four OpenRouter ids into a
-    /// TinyHumans company's tier mapping.
-    default_tier_models: BTreeMap<String, String>,
     /// Where the effective config came from: `default` / `manifest` / `runtime`,
     /// or `managed` when nothing tenant-specific is configured.
     source: String,
@@ -981,16 +939,10 @@ async fn effective_status_with(
         managed.configured && !providers.iter().any(|p| p.slug == inference::MANAGED_SLUG);
     // D-key-without-row (X5): moot once the legacy row itself is hidden.
     managed.needs_model = managed.legacy_row && managed.configured;
-    // Independent of `decl`: the shipped defaults are the same regardless of
-    // what (if anything) this company has configured.
-    let default_tier_models: BTreeMap<String, String> = inference::DEFAULT_TIER_MODELS
-        .iter()
-        .map(|(tier, model)| (tier.to_string(), model.to_string()))
-        .collect();
     // Keys rework (#2306), slice 2c: the stored default, independent of
-    // `decl` the same way `default_tier_models` is — a company can have a
-    // full default that names a now-gone provider (X14) and still have
-    // `decl` resolve through the legacy chain underneath it.
+    // `decl` — a company can have a full default that names a now-gone
+    // provider (X14) and still have `decl` resolve through the legacy chain
+    // underneath it.
     let default_choice = default_choice_dto(
         inference::store::load_default(runtime.id(), secrets)
             .await
@@ -1002,7 +954,6 @@ async fn effective_status_with(
             slug: d.telemetry_slug().to_string(),
             base_url,
             models: d.models.clone(),
-            default_tier_models: default_tier_models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),
             cognition: cognition.path.to_string(),
@@ -1021,7 +972,6 @@ async fn effective_status_with(
             slug: "managed".to_string(),
             base_url,
             models: BTreeMap::new(),
-            default_tier_models,
             source: "managed".to_string(),
             key_configured: false,
             cognition: cognition.path.to_string(),
@@ -1452,27 +1402,12 @@ async fn test_config(company: ScopedCompany) -> Response {
                 }
                 Ok(None) => {}
             }
-            // Ask the endpoint what vocabulary it speaks before the probe
-            // chooses a model for it. Without this the probe resolves tiers by
-            // the pre-discovery guess, which is what made a perfectly good
-            // TinyHumans config fail Test with `Model
-            // 'anthropic/claude-sonnet-5' is not available` — an id neither the
-            // operator nor the provider ever named.
-            let decl = {
-                let bearer = match decl.bearer().await {
-                    Ok(bearer) => bearer,
-                    Err(err) => return ApiError(err).into_response(),
-                };
-                let vocabulary = crate::server::inference_models::discovered_vocabulary(
-                    &decl.base_url,
-                    bearer.as_deref(),
-                    Some(runtime.id().as_ref()),
-                    catalogue::auth_style_for(&decl.provider),
-                    catalogue::catalog_shape_for(&decl.provider, &decl.base_url),
-                )
-                .await;
-                decl.with_vocabulary(vocabulary)
-            };
+            // No vocabulary discovery any more (keys rework, issue #2306,
+            // slice 2d): `probe` reaches `inference::model_on_the_wire`
+            // through `request_plan`, which never sends a tier name — a
+            // company whose Test resolves no real id gets `NO_MODEL_CHOSEN`
+            // back as the probe error instead.
+            //
             // The default harness's real id, whether or not it declares its own
             // `[harness.inference]` — `model_unavailable_advice` names the same
             // table either way (its own, or the company's as the harness's
@@ -2074,65 +2009,10 @@ base_url = "https://byo.example/v1"
             vec!["agentic-v1", "chat-v1", "reasoning-v1", "vision-v1"],
             "the configured endpoint's own ids, not OpenRouter's: {raw}"
         );
-        assert_eq!(
-            body["tierVocabulary"], "tiers",
-            "an endpoint publishing the tier names is telling us it resolves them: {raw}"
-        );
-        assert_eq!(
-            body["tierDefaults"]["agentic-v1"], "agentic-v1",
-            "so the default mapping for it is identity, not an OpenRouter slug: {raw}"
-        );
-    }
-
-    /// The other vocabulary: an endpoint publishing the concrete ids
-    /// [`inference::DEFAULT_TIER_MODELS`] names still gets the shipped mapping.
-    #[tokio::test]
-    async fn model_catalog_route_keeps_concrete_defaults_for_a_concrete_catalog() {
-        const ENDPOINT: &str = "http://127.0.0.1:9/concrete/v1";
-        // Its own company id, for the same reason as the test above.
-        const COMPANY: &str = "catalog-concrete";
-        let home_dir = home();
-        let state = state_with_company_named(home_dir.path(), COMPANY).await;
-        let (status, _, raw) = send_as(
-            &state,
-            COMPANY,
-            "PUT",
-            "/api/v1/company/inference",
-            Some(json!({
-                "provider": "openai_compatible",
-                "baseUrl": ENDPOINT,
-                "key": "test-token",
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{raw}");
-
-        // After the save, for the same reason as the test above: storing a key
-        // evicts this company's authenticated catalogs.
-        seed_catalog_for(
-            COMPANY,
-            ENDPOINT,
-            &[
-                "anthropic/claude-opus-5",
-                "anthropic/claude-sonnet-5",
-                "openai/gpt-5.6-sol-pro",
-                "qwen/qwen3.8-max",
-            ],
-        );
-
-        let (status, body, raw) = send_as(
-            &state,
-            COMPANY,
-            "GET",
-            "/api/v1/company/inference/models",
-            None,
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "{raw}");
-        assert_eq!(body["tierVocabulary"], "concrete", "{raw}");
-        assert_eq!(
-            body["tierDefaults"]["agentic-v1"], "anthropic/claude-opus-5",
+        // Keys rework (#2306), slice 2d: no vocabulary classification is
+        // shipped on this DTO any more — the console never read it either.
+        assert!(
+            body.get("tierVocabulary").is_none() && body.get("tierDefaults").is_none(),
             "{raw}"
         );
     }
@@ -2314,20 +2194,16 @@ base_url = "https://byo.example/v1"
             body["models"].as_array().is_some_and(|m| m.is_empty()),
             "{raw}"
         );
+        // Keys rework (#2306), slice 2d: no vocabulary classification is
+        // shipped on this DTO any more.
         assert!(
-            body["tierVocabulary"].is_null(),
-            "unreadable is not `unknown`: {raw}"
+            body.get("tierVocabulary").is_none() && body.get("tierDefaults").is_none(),
+            "{raw}"
         );
         let error = body["error"].as_str().unwrap_or_default();
         assert!(
             error.contains("Could not list models from") && error.contains(ENDPOINT),
             "the failure names the endpoint it could not reach: {raw}"
-        );
-        assert!(
-            body["tierDefaults"]
-                .as_object()
-                .is_some_and(serde_json::Map::is_empty),
-            "no catalog means no defaults we can honestly prefill: {raw}"
         );
     }
 
@@ -2904,19 +2780,10 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["source"], "managed");
         assert_eq!(dto["keyConfigured"], false);
         assert!(dto.get("key").is_none(), "status DTO must not carry a key");
-        // `defaultTierModels` must actually be on the wire, not just the DTO
-        // struct — the frontend preset (issue #1838) reads it off this exact
-        // response, so a field that only exists in Rust and never serializes
-        // would leave the console silently falling back to a stale local copy.
-        let expected_chat_v1 = inference::DEFAULT_TIER_MODELS
-            .iter()
-            .find(|(tier, _)| *tier == "chat-v1")
-            .map(|(_, model)| *model)
-            .expect("chat-v1 must have a documented default");
-        assert_eq!(
-            dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
-            "defaultTierModels must be present on the managed-default status response: {dto}"
-        );
+        // Keys rework (#2306), slice 2d: no shipped tier defaults are sent
+        // any more — every kind asks for a model explicitly (2c), so there is
+        // nothing left to prefill from a guessed vocabulary.
+        assert!(dto.get("defaultTierModels").is_none(), "{dto}");
 
         // Switch to OpenRouter with a write-only key + a tier→model map.
         let (status, resp, raw) = send(
@@ -2948,13 +2815,7 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["source"], "runtime");
         assert_eq!(dto["keyConfigured"], true);
         assert!(!raw.contains(TOKEN), "GET status leaked the token: {raw}");
-        // defaultTierModels is independent of the tenant's own `models` map —
-        // it must still be the shipped default here even though this company
-        // now has a runtime override with its own chat-v1/reasoning-v1 entries.
-        assert_eq!(
-            dto["defaultTierModels"]["chat-v1"], expected_chat_v1,
-            "defaultTierModels must not follow the tenant's own model override: {dto}"
-        );
+        assert!(dto.get("defaultTierModels").is_none(), "{dto}");
     }
 
     /// Keys rework (#2306) slice 2a, decision Q3: exactly one TinyHumans row
@@ -4465,6 +4326,88 @@ role = "Writer"
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
         assert_eq!(resp["usedBy"]["agents"][0]["id"], "researcher");
+    }
+
+    /// Bug KR-L2-01 (live E2E): the same guard, but the pin is set through the
+    /// real write path an operator actually uses — `PATCH …/team/{id}` on a
+    /// manifest teammate with no pair of its own yet, which stores an
+    /// `AgentOverride` rather than editing `company.toml`. `usedBy.agents`
+    /// must see it exactly as it sees a manifest-declared pair.
+    #[tokio::test]
+    async fn a_provider_pinned_through_the_team_patch_route_is_used_by_that_agent() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let manifest: CompanyManifest = toml::from_str(
+            r#"[company]
+name = "Acme"
+[policy]
+mode = "full"
+
+[[agent]]
+id = "researcher"
+role = "Researcher"
+"#,
+        )
+        .unwrap();
+        save_record(&home, &id, &manifest).await;
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id)
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state
+            .registry()
+            .insert(CompanyId::new("acme"), std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(
+                json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "key": "sk-not-a-real-key", "model": "test-model-large" }),
+            ),
+        )
+        .await;
+
+        // The pin is set through the team PATCH route, not the manifest.
+        let (status, patched, raw) = send(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/researcher",
+            Some(json!({ "provider": "acme", "model": "test-model-large" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(patched["provider"], "acme", "{patched}");
+
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let acme = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "acme")
+            .unwrap();
+        let agent_ids: Vec<&str> = acme["usedBy"]["agents"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no usedBy.agents on {acme}: {raw}"))
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(agent_ids, vec!["researcher"], "{acme}");
+
+        let (status, err, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/inference/providers/acme",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "in_use");
+        assert_eq!(err["usedBy"]["agents"][0]["id"], "researcher", "{err}");
     }
 
     #[tokio::test]

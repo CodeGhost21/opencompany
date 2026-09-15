@@ -9874,7 +9874,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await
@@ -10001,7 +10001,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await
@@ -10160,7 +10160,7 @@ needs_reason = true
                     credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
-                None,
+                Some("stub-model".to_string()),
             )
             .build()
             .await
