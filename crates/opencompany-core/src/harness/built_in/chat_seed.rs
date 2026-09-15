@@ -853,6 +853,39 @@ pub async fn build_chat_seed(
 /// Split out so [`strip_current_message`] can run while the speaker and the
 /// **unlabelled** text are still in hand — see that function for why the
 /// comparison cannot be made after flattening.
+/// Whether `viewer` may read a row addressed to `audience` and authored by
+/// `author`.
+///
+/// The party is the audience **plus the author**, which is
+/// [`hivemind::aside::party`](crate::hivemind::aside::party)'s rule and not a
+/// second answer to the same question: "an audience is author plus the named
+/// ids", so two rows with the same addressee but different authors are two
+/// different asides. An empty audience is an ordinary desk-wide row and is
+/// readable by everyone the desk projection already admits.
+fn reads_aside(audience: &[String], author: &str, viewer: &str) -> bool {
+    audience.is_empty() || author == viewer || audience.iter().any(|id| id == viewer)
+}
+
+/// The stub an unreadable aside leaves in a non-member's seed.
+///
+/// It reports the shape of the exchange and nothing about its content: who
+/// opened it and how many seats were in it. The count is the party — audience
+/// plus author, deduplicated — so it matches what a reader would count off the
+/// desk rather than the raw address list.
+///
+/// Deliberately *not* the operator-facing rendering: operators and people read
+/// every aside in full, so nothing here is ever shown to one.
+fn elided_aside(audience: &[String], author: &str) -> String {
+    let mut party: Vec<&str> = audience.iter().map(String::as_str).collect();
+    party.push(author);
+    party.sort_unstable();
+    party.dedup();
+    format!(
+        "(private aside between {} members — content withheld from you)",
+        party.len()
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_seed_entries(
     events: &Arc<dyn EventLog>,
@@ -960,10 +993,18 @@ async fn build_seed_entries(
                 // the desk then mapped to the same anonymous `"agent"` and the
                 // reading agent got its teammates' words back in its own
                 // assistant role. See [`Speaker`].
+                // The **audience** rides along for the same reason, and it is the
+                // same defect one field over: it used to fall into the `..`
+                // below, so a private aside reached a reader that was never in
+                // it. `hivemind::log` and `runtime::hivemind` both map a
+                // non-empty audience to `Audience::Aside { members }` and let
+                // `project_for` narrow; this path reads `CompanyEvent`s
+                // directly and had nothing doing that job.
                 CompanyEvent::AgentReply {
                     agent_id,
                     text,
                     parent,
+                    audience,
                     ..
                 } => Some((
                     "agent",
@@ -972,7 +1013,17 @@ async fn build_seed_entries(
                     } else {
                         Speaker::Other(agent_id.clone())
                     },
-                    text.clone(),
+                    if reads_aside(audience, agent_id, viewer_agent_id) {
+                        text.clone()
+                    } else {
+                        // **Elided, never dropped.** The row keeps its place,
+                        // its author and the size of the party, because a peer
+                        // has to be able to see that an exchange happened and
+                        // who was in it: an agent that cannot tell a peer knows
+                        // something has no reason to ask. Dropping it would also
+                        // strand a `^N` citation that names it.
+                        elided_aside(audience, agent_id)
+                    },
                     *parent,
                 )),
                 // `owns` also admits `DeskTaskCompleted` (a structural "finished →
@@ -1331,6 +1382,40 @@ mod tests {
         }
     }
 
+    /// A **private aside**: a reply journaled with a non-empty `audience`.
+    ///
+    /// `audience` is the set the line was addressed to. An empty vector is the
+    /// ordinary desk-wide reply every other fixture here writes; a non-empty one
+    /// is the aside seam (`[group_chat.hive.aside]`), which
+    /// `runtime::hivemind`'s adapter maps to
+    /// `tinyhivemind_hive::aside::Audience::Aside { members }` and the episode
+    /// adapter in `hivemind::log` maps identically.
+    fn aside_by(
+        seq: u64,
+        chat_id: &str,
+        agent_id: &str,
+        audience: &[&str],
+        text: &str,
+    ) -> StoredEvent {
+        StoredEvent {
+            seq: EventSeq::new(seq),
+            company: CompanyId::new("acme"),
+            event: CompanyEvent::AgentReply {
+                audience: audience.iter().map(|id| (*id).to_string()).collect(),
+                chat_id: chat_id.to_string(),
+                agent_id: agent_id.to_string(),
+                text: text.to_string(),
+                steps: Vec::new(),
+                task_id: None,
+                outputs: Vec::new(),
+                parent: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+            },
+            at_millis: seq,
+        }
+    }
+
     fn desk_completed(seq: u64, origin_chat_id: Option<&str>) -> StoredEvent {
         threaded_desk_completed(seq, origin_chat_id, None)
     }
@@ -1421,6 +1506,77 @@ mod tests {
                 ("user".to_string(), "operator: u2".to_string()),
             ],
             "only General's own operator/agent turns, chronological, correctly roled"
+        );
+    }
+
+    /// **A private aside must not reach an agent that was not party to it.**
+    ///
+    /// The aside seam lets two members of a desk compare notes in a line the
+    /// rest of the room cannot read — elided rather than removed, so everyone
+    /// still sees *that* an exchange happened and who was in it. Both
+    /// tinyhivemind adapters honour that: `hivemind::log` (the episode path) and
+    /// `runtime::hivemind` (the gated seed path) each map a non-empty
+    /// `audience` to `Audience::Aside { members }`, and `project_for` then
+    /// elides the content for a reader outside the set.
+    ///
+    /// This asserts the same property on the path that is **not** either of
+    /// those: the ordinary chat seed a non-deliberating turn is built from,
+    /// which reads `CompanyEvent`s directly. That path is what every shipped
+    /// tenant runs — `hivemind` is absent from `TENANT_FEATURES` — so if the
+    /// audience is not consulted here, an aside reaches an outsider's model
+    /// context in full on the default build.
+    #[tokio::test]
+    async fn a_private_aside_does_not_reach_a_non_party_agents_seed() {
+        const SECRET: &str = "ASIDE-ONLY-MARKER";
+
+        let log = FixedLog(vec![
+            operator(1, Some("growth"), "what should we do about the outage?"),
+            // Alice and Bob compare notes privately. Carol is seated on the
+            // desk but is not in the audience.
+            aside_by(2, "growth", "alice", &["alice", "bob"], SECRET),
+            reply_by(3, "growth", "bob", "agreed, let us raise it in the open"),
+        ]);
+
+        let carol = seed_for(log, "carol", None).await;
+
+        let leaked = carol.iter().any(|(_, text)| text.contains(SECRET));
+        assert!(
+            !leaked,
+            "an aside Carol was not party to reached her seed in full: {carol:?}"
+        );
+
+        // **Elided, not dropped.** Asserted separately because the absence
+        // check above passes just as happily on a projection that deleted the
+        // row — and a deleted row is the failure mode the seam was explicitly
+        // designed against: Carol must still see that Alice and Bob conferred.
+        let stub = carol
+            .iter()
+            .find(|(_, text)| text.contains("alice:"))
+            .unwrap_or_else(|| panic!("Alice's row vanished from Carol's seed: {carol:?}"));
+        assert!(
+            stub.1.contains("private aside") && stub.1.contains('2'),
+            "the stub must say an aside happened and how many were in it: {stub:?}"
+        );
+    }
+
+    /// The other half of the same property: elision is **per reader**, so a
+    /// member of the aside must still receive it. A projection that simply
+    /// dropped every audienced row would pass the test above while breaking the
+    /// seam it is meant to protect.
+    #[tokio::test]
+    async fn a_private_aside_still_reaches_an_agent_that_was_party_to_it() {
+        const SECRET: &str = "ASIDE-ONLY-MARKER";
+
+        let log = FixedLog(vec![
+            operator(1, Some("growth"), "what should we do about the outage?"),
+            aside_by(2, "growth", "alice", &["alice", "bob"], SECRET),
+        ]);
+
+        let bob = seed_for(log, "bob", None).await;
+
+        assert!(
+            bob.iter().any(|(_, text)| text.contains(SECRET)),
+            "Bob was addressed in the aside and must still read it: {bob:?}"
         );
     }
 
