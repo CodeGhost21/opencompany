@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use crate::Result;
 use crate::company::composio;
 use crate::company::inference::{self, catalogue, probe, store as inference_store};
-use crate::error::OpenCompanyError;
+use crate::error::{OpenCompanyError, UsedBy, UsedBySurface};
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
@@ -95,6 +95,131 @@ pub fn decide_copy(current: &str, old_account: &str, new: &str) -> CopyDecision 
         CopyDecision::Write
     } else {
         CopyDecision::Keep(SkipReason::CustomKey)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// account_key_used_by / account_key_in_use_message — the clear guard
+// ---------------------------------------------------------------------------
+//
+// Moved here from `ops::company_key` (keys rework #2306, P3-6 review): the
+// guard used to be computed by the HTTP handler BEFORE calling into
+// `fan_out`, which takes `slot_guard` itself once entered. That left an
+// unlocked window between "the handler decided this clear is safe" and "the
+// clear actually runs under the lock" — a concurrent save landing in that
+// window could make an unconfirmed clear strand a copy the other save had
+// just filled, or make the 409 this returns echo a `usedBy` that was already
+// stale by the time the caller read it. Computing it here, inline in
+// [`fan_out`] right after the lock is held and before anything is written,
+// closes that: the read, the decision and the write are now one atomic
+// sequence under one lock, exactly like every other decision `fan_out` makes.
+
+/// The `usedBy` an account-key **clear** would carry
+/// (`docs/key-reworks/in-use-guards.md` §1's account-key row, §2's `surfaces`
+/// table): grounded in the exact rule [`fan_out`] itself applies
+/// ([`decide_copy`]), so "what would a clear touch" can never disagree with
+/// what a clear actually does.
+///
+/// `"llm"` appears only when a clear would actually clear
+/// `provider/tinyhumans/key` (its current value equals the account key,
+/// i.e. `decide_copy` would `Clear` it) **and** a `tinyhumans` row already
+/// exists (indexed) **or** entry zero itself is the legacy managed config
+/// (P1-1, keys rework #2306, KR-L3-01 review — a key with no row and no
+/// legacy managed entry zero behind it is not "set" (D-set/X5), so it can
+/// never make `"llm"` appear). `"composio"` appears whenever the same is true
+/// of `composio/tinyhumans/key` **and** `composio/mode` currently selects the
+/// managed slot this clear would touch (P1-1: the same rule
+/// [`super::super::composio`]'s own guard already applies — a company on
+/// `byok` has nothing live resolving through `composio/tinyhumans/key`, so
+/// clearing the account key cannot strand a Composio workload even though the
+/// copy would still be cleared).
+///
+/// `None` when the account key itself is unset, or when neither derived slot
+/// would actually be cleared (both already hold a custom key of their own, or
+/// composio is on `byok`) — the account-key clear equivalent of matrix rows
+/// M6/C2.
+///
+/// A plain read with no lock of its own — safe for a status route to call any
+/// time (it races nothing it could corrupt) — but also exactly what
+/// [`fan_out`] calls **while holding [`slot_guard`]** for the guard itself, so
+/// the same function serves both a best-effort display read and the atomic
+/// gate without the two ever computing the answer differently.
+pub async fn account_key_used_by(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<Option<UsedBy>> {
+    let old_account = secrets
+        .get(company, KEY_KEY)
+        .await?
+        .map(|SecretValue(v)| v.trim().to_string())
+        .unwrap_or_default();
+    if old_account.is_empty() {
+        return Ok(None);
+    }
+
+    let composio_now = composio::load_tinyhumans_key(company, secrets)
+        .await?
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let inference_now =
+        inference::load_managed_key(company, secrets, &inference::HarnessScope::default())
+            .await?
+            .trim()
+            .to_string();
+    let providers = inference_store::list_providers(company, secrets).await?;
+    let row_exists = providers.iter().any(|p| {
+        p.origin == inference_store::ProviderOrigin::Indexed && p.slug == inference::MANAGED_SLUG
+    });
+    // P1-1 decision (keys rework #2306, KR-L3-01 review): count a company
+    // still on the legacy managed entry zero (`inference/config`,
+    // `ProviderOrigin::EntryZero`) as "llm in use" too, not just an indexed
+    // row — see the doc comment above.
+    let entry_zero_managed = providers.iter().any(|p| {
+        p.origin == inference_store::ProviderOrigin::EntryZero && p.slug == inference::MANAGED_SLUG
+    });
+    let llm_in_use = row_exists || entry_zero_managed;
+
+    // P1-1: `"composio"` only when `composio/mode` currently selects the slot
+    // this clear would touch — see the doc comment above.
+    let composio_mode = composio::load_mode(company, secrets).await?;
+
+    let mut surfaces = Vec::new();
+    let clears =
+        |current: &str| matches!(decide_copy(current, &old_account, ""), CopyDecision::Clear);
+    if clears(&inference_now) && llm_in_use {
+        surfaces.push(UsedBySurface::Llm);
+    }
+    if clears(&composio_now) && composio_mode == composio::ComposioMode::Managed {
+        surfaces.push(UsedBySurface::Composio);
+    }
+
+    if surfaces.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(UsedBy {
+        surfaces,
+        ..Default::default()
+    }))
+}
+
+/// One plain sentence naming every surface a clear would strand, e.g. "Used
+/// by TinyHumans on the LLM page and by Composio." or, with one surface,
+/// "Used by Composio." Matches the operator's pattern (2026-09-15 review) —
+/// the upfront copy in `CredentialStatusDto.used_by` and the 409 this fills in
+/// are built from the same phrases so they can never disagree.
+fn account_key_in_use_message(surfaces: &[UsedBySurface]) -> String {
+    let phrases: Vec<&str> = surfaces
+        .iter()
+        .map(|s| match s {
+            UsedBySurface::Llm => "TinyHumans on the LLM page",
+            UsedBySurface::Composio => "Composio",
+            UsedBySurface::Search => "Search",
+        })
+        .collect();
+    match phrases.split_last() {
+        None => String::new(),
+        Some((last, [])) => format!("Used by {last}."),
+        Some((last, rest)) => format!("Used by {} and by {last}.", rest.join(", ")),
     }
 }
 
@@ -403,6 +528,32 @@ pub async fn fan_out(
         .map(|SecretValue(v)| v.trim().to_string())
         .unwrap_or_default();
 
+    // 2b. The in-use guard (P3-6, keys rework #2306 review), for a clear
+    // only. Computed and — if it refuses — returned HERE: after `slot_guard`
+    // is held, and before anything is written. This used to be a check the
+    // HTTP handler ran before ever calling into `fan_out`, which is exactly
+    // the check-then-act race `slot_guard` exists to close for every other
+    // decision this function makes: a concurrent save landing in that
+    // unlocked window could make an unconfirmed clear strand a copy the
+    // other save had just filled, or make this 409 echo a `usedBy` that was
+    // already stale by the time the caller read it. Reusing
+    // [`account_key_used_by`] rather than re-deriving it inline keeps this
+    // gate and the status route's own display read agreeing by construction.
+    let strand_check = if clearing {
+        account_key_used_by(company, secrets).await?
+    } else {
+        None
+    };
+    if clearing
+        && !request.confirm_in_use
+        && let Some(used_by) = strand_check.clone()
+    {
+        return Err(OpenCompanyError::InUse {
+            message: account_key_in_use_message(&used_by.surfaces),
+            used_by,
+        });
+    }
+
     // 3. Write the account key itself — as early as it can land once its own
     // prior value is known. This is the point that makes `finish_link`'s
     // single-use, unreissuable hub-minted key safe: past this line, no later
@@ -465,6 +616,7 @@ pub async fn fan_out(
                 sets_default: false,
                 models: Vec::new(),
                 rollback_had_prior_key: false,
+                used_by: strand_check.clone(),
             });
         }
     };
@@ -595,6 +747,7 @@ pub async fn fan_out(
             sets_default: false,
             models: Vec::new(),
             rollback_had_prior_key: false,
+            used_by: strand_check.clone(),
         });
     }
 
@@ -855,6 +1008,9 @@ pub async fn fan_out(
         sets_default,
         models,
         rollback_had_prior_key,
+        // Never reached with `clearing` true (step 7 already returned), so
+        // `strand_check` is always `None` here.
+        used_by: strand_check.clone(),
     })
 }
 
@@ -1071,6 +1227,7 @@ pub async fn copy_account_key_to_composio(
         sets_default: false,
         models: Vec::new(),
         rollback_had_prior_key: false,
+        used_by: None,
     })
 }
 

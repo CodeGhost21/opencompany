@@ -1159,6 +1159,170 @@ async fn status_reports_no_used_by_when_nothing_depends_on_it() {
 }
 
 // ---------------------------------------------------------------------------
+// P1-1 (keys rework #2306, KR-L3-01 review): the composio/mode gate and the
+// legacy managed entry-zero decision, pinned by dedicated tests.
+// ---------------------------------------------------------------------------
+
+/// P1-1 (a): BYOK mode with an account key equal to the Composio copy — no
+/// row exists either, so nothing at all could be stranded, and clearing needs
+/// no confirmation. This isolates the composio/mode gate specifically:
+/// `composio/tinyhumans/key` still equals the account key (`decide_copy`
+/// would `Clear` it), but a company on `byok` has nothing live resolving
+/// through that slot (`in-use-guards.md` §2's `"composio"` row).
+#[tokio::test]
+async fn p1_1_byok_mode_with_a_matching_composio_copy_needs_no_confirmation() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "p11byok", GRANTED).await;
+    let id = CompanyId::new("p11byok");
+    // No model: no `tinyhumans` row is created, so nothing can make "llm"
+    // appear either.
+    send(
+        &state,
+        "p11byok",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    // Switch Composio to BYOK directly at the store, bypassing
+    // `PUT …/composio/api-key` and the real network probe it would run in
+    // this feature build — this test is about the mode gate, not the probe.
+    // `composio/tinyhumans/key` is untouched by this — it still holds the
+    // fan-out's own copy of the account key.
+    let runtime = state.registry().get(&id).expect("registered");
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::composio::MODE_KEY,
+            crate::ports::types::SecretValue("byok".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let (status, resp, raw) = send(
+        &state,
+        "p11byok",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert!(
+        resp.get("usedBy").is_none(),
+        "byok has nothing live resolving through composio/tinyhumans/key: {resp}"
+    );
+}
+
+/// P1-1 (b): the mirror image of (a) — managed mode (the default), same
+/// matching Composio copy, same absence of a row. Refused with `409`,
+/// naming `"composio"` and nothing else.
+#[tokio::test]
+async fn p1_1_managed_mode_with_a_matching_composio_copy_is_refused() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "p11managed", GRANTED).await;
+    send(
+        &state,
+        "p11managed",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+
+    let (status, body, raw) = send(
+        &state,
+        "p11managed",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["code"], "in_use", "{body}");
+    let surfaces: Vec<&str> = body["usedBy"]["surfaces"]
+        .as_array()
+        .expect("surfaces")
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(surfaces, vec!["composio"], "{body}");
+}
+
+/// P1-1 (c): a company still on the legacy managed entry zero — no indexed
+/// `tinyhumans` row at all, but `inference/config` already names
+/// `tinyhumans` — counts as `"llm"` in use too (the KR-L3-01 review decision
+/// recorded in `docs/key-reworks/in-use-guards.md` §2's `"llm"` row).
+/// `row_exists` alone only ever sees indexed rows; this pins that the
+/// entry-zero path is deliberately counted as well, with an explicit
+/// assertion rather than leaving the decision undertested.
+#[tokio::test]
+async fn p1_1_legacy_managed_entry_zero_counts_as_llm_in_use() {
+    use crate::company::inference::RuntimeInference;
+
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "p11entryzero", GRANTED).await;
+    let id = CompanyId::new("p11entryzero");
+    let runtime = state.registry().get(&id).expect("registered");
+
+    // The account key, and the SAME value at the legacy flat slot
+    // `inference/key` — the address `load_managed_key`'s own entry-zero
+    // fallback reads, so the guard's `decide_copy` sees a copy that still
+    // equals the account key.
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::company_key::KEY_KEY,
+            crate::ports::types::SecretValue(KEY.to_string()),
+        )
+        .await
+        .unwrap();
+    runtime
+        .secrets()
+        .set(
+            &id,
+            crate::company::inference::KEY_KEY,
+            crate::ports::types::SecretValue(KEY.to_string()),
+        )
+        .await
+        .unwrap();
+    crate::company::inference::save_runtime_config(
+        &id,
+        runtime.secrets().as_ref(),
+        &RuntimeInference {
+            provider: crate::company::inference::MANAGED_SLUG.to_string(),
+            base_url: None,
+            models: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let (status, body, raw) = send(
+        &state,
+        "p11entryzero",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["code"], "in_use", "{body}");
+    let surfaces: Vec<&str> = body["usedBy"]["surfaces"]
+        .as_array()
+        .expect("surfaces")
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(
+        surfaces.contains(&"llm"),
+        "entry-zero legacy managed config counts as llm in use: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // `slot_facts` — the account-key dialog's own-key booleans (keys rework
 // #2306, slice 4b). See `docs/key-reworks/phase-4b-account-dialog.md` §3.1/§6.
 // ---------------------------------------------------------------------------

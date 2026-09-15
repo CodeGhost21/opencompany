@@ -1185,12 +1185,25 @@ async fn copy_account_key(company: AdminScopedCompany) -> Result<Json<MutationRe
     // so this response (and every read after it) reflects the new credential
     // rather than the previous one's.
     evict_catalog_cache(runtime);
-    journal(&company, "company_key_composio_filled", None).await?;
 
     let filled = report
         .slots
         .iter()
         .any(|s| matches!(s.outcome, SlotOutcome::Filled));
+    // P3-3 (keys rework #2306 review): journal only when the copy actually
+    // changed stored state, matching 4a §3.5's convention ("one entry per
+    // slot whose outcome changed stored state ... no entry for kept, skipped,
+    // failed"). `copy_account_key_to_composio`'s own doc comment says its
+    // successful report only ever carries `Filled` or `Kept(AlreadyCurrent)`
+    // — a `CustomKey` conflict returns `Err` before any `FanOutReport` exists,
+    // and this call never rotates or clears — so `filled` is exactly the
+    // right and only test: a `Kept` outcome changed nothing, and an audit
+    // line for it would misreport "this admin changed something" for an
+    // action that did not.
+    if filled {
+        journal(&company, "company_key_composio_filled", None).await?;
+    }
+
     let note = if filled {
         "Composio now uses your account key. A key you created by hand may lack the \
          connections permission Composio needs."
@@ -3058,6 +3071,113 @@ mod tests {
         assert!(
             !raw.contains("th-not-a-real-account-key"),
             "the response leaked the key: {raw}"
+        );
+    }
+
+    /// P3-3 (keys rework #2306 review): a `Filled` copy is journaled — the
+    /// counterpart to `copying_an_already_current_key_does_not_journal`
+    /// below, which proves the opposite for `Kept`.
+    #[tokio::test]
+    async fn copying_a_new_composio_key_journals_the_fill() {
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-journal-fill", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-journal-fill");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-account-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let (code, _, raw) = send_for(
+            &state,
+            "reuse-journal-fill",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        let events = runtime
+            .events()
+            .read_from(&CompanyId::new("reuse-journal-fill"), EventSeq::new(0), 100)
+            .await
+            .unwrap();
+        let journaled = events.iter().any(|stored| {
+            matches!(
+                &stored.event,
+                CompanyEvent::ToolAccessChanged { change, .. }
+                    if change == "company_key_composio_filled"
+            )
+        });
+        assert!(journaled, "a Filled copy must be journaled: {events:?}");
+    }
+
+    /// P3-3 (keys rework #2306 review): a copy whose outcome is
+    /// `Kept(AlreadyCurrent)` — the Composio slot already held exactly the
+    /// account key's value — changes no stored state, so it must not add a
+    /// journal entry either, matching 4a §3.5's "no entry for kept" rule.
+    #[tokio::test]
+    async fn copying_an_already_current_key_does_not_journal() {
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-journal-kept", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-journal-kept");
+        const ACCOUNT_KEY: &str = "th-not-a-real-account-key";
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue(ACCOUNT_KEY.into()),
+            )
+            .await
+            .unwrap();
+        // The Composio slot already agrees with the account key, so the copy
+        // is a no-op (`Kept(AlreadyCurrent)`), not a fill.
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::composio::TINYHUMANS_KEY_KEY,
+                crate::ports::types::SecretValue(ACCOUNT_KEY.into()),
+            )
+            .await
+            .unwrap();
+
+        let (code, body, raw) = send_for(
+            &state,
+            "reuse-journal-kept",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(body["slots"][0]["outcome"], "kept", "{body}");
+
+        let events = runtime
+            .events()
+            .read_from(&CompanyId::new("reuse-journal-kept"), EventSeq::new(0), 100)
+            .await
+            .unwrap();
+        let journaled = events.iter().any(|stored| {
+            matches!(
+                &stored.event,
+                CompanyEvent::ToolAccessChanged { change, .. }
+                    if change == "company_key_composio_filled"
+            )
+        });
+        assert!(
+            !journaled,
+            "a Kept(AlreadyCurrent) copy changed nothing and must not journal: {events:?}"
         );
     }
 

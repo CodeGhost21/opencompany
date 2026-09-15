@@ -98,6 +98,41 @@ impl SecretStore for SlowSecrets {
     }
 }
 
+/// A store that writes an "intruder" default the Nth time `inference/default`
+/// is read — simulating another writer (e.g. the LLM page setting a default
+/// on a different provider) landing in the gap `still_unset` exists to catch
+/// (P2-3, keys rework #2306 review): `read_slots`'s own early read of
+/// `default_now` is call #1 and always sees whatever was there before the
+/// call; `still_unset`'s re-read right before the write is call #2, which
+/// this makes see the intruder instead — proving the interim, non-`index_lock`
+/// re-read actually backs off rather than clobbering a concurrent write.
+struct IntrudingDefaultRead {
+    inner: MemSecrets,
+    calls: AtomicUsize,
+    intrude_after: usize,
+    intruder_slug: String,
+}
+
+#[async_trait]
+impl SecretStore for IntrudingDefaultRead {
+    async fn get(&self, c: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
+        let result = self.inner.get(c, key).await;
+        if key == inference_store::DEFAULT_PROVIDER_KEY {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == self.intrude_after {
+                self.inner
+                    .set(c, key, SecretValue(self.intruder_slug.clone()))
+                    .await
+                    .unwrap();
+            }
+        }
+        result
+    }
+    async fn set(&self, c: &CompanyId, key: &str, value: SecretValue) -> Result<()> {
+        self.inner.set(c, key, value).await
+    }
+}
+
 /// A canned prober answer, with a call counter so a test can assert the
 /// probe never ran at all (e.g. on a `CustomKey` skip).
 struct FakeProber {
@@ -244,6 +279,7 @@ async fn matrix_m1() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -295,6 +331,7 @@ async fn matrix_m2() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -362,6 +399,7 @@ async fn matrix_m3() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -404,6 +442,7 @@ async fn matrix_m4() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -467,6 +506,7 @@ async fn matrix_m5() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -500,6 +540,126 @@ async fn matrix_m5() {
     );
 }
 
+/// P2-2 (keys rework #2306 review): M5's "before" state — a genuine
+/// **rotation** (`A`·`A`·`A`·row(m)·`{tinyhumans,m}` default), not a
+/// first-time fill — but this time the probe answers `auth`. The rollback
+/// restores the LLM slot to the raw prior key (`A`), not to empty the way
+/// M10's fresh-company rollback does, `rollback_had_prior_key` makes the note
+/// say so, and — the documented consequence — a second save of the same new
+/// key afterward finds the LLM slot no longer recognisable as "the old
+/// account key" (the account key itself already moved to `B` on the first
+/// call and is never rolled back), so `decide_copy` reads it as a distinct,
+/// custom value and reports `Kept(CustomKey)` rather than rotating it again.
+#[tokio::test]
+async fn matrix_m5_plus_auth() {
+    let cid = company("m5-auth");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, OLD).await;
+    raw_set(&secrets, &cid, COMPOSIO_KEY_KEY, OLD).await;
+    raw_set(&secrets, &cid, &llm_key_key(), OLD).await;
+    seed_row(&secrets, &cid, MODEL).await;
+    inference_store::set_default_choice(
+        &cid,
+        &secrets,
+        &inference_store::ModelChoice {
+            provider: "tinyhumans".to_string(),
+            model: MODEL.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let prober = FakeProber::failing(probe::ProbeClass::Auth);
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: NEW,
+            model: None,
+            confirm_in_use: true,
+        },
+        &prober,
+    )
+    .await
+    .unwrap();
+
+    // The account key and the Composio copy are never rolled back (Q6) — only
+    // the LLM slot this specific request wrote is undone.
+    assert_eq!(raw_get(&secrets, &cid, ACCOUNT_KEY_KEY).await, NEW);
+    assert_eq!(raw_get(&secrets, &cid, COMPOSIO_KEY_KEY).await, NEW);
+    assert_eq!(
+        raw_get(&secrets, &cid, &llm_key_key()).await,
+        OLD,
+        "a genuine rotation rolls back to the PRIOR key, not to empty"
+    );
+    // Untouched: `auth_rejected` skips the provider/default slots outright,
+    // so the row and default this test seeded survive exactly as they were.
+    assert_eq!(
+        inference_store::list_providers(&cid, &secrets)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        inference_store::load_default(&cid, &secrets).await.unwrap(),
+        full("tinyhumans", MODEL)
+    );
+
+    assert_eq!(outcome(&report, Slot::Composio), SlotOutcome::Rotated);
+    assert_eq!(outcome(&report, Slot::Inference), SlotOutcome::RolledBack);
+    assert_eq!(
+        outcome(&report, Slot::Provider),
+        SlotOutcome::Skipped(SkipReason::InferenceRejected)
+    );
+    assert_eq!(
+        outcome(&report, Slot::Default),
+        SlotOutcome::Skipped(SkipReason::InferenceRejected)
+    );
+    assert!(
+        report.rollback_had_prior_key,
+        "this was a rotation, not a first-time fill: {report:?}"
+    );
+
+    let note = fan_out_note(false, &report, None);
+    assert!(
+        note.contains(
+            "TinyHumans on the LLM page still uses your previous key, because the new key \
+             was rejected for LLM use."
+        ),
+        "{note}"
+    );
+
+    // The documented consequence: a second save of the SAME new key now
+    // treats the LLM slot as a custom key, because the slot holds the raw
+    // prior key (`A`) while `tinyhumans/key` itself has already moved on to
+    // `B` — `decide_copy` can no longer tell the rolled-back value apart from
+    // one an operator pasted by hand on the LLM page.
+    let prober2 = FakeProber::ok(&[MODEL]);
+    let second = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: NEW,
+            model: None,
+            confirm_in_use: true,
+        },
+        &prober2,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome(&second, Slot::Inference),
+        SlotOutcome::Kept(SkipReason::CustomKey),
+        "{second:?}"
+    );
+    assert_eq!(
+        prober2.calls.load(Ordering::SeqCst),
+        0,
+        "a slot already read as a custom key is never health-probed"
+    );
+}
+
 #[tokio::test]
 async fn matrix_m6() {
     let cid = company("m6");
@@ -515,6 +675,7 @@ async fn matrix_m6() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -587,6 +748,7 @@ async fn matrix_m7() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -630,6 +792,7 @@ async fn matrix_m8() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -710,6 +873,7 @@ async fn matrix_m9() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -752,6 +916,7 @@ async fn matrix_m10() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -812,6 +977,7 @@ async fn matrix_m11() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -824,6 +990,7 @@ async fn matrix_m11() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -875,6 +1042,7 @@ async fn matrix_m12() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -909,6 +1077,7 @@ async fn matrix_m13() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -956,6 +1125,7 @@ async fn matrix_m14() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1000,6 +1170,7 @@ async fn matrix_c1() {
         FanOutRequest {
             key: "",
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1059,6 +1230,7 @@ async fn matrix_c2() {
         FanOutRequest {
             key: "",
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1092,6 +1264,7 @@ async fn matrix_c3() {
         FanOutRequest {
             key: "",
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1137,6 +1310,7 @@ async fn an_auth_probe_restores_the_llm_slots_exactly() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1173,6 +1347,7 @@ async fn a_non_auth_probe_failure_keeps_everything() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1210,6 +1385,7 @@ async fn an_invalid_model_writes_nothing() {
         FanOutRequest {
             key: NEW,
             model: Some("chat-v1"),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1235,6 +1411,7 @@ async fn a_model_with_a_clear_is_refused() {
         FanOutRequest {
             key: "",
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1243,6 +1420,57 @@ async fn a_model_with_a_clear_is_refused() {
 
     assert!(err.to_string().contains("cannot be chosen"), "{err}");
     assert_eq!(raw_get(&secrets, &cid, ACCOUNT_KEY_KEY).await, "");
+}
+
+/// P2-1 (keys rework #2306 review): a read failure AFTER the account key is
+/// already safely stored (step 4, `read_slots`) must not cost that key. A
+/// corrupt `inference/default` blob (invalid JSON behind a `{` prefix, per
+/// `inference::store::parse_default`) makes `read_slots`'s own
+/// `inference_store::load_default` call return `Err`, which `fan_out`
+/// degrades to every derived slot reporting `Failed` in an `Ok` report —
+/// this is the "no bubbled `Err`" half of that contract; `tinyhumans/key`
+/// itself must already hold the minted value regardless.
+#[tokio::test]
+async fn a_read_failure_after_the_account_key_is_stored_still_keeps_the_key() {
+    let cid = company("read-fail");
+    let secrets = MemSecrets::default();
+    // Not valid JSON, but starts with `{` so `parse_default` attempts to
+    // parse it rather than reading it as a bare slug — and fails.
+    raw_set(&secrets, &cid, inference_store::DEFAULT_PROVIDER_KEY, "{").await;
+    let prober = FakeProber::ok(&[MODEL]);
+
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: NEW,
+            model: Some(MODEL),
+            confirm_in_use: true,
+        },
+        &prober,
+    )
+    .await
+    .expect("a read failure degrades to a Failed report, never a bubbled Err");
+
+    assert_eq!(
+        raw_get(&secrets, &cid, ACCOUNT_KEY_KEY).await,
+        NEW,
+        "the account key was already stored before the read that failed"
+    );
+    for slot in [
+        Slot::Composio,
+        Slot::Inference,
+        Slot::Provider,
+        Slot::Default,
+        Slot::Health,
+    ] {
+        assert_eq!(
+            outcome(&report, slot),
+            SlotOutcome::Failed,
+            "every derived slot degrades to Failed: {report:?}"
+        );
+    }
+    assert_eq!(prober.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1260,6 +1488,7 @@ async fn failing_account_key_write_writes_nothing_else() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1286,6 +1515,7 @@ async fn failing_composio_write_still_sets_up_llm() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1322,6 +1552,7 @@ async fn failing_inference_write_skips_row_default_and_probe() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1359,6 +1590,7 @@ async fn failing_row_write_keeps_the_key_copy() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1388,6 +1620,7 @@ async fn failing_default_write_keeps_the_row() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1420,6 +1653,7 @@ async fn failing_health_record_does_not_change_outcomes() {
         FanOutRequest {
             key: NEW,
             model: Some(MODEL),
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1455,6 +1689,7 @@ async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
             FanOutRequest {
                 key: NEW,
                 model: None,
+                confirm_in_use: true,
             },
             &prober_a,
         );
@@ -1464,6 +1699,7 @@ async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
             FanOutRequest {
                 key: OTHER,
                 model: None,
+                confirm_in_use: true,
             },
             &prober_b,
         );
@@ -1511,6 +1747,7 @@ async fn no_report_or_note_contains_a_key() {
         FanOutRequest {
             key: NEW,
             model: None,
+            confirm_in_use: true,
         },
         &prober,
     )
@@ -1658,5 +1895,58 @@ async fn copying_the_account_key_never_touches_mode_or_byok() {
         raw_get(&secrets, &cid, BYOK_KEY_KEY).await,
         CUSTOM,
         "the copy never reads or writes composio/byok/key"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2-3 (interim, non-`index_lock`): the default re-read closes the gap
+// between `read_slots`'s own read and the write, without a shared lock.
+// ---------------------------------------------------------------------------
+
+/// A fresh company, no row yet: `fan_out` would normally create the
+/// `tinyhumans` row and set it as the default (matrix M1/M2's shape). Here,
+/// between `read_slots` seeing `Unset` and `still_unset`'s re-read right
+/// before the actual write, [`IntrudingDefaultRead`] simulates a concurrent
+/// writer landing a bare-slug default on a different provider — proving the
+/// interim re-read backs the default write off to `Kept(DefaultAlreadySet)`
+/// rather than clobbering what the other writer just set.
+#[tokio::test]
+async fn the_default_re_read_backs_off_when_something_else_wins_the_race() {
+    let cid = company("default-race");
+    let secrets = IntrudingDefaultRead {
+        inner: MemSecrets::default(),
+        calls: AtomicUsize::new(0),
+        intrude_after: 1,
+        intruder_slug: "openrouter".to_string(),
+    };
+    let prober = FakeProber::ok(&[MODEL]);
+
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: NEW,
+            model: Some(MODEL),
+            confirm_in_use: true,
+        },
+        &prober,
+    )
+    .await
+    .unwrap();
+
+    // The row still gets created — the race is only about the default slot.
+    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Filled);
+    assert_eq!(
+        outcome(&report, Slot::Default),
+        SlotOutcome::Kept(SkipReason::DefaultAlreadySet),
+        "the re-read must see the intruder's write and back off: {report:?}"
+    );
+    assert_eq!(
+        inference_store::load_default(&cid, &secrets.inner)
+            .await
+            .unwrap(),
+        inference_store::DefaultChoice::ProviderOnly("openrouter".to_string()),
+        "the intruder's default must survive untouched — this is the race \
+         guard actually working, not merely reporting itself as skipped"
     );
 }

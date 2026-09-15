@@ -130,6 +130,20 @@ The message names **every** user, in one sentence:
 `N agent(s)` is `"1 agent"` or singular-free `"N agents"` — never
 `"1 agents"`.
 
+**Accepted variant (P3-2, keys rework #2306 review):** the account-key
+clear's own message (`account_key_in_use_message`,
+`crate::company::company_key::fan_out`) does not follow the generic
+`surfaces`-only template above. It reads `"Used by TinyHumans on the LLM page
+and by Composio."` (or, with one surface, `"Used by Composio."`) rather than
+`"TinyHumans account key's key is used by llm, composio."` — an accepted
+operator decision (2026-09-15 review): the account key has no single
+`<Label>` a reader would recognize the way a provider's display name reads,
+and naming the surfaces themselves in plain words reads more naturally for a
+one- or two-item list than forcing the raw template's comma join. Every other
+guard in this file (a provider row, a key, Composio's own guard) still uses
+the generic template unchanged; this is the one deliberate, documented
+exception.
+
 ### What each `surfaces` entry means, precisely (P2 fix)
 
 `surfaces` is populated **per credential/row being guarded**, not globally —
@@ -200,7 +214,31 @@ for, on the same footing as a marker naming a disabled one. Concretely, in
   "unset".
 
 Search gets the identical treatment in Agent A's slices: disabling or
-deleting the provider `search/default` names never clears that key either.
+deleting the provider `search/default` names never clears that key either —
+`DELETE …/search/providers/{slug}`, `PUT …/search/providers/{slug}` (disable)
+and `PUT …/search/providers/{slug}/key` (clear) all guard exactly as §1/§2
+describe, and `DELETE …/search/key` (disconnect-all) carries the same guard
+in bulk: `usedBy` is `{ "default": true }` whenever `search/default` names
+*any* provider, refused without `?confirmInUse=true`, and a confirmed
+disconnect-all never clears the marker either.
+
+**Explicit carve-out: the legacy `PUT …/search` route.** Its own
+"select managed" branch (`src/server/ops/search.rs`, `put_search`,
+`provider == MANAGED_PROVIDER`) still clears `search/default` outright on
+every call, unguarded and unconditional — the one place on this surface that
+does not follow X14. This is intentional, not an oversight: the route
+predates the indexed `search/providers` flow, has no console caller today
+(`saveSearch` in `frontend/src/api/search.ts` is defined but unused —
+confirmed by grepping `frontend/src` for callers), and is marked
+`// DEPRECATED(keys-rework #2306)` at the site rather than rewritten to match
+X14, because rewriting dead code's behavior "for consistency" is a change
+with no observable effect and a nonzero chance of quietly breaking whatever
+integration still holds the route by hand. A test in `search.rs` pins the
+current (unchanged) behavior so a future removal of the route — the only
+condition under which this carve-out goes away — is a deliberate decision
+against a known baseline, not silent drift. If this route ever gains a real
+caller again, the same guard-and-never-clear treatment above applies to it
+with no further discussion needed.
 
 ## 5. Turn-time fail-closed messages (F6, D-copy / X9, D-names-in-errors / X7)
 
