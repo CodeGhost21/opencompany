@@ -2179,8 +2179,21 @@ async fn attach_referral_origins(
                             chat_id,
                             agent_id,
                             text,
+                            audience,
                             ..
-                        } if chat_id == from_desk && !crate::hivemind::is_hive_author(agent_id) => {
+                        } if chat_id == from_desk
+                            && !crate::hivemind::is_hive_author(agent_id)
+                            // **An aside is not a turn, here as in `turns_of`.**
+                            //
+                            // A room's `!aside` is journaled with the same
+                            // parent as its turns, so scoping by thread admits
+                            // it. Folded into the crossing it would publish a
+                            // private pair exchange on the ASKING desk — the
+                            // same cross-desk leak the answer builder was fixed
+                            // for, in the other projection of the same rule
+                            // (Codex, #2332).
+                            && audience.is_empty() =>
+                        {
                             Some(ReferralLine {
                                 author_id: agent_id.clone(),
                                 author_label: agent_id.clone(),

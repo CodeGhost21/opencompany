@@ -5219,7 +5219,7 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
         // attributed, in the order they were said.
         let conclusion = match &outcome.ending {
             crate::hivemind::EpisodeEnding::Converged { .. } => {
-                let Some(report_seq) = outcome.report_seq else {
+                if outcome.report_seq.is_none() {
                     tracing::warn!(
                         company = %record.id,
                         desk = %desk_id,
@@ -5234,15 +5234,18 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
                     // to `@<seat>` instead of the desk. Carry what the room
                     // said, exactly as the unconverged arm does (CodeRabbit,
                     // #2332).
-                    return Ok(self
-                        .turns_of(&events, &record.id, &outcome, &far_desk, root)
-                        .await);
-                };
-                let page = events.read_from(&record.id, report_seq, 1).await?;
-                page.into_iter().find_map(|stored| match stored.event {
-                    CompanyEvent::AgentReply { text, .. } if stored.seq == report_seq => Some(text),
-                    _ => None,
-                })
+                    self.turns_of(&events, &record.id, &outcome, &far_desk, root)
+                        .await
+                } else {
+                    let report_seq = outcome.report_seq.expect("checked above");
+                    let page = events.read_from(&record.id, report_seq, 1).await?;
+                    page.into_iter().find_map(|stored| match stored.event {
+                        CompanyEvent::AgentReply { text, .. } if stored.seq == report_seq => {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                }
             }
             _ => {
                 self.turns_of(&events, &record.id, &outcome, &far_desk, root)
@@ -5258,7 +5261,26 @@ impl crate::hivemind::HiveReferralRunner for HiveDeskRunner<'_> {
             answered = conclusion.is_some(),
             "[hive] a referred desk answered as a room"
         );
-        Ok(conclusion)
+        // **An empty room that RAN is a failure, not an absent room.**
+        //
+        // `Ok(None)` means "this desk cannot hold a room" and `forward` acts on
+        // it by running a single seat instead. Past this point the room has been
+        // stood up and has spent its budget — a one-turn desk whose only turn
+        // failed comes back as a non-error `Exhausted` with no rows at all — so
+        // returning `None` here would bill the room AND a seat, and credit the
+        // answer to a seat that never spoke. An `Err` is what a crossing that
+        // got nothing back already means, and `unanswered` now names the desk
+        // rather than a seat for exactly this case (Codex, #2332).
+        match conclusion {
+            Some(answer) => Ok(Some(answer)),
+            None => Err(crate::OpenCompanyError::Harness(format!(
+                "the {desk_id} desk deliberated and produced no answer to carry back \
+                 (ending {}, {} turn(s), {} of them failed)",
+                outcome.ending.label(),
+                outcome.turns,
+                outcome.failed_turns,
+            ))),
+        }
     }
 }
 

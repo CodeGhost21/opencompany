@@ -207,6 +207,44 @@ struct TurnScratch {
     aside: Option<String>,
 }
 
+/// Whether a line puts a question to somebody this episode would have to cross
+/// a desk to reach.
+///
+/// Read off the same roster and desk set `consider` resolves mentions against,
+/// so the two cannot disagree about what counts as a crossing. A mention of
+/// somebody on this desk is not one — that is an ordinary line and stays.
+fn asks_across(line: &str, federation: &HiveFederation, home: &str) -> bool {
+    let members = federation.roster_members();
+    let desks = federation.desk_set();
+    let retired: Vec<String> = Vec::new();
+    let roster = tinyhivemind_hive::roster::Roster::new(&members, &[], &retired);
+    let desk_set = tinyhivemind_hive::desk::DeskSet::new(&desks, &[], &[], &[], &retired);
+    tinyhivemind_hive::mention::resolve(
+        line,
+        None,
+        &tinyhivemind_hive::mention::MentionAuthor::Agent {
+            // No author to speak of: this reads desk mentions only, and a
+            // self-mention cannot apply to a desk.
+            id: String::new(),
+        },
+        &roster,
+        &desk_set,
+    )
+    .iter()
+    .any(|mention| match &mention.target {
+        // This desk is not a crossing, and the library refuses it as
+        // `SelfDesk` — so a continuation naming its own room is an ordinary
+        // line and must not be dropped for it.
+        tinyhivemind_hive::mention::MentionTarget::Desk { id } => {
+            !mention.quiet
+                && desk_set
+                    .resolve_id(id)
+                    .is_ok_and(|resolved| resolved != home)
+        }
+        _ => false,
+    })
+}
+
 /// Whether two lines say the same thing, for the continuation guard.
 ///
 /// Collapsed whitespace and nothing cleverer. The failure this catches is a
@@ -853,6 +891,33 @@ impl<'a> EpisodeDriver<'a> {
                             // the whole of the observed difference: a genuinely
                             // new conclusion is not a whitespace variant of the
                             // question that earned it.
+                            // **A continuation may not raise a NEW crossing.**
+                            //
+                            // `consider` has already run for the line that
+                            // earned this pass and is not called again on what
+                            // it produces, so a continuation answering with its
+                            // own `!question @#desk` journals a question that is
+                            // never dispatched and never answered — valid-looking
+                            // to the fold and to every later speaker, and able to
+                            // move the room on the strength of an exchange that
+                            // did not happen. `!question` is a move every seat
+                            // keeps, so nothing else stops it (Codex, #2332).
+                            //
+                            // Dropped rather than dispatched: this pass exists
+                            // to state what the answer settles, and one that
+                            // asks again has not done that. Dispatching it would
+                            // work too, and would spend another crossing; that
+                            // is the change to make if a continuation should be
+                            // allowed to widen the question.
+                            Ok(second) if asks_across(&second, federation, &self.desk.id) => {
+                                tracing::debug!(
+                                    company = %self.company,
+                                    desk = %self.desk.id,
+                                    agent = %turn.agent_id,
+                                    "[hive] a crossing's continuation raised a new question of \
+                                     another desk; not journaled, since nothing would dispatch it"
+                                );
+                            }
                             Ok(second) if same_line(&second, &line) => {
                                 tracing::debug!(
                                     company = %self.company,
