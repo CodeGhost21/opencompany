@@ -838,11 +838,36 @@ async fn edit_agent(
     let model = body
         .model
         .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    // Same double-option contract and same reason to hoist as `model` — the
+    // pair check just below needs both resulting values at once.
+    let provider = body
+        .provider
+        .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
     // Same double-option contract, and same reason to hoist: validated below
     // against the declared harness list before anything is written.
     let harness = body
         .harness
         .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+
+    // The pair is set and cleared together — the frontend's own contract
+    // (`api/types.ts`'s `EditAgentPatch.provider` doc) and the one honest rule
+    // that keeps a stored pin from ever naming a provider with no model or a
+    // model with no provider. Checked on the REQUEST fields, not the
+    // resulting values: a caller updating only `model` on an agent that
+    // already carries a stored `provider` (or vice versa) is refused rather
+    // than silently left with a pin one half of which the caller never
+    // looked at. `body.provider`/`body.model` deliberately, not `provider`/
+    // `model` (blank-filtered) — a client sending `{"provider": ""}` alone is
+    // this same mistake and must be refused identically.
+    if body.provider.is_some() != body.model.is_some() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "a provider and a model are a pair on a built-in harness (keys rework, issue \
+             #2306) — set both together, or clear both together by sending them both as \
+             `null`."
+                .to_string(),
+        ))
+        .into());
+    }
 
     // A coding CLI this build drives is bindable without any `[[harness]]`
     // naming it, and `GET {scope}/harnesses` offers exactly those ids in the
