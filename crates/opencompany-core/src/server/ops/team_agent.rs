@@ -1078,6 +1078,11 @@ async fn edit_agent(
         if let Some(model) = model {
             agent.model = model;
         }
+        // Keys rework (#2306), slice 3a — same shape and same guarantee as
+        // the manifest branch above.
+        if let Some(provider) = provider {
+            agent.provider = provider;
+        }
         if let Some(harness) = harness {
             agent.harness = harness;
         }
