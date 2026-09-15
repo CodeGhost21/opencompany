@@ -278,11 +278,16 @@ test("an agent defined in the console can be read back and edited", async ({ pag
  * request context that still works. Both calls are idempotent (a clear on an
  * unpinned agent, a delete on a missing slug), so this needs no bookkeeping.
  */
-test.afterEach(async ({ request }) => {
-  await request
+test.afterEach(async ({ request }, testInfo) => {
+  const fs = await import("node:fs");
+  const log = (m: string) => fs.appendFileSync("/tmp/claude-1000/-home-enamakel-work-workflow-opencompany-opencompany/5e898ddc-46ef-4b1f-a5b5-1fa221d9a1f4/scratchpad/hook.log", `${new Date().toISOString()} ${testInfo.title} ${testInfo.status}: ${m}\n`);
+  log("hook start");
+  const a = await request
     .patch("/api/v1/company/team/researcher", { data: { provider: null, model: null } })
-    .catch(() => {});
-  await request.delete("/api/v1/company/inference/providers/e2e-pair").catch(() => {});
+    .catch((e) => e);
+  log(`patch -> ${typeof a?.status === "function" ? a.status() : String(a)}`);
+  const b = await request.delete("/api/v1/company/inference/providers/e2e-pair").catch((e) => e);
+  log(`delete -> ${typeof b?.status === "function" ? `${b.status()} ${(await b.text()).slice(0,120)}` : String(b)}`);
 });
 
 test("an admin pins an agent to a provider and model, then clears it (keys rework, issue #2306, slice 3b)", async ({
