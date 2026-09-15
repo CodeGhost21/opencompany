@@ -218,29 +218,36 @@ test("a provider behind an unreachable endpoint is saved, amber, and keeps its k
   // the key is perfectly good.
   await openInference(page);
 
-  await addCustom(page);
-  await page.locator("#inference-connect-name").fill("E2E Gateway");
-  await expect(page.getByTestId("inference-slug-preview")).toHaveText("Slug: e2e-gateway");
-  await page.locator("#inference-connect-url").fill(UNREACHABLE);
-  await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
-  await page.getByTestId("inference-connect-submit").click();
-  await pickModel(page, "e2e-model");
+  try {
+    await addCustom(page);
+    await page.locator("#inference-connect-name").fill("E2E Gateway");
+    await expect(page.getByTestId("inference-slug-preview")).toHaveText("Slug: e2e-gateway");
+    await page.locator("#inference-connect-url").fill(UNREACHABLE);
+    await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
+    await page.getByTestId("inference-connect-submit").click();
+    await pickModel(page, "e2e-model");
 
-  const row = page.getByTestId("inference-provider-e2e-gateway");
-  await expect(row).toBeVisible({ timeout: 30_000 });
-  // The row was created and the credential was kept: the save succeeded, and
-  // only reachability is in question.
-  await expect(row).toContainText("•••• configured");
-  await expect(page.getByTestId("inference-provider-e2e-gateway-health")).toContainText(
-    "unreachable",
-  );
+    const row = page.getByTestId("inference-provider-e2e-gateway");
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    // The row was created and the credential was kept: the save succeeded, and
+    // only reachability is in question.
+    await expect(row).toContainText("•••• configured");
+    await expect(page.getByTestId("inference-provider-e2e-gateway-health")).toContainText(
+      "unreachable",
+    );
 
-  // And it survives a reload, which is the half a component test cannot see.
-  await page.reload();
-  await openInference(page);
-  await expect(page.getByTestId("inference-provider-e2e-gateway")).toContainText(
-    "•••• configured",
-  );
+    // And it survives a reload, which is the half a component test cannot see.
+    await page.reload();
+    await openInference(page);
+    await expect(page.getByTestId("inference-provider-e2e-gateway")).toContainText(
+      "•••• configured",
+    );
+  } finally {
+    // An enabled, unreachable provider is exactly the shape that becomes the
+    // shared company's *primary* route (see `deleteProvider`) — remove it
+    // regardless of where the assertions above landed.
+    await deleteProvider(page, "e2e-gateway");
+  }
 });
 
 test("a second provider holds a credential of its own", async ({ page }) => {
