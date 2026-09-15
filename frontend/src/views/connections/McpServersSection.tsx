@@ -700,6 +700,14 @@ export function McpServersSection({
       );
       const after = res.test;
       if (after) setTested((t) => ({ ...t, [server.name]: after }));
+      if (after && after.status !== "ok") {
+        setEnvError(
+          after.message.trim() ||
+            `${server.name} still isn't connected with those credentials.`,
+        );
+        await refresh();
+        return;
+      }
       setEnvFor(null);
       setEnvDraft({});
       await refresh();
