@@ -11,7 +11,7 @@
 # Members:
 # - `crates/opencompany-core` — the host (library crate `opencompany`, binary
 #   `opencompany`), with its `src/`, `tests/`, `benches/`, `examples/` and
-#   `build.rs` beneath it. The data it embeds (`companies/`, `globals/`,
+#   `build.rs` beneath it. The data it embeds (`companies/`,
 #   `skills/`) and `vendor/` stay here at the root.
 # - `crates/opencompany-tui` — the terminal client, embedding the host.
 #

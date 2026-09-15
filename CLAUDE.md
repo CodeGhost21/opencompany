@@ -9,7 +9,7 @@ manifest per flavour under `crates/`:
   crate `opencompany`, binary `opencompany`. Its `src/`, `tests/`, `benches/`,
   `examples/` and `build.rs` live beneath that manifest. Every `src/...` path
   in this file and under `docs/` is short for `crates/opencompany-core/src/...`;
-  the data the crate embeds and reads (`companies/` — the baseline at `companies/_globals/` included — `skills/`,
+  the data the crate embeds and reads (`companies/`, `skills/`,
   `frontend/`, `vendor/`) stays at the repository root, `../..` from
   `CARGO_MANIFEST_DIR`.
 - `crates/opencompany-app`: the Tauri desktop shell. Excluded from the
