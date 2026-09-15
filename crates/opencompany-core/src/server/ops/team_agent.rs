@@ -1247,6 +1247,7 @@ async fn detail(
         tier: declared_tier(record, agent_id),
         harness: declared_harness(record, agent_id),
         model: declared_model(record, agent_id),
+        provider: declared_provider(record, agent_id),
         is_orchestrator: is_orchestrator(record, agent_id),
         tools: agent_tools(record, agent_id),
         desks: desks_for(record, agent_id),
