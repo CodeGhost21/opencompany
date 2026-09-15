@@ -482,8 +482,8 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         // A host that already reaches a model has answered the model question
         // on the operator's behalf, so the step is not shown at all (see
         // `visibleSteps`) and its verdict settles here rather than waiting for
-        // a probe nobody can run. Settled rather than cleared, the
-        // same way "No model" settles: there is nothing left to prove.
+        // a probe nobody can run. Settled rather than cleared, the same way
+        // "No model" settles: there is nothing left to prove.
         if (s.inference.ready) setTested({ kind: "hosted" });
         // Pre-fill the model step from what the host already holds. A hosted
         // operator has a credential injected by the control plane, no key of
@@ -2168,6 +2168,15 @@ function ReviewStep({
           Anything that leaves the company — sending, publishing, spending — waits
           for you until you say otherwise.
         </p>
+        {/* Said, because the alternative is an operator who was never asked for
+            a model wondering later where theirs came from. A skipped question
+            still owes its answer somewhere. */}
+        {status.inference.ready && (
+          <p className="mt-1" data-testid="setup-host-model">
+            The model comes with this host, so there was no key to supply and none
+            is stored against your company.
+          </p>
+        )}
         {email.trim() && (
           <p className="mt-1">
             You&apos;ll sign in as <span className="font-medium text-foreground">{email.trim()}</span>.
