@@ -852,14 +852,14 @@ async fn edit_agent(
     // The pair is set and cleared together — the frontend's own contract
     // (`api/types.ts`'s `EditAgentPatch.provider` doc) and the one honest rule
     // that keeps a stored pin from ever naming a provider with no model or a
-    // model with no provider. Checked on the REQUEST fields, not the
+    // model with no provider. Checked on whether the REQUEST carried each
+    // field at all (`.is_some()` on the double option, unaffected by the
+    // blank-filtering `model`/`provider` just applied) rather than on the
     // resulting values: a caller updating only `model` on an agent that
     // already carries a stored `provider` (or vice versa) is refused rather
     // than silently left with a pin one half of which the caller never
-    // looked at. `body.provider`/`body.model` deliberately, not `provider`/
-    // `model` (blank-filtered) — a client sending `{"provider": ""}` alone is
-    // this same mistake and must be refused identically.
-    if body.provider.is_some() != body.model.is_some() {
+    // looked at.
+    if model.is_some() != provider.is_some() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "a provider and a model are a pair on a built-in harness (keys rework, issue \
              #2306) — set both together, or clear both together by sending them both as \
