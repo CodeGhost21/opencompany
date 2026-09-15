@@ -286,7 +286,7 @@ test.afterEach(async ({ request }, testInfo) => {
     .patch("/api/v1/company/team/researcher", { data: { provider: null, model: null } })
     .catch((e) => e);
   log(`patch -> ${typeof a?.status === "function" ? a.status() : String(a)}`);
-  const b = await request.delete("/api/v1/company/inference/providers/e2e-pair").catch((e) => e);
+  const b = await request.delete("/api/v1/company/inference/providers/e2e-pair?confirmInUse=true").catch((e) => e);
   log(`delete -> ${typeof b?.status === "function" ? `${b.status()} ${(await b.text()).slice(0,120)}` : String(b)}`);
 });
 
