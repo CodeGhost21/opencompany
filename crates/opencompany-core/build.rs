@@ -13,8 +13,8 @@
 //! Both `*.toml` rosters and the documents `prompt_files` names are embedded,
 //! because `agent_file::resolve_prompt_files` reads those bodies at parse time.
 //!
-//! The same script embeds the **global baseline** — `companies/_globals/` plus the shared
-//! `skills/` library — for a second reason: a platform-provisioned container has
+//! The same script embeds the **global baseline** — `companies/_globals/`,
+//! its `skills/` included — for a second reason: a platform-provisioned container has
 //! no repository checkout beside it, so anything only readable from disk is
 //! simply absent there. A baseline that every company gets except the hosted
 //! ones is not a baseline.
@@ -340,17 +340,16 @@ fn collect(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
     }
 }
 
-/// Embeds `companies/_globals/` and the shared `skills/` library into `embedded_globals.rs`.
+/// Embeds `companies/_globals/` — its `skills/` included — into `embedded_globals.rs`.
 ///
 /// Absent directories are not this script's business to fail on, exactly as with
 /// `companies/`: the crate still compiles, and `crate::globals` is what asserts
 /// the baseline is non-empty.
 fn embed_globals(root: &Path) {
     let globals = root.join("companies").join("_globals");
-    let skills = root.join("skills");
+    let skills = globals.join("skills");
     println!("cargo:rerun-if-changed={}", globals.display());
-    println!("cargo:rerun-if-changed={}", skills.display());
-    for sub in ["agents", "workflows", "ledgers"] {
+    for sub in ["agents", "workflows", "ledgers", "skills"] {
         println!("cargo:rerun-if-changed={}", globals.join(sub).display());
     }
 
@@ -383,9 +382,11 @@ fn embed_globals(root: &Path) {
     );
     ledgers.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Every shared skill, keyed by slug: which of them the baseline *installs*
-    // is `[skills].always`, read at runtime rather than here, so this script
-    // never has to parse TOML to decide what to embed.
+    // Every baseline skill, keyed by slug: which of them the baseline
+    // *installs* is `[skills].always`, read at runtime rather than here, so
+    // this script never has to parse TOML to decide what to embed. A vertical's
+    // own skills are not here — they are read from its bundle on disk, and a
+    // hosted tenant's registry is served from the same bundles.
     let mut skill_docs: Vec<(String, String)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&skills) {
         for entry in entries.filter_map(Result::ok) {
@@ -430,8 +431,8 @@ fn embed_globals(root: &Path) {
     );
     write_pairs(
         &mut out,
-        "EMBEDDED_SHARED_SKILLS",
-        "Every shared-library `SKILL.md`, keyed by skill slug, sorted.",
+        "EMBEDDED_GLOBAL_SKILLS",
+        "Every `companies/_globals/skills/*/SKILL.md`, keyed by skill slug, sorted.",
         &skill_docs,
     );
 

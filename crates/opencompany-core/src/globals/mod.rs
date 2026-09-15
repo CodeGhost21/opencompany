@@ -233,12 +233,12 @@ fn build_tasks(faults: &mut Vec<String>) -> Vec<crate::company::TaskSeed> {
 fn build_skills(always: &[String], faults: &mut Vec<String>) -> Vec<SkillDoc> {
     let mut out = Vec::new();
     for slug in always {
-        let Some((_, body)) = generated::EMBEDDED_SHARED_SKILLS
+        let Some((_, body)) = generated::EMBEDDED_GLOBAL_SKILLS
             .iter()
             .find(|(candidate, _)| candidate == slug)
         else {
             faults.push(format!(
-                "`[skills].always` names `{slug}`, which is not in the shared library (`skills/{slug}/SKILL.md`)."
+                "`[skills].always` names `{slug}`, which the baseline does not ship (`companies/_globals/skills/{slug}/SKILL.md`)."
             ));
             continue;
         };
