@@ -141,6 +141,26 @@ async function pickModel(page: Page, model: string) {
 /** The discard port: refused immediately, no DNS, no wait. */
 const UNREACHABLE = "http://127.0.0.1:9/v1";
 
+/**
+ * Removes a provider this file connected, so it cannot outlive its test.
+ *
+ * Every spec in this file (bar the legacy single-slot one below, which has its
+ * own "Reset to default" cleanup) runs against the one company the whole `npm
+ * run e2e:live` run shares (`playwright.config.ts`'s `managesHost` path — one
+ * host process, one company, for every spec file that is not first-run/Euler/
+ * live-LLM/visual). `resolve_effective`'s unset-workload fallback is the
+ * *primary* provider — the first enabled one (`company::inference::resolve`)
+ * — so a provider this file leaves connected and enabled does not just sit
+ * there: it becomes the route every agent turn in every *other* spec takes,
+ * for the rest of the run. An unreachable one (every provider this file
+ * creates points at `UNREACHABLE`) turns every later turn into the exact 500
+ * this cleanup exists to prevent. `.catch()` swallows a delete on a slug a
+ * test already removed itself.
+ */
+async function deleteProvider(page: Page, slug: string) {
+  await page.request.delete(`/api/v1/company/inference/providers/${slug}`).catch(() => {});
+}
+
 test("TinyHumans is offered as an ordinary catalogue row, once (keys rework, slice 2a)", async ({ page }) => {
   await openInference(page);
 
