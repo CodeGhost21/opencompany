@@ -511,7 +511,7 @@ export function RoomView({
    * The cognition read is in the set too, and it was not at first: it already
    * refreshes on `visibilitychange`, which sounded like enough and is not. That
    * event is about the *tab*, not the route — an admin who follows the Room
-   * warning to Connections → Inference, configures a provider and comes back has
+   * warning to Connections → API Keys → LLM, configures a provider and comes back has
    * never hidden the tab, so the stale warning and its echo placeholders would
    * have stayed (Codex P2 review).
    */
@@ -653,7 +653,7 @@ export function RoomView({
    * answer can go stale under a console that is doing nothing at all: another
    * admin, or this operator in a second window, can configure inference and
    * rebuild the runtime while this chat sits open (codex, PR #1740). The
-   * operator's *own* trip to Connections → Inference already re-reads — the shell
+   * operator's *own* trip to Connections → API Keys → LLM already re-reads — the shell
    * mounts and unmounts `RoomView` per route, so coming back remounts it — but
    * nothing covered the cross-session case, and a standing banner insisting
    * that a company which now thinks perfectly well cannot is the same class of
@@ -3097,7 +3097,7 @@ export function RoomView({
                             className="font-medium text-foreground transition-opacity hover:opacity-80"
                             href={connectionsHref("inference")}
                           >
-                            Connections → Inference
+                            Connections → API Keys → LLM
                           </a>
                           .
                         </>
@@ -3122,7 +3122,7 @@ export function RoomView({
                             className="font-medium text-foreground transition-opacity hover:opacity-80"
                             href={connectionsHref("inference")}
                           >
-                            Connections → Inference
+                            Connections → API Keys → LLM
                           </a>
                           .
                         </>
