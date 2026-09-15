@@ -125,6 +125,20 @@ describe("the Reset / Start clean button's render gate", () => {
   // comment) so the flow tests below can reach the control at all, which makes
   // "the product does not offer it" unrepresentable here.
 
+  it("renders when the product offers company creation, the session is platform-scoped, onReset is given, and the company is running", async () => {
+    // The one positive case in this file — every other case below only pins
+    // an *absence*, which a broken or permanently-removed button would pass
+    // just as well as a working one. Codex review on #2310: with the removed
+    // case above gone, this mocked file was left with no assertion that the
+    // control can render at all, so deleting or disabling it here would have
+    // passed every gate test in this file while the unmocked companion
+    // (`settings-lifecycle-reset-button-product-scope.test.ts`) only ever
+    // asserts absence under `COMPANY_SWITCHING_HIDDEN: true` — neither file
+    // would have caught it.
+    await render(clientWith(true), "running", () => {});
+    expect(resetButton()).toBeDefined();
+  });
+
   it("is left out when onReset is not given (mirrors the `offersCompanyCreation` gate upstream)", async () => {
     await render(clientWith(true), "running", undefined);
     expect(resetButton()).toBeUndefined();
