@@ -417,6 +417,22 @@ fn company_source_dir(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// The skill-registry catalog root for a company source directory: the
+/// `companies/` dir every bundle's `skills/` lives under.
+///
+/// Normalizes `dir` with [`std::path::absolute`] first (Codex review, PR
+/// #2326): a relative `--company .` makes `company_source_dir` return `.`,
+/// whose `Path::parent()` is the empty path. An empty `skills_root` is
+/// rejected by `AppState::skill_registry` as "not a directory", taking the
+/// REST/GraphQL skill-registry reads down with a 500 even though the company
+/// loaded fine. `std::path::absolute` is lexical — no filesystem access, so it
+/// cannot fail on a nonexistent path — and joins against the process CWD, so
+/// `.`'s parent resolves to the real containing directory instead of empty.
+fn skills_root_for(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let absolute = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    absolute.parent().map(Path::to_path_buf)
+}
+
 /// Loads the manifest under `dir`, builds a runtime over `home`, and registers
 /// it in `state`. Returns the derived company id and display name.
 ///
