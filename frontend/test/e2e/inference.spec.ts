@@ -347,32 +347,44 @@ test("turning a provider off and back on both confirm (decision X3)", async ({ p
   // expressible, and neither direction of the toggle scrubs anything.
   await openInference(page);
 
-  await addCustom(page);
-  await page.locator("#inference-connect-name").fill("E2E Parked");
-  await page.locator("#inference-connect-url").fill(UNREACHABLE);
-  await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
-  await page.getByTestId("inference-connect-submit").click();
-  await pickModel(page, "e2e-model");
-  await expect(page.getByTestId("inference-provider-e2e-parked")).toBeVisible({ timeout: 30_000 });
+  try {
+    await addCustom(page);
+    await page.locator("#inference-connect-name").fill("E2E Parked");
+    await page.locator("#inference-connect-url").fill(UNREACHABLE);
+    await page.locator("#inference-connect-key").fill(`pw-e2e-${Date.now()}`);
+    await page.getByTestId("inference-connect-submit").click();
+    await pickModel(page, "e2e-model");
+    await expect(page.getByTestId("inference-provider-e2e-parked")).toBeVisible({
+      timeout: 30_000,
+    });
 
-  // Off, reversible language.
-  await page.getByTestId("inference-provider-e2e-parked-toggle").click();
-  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn off");
-  await page.getByTestId("inference-remove-confirm").click();
-  await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
-  await page.reload();
-  await openInference(page);
+    // Off, reversible language.
+    await page.getByTestId("inference-provider-e2e-parked-toggle").click();
+    await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn off");
+    await page.getByTestId("inference-remove-confirm").click();
+    await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
+    await page.reload();
+    await openInference(page);
 
-  const row = page.getByTestId("inference-provider-e2e-parked");
-  await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "false");
-  await expect(row).toContainText("•••• configured");
+    const row = page.getByTestId("inference-provider-e2e-parked");
+    await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "false");
+    await expect(row).toContainText("•••• configured");
 
-  // On, also confirmed (decision X3: every toggle does).
-  await row.getByTestId("inference-provider-e2e-parked-toggle").click();
-  await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn on");
-  await page.getByTestId("inference-remove-confirm").click();
-  await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
-  await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "true");
+    // On, also confirmed (decision X3: every toggle does). This is the point
+    // of the test, so the cleanup below cannot skip it the way the other
+    // leaky specs in this file skip disabling — it has to delete instead.
+    await row.getByTestId("inference-provider-e2e-parked-toggle").click();
+    await expect(page.getByTestId("inference-remove-dialog")).toContainText("Turn on");
+    await page.getByTestId("inference-remove-confirm").click();
+    await expect(page.getByTestId("inference-remove-dialog")).toHaveCount(0);
+    await expect(row.locator("[role='switch']")).toHaveAttribute("aria-checked", "true");
+  } finally {
+    // Deliberately left enabled by the assertions above (that is what "back
+    // on" means) — so, unlike a test that could just leave it disabled, this
+    // one has to remove the row outright or it becomes the shared company's
+    // primary route for every later spec (see `deleteProvider`).
+    await deleteProvider(page, "e2e-parked");
+  }
 });
 
 test("deleting a provider removes its row", async ({ page }) => {
