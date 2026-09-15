@@ -684,6 +684,7 @@ async fn add_member(
         // teammate afterwards (`PATCH …/team/{id}` with `tools: []`).
         tools: if tools.is_empty() { None } else { Some(tools) },
         model: None,
+        provider: None,
         harness: None,
     };
     record.overlay_agents.push(agent.clone());
