@@ -97,9 +97,16 @@ export interface ConnectOutcome {
  * operator's mid-project ask (`docs/key-reworks/in-use-guards.md`) put every
  * on/off toggle behind a confirmation too, unconditionally, not only when
  * something depends on it.
+ *
+ * `usedBy` (round-3 review, P1-2): the row's own dependents, read fresh when
+ * the dialog opens — same rule as the LLM page — so the FIRST attempt already
+ * says what depends on it instead of only a 409 reopening with the host's own
+ * reason. `disconnect-all` has no single row; its `usedBy` is `{default:
+ * true}` when any provider currently holds the search default, since that
+ * marker is the one thing this bulk action can strand.
  */
 export type ConfirmTarget =
-  | { kind: "remove"; slug: string; label: string }
-  | { kind: "remove-key"; slug: string; label: string }
-  | { kind: "disconnect-all"; label: string }
-  | { kind: "toggle"; slug: string; label: string; enabling: boolean };
+  | { kind: "remove"; slug: string; label: string; usedBy?: UsedBy }
+  | { kind: "remove-key"; slug: string; label: string; usedBy?: UsedBy }
+  | { kind: "disconnect-all"; label: string; usedBy?: UsedBy }
+  | { kind: "toggle"; slug: string; label: string; enabling: boolean; usedBy?: UsedBy };
