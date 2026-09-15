@@ -39,7 +39,9 @@ import { expect, test, type Page } from "@playwright/test";
  */
 async function dismissOnboarding(page: Page): Promise<boolean> {
   let dismissed = false;
-  const gate = page.getByRole("button", { name: /^(Skip setup|Skip for now)$/ });
+  const gate = page.getByRole("button", {
+    name: /^(Skip setup|Skip for now)$/,
+  });
   await gate
     .first()
     .waitFor({ state: "visible", timeout: 5_000 })
@@ -74,7 +76,11 @@ async function openDeepLink(page: Page, hash: string) {
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     const seen = JSON.stringify({ skipped: true, seenAt: Date.now() });
-    for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
+    for (const key of [
+      "oc-tour:single",
+      "oc-tour:e2e-harness-co",
+      "oc-tour:null",
+    ]) {
       window.localStorage.setItem(key, seen);
     }
   });
@@ -115,7 +121,9 @@ test("a teammate's session opens from its own address", async ({ page }) => {
   if (await stream.isVisible().catch(() => false)) {
     const rows = await page.getByTestId("agent-session-row").count();
     if (rows > 0) {
-      expect(await page.getByTestId("agent-session-channel").count()).toBe(rows);
+      expect(await page.getByTestId("agent-session-channel").count()).toBe(
+        rows,
+      );
     }
   }
 });
