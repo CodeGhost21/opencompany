@@ -19,7 +19,7 @@ name: opencompany
 services:
   opencompany:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
       args:
         FEATURES: ${OPENCOMPANY_FEATURES:-}
@@ -50,7 +50,7 @@ services:
 
   console:
     build:
-      context: ./frontend
+      context: ../frontend
       dockerfile: Dockerfile
       # Build-time, not run-time: Vite bakes these into the bundle, so setting
       # them in `environment` below would have no effect at all. Changing one

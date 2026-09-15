@@ -68,8 +68,8 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 project=$(demo_project_name "$company")
-compose_file="${REPO_ROOT}/docker-compose.yml"
-dev_compose_file="${REPO_ROOT}/docker-compose.dev.yml"
+compose_file="${REPO_ROOT}/deploy/docker-compose.yml"
+dev_compose_file="${REPO_ROOT}/deploy/docker-compose.dev.yml"
 
 echo "opencompany: ${action} '${company}' (Compose project: ${project})"
 
