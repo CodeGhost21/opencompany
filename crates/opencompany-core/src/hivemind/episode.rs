@@ -1,11 +1,18 @@
-//! The host loop: fold, run the one turn the library authorized, append it,
-//! commit the state it returned, repeat.
+//! The host loop: fold, run the round of turns the library authorized, append
+//! every one of them, commit the state it returned, repeat.
 //!
 //! That ordering is the whole contract. [`step`] never appends, never waits and
 //! never calls back into this host; it hands back a `next_state` that is only
-//! valid once the turn it authorized is **durably** in the journal. Committing
-//! it before the append would let a failed write leave the episode believing a
-//! turn happened that nothing can read back.
+//! valid once **every** turn the round authorized is **durably** in the
+//! journal. Committing it before the appends would let a failed write leave the
+//! episode believing a turn happened that nothing can read back; committing it
+//! part-way through a round would charge a threshold nobody spent.
+//!
+//! A round's turns are authorized to run *concurrently* and by construction
+//! cannot read one another — each is projected against the single transcript
+//! `step` decided on. This host runs them in series anyway, which the library
+//! deliberately leaves open: a round says who may speak now, not how the host
+//! should schedule them.
 //!
 //! Reading the transcript back out of the journal on every iteration — rather
 //! than accumulating it in memory as the loop runs — is the same discipline
@@ -426,8 +433,8 @@ impl<'a> EpisodeDriver<'a> {
                     .map_err(|error| self.malformed(&error))?
             };
 
-            let turn = match decision {
-                HiveStep::Speak { turn } => *turn,
+            let (round, next_state) = match decision {
+                HiveStep::Speak { turns, next_state } => (turns, next_state),
                 HiveStep::Converged { topic, standing } => {
                     break EpisodeEnding::Converged {
                         // Read from the very transcript `step` just decided on,
@@ -446,268 +453,303 @@ impl<'a> EpisodeDriver<'a> {
                 HiveStep::Idle => break EpisodeEnding::Idle,
             };
 
-            let visible = project_for(&turn, &transcript);
-            // Folded fresh each turn from the same journal the transcript came
-            // from, so a pin laid down *during* the episode is on the board for
-            // the next speaker rather than the next episode.
-            let pins = match read_pinboard(
-                &log,
-                &conversation,
-                // The board is rendered into *this speaker's* prompt, so it is
-                // read as this speaker: a pin over an aside it is not in must
-                // not quote content to it, and one over an aside it *is* in
-                // must still reach it.
-                &Viewer::Agent {
-                    id: turn.agent_id.clone(),
-                },
-                PIN_LIMIT,
-                None,
-            )
-            .await
-            {
-                Ok(pins) => pins,
-                Err(error) => {
-                    tracing::warn!(
-                        company = %self.company,
-                        desk = %self.desk.id,
-                        error = %error,
-                        "[hive] the pinboard could not be read; this turn sees no pins"
-                    );
-                    Vec::new()
-                }
-            };
-            let member = self.desk.member(&turn.agent_id).ok_or_else(|| {
-                OpenCompanyError::Config(format!(
-                    "hive episode on desk `{}`: the floor was given to `{}`, who is not seated",
-                    self.desk.id, turn.agent_id,
-                ))
-            })?;
-            // Speaker diversity, as a *prompt* and never as an override. The
-            // fold picked this speaker under invariants this host does not get
-            // to break, so when it hands the floor straight back to whoever
-            // just held it while somebody has not used theirs at all, the
-            // repair available is to name the missing members and let the
-            // speaker `!question` or `!defer` to them.
-            let unspoken: Vec<String> = if last_speaker.as_deref() == Some(turn.agent_id.as_str()) {
-                self.desk
-                    .member_ids()
-                    .into_iter()
-                    .filter(|id| !spoken.contains(id))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let elsewhere = self.elsewhere_for(&turn.agent_id).await;
-            let prompt = EpisodePrompt::new(member, &self.desk, &self.task, policy.quorum, &pins)
-                .with_recall(&recall)
-                .with_elsewhere(&elsewhere)
-                .with_unspoken(&unspoken)
-                .with_peers(peers.clone())
-                .with_trigger(Sequence(trigger.value()))
-                .render(&turn, &visible);
-
-            // Cleared per turn: the aside belongs to the reply that produced
-            // this turn's line, never to the one before it.
-            scratch.aside = None;
-            let line = match self
-                .line_from(&turn.agent_id, &prompt, &visible, &mut scratch)
+            // A round authorizes several members to speak *together*, so each
+            // of its turns is projected against the one transcript `step`
+            // decided on and none of them can read another's row —
+            // `project_for` withholds any peer row above `round_start`.
+            // Running them in series is a scheduling choice the library leaves
+            // to the host; what it does not leave open is the commit, which
+            // belongs to the round and lands once, below.
+            let round_len = u32::try_from(round.len()).unwrap_or(u32::MAX);
+            for turn in round {
+                let visible = project_for(&turn, &transcript);
+                // Folded fresh each turn from the same journal the transcript came
+                // from, so a pin laid down *during* the episode is on the board for
+                // the next speaker rather than the next episode.
+                let pins = match read_pinboard(
+                    &log,
+                    &conversation,
+                    // The board is rendered into *this speaker's* prompt, so it is
+                    // read as this speaker: a pin over an aside it is not in must
+                    // not quote content to it, and one over an aside it *is* in
+                    // must still reach it.
+                    &Viewer::Agent {
+                        id: turn.agent_id.clone(),
+                    },
+                    PIN_LIMIT,
+                    // Bounded at the round, for the same reason `project_for`
+                    // withholds a peer row above `round_start`: a pin a
+                    // round-mate laid down was written *concurrently* with this
+                    // turn, so it must no more reach this prompt than that
+                    // member's row reaches the transcript. Without the bound
+                    // this host runs the round in series and quietly leaks it —
+                    // the transcript path stays honest while the board does not.
+                    // A pin from an earlier round sits below the boundary and
+                    // still arrives; at width one nothing is above it at all.
+                    //
+                    // `+ 1` because the two bounds are not the same shape.
+                    // `readable` keeps a row **at** the boundary
+                    // (`sequence <= round_start`) while `EventLog::read_before`
+                    // is strictly exclusive (`seq < before`), so passing
+                    // `round_start` unchanged would hide the boundary row from
+                    // the board alone — a `!pin` on the last row of the
+                    // previous round would reach the transcript and not the
+                    // prompt, and would only reappear once some later row moved
+                    // the boundary past it.
+                    Some(Sequence(turn.round_start.0.saturating_add(1))),
+                )
                 .await
-            {
-                Ok(line) => {
-                    consecutive_failures = 0;
-                    line
-                }
-                // A member's turn failing is not the room failing (the live
-                // case: one turn hit the harness's per-turn wall-clock ceiling
-                // and a `?` here threw away three good turns and answered the
-                // operator with a 500). The transcript records the miss as a
-                // system row — trace-less, so it folds to nothing and can
-                // never be counted as support — the budget still advances, and
-                // the next speaker is chosen from a transcript that shows what
-                // happened.
-                Err(error) => {
-                    failed_turns = failed_turns.saturating_add(1);
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    tracing::warn!(
-                        company = %self.company,
-                        desk = %self.desk.id,
-                        agent = %turn.agent_id,
-                        error = %error,
-                        "[hive] a member's turn did not finish; the room continues"
-                    );
-                    let seq = self
-                        .events
-                        .append(
-                            &self.company,
-                            CompanyEvent::AgentReply {
-                                chat_id: self.desk.id.clone(),
-                                agent_id: super::HIVE_FAILURE_AUTHOR.to_string(),
-                                text: failure_note(&turn.agent_id, &error),
-                                // The room's own report is never private: a
-                                // reader who could not see that a turn failed
-                                // would be reading a transcript with a hole in
-                                // it that nothing accounts for.
-                                audience: Vec::new(),
-                                steps: Vec::new(),
-                                task_id: None,
-                                outputs: Vec::new(),
-                                parent: self.thread_root,
-                                mentions: Vec::new(),
-                                mention_depth: 0,
-                            },
-                        )
-                        .await?;
-                    scope.record(seq);
-                    last_seq = Some(seq);
-                    state = turn.next_state;
-                    turns = turns.saturating_add(1);
-                    last_speaker = Some(turn.agent_id.clone());
-                    if consecutive_failures >= failure_cap {
-                        return Err(OpenCompanyError::Config(format!(
-                            "hive episode on desk `{}`: {consecutive_failures} turns in a row failed, which is every seat twice over — the room stopped rather than spending the rest of its budget on a harness that is down: {error}",
-                            self.desk.id,
-                        )));
+                {
+                    Ok(pins) => pins,
+                    Err(error) => {
+                        tracing::warn!(
+                            company = %self.company,
+                            desk = %self.desk.id,
+                            error = %error,
+                            "[hive] the pinboard could not be read; this turn sees no pins"
+                        );
+                        Vec::new()
                     }
-                    continue;
-                }
-            };
-            let seq = self
-                .events
-                .append(
-                    &self.company,
-                    CompanyEvent::AgentReply {
-                        chat_id: self.desk.id.clone(),
-                        agent_id: turn.agent_id.clone(),
-                        text: line.clone(),
-                        // The turn's own contribution is always the room's. An
-                        // aside is a *second* row riding alongside it, appended
-                        // below.
-                        audience: Vec::new(),
-                        // The episode's own turns carry no step timeline: the
-                        // room is reading one line per turn, and a tool trace
-                        // belongs to the turn's own bubble, which this path
-                        // does not raise.
-                        steps: Vec::new(),
-                        task_id: None,
-                        outputs: Vec::new(),
-                        parent: self.thread_root,
-                        // A deliberation line names topics and message numbers,
-                        // not people. Left empty rather than half-resolved —
-                        // and a reply's mentions are never consulted by
-                        // dispatch anyway, which is the mention-loop fuse.
-                        mentions: Vec::new(),
-                        mention_depth: 0,
-                    },
-                )
-                .await?;
-            scope.record(seq);
-            first_seq.get_or_insert(seq);
-            last_seq = Some(seq);
-            // The aside rides alongside the turn that authored it and is not
-            // charged as one (ADR 0011): one authorized turn produces the
-            // member's ordinary contribution *and*, optionally, one private
-            // row. `EpisodeState::spent` counts turns rather than rows, and
-            // `step` drops a non-desk row before it reaches any trace or
-            // standing, so this adds nothing the episode can vote.
-            //
-            // Under the old rule an aside *was* the turn, and a live six-day
-            // run of `companies/vending_machine_co` used the move zero times:
-            // asking a peer meant not depositing, not objecting and not
-            // refuting, while the rest of the room went on accumulating support
-            // for the option the member had stepped away to ask about.
-            //
-            // A refused audience is **dropped, not published**. Falling back to
-            // the desk would put a second desk-visible contribution on one
-            // turn, which is the one thing a turn may not produce — and the
-            // member has already said its piece in the row above.
-            if let Some(aside_line) = scratch.aside.take() {
-                let audience = self.aside_audience(
-                    &turn.agent_id,
-                    &aside_line,
-                    &transcript,
-                    &members,
-                    &desks,
-                    &retired,
-                );
-                if audience.is_empty() {
-                    tracing::debug!(
-                        company = %self.company,
-                        desk = %self.desk.id,
-                        agent = %turn.agent_id,
-                        "[hive] an aside was not authorized; the row was dropped"
+                };
+                let member = self.desk.member(&turn.agent_id).ok_or_else(|| {
+                    OpenCompanyError::Config(format!(
+                        "hive episode on desk `{}`: the floor was given to `{}`, who is not seated",
+                        self.desk.id, turn.agent_id,
+                    ))
+                })?;
+                // Speaker diversity, as a *prompt* and never as an override. The
+                // fold picked this speaker under invariants this host does not get
+                // to break, so when it hands the floor straight back to whoever
+                // just held it while somebody has not used theirs at all, the
+                // repair available is to name the missing members and let the
+                // speaker `!question` or `!defer` to them.
+                let unspoken: Vec<String> =
+                    if last_speaker.as_deref() == Some(turn.agent_id.as_str()) {
+                        self.desk
+                            .member_ids()
+                            .into_iter()
+                            .filter(|id| !spoken.contains(id))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                let elsewhere = self.elsewhere_for(&turn.agent_id, turn.round_start).await;
+                let prompt =
+                    EpisodePrompt::new(member, &self.desk, &self.task, policy.quorum, &pins)
+                        .with_recall(&recall)
+                        .with_elsewhere(&elsewhere)
+                        .with_unspoken(&unspoken)
+                        .with_peers(peers.clone())
+                        .with_trigger(Sequence(trigger.value()))
+                        .render(&turn, &visible);
+
+                // Cleared per turn: the aside belongs to the reply that produced
+                // this turn's line, never to the one before it.
+                scratch.aside = None;
+                let line = match self
+                    .line_from(&turn.agent_id, &prompt, &visible, &mut scratch)
+                    .await
+                {
+                    Ok(line) => {
+                        consecutive_failures = 0;
+                        line
+                    }
+                    // A member's turn failing is not the room failing (the live
+                    // case: one turn hit the harness's per-turn wall-clock ceiling
+                    // and a `?` here threw away three good turns and answered the
+                    // operator with a 500). The transcript records the miss as a
+                    // system row — trace-less, so it folds to nothing and can
+                    // never be counted as support — the budget still advances, and
+                    // the next speaker is chosen from a transcript that shows what
+                    // happened.
+                    Err(error) => {
+                        failed_turns = failed_turns.saturating_add(1);
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        tracing::warn!(
+                            company = %self.company,
+                            desk = %self.desk.id,
+                            agent = %turn.agent_id,
+                            error = %error,
+                            "[hive] a member's turn did not finish; the room continues"
+                        );
+                        let seq = self
+                            .events
+                            .append(
+                                &self.company,
+                                CompanyEvent::AgentReply {
+                                    chat_id: self.desk.id.clone(),
+                                    agent_id: super::HIVE_FAILURE_AUTHOR.to_string(),
+                                    text: failure_note(&turn.agent_id, &error),
+                                    // The room's own report is never private: a
+                                    // reader who could not see that a turn failed
+                                    // would be reading a transcript with a hole in
+                                    // it that nothing accounts for.
+                                    audience: Vec::new(),
+                                    steps: Vec::new(),
+                                    task_id: None,
+                                    outputs: Vec::new(),
+                                    parent: self.thread_root,
+                                    mentions: Vec::new(),
+                                    mention_depth: 0,
+                                },
+                            )
+                            .await?;
+                        scope.record(seq);
+                        last_seq = Some(seq);
+                        // The failure note is this turn's durable row, so the turn
+                        // is appended and the budget advances for it — but the
+                        // state belongs to the *round*, and is taken up once below
+                        // rather than part-way through.
+                        last_speaker = Some(turn.agent_id.clone());
+                        if consecutive_failures >= failure_cap {
+                            return Err(OpenCompanyError::Config(format!(
+                                "hive episode on desk `{}`: {consecutive_failures} turns in a row failed, which is every seat twice over — the room stopped rather than spending the rest of its budget on a harness that is down: {error}",
+                                self.desk.id,
+                            )));
+                        }
+                        continue;
+                    }
+                };
+                let seq = self
+                    .events
+                    .append(
+                        &self.company,
+                        CompanyEvent::AgentReply {
+                            chat_id: self.desk.id.clone(),
+                            agent_id: turn.agent_id.clone(),
+                            text: line.clone(),
+                            // The turn's own contribution is always the room's. An
+                            // aside is a *second* row riding alongside it, appended
+                            // below.
+                            audience: Vec::new(),
+                            // The episode's own turns carry no step timeline: the
+                            // room is reading one line per turn, and a tool trace
+                            // belongs to the turn's own bubble, which this path
+                            // does not raise.
+                            steps: Vec::new(),
+                            task_id: None,
+                            outputs: Vec::new(),
+                            parent: self.thread_root,
+                            // A deliberation line names topics and message numbers,
+                            // not people. Left empty rather than half-resolved —
+                            // and a reply's mentions are never consulted by
+                            // dispatch anyway, which is the mention-loop fuse.
+                            mentions: Vec::new(),
+                            mention_depth: 0,
+                        },
+                    )
+                    .await?;
+                scope.record(seq);
+                first_seq.get_or_insert(seq);
+                last_seq = Some(seq);
+                // The aside rides alongside the turn that authored it and is not
+                // charged as one (ADR 0011): one authorized turn produces the
+                // member's ordinary contribution *and*, optionally, one private
+                // row. `EpisodeState::spent` counts turns rather than rows, and
+                // `step` drops a non-desk row before it reaches any trace or
+                // standing, so this adds nothing the episode can vote.
+                //
+                // Under the old rule an aside *was* the turn, and a live six-day
+                // run of `companies/vending_machine_co` used the move zero times:
+                // asking a peer meant not depositing, not objecting and not
+                // refuting, while the rest of the room went on accumulating support
+                // for the option the member had stepped away to ask about.
+                //
+                // A refused audience is **dropped, not published**. Falling back to
+                // the desk would put a second desk-visible contribution on one
+                // turn, which is the one thing a turn may not produce — and the
+                // member has already said its piece in the row above.
+                if let Some(aside_line) = scratch.aside.take() {
+                    let audience = self.aside_audience(
+                        &turn.agent_id,
+                        &aside_line,
+                        &transcript,
+                        &members,
+                        &desks,
+                        &retired,
                     );
-                } else {
-                    let aside_seq = self
-                        .events
-                        .append(
-                            &self.company,
-                            CompanyEvent::AgentReply {
-                                chat_id: self.desk.id.clone(),
-                                agent_id: turn.agent_id.clone(),
-                                text: aside_line,
-                                audience,
-                                steps: Vec::new(),
-                                task_id: None,
-                                outputs: Vec::new(),
-                                parent: self.thread_root,
-                                mentions: Vec::new(),
-                                mention_depth: 0,
-                            },
-                        )
-                        .await?;
-                    scope.record(aside_seq);
-                    last_seq = Some(aside_seq);
+                    if audience.is_empty() {
+                        tracing::debug!(
+                            company = %self.company,
+                            desk = %self.desk.id,
+                            agent = %turn.agent_id,
+                            "[hive] an aside was not authorized; the row was dropped"
+                        );
+                    } else {
+                        let aside_seq = self
+                            .events
+                            .append(
+                                &self.company,
+                                CompanyEvent::AgentReply {
+                                    chat_id: self.desk.id.clone(),
+                                    agent_id: turn.agent_id.clone(),
+                                    text: aside_line,
+                                    audience,
+                                    steps: Vec::new(),
+                                    task_id: None,
+                                    outputs: Vec::new(),
+                                    parent: self.thread_root,
+                                    mentions: Vec::new(),
+                                    mention_depth: 0,
+                                },
+                            )
+                            .await?;
+                        scope.record(aside_seq);
+                        last_seq = Some(aside_seq);
+                    }
                 }
+                // Considered *after* the line is durable and *before* the next
+                // speaker is chosen, which is the whole of the timing. The wiki
+                // measures this as the single largest effect in the mechanism: a
+                // desk that asks a peer and then votes before the answer lands has
+                // voted past the information it paid a turn for, so an answer that
+                // arrives one row late is an answer that arrives never.
+                //
+                // `last_seq` is deliberately not advanced by what a referral
+                // journals: it names the episode's last *turn*, and a question's
+                // answer is a row the room reads, not a turn the room took.
+                //
+                // Gated on the line still carrying an allowed marker:
+                // `moves::demote` (in `line_from`) strips only the leading `!` off
+                // a barred move, and leaves the rest of the text — including any
+                // `@#desk` mention it contains — intact. `consider` resolves
+                // mentions from raw content with no grammar check of its own, so
+                // without this a barred move that happened to mention a desk
+                // could still spend a peer-desk turn and return an answer under
+                // `HIVE_REFERRAL_AUTHOR`, even though the line itself was refused
+                // as an illegitimate move. `line_kind` returns `None` for a
+                // demoted line (no leading marker left to recognize), so this is
+                // the same "committed and legitimate" test the fold already
+                // applies before counting a line as anything.
+                if moves::line_kind(&line).is_some()
+                    && let Some((federation, queue, policy)) = referrals.as_ref()
+                {
+                    super::referral::consider(
+                        queue,
+                        *policy,
+                        federation,
+                        &tinyhivemind_hive::dispatch::DispatchConversation {
+                            desk_id: self.desk.id.clone(),
+                            thread_root: self.thread_root.map(EventSeq::value),
+                        },
+                        &turn.agent_id,
+                        &line,
+                        seq,
+                    )
+                    .await;
+                }
+                lines.push((seq, turn.agent_id.clone(), line));
+                if !spoken.contains(&turn.agent_id) {
+                    spoken.push(turn.agent_id.clone());
+                }
+                last_speaker = Some(turn.agent_id.clone());
             }
-            // Considered *after* the line is durable and *before* the next
-            // speaker is chosen, which is the whole of the timing. The wiki
-            // measures this as the single largest effect in the mechanism: a
-            // desk that asks a peer and then votes before the answer lands has
-            // voted past the information it paid a turn for, so an answer that
-            // arrives one row late is an answer that arrives never.
-            //
-            // `last_seq` is deliberately not advanced by what a referral
-            // journals: it names the episode's last *turn*, and a question's
-            // answer is a row the room reads, not a turn the room took.
-            //
-            // Gated on the line still carrying an allowed marker:
-            // `moves::demote` (in `line_from`) strips only the leading `!` off
-            // a barred move, and leaves the rest of the text — including any
-            // `@#desk` mention it contains — intact. `consider` resolves
-            // mentions from raw content with no grammar check of its own, so
-            // without this a barred move that happened to mention a desk
-            // could still spend a peer-desk turn and return an answer under
-            // `HIVE_REFERRAL_AUTHOR`, even though the line itself was refused
-            // as an illegitimate move. `line_kind` returns `None` for a
-            // demoted line (no leading marker left to recognize), so this is
-            // the same "committed and legitimate" test the fold already
-            // applies before counting a line as anything.
-            if moves::line_kind(&line).is_some()
-                && let Some((federation, queue, policy)) = referrals.as_ref()
-            {
-                super::referral::consider(
-                    queue,
-                    *policy,
-                    federation,
-                    &tinyhivemind_hive::dispatch::DispatchConversation {
-                        desk_id: self.desk.id.clone(),
-                        thread_root: self.thread_root.map(EventSeq::value),
-                    },
-                    &turn.agent_id,
-                    &line,
-                    seq,
-                )
-                .await;
-            }
-            lines.push((seq, turn.agent_id.clone(), line));
-            if !spoken.contains(&turn.agent_id) {
-                spoken.push(turn.agent_id.clone());
-            }
-            last_speaker = Some(turn.agent_id.clone());
-            // Durably appended, so — and only now — the state the library
-            // returned may be taken up.
-            state = turn.next_state;
-            turns = turns.saturating_add(1);
+            // Every turn the round authorized is now durably appended — a
+            // failed one as a system row — so, and only now, the state the
+            // library returned may be taken up. Committing after a subset
+            // would charge a threshold nobody spent.
+            state = *next_state;
+            turns = turns.saturating_add(round_len);
         };
 
         let referral_ledger = match referrals.as_ref() {
@@ -946,6 +988,7 @@ impl<'a> EpisodeDriver<'a> {
     async fn elsewhere_for(
         &self,
         agent_id: &str,
+        round_start: Sequence,
     ) -> Vec<(String, Vec<tinyhivemind_hive::SessionMessage>)> {
         // Unset is the default, and a caller that never named the company's desks
         // gets exactly the prompt it got before this existed — including no read
@@ -1042,7 +1085,19 @@ impl<'a> EpisodeDriver<'a> {
                         thread_root: None,
                     },
                     viewer: viewer.clone(),
-                    before: None,
+                    // Frozen at the round boundary, for the reason the pinboard
+                    // read above is. These are *other* desks, but a round-mate
+                    // can reach them within this round — a synchronous desk
+                    // referral journals its answer on the target desk before
+                    // this loop reaches the next member — and an unbounded read
+                    // would hand that answer to a speaker who, by the round's
+                    // definition, cannot have read it. Left unbounded, what a
+                    // member sees would depend on the host's serial iteration
+                    // order, which is the one thing a round is supposed to make
+                    // irrelevant. `+ 1` for the same off-by-one as the board:
+                    // `before` is an exclusive upper bound and `round_start` is
+                    // the last row the round may see.
+                    before: Some(Sequence(round_start.0.saturating_add(1))),
                     window: SESSION_WINDOW,
                 },
             )
