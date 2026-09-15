@@ -202,9 +202,27 @@ export function ProvidersTab({
     return <SectionUnreachable label="Couldn't read this company's model providers" />;
   }
 
-  /** Bumps {@link attempt} and clears everything a stale result could still write into. */
+  /**
+   * Bumps {@link attempt} and clears everything a stale result could still
+   * write into.
+   *
+   * Clears `busy` too, not just the error/model-ask fields. `submitConnect`'s
+   * own `finally` only resets `busy` when `myAttempt === attempt.current` —
+   * deliberately, so a stale async response from a superseded attempt cannot
+   * clear the spinner a *newer* attempt is showing. But a *successful* submit
+   * calls `closeConnect` (which calls this) from inside that same attempt's
+   * try block, before its own `finally` runs — so by the time `finally`
+   * checks, this call has already bumped `attempt` out from under it, and the
+   * guard skips `setBusy(false)`. A dialog opened again after that (a second
+   * provider in the same session, `openConnect` also routes through here)
+   * inherited `busy: true` from the previous, already-finished attempt and
+   * rendered its first submit permanently disabled on "Reading models…" —
+   * exactly the shape the loop in "a second provider holds a credential of
+   * its own" hit on its second iteration.
+   */
   const resetConnectState = () => {
     attempt.current += 1;
+    setBusy(false);
     setError(null);
     setProbeFailure(null);
     setModelAsk(null);
@@ -216,9 +234,24 @@ export function ProvidersTab({
     setEditing(null);
   };
 
-  /** Opens the connect dialog fresh — every caller that sets `connecting`/`editing` goes through this. */
+  /**
+   * Opens the connect dialog fresh — every caller that sets
+   * `connecting`/`editing` goes through this.
+   *
+   * Also closes the "Add a provider" list dialog. `AddProviderDialog`'s own
+   * `onChoose` calls straight into this without ever setting `adding` back to
+   * `false`, so the list dialog stayed mounted and open *underneath* the
+   * connect dialog it had just opened. Both are Base UI portalled dialogs at
+   * the same z-index, so the connect dialog (rendered later in the DOM)
+   * covered it while open — but the moment the connect dialog closed (submit
+   * success, Escape, or an overlay click), the still-open list dialog
+   * resurfaced with its own overlay and ate every click after it, including a
+   * later `inference-add-open` click meant to open a fresh one. A loop that
+   * connects two providers in one test hit this on the second iteration.
+   */
   const openConnect = (next: { connecting: string | null; editing: Provider | null }) => {
     resetConnectState();
+    setAdding(false);
     setConnecting(next.connecting);
     setEditing(next.editing);
   };
