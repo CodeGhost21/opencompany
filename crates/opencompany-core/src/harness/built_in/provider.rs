@@ -130,12 +130,15 @@ pub trait HarnessModel: ChatModel<()> {
     /// A sibling of this model that resolves every turn against agent
     /// `agent_id`'s own `{provider, model}` pair (keys rework, issue #2306,
     /// slice 3a), or `None` when this implementation cannot pin (test
-    /// doubles). Only that agent's own turns use the sibling this returns;
-    /// internal passes (title, triage, planning, and the rest — Q13) keep
-    /// resolving against the company default via the un-pinned model.
+    /// doubles). `agent_name` is the display name (round-3a review P1-1) a
+    /// turn-time refusal names — never the id, per X7. Internal passes
+    /// (title, triage, planning, and the rest) resolve per X12: the company
+    /// default first, else the turn's own pair — see
+    /// `crate::harness::built_in::pass_model`.
     fn pinned(
         &self,
         _agent_id: &str,
+        _agent_name: &str,
         _choice: &inference::store::ModelChoice,
     ) -> Option<Arc<dyn HarnessModel>> {
         None
@@ -2070,13 +2073,18 @@ pub struct TenantProvider {
     pin: Option<AgentPin>,
 }
 
-/// One agent's `{provider, model}` pair, carried with the agent's id so a
-/// turn-time refusal can name it (keys rework, issue #2306, slice 3a) —
+/// One agent's `{provider, model}` pair, carried with the agent's id and
+/// display name so a turn-time refusal can name it (keys rework, issue
+/// #2306, slice 3a; the name added in round-3a review P1-1) —
 /// `resolve_for_turn` itself sees only the [`inference::store::ModelChoice`]
-/// and has no agent to name, so the id travels beside it instead.
+/// and has no agent to name, so both travel beside it instead. `agent_name`
+/// is `Agent.name`, else `Agent.role` (never the raw id): X7 requires every
+/// user-facing sentence to name a display name, and `copy::pair_broken`
+/// takes one, not an id.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentPin {
     pub agent_id: String,
+    pub agent_name: String,
     pub choice: inference::store::ModelChoice,
 }
 
@@ -2132,11 +2140,26 @@ impl TenantProvider {
         // Checked **before** `resolve_for_turn`, and only here: that function
         // sees just the `ModelChoice`, so a refusal it raises for a gone pin
         // cannot name the agent. This pre-check can, because `AgentPin`
-        // carries the id alongside the choice (phase-3.md use case 4). If the
-        // row vanishes between this read and `resolve_for_turn`'s own, that
-        // function's generic "this agent is set to …" still fires — fail
-        // closed either way, just with a less specific sentence on the race.
-        if let Some(AgentPin { agent_id, choice }) = &self.pin {
+        // carries the id and display name alongside the choice (phase-3.md
+        // use case 4). If the row vanishes between this read and
+        // `resolve_for_turn`'s own, that function's generic "this agent is
+        // set to …" still fires — fail closed either way, just with a less
+        // specific sentence on the race.
+        //
+        // Round-3a review P1-1: both branches go through `copy::pair_broken`
+        // now, not a hand-written sentence — the shared X9 table, in display
+        // names, is what every other turn-time refusal in this module uses,
+        // and this was the one holdout still naming a raw agent id and
+        // provider slug in the sentence itself. `Removed` has no row to read
+        // a label from, so it names the slug (`copy::pair_broken`'s own
+        // "label, else nothing better on hand" contract); `TurnedOff` uses
+        // the row's real label.
+        if let Some(AgentPin {
+            agent_id: _,
+            agent_name,
+            choice,
+        }) = &self.pin
+        {
             match inference::store::get_provider(
                 &self.company,
                 self.secrets.as_ref(),
@@ -2145,17 +2168,39 @@ impl TenantProvider {
             .await
             .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
             {
-                None => anyhow::bail!(
-                    "agent `{agent_id}` is set to `{}`, which this company does not have. \
-                     Choose another in Team → {agent_id} → Model.",
-                    choice.provider
-                ),
-                Some(row) if !row.enabled => anyhow::bail!(
-                    "agent `{agent_id}` is set to `{}`, which is switched off. Switch it on in \
-                     Connections → API Keys → LLM, or choose another in Team → {agent_id} → Model.",
-                    row.label
-                ),
-                Some(_) => {}
+                None => anyhow::bail!(inference::copy::pair_broken(
+                    agent_name,
+                    &choice.provider,
+                    inference::copy::ProviderGone::Removed,
+                )),
+                Some(row) if !row.enabled => anyhow::bail!(inference::copy::pair_broken(
+                    agent_name,
+                    &row.label,
+                    inference::copy::ProviderGone::TurnedOff,
+                )),
+                Some(row) => {
+                    // Round-3a review P1-1: a pin naming an enabled row that
+                    // still has no credential used to go straight to the
+                    // network with no bearer and come back as a generic
+                    // rejection. Only for a kind that actually needs one —
+                    // the local-runtime kinds `auth_style_for` classifies
+                    // `None` (ollama, omlx) are keyless by design and must
+                    // reach `resolve_for_turn` exactly as before.
+                    if inference::catalogue::auth_style_for(&row.kind)
+                        != inference::catalogue::AuthStyle::None
+                        && !inference::store::provider_key_configured(
+                            &self.company,
+                            self.secrets.as_ref(),
+                            &row,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?
+                    {
+                        anyhow::bail!(
+                            inference::copy::provider_has_no_key(agent_name, &row.label,)
+                        );
+                    }
+                }
             }
         }
         let decl = inference::resolve_for_turn(
@@ -2283,6 +2328,7 @@ impl HarnessModel for TenantProvider {
     fn pinned(
         &self,
         agent_id: &str,
+        agent_name: &str,
         choice: &inference::store::ModelChoice,
     ) -> Option<Arc<dyn HarnessModel>> {
         Some(Arc::new(TenantProvider {
@@ -2296,6 +2342,7 @@ impl HarnessModel for TenantProvider {
             scope: self.scope.clone(),
             pin: Some(AgentPin {
                 agent_id: agent_id.to_string(),
+                agent_name: agent_name.to_string(),
                 choice: choice.clone(),
             }),
         }))
@@ -5071,10 +5118,18 @@ mod tests {
         let base =
             TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
         let a = base
-            .pinned("researcher", &choice("acme", "test-model-large"))
+            .pinned(
+                "researcher",
+                "Researcher",
+                &choice("acme", "test-model-large"),
+            )
             .expect("this provider can pin");
         let b = base
-            .pinned("web_search", &choice("other-co", "test-model-small"))
+            .pinned(
+                "web_search",
+                "Web search",
+                &choice("other-co", "test-model-small"),
+            )
             .expect("this provider can pin");
 
         a.invoke(&(), user_request("hi")).await.expect("turn a");
@@ -5127,18 +5182,28 @@ mod tests {
         let base = TenantProvider::new(company.clone(), secrets.clone(), manifest, None);
 
         let pinned = base
-            .pinned("researcher", &choice("acme", "test-model-large"))
+            .pinned(
+                "researcher",
+                "Researcher",
+                &choice("acme", "test-model-large"),
+            )
             .expect("this provider can pin");
         let err = pinned
             .invoke(&(), user_request("hi"))
             .await
             .expect_err("the pinned provider does not exist");
         let text = err.to_string();
+        // Round-3a review P1-1: the shared `copy::pair_broken` sentence, in
+        // the agent's display name — no raw id, no raw slug, no
+        // hand-written "Team → …" path.
         assert!(
-            text.contains("agent `researcher` is set to `acme`, which this company does not have."),
+            text.contains("Researcher uses acme, which is removed."),
             "{text}"
         );
-        assert!(text.contains("Team → researcher → Model"), "{text}");
+        assert!(
+            text.contains("Choose another provider and model for Researcher"),
+            "{text}"
+        );
         assert!(
             default_seen.lock().unwrap().is_empty(),
             "the default must never receive the turn a bad pin refused"
@@ -5169,15 +5234,25 @@ mod tests {
         let base =
             TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
         let pinned = base
-            .pinned("researcher", &choice("acme", "test-model-large"))
+            .pinned(
+                "researcher",
+                "Researcher",
+                &choice("acme", "test-model-large"),
+            )
             .expect("this provider can pin");
         let err = pinned
             .invoke(&(), user_request("hi"))
             .await
             .expect_err("the pinned provider is switched off");
         let text = err.to_string();
-        assert!(text.contains("agent `researcher` is set to"), "{text}");
-        assert!(text.contains("which is switched off"), "{text}");
+        assert!(
+            text.contains("Researcher uses Acme, which is turned off."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Choose another provider and model for Researcher"),
+            "{text}"
+        );
     }
 
     /// The trait default: an implementation that reports no telemetry
@@ -5188,7 +5263,11 @@ mod tests {
         let double = MockProvider::default();
         assert!(
             double
-                .pinned("researcher", &choice("acme", "test-model-large"))
+                .pinned(
+                    "researcher",
+                    "Researcher",
+                    &choice("acme", "test-model-large")
+                )
                 .is_none()
         );
     }
