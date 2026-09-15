@@ -403,18 +403,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * The verdict on the credential, and the reason the step can gate on it.
    *
    * `"untested"` blocks Next; `"ok"` releases it; `"failed"` blocks with the
-   * reason shown. `"skipped"` releases it too — see the skip link. There is no
-   * state in which the operator cannot proceed at all: decision D3 says nobody
-   * gets stuck, and a credential they cannot obtain must not be the one thing
-   * that traps them.
+   * reason shown. `"skipped"` releases it too — see the skip link. `"hosted"`
+   * releases it as well, and says the model came with the host rather than
+   * from this operator. There is no state in which the operator cannot proceed
+   * at all: decision D3 says nobody gets stuck, and a credential they cannot
+   * obtain must not be the one thing that traps them.
    */
-  const [tested, setTested] = useState<
-    | { kind: "untested" }
-    | { kind: "testing" }
-    | { kind: "ok"; baseUrl: string; model?: string | null }
-    | { kind: "failed"; error: string }
-    | { kind: "skipped" }
-  >({ kind: "untested" });
+  const [tested, setTested] = useState<TestState>({ kind: "untested" });
   /**
    * The team, once the host has designed one — and `null` until then.
    *
@@ -486,6 +481,11 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
           seeded.auth_mode = "none";
         }
         setValues(seeded);
+        // A host that already reaches a model has answered the model question
+        // on the operator's behalf, so its verdict settles here rather than
+        // waiting for a probe nobody can run. Settled rather than cleared, the
+        // same way "No model" settles: there is nothing left to prove.
+        if (s.inference.ready) setTested({ kind: "hosted" });
         // Pre-fill the model step from what the host already holds. A hosted
         // operator has a credential injected by the control plane, no key of
         // their own, and no way to get one — the step should arrive answered.
@@ -998,7 +998,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   const problem = (): string | undefined => {
     // The gate. Untested is not "probably fine": the whole reason this step
     // moved to the front is that a bad credential is silent everywhere else.
-    if (current.id === "power" && tested.kind !== "ok" && tested.kind !== "skipped") {
+    if (
+      current.id === "power" &&
+      tested.kind !== "ok" &&
+      tested.kind !== "skipped" &&
+      tested.kind !== "hosted"
+    ) {
       return tested.kind === "failed"
         ? "That connection did not work. Fix it, or continue without a model."
         : "Test the connection first, or continue without a model.";
@@ -1894,7 +1899,8 @@ type TestState =
   | { kind: "testing" }
   | { kind: "ok"; baseUrl: string; model?: string | null }
   | { kind: "failed"; error: string }
-  | { kind: "skipped" };
+  | { kind: "skipped" }
+  | { kind: "hosted" };
 
 // ---------------------------------------------------------------------------
 // Review, and the team as reviewed
