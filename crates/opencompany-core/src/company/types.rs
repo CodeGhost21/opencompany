@@ -714,6 +714,30 @@ pub struct Agent {
     /// *session* (`session/set_config_option`), not the process env.
     #[serde(default)]
     pub model: Option<String>,
+    /// The provider half of this agent's own `{provider, model}` pair on a
+    /// `built_in` harness (keys rework, issue #2306, slice 3a) — a company
+    /// provider list slug (`crate::company::inference::store::get_provider`),
+    /// never a manifest-authored value: nothing in `AgentFile`/`company.toml`
+    /// parsing populates this, it exists only so
+    /// [`CompanyRecord::effective_manifest_agent`] can project an
+    /// [`crate::ports::types::AgentOverride::provider`] pin onto the same
+    /// `Agent` shape [`Self::model`] already uses for the ACP case. Always set
+    /// together with [`Self::model`] (both `Some` or both `None`), and
+    /// meaningful only on `built_in` — an `acp` harness keeps [`Self::model`]'s
+    /// existing ACP-hint meaning and refuses this field outright.
+    ///
+    /// Not yet read on the turn path: [`crate::harness::built_in::provider::TenantProvider`]
+    /// resolves every turn through `resolve_for_turn`'s `pin` parameter, which
+    /// this slice does not populate (`// the agent pair: slice 3a passes
+    /// self.pin.clone()` in that module still says `None`) — `TenantProvider`
+    /// is shared across every agent on a harness lane
+    /// (`crate::harness::lanes::built_in_lane`), so routing a single agent's
+    /// turns through a pin it alone chose needs that pooling to become
+    /// per-agent-aware, which is its own change. This field is the persisted,
+    /// round-tripped half: an operator's choice is saved and read back
+    /// honestly; it does not yet steer a turn.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Tool grant globs, intersected with `[tools].allow`.
     ///
     /// Three distinct states, made representable by issue #1804 (epic #1817,
