@@ -17,7 +17,7 @@ crates/opencompany-tui/     The terminal client: the host, embedded, in ratatui
 
 Every `src/...` path below and in the rest of `docs/` is short for
 `crates/opencompany-core/src/...`. What the crate embeds and reads at build
-and test time — `companies/`, `skills/`, `frontend/`, `vendor/` —
+and test time — `companies/`, `frontend/`, `vendor/` —
 stays at the repository root, which is `../..` from `CARGO_MANIFEST_DIR`.
 
 ## Host source tree

@@ -6,7 +6,7 @@
 #
 # The sources live beneath this manifest — `src/`, `tests/`, `benches/`,
 # `examples/` and `build.rs` — so `CARGO_MANIFEST_DIR` is their parent, and the
-# repository root (`companies/`, `skills/`, `frontend/`, `vendor/`,
+# repository root (`companies/`, `frontend/`, `vendor/`,
 # the workspace `Cargo.lock`) is `../..` from it. Auto-discovery stays off all
 # the same: `scripts/ci/assert-integration-targets-run.sh` reads the `[[test]]`
 # entries here to decide which integration targets must run something, and a
