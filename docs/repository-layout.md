@@ -48,6 +48,7 @@ src/paypal/             PayPal wallet and transaction visibility
 src/bin/opencompany.rs  CLI entrypoint
 companies/              22 business definitions (a company.toml + docs each)
 frontend/               Company-agnostic operator console (Vite + React)
+docs/gitbooks/          The published GitBook: overview, get started, developer guide
 docs/spec/              Architecture reference
 docs/modules/           Per-package design docs
 qa/                     Release checks against a deployed tenant
