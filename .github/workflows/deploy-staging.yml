@@ -513,7 +513,7 @@ jobs:
                  | select(any(.metadata.ownerReferences[]?;
                      .kind == "StatefulSet" and .name == $statefulset))]
                 | if length == 0 then
-                    "-\t-\t-\tno pod"
+                    "-\u001f-\u001f-\u001fno pod"
                   else
                     . as $pods
                     | [
@@ -528,9 +528,9 @@ jobs:
                              .status.initContainerStatuses[]?.state.terminated.reason
                            ) ]
                          | map(select(. != null and . != "")) | unique | join(","))
-                      ] | @tsv
+                      ] | join("\u001f")
                   end')
-              IFS=$'\t' read -r pod_name pod_phase pod_image pod_reason <<< "${pod_status}"
+              IFS=$'\037' read -r pod_name pod_phase pod_image pod_reason <<< "${pod_status}"
 
               failure_detail=''
               if [ -n "${rollout_error}" ]; then

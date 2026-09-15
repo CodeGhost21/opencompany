@@ -330,6 +330,23 @@ expect_contains "F8 patch targets" \
 expect_absent "F8 patch targets" "set image statefulset/cortexdb" "${log}"
 expect_absent "F8 patch targets" "get pod -l" "${log}"
 
+# F9 — a sidecar (no opencompany container) whose pod stays phase Running
+# while its own container crash-loops. The jq record's image field is empty
+# for this row (only the opencompany container's image is captured), which is
+# the case that exposed a tab-collapsing IFS read: a $'\t'-joined record with
+# an empty middle field parses one column short and the reason lands in the
+# image slot, leaving the reason check nothing to see.
+f9=$(new_fixture f9)
+statefulset demo cortexdb 1 tinycortex | as_list >"${f9}/statefulsets.json"
+pod demo cortexdb-0 cortexdb cortexdb Running tinycortex "${SIDECAR_IMAGE}" CrashLoopBackOff \
+    | as_list >"${f9}/pods-demo.json"
+
+out=$(run_gate "${f9}" false)
+expect_exit "F9 sidecar crash loop" 1 "${out}"
+expected_row=$(printf '%-24s %-24s %-8s %-90s %s' \
+    demo cortexdb failed - "pod cortexdb-0: CrashLoopBackOff")
+expect_contains "F9 sidecar crash loop" "${expected_row}" "${out}"
+
 if [ "${failures}" -ne 0 ]; then
     echo "tenant-landed-gate: ${failures} check(s) failed" >&2
     exit 1
