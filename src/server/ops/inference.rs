@@ -3609,6 +3609,84 @@ base_url = "https://byo.example/v1"
         );
     }
 
+    /// Bug KR-L1-01 (live E2E, orchestrator-reported): a provider whose
+    /// `/models` catalog is real, valid JSON but too large for the probe's
+    /// success-body cap used to be silently read as zero models, reporting a
+    /// healthy `ok` add — the operator's key was never at fault, and nothing
+    /// said so. Now the add still saves the row (this failure is
+    /// non-destructive: `ProbeClass::Unknown` never rolls a credential back),
+    /// but the probe result is an explicit failure naming the model list
+    /// itself, never a bare `ok: true` over zero models.
+    #[tokio::test]
+    async fn an_add_whose_catalog_is_too_large_to_read_never_reports_ok() {
+        use axum::routing::get;
+
+        // One entry whose filler alone exceeds the probe's cap — a cheap way
+        // to produce a real over-the-wire body larger than
+        // `probe::CATALOG_BODY_CAP` without generating (and comparing) many
+        // megabytes of meaningful content.
+        let oversized = "x".repeat(17 * 1024 * 1024);
+        let body = format!(r#"{{"data":[{{"id":"acme/test-model","description":"{oversized}"#);
+        let app = axum::Router::new().route(
+            "/v1/models",
+            get(move || {
+                let body = body.clone();
+                async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, resp, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({
+                "kind": "custom",
+                "label": "Acme",
+                "baseUrl": format!("http://{address}/v1"),
+                "key": "sk-not-a-real-key",
+                "model": "acme/test-model",
+            })),
+        )
+        .await;
+        server.abort();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a non-destructive probe failure still saves: {raw}"
+        );
+        assert_eq!(resp["probe"]["ok"], false, "{resp}");
+        assert_eq!(resp["probe"]["modelCount"], 0, "{resp}");
+        let message = resp["probe"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("could not be read"),
+            "must say the model list itself could not be read, not a generic failure: {message}"
+        );
+
+        // And the row's own recorded health must not be "ok" either — the
+        // whole point being that the console's health column must not read
+        // as a working, connected provider.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        let acme = dto["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["slug"] == "acme")
+            .unwrap();
+        assert_ne!(acme["health"]["state"], "ok", "{acme}");
+    }
+
     #[tokio::test]
     async fn disabling_keeps_the_route_and_names_the_tiers_it_parks() {
         // The departure from the plan, pinned so it is a decision rather than an

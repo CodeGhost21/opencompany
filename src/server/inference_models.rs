@@ -332,9 +332,28 @@ async fn fetch_catalog(
     bearer: Option<&str>,
     auth: AuthStyle,
 ) -> Result<Vec<InferenceModel>, DiscoveryError> {
-    let response = send_classified(client, url, bearer, auth).await?;
+    let mut response = send_classified(client, url, bearer, auth).await?;
     let named = crate::company::inference::catalogue::redact_endpoint(url);
-    let payload = response.json::<RegistryResponse>().await.map_err(|error| {
+    // Capped and read chunk-by-chunk, matching `fetch_paged_catalog` below and
+    // the connect-time probe's own `probe::CATALOG_BODY_CAP` (bug KR-L1-01,
+    // keys rework issue #2306) — one shared limit, refused explicitly rather
+    // than either buffered without bound (`response.json()`'s old behaviour
+    // here) or silently truncated into invalid JSON.
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        DiscoveryError::endpoint(format!(
+            "reading the model catalog from {named} failed: {e}"
+        ))
+    })? {
+        if body.len() + chunk.len() > crate::company::inference::probe::CATALOG_BODY_CAP {
+            return Err(DiscoveryError::endpoint(format!(
+                "the model list from {named} could not be read: it is larger than {} MiB",
+                crate::company::inference::probe::CATALOG_BODY_CAP / (1024 * 1024)
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let payload: RegistryResponse = serde_json::from_slice(&body).map_err(|error| {
         DiscoveryError::endpoint(format!("model catalog from {named} was invalid: {error}"))
     })?;
     Ok(parse_models(payload))
