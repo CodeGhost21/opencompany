@@ -360,6 +360,27 @@ pub(super) fn declared_model(record: &CompanyRecord, agent_id: &str) -> Option<S
         })
 }
 
+/// The declared provider half of `agent_id`'s `{provider, model}` pair, from
+/// whichever half of the roster it comes from (keys rework, issue #2306,
+/// slice 3a).
+///
+/// Sibling of [`declared_model`] in shape and in reason — see that function's
+/// doc. Always set together with [`declared_model`]'s own value by
+/// [`edit_agent`]'s own validation, but read independently here so a caller
+/// that only wants one half never has to reconstruct the other's plumbing.
+pub(super) fn declared_provider(record: &CompanyRecord, agent_id: &str) -> Option<String> {
+    record
+        .effective_agent(agent_id)
+        .and_then(|agent| agent.provider.clone())
+        .or_else(|| {
+            record
+                .overlay_agents
+                .iter()
+                .find(|agent| agent.id == agent_id)
+                .and_then(|agent| agent.provider.clone())
+        })
+}
+
 /// The declared harness binding for `agent_id`, from whichever half of the
 /// roster it comes from (issue #1245's harness-picker follow-up).
 ///
