@@ -433,6 +433,111 @@ pub async fn store_key_if_connected(
     Ok(true)
 }
 
+/// What a guarded write against a possibly-default provider found, under one
+/// hold of the index lock end to end.
+///
+/// KR review comment 4012261309: the HTTP layer used to read
+/// [`load_default_slug`] and decide whether to refuse *before* calling into
+/// one of this module's own locked mutations, which reopened exactly the
+/// check-then-act window the index lock exists to close — a concurrent
+/// `set_default_if_connected` naming this slug could land in the gap between
+/// the read and the write, so an unconfirmed disable/removal/key-clear could
+/// still strand the newly selected default. [`set_enabled_guarded`],
+/// [`delete_provider_guarded`] and [`store_key_guarded`] read the marker,
+/// apply the in-use rule, and write, all under one `index_guard` hold, so
+/// nothing else touching this company's index can interleave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedWrite {
+    /// `slug` has no row — nothing was checked or changed.
+    NotConnected,
+    /// `slug` is the marked default and the caller did not confirm — nothing
+    /// changed. Search's only `usedBy` shape is the default marker itself
+    /// (`docs/key-reworks/in-use-guards.md` §1), so the caller needs nothing
+    /// more than this to build the guard's `usedBy: { default: true }`.
+    Blocked,
+    /// The mutation ran.
+    Applied,
+}
+
+/// [`set_enabled`], but the marked-default check and the write are one
+/// critical section (see [`GuardedWrite`]). Enabling a row is never guarded —
+/// turning a provider on cannot strand anything — so `confirm` is only
+/// consulted when `enabled` is false.
+pub async fn set_enabled_guarded(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    enabled: bool,
+    confirm: bool,
+) -> Result<GuardedWrite> {
+    let _guard = index_guard(company).await;
+    if !enabled && load_default_slug(company, secrets).await?.as_deref() == Some(slug) && !confirm {
+        return Ok(GuardedWrite::Blocked);
+    }
+    let mut providers = list_providers(company, secrets).await?;
+    let Some(target) = providers.iter_mut().find(|p| p.slug == slug) else {
+        return Ok(GuardedWrite::NotConnected);
+    };
+    target.enabled = enabled;
+    save_index(company, secrets, &providers).await?;
+    Ok(GuardedWrite::Applied)
+}
+
+/// [`delete_provider`], but the marked-default check and the removal are one
+/// critical section (see [`GuardedWrite`]).
+pub async fn delete_provider_guarded(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    confirm: bool,
+) -> Result<GuardedWrite> {
+    let _guard = index_guard(company).await;
+    if load_default_slug(company, secrets).await?.as_deref() == Some(slug) && !confirm {
+        return Ok(GuardedWrite::Blocked);
+    }
+    if !list_providers(company, secrets)
+        .await?
+        .iter()
+        .any(|provider| provider.slug == slug)
+    {
+        return Ok(GuardedWrite::NotConnected);
+    }
+    delete_provider_locked(company, secrets, slug).await?;
+    Ok(GuardedWrite::Applied)
+}
+
+/// [`store_key_if_connected`], but the marked-default check and the write are
+/// one critical section (see [`GuardedWrite`]). Only a **clear**
+/// (`key.is_empty()`) is guarded — a rotate keeps serving whatever already
+/// depended on it, the same rule the HTTP route's own guard already applied
+/// before this fix, just not atomically with the write.
+pub async fn store_key_guarded(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    key: &str,
+    confirm: bool,
+) -> Result<GuardedWrite> {
+    let _guard = index_guard(company).await;
+    if key.is_empty()
+        && load_default_slug(company, secrets).await?.as_deref() == Some(slug)
+        && !confirm
+    {
+        return Ok(GuardedWrite::Blocked);
+    }
+    if !list_providers(company, secrets)
+        .await?
+        .iter()
+        .any(|provider| provider.slug == slug)
+    {
+        return Ok(GuardedWrite::NotConnected);
+    }
+    // Takes no lock of its own — it writes credential addresses, not the index
+    // — so calling it while the guard is held is safe rather than re-entrant.
+    store_provider_key(company, secrets, slug, key).await?;
+    Ok(GuardedWrite::Applied)
+}
+
 /// [`put_provider`]'s body, for a caller that already holds the index lock.
 ///
 /// Separate because the lock is not re-entrant: [`claim_provider`] holds it

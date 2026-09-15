@@ -1677,3 +1677,183 @@ async fn seed_failing(secrets: &FailingSecrets, pairs: &[(&str, &str)]) {
             .expect("seed");
     }
 }
+
+// ---------------------------------------------------------------------------
+// GuardedWrite — KR review comment 4012261309: the disable/remove/key-clear
+// in-use check and the mutation it guards must be one critical section.
+// ---------------------------------------------------------------------------
+
+/// `server/ops/search.rs`'s guards used to read [`load_default_slug`] and
+/// decide *before* ever calling into one of this module's locked mutations —
+/// two separate operations with a gap between them wide enough for an entire
+/// concurrent [`set_default_if_connected`] to land and complete, unconfirmed,
+/// stranding whatever it just made the default. Reproduced here by hand
+/// (deterministically — the vulnerable pattern is unsafe no matter how the
+/// interleaving is scheduled, so nothing about this needs a real race) to
+/// show [`set_enabled_guarded`] closes the gap: it re-reads the marker inside
+/// the same lock hold as the write, so it can never act on an answer staler
+/// than the moment it actually applies.
+#[tokio::test]
+async fn set_enabled_guarded_sees_a_default_set_after_its_caller_first_checked() {
+    let secrets = MemSecrets::default();
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "brave".to_string(),
+            enabled: true,
+            endpoint: None,
+        },
+    )
+    .await
+    .expect("seed");
+
+    // The vulnerable pattern's own first step: read the marker before
+    // deciding anything. Nothing is marked yet.
+    let marked_before = load_default_slug(&company(), &secrets).await.unwrap();
+    assert_eq!(marked_before, None, "nothing marked yet");
+
+    // The concurrent request that used to be able to land in the gap between
+    // that read and the disable's own write: something else marks brave as
+    // the default in the meantime.
+    assert!(
+        set_default_if_connected(&company(), &secrets, "brave")
+            .await
+            .unwrap(),
+        "brave is connected"
+    );
+    assert_ne!(
+        marked_before.as_deref(),
+        Some("brave"),
+        "the stale read is exactly what made the old pattern unsafe"
+    );
+
+    // The vulnerable pattern: decide from that stale read, then call the
+    // plain mutation directly with no fresh check of its own — exactly what
+    // the HTTP layer used to do.
+    set_enabled(&company(), &secrets, "brave", false)
+        .await
+        .unwrap();
+    let stranded = list_providers(&company(), &secrets)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.slug == "brave")
+        .unwrap();
+    assert!(
+        !stranded.enabled,
+        "documents the bug this fix closes: an unconfirmed disable went through against a \
+         stale read, stranding what is now the marked default"
+    );
+
+    // Reset, and prove the guarded function does not repeat this.
+    set_enabled(&company(), &secrets, "brave", true)
+        .await
+        .unwrap();
+    let outcome = set_enabled_guarded(&company(), &secrets, "brave", false, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        GuardedWrite::Blocked,
+        "the guarded path re-reads the marker under its own lock, sees brave IS the default, \
+         and refuses rather than stranding it"
+    );
+    let still_enabled = list_providers(&company(), &secrets)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.slug == "brave")
+        .unwrap();
+    assert!(
+        still_enabled.enabled,
+        "the guarded call must not have disabled it"
+    );
+}
+
+/// The same closed gap for [`delete_provider_guarded`] and
+/// [`store_key_guarded`], plus their ordinary `NotConnected`/`Applied` paths —
+/// exercised together since all three share [`GuardedWrite`]'s shape and the
+/// same lock discipline.
+#[tokio::test]
+async fn guarded_writes_report_not_connected_blocked_and_applied() {
+    let secrets = MemSecrets::default();
+
+    // No row at all: every guarded write reports `NotConnected` rather than
+    // silently doing nothing, so a caller building an error message can tell
+    // "refused, in use" apart from "there was nothing to change".
+    assert_eq!(
+        set_enabled_guarded(&company(), &secrets, "brave", false, false)
+            .await
+            .unwrap(),
+        GuardedWrite::NotConnected
+    );
+    assert_eq!(
+        delete_provider_guarded(&company(), &secrets, "brave", false)
+            .await
+            .unwrap(),
+        GuardedWrite::NotConnected
+    );
+    assert_eq!(
+        store_key_guarded(&company(), &secrets, "brave", "", false)
+            .await
+            .unwrap(),
+        GuardedWrite::NotConnected
+    );
+
+    put_provider(
+        &company(),
+        &secrets,
+        SearchProvider {
+            slug: "brave".to_string(),
+            enabled: true,
+            endpoint: None,
+        },
+    )
+    .await
+    .expect("seed");
+    store_provider_key(&company(), &secrets, "brave", "brave-not-a-real-key")
+        .await
+        .expect("seed key");
+    assert!(
+        set_default_if_connected(&company(), &secrets, "brave")
+            .await
+            .unwrap()
+    );
+
+    // Marked default, unconfirmed: every one of the three guards refuses.
+    assert_eq!(
+        delete_provider_guarded(&company(), &secrets, "brave", false)
+            .await
+            .unwrap(),
+        GuardedWrite::Blocked
+    );
+    assert_eq!(
+        store_key_guarded(&company(), &secrets, "brave", "", false)
+            .await
+            .unwrap(),
+        GuardedWrite::Blocked,
+        "clearing the key is guarded the same as a disable"
+    );
+    // A rotate (non-empty key) is never guarded, even while brave is default.
+    assert_eq!(
+        store_key_guarded(&company(), &secrets, "brave", "brave-new-key", false)
+            .await
+            .unwrap(),
+        GuardedWrite::Applied
+    );
+
+    // Confirmed: the removal actually runs.
+    assert_eq!(
+        delete_provider_guarded(&company(), &secrets, "brave", true)
+            .await
+            .unwrap(),
+        GuardedWrite::Applied
+    );
+    assert!(
+        list_providers(&company(), &secrets)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

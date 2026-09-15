@@ -753,25 +753,30 @@ async fn update_provider(
     }
     if let Some(enabled) = body.enabled {
         // Only a disable is guarded (in-use-guards.md §1/§2): turning a
-        // provider ON cannot strand anything this company already had.
-        // Computed before the write, per §3, so a confirmed disable echoes
-        // exactly what it would have refused with — the row survives a
-        // disable (unlike a delete), so `status_of`'s own `used_by` for this
-        // slug reports the same thing afterwards.
-        if !enabled {
-            let marked = store::load_default_slug(runtime.id(), runtime.secrets().as_ref())
-                .await
-                .map_err(ApiError)?;
-            if let Some(used_by) = used_by_for(marked.as_deref(), &slug)
-                && !body.confirm_in_use
-            {
+        // provider ON cannot strand anything this company already had. The
+        // marked-default read, the in-use check, and the write are one
+        // critical section under the store's index lock (KR review comment
+        // 4012261309) — the row survives a disable (unlike a delete), so
+        // `status_of`'s own `used_by` for this slug reports the same thing
+        // afterwards.
+        match store::set_enabled_guarded(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            &slug,
+            enabled,
+            body.confirm_in_use,
+        )
+        .await?
+        {
+            store::GuardedWrite::Blocked => {
                 return Err(ApiError(OpenCompanyError::InUse {
                     message: copy::provider_in_use_message(info.label),
-                    used_by,
+                    used_by: used_by_for(Some(&slug), &slug)
+                        .expect("Blocked only returned when slug is the marked default"),
                 }));
             }
+            store::GuardedWrite::NotConnected | store::GuardedWrite::Applied => {}
         }
-        store::set_enabled(runtime.id(), runtime.secrets().as_ref(), &slug, enabled).await?;
     }
 
     Ok(Json(status_of(runtime).await?))
@@ -802,24 +807,31 @@ async fn remove_provider(
     if !slug_is_addressable(&slug) {
         return Err(invalid("that is not a provider slug"));
     }
-    // Computed before the delete, per in-use-guards.md §3, so a confirmed
-    // removal echoes exactly what it would have refused with. The row is
-    // gone after this, so — unlike a disable — there is no surviving row for
-    // `status_of`'s own `used_by` to echo it through; the caller already saw
-    // this (from a prior GET, or from a first unconfirmed 409) before
-    // confirming.
-    let marked = store::load_default_slug(runtime.id(), runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
-    if let Some(used_by) = used_by_for(marked.as_deref(), &slug)
-        && !confirm_in_use
+    // The marked-default read, the in-use check, and the removal are one
+    // critical section under the store's index lock (KR review comment
+    // 4012261309), so a confirmed removal echoes exactly what it would have
+    // refused with rather than a stale read from before a concurrent
+    // `set_default_if_connected` landed. The row is gone after this, so —
+    // unlike a disable — there is no surviving row for `status_of`'s own
+    // `used_by` to echo it through; the caller already saw this (from a prior
+    // GET, or from a first unconfirmed 409) before confirming.
+    match store::delete_provider_guarded(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &slug,
+        confirm_in_use,
+    )
+    .await?
     {
-        return Err(ApiError(OpenCompanyError::InUse {
-            message: copy::provider_in_use_message(&label_for(&slug)),
-            used_by,
-        }));
+        store::GuardedWrite::Blocked => {
+            return Err(ApiError(OpenCompanyError::InUse {
+                message: copy::provider_in_use_message(&label_for(&slug)),
+                used_by: used_by_for(Some(&slug), &slug)
+                    .expect("Blocked only returned when slug is the marked default"),
+            }));
+        }
+        store::GuardedWrite::NotConnected | store::GuardedWrite::Applied => {}
     }
-    store::delete_provider(runtime.id(), runtime.secrets().as_ref(), &slug).await?;
     Ok(Json(status_of(runtime).await?))
 }
 
@@ -858,22 +870,8 @@ async fn replace_key(
     // Only a clear is guarded (in-use-guards.md §1/§6): a clear is
     // functionally equivalent to disabling the row from a dependent's point
     // of view — a key-less row cannot serve the default — while a rotate
-    // keeps serving whatever already depended on it. Computed before the
-    // write, per §3, so a confirmed clear echoes exactly what it would have
-    // refused with.
-    if key.is_empty() {
-        let marked = store::load_default_slug(runtime.id(), runtime.secrets().as_ref())
-            .await
-            .map_err(ApiError)?;
-        if let Some(used_by) = used_by_for(marked.as_deref(), &slug)
-            && !body.confirm_in_use
-        {
-            return Err(ApiError(OpenCompanyError::InUse {
-                message: copy::provider_in_use_message(info.label),
-                used_by,
-            }));
-        }
-    }
+    // keeps serving whatever already depended on it.
+    //
     // **Replace**, so there has to be something to replace. Without this a
     // direct `PUT …/search/providers/exa/key` for a provider with no row wrote
     // a credential to `search/provider/exa/key` that the status route never
@@ -882,16 +880,35 @@ async fn replace_key(
     // cannot delete is the orphaned-secret shape this module keeps refusing
     // elsewhere, and it does not get an exception here.
     //
-    // Checked and written in one critical section rather than two: a removal
-    // landing between them would leave the credential at an address absent from
-    // the index, which the status route never reports and `DELETE …/search/key`
-    // never clears, because both walk the index.
-    if !store::store_key_if_connected(runtime.id(), runtime.secrets().as_ref(), &slug, &key).await?
+    // The marked-default read, the in-use check, the existence check, and the
+    // write are one critical section under the store's index lock (KR review
+    // comment 4012261309): a removal or a default change landing between them
+    // used to be able to leave the credential at an address absent from the
+    // index, or let an unconfirmed clear through against a marker that was
+    // stale by the time it was read.
+    match store::store_key_guarded(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        &slug,
+        &key,
+        body.confirm_in_use,
+    )
+    .await?
     {
-        return Err(invalid(format!(
-            "{} is not connected — connect it instead",
-            info.label
-        )));
+        store::GuardedWrite::Blocked => {
+            return Err(ApiError(OpenCompanyError::InUse {
+                message: copy::provider_in_use_message(info.label),
+                used_by: used_by_for(Some(&slug), &slug)
+                    .expect("Blocked only returned when slug is the marked default"),
+            }));
+        }
+        store::GuardedWrite::NotConnected => {
+            return Err(invalid(format!(
+                "{} is not connected — connect it instead",
+                info.label
+            )));
+        }
+        store::GuardedWrite::Applied => {}
     }
     Ok(Json(status_of(runtime).await?))
 }
