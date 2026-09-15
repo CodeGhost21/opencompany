@@ -699,6 +699,16 @@ export interface AgentReplyEvent {
   agentId: string;
   text: string;
   /**
+   * **The body as the model wrote it**, mirroring `MessageView.cueText` on the
+   * reload path — `text` before the host rewrote the room's grammar into
+   * operator-facing prose.
+   *
+   * Equal to {@link text} on every row carrying no move, and absent from a host
+   * that predates the field. The episode fold reads it because it counts
+   * `!propose`/`!support`/`^N`, which the operator-facing body no longer has.
+   */
+  cueText?: string;
+  /**
    * The **host-side** id of this message (issue #483) — the stream envelope's
    * `seq`. `chat/history` projects its own `id` from the same `StoredEvent`
    * sequence, so a live line stamped with this carries the identity a later

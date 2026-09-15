@@ -183,6 +183,20 @@ export interface ChatMessage {
   id: string;
   from: "you" | "company" | "system";
   text: string;
+  /**
+   * **The body as the model wrote it**, when the host sent one — `text` before
+   * `readable_moves` rewrote the room's grammar into operator-facing prose.
+   *
+   * Equal to {@link text} on every row that carries no move, which is every
+   * reply on every desk that does not deliberate, and absent from a host that
+   * predates the field.
+   *
+   * Read it wherever the *grammar* is the point rather than the prose: the
+   * episode fold counts `!propose`/`!support`/`^N`, and reading {@link text}
+   * there makes the deliberation panel depend on the host not having tidied
+   * the bubble.
+   */
+  cueText?: string;
   /** Wall-clock the line was added, for timestamps and grouping. */
   at: number;
   /**
@@ -465,6 +479,12 @@ export function makeMessage(
     attachments?: AttachmentDto[];
     /** Mention spans the host resolved against this message, for chip rendering. */
     mentions?: Mention[];
+    /**
+     * The body as the model wrote it, when the frame carried one — see
+     * {@link ChatMessage.cueText}. Passed through untouched so a live row and
+     * the same row after a reload feed the episode fold identically.
+     */
+    cueText?: string;
     /** The fail-closed reason (KR-L2-03), already narrowed by `toTurnFailure`. */
     turnFailure?: TurnFailure;
   } = {},
@@ -473,6 +493,7 @@ export function makeMessage(
     id: opts.messageId ? hostMessageId(opts.messageId) : nextId(),
     from,
     text,
+    cueText: opts.cueText,
     at: opts.at ?? Date.now(),
     channel: opts.channel,
     parentId: opts.parentId,
@@ -598,6 +619,9 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       id: hostMessageId(entry.id),
       from,
       text: entry.text,
+      // Straight through, like `byPerson`: the host is the only layer that
+      // still has the pre-rewrite body, and the episode fold needs it.
+      cueText: entry.cueText,
       at: entry.atMillis,
       // Straight through, never derived: see the field's own note, and
       // `MessageView::by_person` for why the host is the only layer that knows.
