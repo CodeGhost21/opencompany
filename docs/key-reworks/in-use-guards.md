@@ -221,8 +221,48 @@ default can point at nothing servable, shared by `pair_broken` and
 what. Every sentence above has a test in `copy.rs` asserting the exact text.
 
 These are produced by `resolve_choice` (2b/3a) and the `TenantProvider::resolve`
-pin check (3a), both calling into `copy.rs` rather than formatting their own
-strings.
+pin check (3a). `resolve_choice` calls into `copy.rs`; the pin check's own two
+sentences ("agent `{id}` is set to `{provider}`, which this company does not
+have/is switched off…") are still written inline with the raw agent id and
+provider identifier **in the sentence itself** — a known X7 gap (phase-3a's
+gotcha G7), kept because `HarnessModel::pinned` carries only an id, not the
+agent's display role, and fixing it needs a signature change out of this
+slice's scope. Recorded here rather than silently left inconsistent with the
+"display names only" rule the rest of this table follows.
+
+### 5.1 The fail-closed chat notice, structured (KR-L2-03, 2026-09-15)
+
+A turn that fails **because of resolution** (a pin naming a gone/off
+provider, a broken company default, no model chosen, no key) is reported to
+the chat UI as an ordinary `AgentReply`/history message, additively carrying
+five more fields — present only for this one class of failure, so every other
+turn error (a tool timeout, an empty response, a provider rate limit) is
+unaffected and keeps today's generic "This turn couldn't be finished…"
+wording with none of these fields set:
+
+| Wire key | Type | Meaning |
+|---|---|---|
+| `userFacing` | `boolean` | `true` only for a classified resolution failure. Absent (reads as falsy) on every other failure and on every ordinary reply. |
+| `code` | `string` | One of `no_model_chosen`, `pair_provider_removed`, `pair_provider_off`, `default_provider_removed`, `default_provider_off`, `provider_no_key`, `model_not_listed`. `model_not_listed` is reserved: no resolver check produces it yet (a chosen model is never re-validated against a live catalogue at turn time, by design — see phase-2b/2d), so no test exercises it either. |
+| `message` | `string` | The exact `copy.rs` sentence (X9), with display names — identical to `text` on this same message for a classified failure. |
+| `pairAgentId` | `string?` | The agent id this failure is about, when the resolver could name one **and had a raw id in hand** — today that is only `pair_provider_removed`/`pair_provider_off`, from `TenantProvider::resolve`'s own pin check (§5's G7 note). Absent for every other code, because `copy.rs`'s sentences are display-name-only (X7) and a display name is not a ref-able id. |
+| `providerSlug` | `string?` | The provider slug or label the failure names, on the same terms as `pairAgentId` — a slug for the two pin codes, absent otherwise. |
+
+**Not `agentId`.** The obvious wire name collides with `AgentReply.agent_id` /
+the existing SSE `agentId` key, which is the reply's **author** — always the
+system author for every failure notice, classified or not — and which other
+code (and, presumably, the console) already keys "is this a system notice"
+off. Overwriting it with a teammate's id for a classified failure would make
+a fail-closed notice about `researcher` render as if `researcher` had sent
+it. `pairAgentId` is additive and carries no such collision.
+
+Backend: `resolution_failure(detail: &str)` in `src/server/operator.rs`
+classifies the error text `turn_failure_notice` already receives, by fixed
+substring (mirroring `provider_failure_sentence`'s existing pattern in the
+same file) — there is no structured error type threaded through the
+vendored turn loop to classify on instead. Applies to both the live SSE
+`agent_reply` frame and the persisted `CompanyEvent::AgentReply` (so history
+carries the same fields on reload, via `MessageView`/`ChatHistoryMessageDto`).
 
 ## 6. What counts as "used", precisely (Agent B's scope)
 
