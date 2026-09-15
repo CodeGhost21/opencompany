@@ -122,12 +122,12 @@ test("the account key sets up TinyHumans for LLM and a turn reaches the backend"
   const afterStatus = (await after.json()) as {
     cognition: string;
     restartRequired: boolean;
-    defaultChoice: { provider: string; model: string } | null;
+    defaultChoice: { provider: string; model: string; broken: boolean } | null;
     providers: { slug: string; baseUrl: string; isDefault: boolean; enabled: boolean }[];
   };
   expect(afterStatus.cognition).toBe("harness");
   expect(afterStatus.restartRequired).toBe(false);
-  expect(afterStatus.defaultChoice).toEqual({ provider: "tinyhumans", model: MODEL });
+  expect(afterStatus.defaultChoice).toEqual({ provider: "tinyhumans", model: MODEL, broken: false });
   const row = afterStatus.providers.find((p) => p.slug === "tinyhumans");
   expect(row, "the fan-out created the tinyhumans row").toBeTruthy();
   expect(row?.enabled).toBe(true);
