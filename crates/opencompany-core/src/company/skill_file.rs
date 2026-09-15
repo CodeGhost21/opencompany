@@ -157,10 +157,11 @@ pub fn load_catalog_skills(companies_dir: &Path) -> Result<Vec<SkillDoc>> {
     if !companies_dir.exists() {
         return Ok(Vec::new());
     }
-    let entries = std::fs::read_dir(companies_dir).map_err(|source| OpenCompanyError::DataRead {
-        path: companies_dir.to_path_buf(),
-        source,
-    })?;
+    let entries =
+        std::fs::read_dir(companies_dir).map_err(|source| OpenCompanyError::DataRead {
+            path: companies_dir.to_path_buf(),
+            source,
+        })?;
     let mut bundles = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| OpenCompanyError::DataRead {
@@ -407,7 +408,11 @@ mod tests {
         assert_eq!(docs[1].name, "Alpha Shared");
 
         // Nothing there at all is an empty catalog, not an error.
-        assert!(load_catalog_skills(&root.path().join("missing")).unwrap().is_empty());
+        assert!(
+            load_catalog_skills(&root.path().join("missing"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
