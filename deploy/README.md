@@ -82,7 +82,7 @@ two-container task (host + console in one task; the console reaches the host on
 # build + push
 aws ecr create-repository --repository-name opencompany
 aws ecr create-repository --repository-name opencompany-console
-docker build -t <ecr>/opencompany:latest .
+docker build -f deploy/Dockerfile -t <ecr>/opencompany:latest .
 docker build -t <ecr>/opencompany-console:latest frontend
 docker push <ecr>/opencompany:latest && docker push <ecr>/opencompany-console:latest
 
