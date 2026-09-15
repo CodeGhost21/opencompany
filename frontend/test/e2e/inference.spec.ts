@@ -33,6 +33,17 @@ import { disconnectSharedProviders } from "./shared-inference";
  * Every add now goes: fill the key or endpoint, submit (opens the model step,
  * always — D-model), choose or type a model, submit again. `pickModel` below is
  * that second step, added to every existing add flow.
+ *
+ * ## What is deliberately not here
+ *
+ * The single-provider form — `#inference-provider`, `inference-save`,
+ * `inference-current-provider`, the "Managed (TinyHumans)" option and its
+ * `connect-tinyhumans` button — was retired with the Routing tab (commit
+ * 7aa1d0b22), and "TinyHumans is offered as an ordinary catalogue row" below
+ * asserts there is no `Managed` entry any more. A spec for that form,
+ * "switching to the managed brain and saving stays on managed", outlived it
+ * through a merge and sat red on every lane; it is gone, not skipped. Do not
+ * resurrect it from an older branch.
  */
 
 type Page = import("@playwright/test").Page;
