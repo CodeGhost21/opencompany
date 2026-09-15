@@ -202,9 +202,27 @@ export function ProvidersTab({
     return <SectionUnreachable label="Couldn't read this company's model providers" />;
   }
 
-  /** Bumps {@link attempt} and clears everything a stale result could still write into. */
+  /**
+   * Bumps {@link attempt} and clears everything a stale result could still
+   * write into.
+   *
+   * Clears `busy` too, not just the error/model-ask fields. `submitConnect`'s
+   * own `finally` only resets `busy` when `myAttempt === attempt.current` —
+   * deliberately, so a stale async response from a superseded attempt cannot
+   * clear the spinner a *newer* attempt is showing. But a *successful* submit
+   * calls `closeConnect` (which calls this) from inside that same attempt's
+   * try block, before its own `finally` runs — so by the time `finally`
+   * checks, this call has already bumped `attempt` out from under it, and the
+   * guard skips `setBusy(false)`. A dialog opened again after that (a second
+   * provider in the same session, `openConnect` also routes through here)
+   * inherited `busy: true` from the previous, already-finished attempt and
+   * rendered its first submit permanently disabled on "Reading models…" —
+   * exactly the shape the loop in "a second provider holds a credential of
+   * its own" hit on its second iteration.
+   */
   const resetConnectState = () => {
     attempt.current += 1;
+    setBusy(false);
     setError(null);
     setProbeFailure(null);
     setModelAsk(null);
@@ -216,19 +234,31 @@ export function ProvidersTab({
     setEditing(null);
   };
 
-  /** Opens the connect dialog fresh — every caller that sets `connecting`/`editing` goes through this. */
+  /**
+   * Opens the connect dialog fresh — every caller that sets
+   * `connecting`/`editing` goes through this.
+   *
+   * Also closes the "Add a provider" list dialog (found twice, independently:
+   * live lane 1's KR-L1-02, and upstream's "handle missing provider in
+   * inference tab"). `AddProviderDialog`'s own `onChoose` calls straight into
+   * this without ever setting `adding` back to `false`, so the outer picker
+   * — a separate `open` boolean from the inner connect dialog — stayed
+   * mounted and open *underneath* the connect dialog it had just opened. Both
+   * are Base UI portalled dialogs at the same z-index, so the connect dialog
+   * (rendered later in the DOM) covered it while open — but the moment the
+   * connect dialog closed (submit success, Escape, or an overlay click), the
+   * still-open picker resurfaced with its own overlay (marking the whole page
+   * `aria-hidden` again) and ate every click after it, including a later
+   * `inference-add-open` click meant to open a fresh one. A loop that
+   * connects two providers in one test hit this on the second iteration.
+   * Opening the connect dialog always closes the picker, whether or not it
+   * happened to be open.
+   */
   const openConnect = (next: { connecting: string | null; editing: Provider | null }) => {
     resetConnectState();
+    setAdding(false);
     setConnecting(next.connecting);
     setEditing(next.editing);
-    // Live lane 1, KR-L1-02: the outer "Add a provider" picker is a separate
-    // `open` boolean (`adding`) from the inner connect dialog, and choosing
-    // an option opens the second without ever closing the first — so the
-    // picker was still technically open underneath, and reappeared (marking
-    // the whole page `aria-hidden` again) the instant the connect dialog
-    // unmounted on a successful or cancelled add. Opening the connect dialog
-    // always closes the picker, whether or not it happened to be open.
-    setAdding(false);
   };
 
   async function submitConnect(draft: ConnectDraft) {
