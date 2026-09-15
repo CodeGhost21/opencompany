@@ -202,9 +202,27 @@ export function ProvidersTab({
     return <SectionUnreachable label="Couldn't read this company's model providers" />;
   }
 
-  /** Bumps {@link attempt} and clears everything a stale result could still write into. */
+  /**
+   * Bumps {@link attempt} and clears everything a stale result could still
+   * write into.
+   *
+   * Clears `busy` too, not just the error/model-ask fields. `submitConnect`'s
+   * own `finally` only resets `busy` when `myAttempt === attempt.current` —
+   * deliberately, so a stale async response from a superseded attempt cannot
+   * clear the spinner a *newer* attempt is showing. But a *successful* submit
+   * calls `closeConnect` (which calls this) from inside that same attempt's
+   * try block, before its own `finally` runs — so by the time `finally`
+   * checks, this call has already bumped `attempt` out from under it, and the
+   * guard skips `setBusy(false)`. A dialog opened again after that (a second
+   * provider in the same session, `openConnect` also routes through here)
+   * inherited `busy: true` from the previous, already-finished attempt and
+   * rendered its first submit permanently disabled on "Reading models…" —
+   * exactly the shape the loop in "a second provider holds a credential of
+   * its own" hit on its second iteration.
+   */
   const resetConnectState = () => {
     attempt.current += 1;
+    setBusy(false);
     setError(null);
     setProbeFailure(null);
     setModelAsk(null);
