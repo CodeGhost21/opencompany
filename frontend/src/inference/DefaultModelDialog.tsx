@@ -101,7 +101,8 @@ export function DefaultModelDialog({
           </DialogTitle>
           {confirming && (
             <DialogDescription>
-              Every agent with no pinned pair of its own moves to this the moment you confirm.
+              Every agent with no pinned pair of its own moves to this default the moment you
+              confirm.
             </DialogDescription>
           )}
         </DialogHeader>
