@@ -4179,6 +4179,118 @@ base_url = "https://byo.example/v1"
         assert_eq!(dto["defaultChoice"]["provider"], "first");
     }
 
+    /// Round-3a review, P0: "no stored default" is not "the first provider
+    /// ever" — every company that predates this rework has no stored default,
+    /// so testing only `Unset` would silently reroute an existing company's
+    /// traffic onto the next thing an operator "tried out". A company with an
+    /// existing row must not auto-default a second one.
+    #[tokio::test]
+    async fn adding_a_second_provider_to_a_non_empty_company_never_auto_defaults() {
+        use crate::company::inference::store;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+        // Planted straight into the store — a row from before this feature
+        // existed, with no default marker of any kind, which is exactly the
+        // pre-rework shape the P0 bug mishandled.
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        store::put_provider(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            store::ProviderDraft {
+                slug: "already-here".into(),
+                label: "Already here".into(),
+                kind: "custom".into(),
+                base_url: UNREACHABLE.into(),
+                models: BTreeMap::from([("chat".to_string(), "existing-model".to_string())]),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Second", "baseUrl": UNREACHABLE, "model": "second-model" })),
+        )
+        .await;
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert!(
+            dto["defaultChoice"].is_null(),
+            "a company that already had a provider row must not auto-default its next add: {raw}"
+        );
+    }
+
+    /// Round-3a review, P0: a legacy entry-zero company (the flat
+    /// `inference/config` slot every pre-rework company already resolves
+    /// through) adding its first *console* provider must not auto-default —
+    /// entry zero is already an effective default, so this is not that
+    /// company's first provider.
+    #[tokio::test]
+    async fn adding_a_provider_to_a_legacy_entry_zero_company_never_auto_defaults() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openai_compatible", "baseUrl": UNREACHABLE })),
+        )
+        .await;
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Second", "baseUrl": UNREACHABLE, "model": "second-model" })),
+        )
+        .await;
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert!(
+            dto["defaultChoice"].is_null(),
+            "a legacy entry-zero company's next add must not auto-default: {raw}"
+        );
+    }
+
+    /// Round-3a review, P0: same guard, for a company whose inference comes
+    /// from a manifest `[inference]` section rather than a console row.
+    #[tokio::test]
+    async fn adding_a_provider_to_a_manifest_inference_company_never_auto_defaults() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(
+            &home,
+            "acme",
+            r#"[company]
+name = "Acme"
+[policy]
+mode = "full"
+
+[inference]
+provider = "openai_compatible"
+base_url = "http://127.0.0.1:9/v1"
+"#,
+        )
+        .await;
+
+        send(
+            &state,
+            "POST",
+            "/api/v1/company/inference/providers",
+            Some(json!({ "kind": "custom", "label": "Second", "baseUrl": UNREACHABLE, "model": "second-model" })),
+        )
+        .await;
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert!(
+            dto["defaultChoice"].is_null(),
+            "a manifest-inference company's first console add must not auto-default: {raw}"
+        );
+    }
+
     #[tokio::test]
     async fn deleting_the_default_provider_is_refused_without_confirmation() {
         let home_dir = home();

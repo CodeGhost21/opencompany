@@ -484,6 +484,41 @@ async fn add_provider(
     let existing = store::list_providers(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
+    // Decision X1 (round-3a review P0, 2026-09-15): auto-default requires more
+    // than "no stored default" — every company that predates this rework has
+    // no stored default, so that test alone would silently move an existing
+    // company's traffic (entry zero, a manifest `[inference]` section, an env
+    // default, or the managed chain) onto whatever it "tried out" next, with
+    // no confirm. X1 means "the first provider this company has ever
+    // connected", so both must hold, read from the state as it stood before
+    // this add:
+    //   (a) there were zero provider rows;
+    //   (b) nothing else resolves for the company at all — `resolve_effective`
+    //       is the one seam that already answers exactly that question, for
+    //       the turn path and the boot path alike.
+    //
+    // Must run **before** this add's own row exists: asked afterwards, (b)
+    // would trivially see this very row resolving as sole positional primary
+    // and answer "nothing else" regardless of what was true before. Locked
+    // only for this read — released here, long before the write below and
+    // the network probe further down; re-validated under the lock again,
+    // narrowly, at the point that actually writes the default.
+    let first_provider_ever = if existing.is_empty() {
+        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
+        let (manifest, _harness_id) = super::manifest_inference(runtime).await?;
+        let platform = super::platform_default(&crate::app::config::ProcessEnv);
+        crate::company::inference::resolve_effective(
+            runtime.id(),
+            &manifest,
+            platform.as_ref(),
+            secrets,
+        )
+        .await
+        .map_err(ApiError)?
+        .is_none()
+    } else {
+        false
+    };
     // The catalogue check applies to a *typed* name only. Adding the catalogue's
     // own `groq` entry should take the slug `groq` — that is the same provider,
     // not a collision.
@@ -686,19 +721,12 @@ async fn add_provider(
     // Two reasons this runs, matched independently rather than one flag:
     // - `body.make_default` (2c): the operator explicitly ticked "Make this
     //   the default", which is honoured whatever the default already held.
-    // - Decision D-first-default (X1, 2026-09-15): the *first* provider a
-    //   company ever connects becomes its default automatically, with no
-    //   opt-out — `load_default()` is `Unset` only for a company that has
-    //   never set one, so this never overwrites an operator's existing
-    //   choice (X1's second half: "adding never changes it").
-    let auto_default = !body.make_default
-        && matches!(
-            store::load_default(runtime.id(), secrets)
-                .await
-                .map_err(ApiError)?,
-            store::DefaultChoice::Unset
-        );
-    let note = if body.make_default || auto_default {
+    // - Decision D-first-default / X1 (round-3a review P0, 2026-09-15): the
+    //   *first* provider a company has ever connected becomes its default
+    //   automatically, with no opt-out — gated on `first_provider_ever`
+    //   above, not merely on `load_default` reading `Unset` (X1's second
+    //   half, "adding never changes it", still holds either way).
+    let note = if body.make_default {
         let choice = store::ModelChoice {
             provider: provider.slug.clone(),
             model: model.clone(),
@@ -715,12 +743,49 @@ async fn add_provider(
                     error = %err,
                     "added a provider but could not make it the default",
                 );
-                if body.make_default {
-                    format!("{note} It could not be made the default. Use Set as default.")
-                } else {
+                format!("{note} It could not be made the default. Use Set as default.")
+            }
+        }
+    } else if first_provider_ever {
+        // Re-validated under the lock right before the write: the snapshot
+        // above was taken before this add's own row was written and before
+        // its probe ran, both of which took real time a concurrent request
+        // could have used to add a second row or set an explicit default —
+        // either of which means this is no longer "the first provider ever".
+        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
+        let still_unset = matches!(
+            store::load_default(runtime.id(), secrets)
+                .await
+                .map_err(ApiError)?,
+            store::DefaultChoice::Unset
+        );
+        let still_only_row = store::list_providers(runtime.id(), secrets)
+            .await
+            .map_err(ApiError)?
+            .len()
+            == 1;
+        if still_unset && still_only_row {
+            let choice = store::ModelChoice {
+                provider: provider.slug.clone(),
+                model: model.clone(),
+            };
+            match store::set_default_choice(runtime.id(), secrets, &choice).await {
+                Ok(()) => format!(
+                    "{note} New work now goes through {} · {model}.",
+                    provider.label
+                ),
+                Err(err) => {
+                    tracing::warn!(
+                        company = %runtime.id(),
+                        provider = %provider.slug,
+                        error = %err,
+                        "added a provider but could not make it the default",
+                    );
                     note
                 }
             }
+        } else {
+            note
         }
     } else {
         note
