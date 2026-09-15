@@ -331,6 +331,11 @@ async fn company_agent(
         session: tokio::sync::Mutex::new(
             crate::harness::built_in::agent_session::AgentSessionState::default(),
         ),
+        // This fixture's `manifest_agent` carries no `{provider, model}` pin
+        // (`provider: None, model: None` above), so `build_agent` (the
+        // model-discarding wrapper) built `agent` against `deps.provider`
+        // unpinned — the same instance this field must name.
+        chat_model: deps.provider.clone(),
     }
 }
 

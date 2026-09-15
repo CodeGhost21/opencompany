@@ -131,10 +131,18 @@ pub trait HarnessModel: ChatModel<()> {
     /// `agent_id`'s own `{provider, model}` pair (keys rework, issue #2306,
     /// slice 3a), or `None` when this implementation cannot pin (test
     /// doubles). `agent_name` is the display name (round-3a review P1-1) a
-    /// turn-time refusal names — never the id, per X7. Internal passes
-    /// (title, triage, planning, and the rest) resolve per X12: the company
-    /// default first, else the turn's own pair — see
-    /// `crate::harness::built_in::pass_model`.
+    /// turn-time refusal names — never the id, per X7.
+    ///
+    /// A **per-agent** auxiliary pass built inside a specific agent's own
+    /// [`build_agent_with_model`](crate::harness::build::build_agent_with_model)
+    /// call (today: payload extraction) resolves per X12 through
+    /// `crate::harness::built_in::pass_model`: the company default first,
+    /// else this pin (round-2 review comment 4012457329). A **company-wide**
+    /// pass with no single agent to pin against (title, triage, planning,
+    /// selector — each built once per company, before any agent is chosen)
+    /// is not wired to a pin at all; its own "the default is unreachable ⇒
+    /// skip" contract already covers a pinned-only company the same way a
+    /// missing default always has.
     fn pinned(
         &self,
         _agent_id: &str,
