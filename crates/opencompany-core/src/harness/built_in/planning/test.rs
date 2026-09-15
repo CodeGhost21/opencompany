@@ -2528,6 +2528,7 @@ async fn add_overlay_agent(runtime: &Arc<CompanyRuntime>, id: &str, role: &str, 
     record
         .overlay_agents
         .push(crate::ports::types::OverlayAgent {
+            provider: None,
             id: id.to_string(),
             name: id.to_string(),
             role: role.to_string(),

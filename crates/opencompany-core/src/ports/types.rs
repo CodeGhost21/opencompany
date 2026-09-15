@@ -7828,6 +7828,7 @@ mod test {
         let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "nova".into(),
             name: "Nova".into(),
             role: "Growth".into(),
@@ -7865,6 +7866,7 @@ mod test {
         // An explicit deny-all IS on the wire, as `tools: []` — it must NOT be
         // skipped, or it would read back as the standard grant (the inversion).
         let denied = OverlayAgent {
+            provider: None,
             id: "d".into(),
             name: "D".into(),
             role: "r".into(),
@@ -7885,6 +7887,7 @@ mod test {
 
         // A non-empty grant round-trips in order.
         let scoped = OverlayAgent {
+            provider: None,
             id: "s".into(),
             name: "S".into(),
             role: "r".into(),
@@ -7912,6 +7915,7 @@ mod test {
 
     fn add_overlay(record: &mut CompanyRecord, id: &str, name: &str) {
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: id.into(),
             name: name.into(),
             role: "Worker".into(),
@@ -8128,6 +8132,7 @@ mod test {
         let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "dana_designer".into(),
             name: "Dana Designer".into(),
             role: "Designer".into(),
@@ -8173,6 +8178,7 @@ mod test {
         let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
         let mut record = desk_record(manifest, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "impostor".into(),
             name: "ceo".into(),
             role: "Growth".into(),
@@ -8195,6 +8201,7 @@ mod test {
         let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
         for id in ["dana_designer", "dana_designer_2"] {
             record.overlay_agents.push(OverlayAgent {
+                provider: None,
                 id: id.into(),
                 name: "Dana Designer".into(),
                 role: "Designer".into(),
@@ -8719,6 +8726,7 @@ mod test {
     fn an_overlay_teammate_can_be_capped() {
         let mut record = desk_record(BUDGET_ROSTER, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "shane".to_string(),
             name: "Shane".to_string(),
             role: "Growth".to_string(),
@@ -8939,6 +8947,7 @@ mod test {
     fn effective_avatar_answers_for_an_overlay_teammate() {
         let mut record = desk_record(PERSONA_ROSTER, Vec::new());
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "alex".into(),
             name: "Alex".into(),
             role: "Writer".into(),

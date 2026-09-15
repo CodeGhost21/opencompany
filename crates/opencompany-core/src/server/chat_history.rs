@@ -3409,6 +3409,7 @@ mod test {
             record
                 .overlay_agents
                 .push(crate::ports::types::OverlayAgent {
+                    provider: None,
                     id: "workflow".to_string(),
                     name: "Workflow".to_string(),
                     role: "Worker".to_string(),

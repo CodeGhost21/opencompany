@@ -2148,6 +2148,7 @@ mod tests {
         record
             .overlay_agents
             .push(crate::ports::types::OverlayAgent {
+                provider: None,
                 id: "operator".to_string(),
                 name: "Legacy Operator".to_string(),
                 role: "Chief of Staff".to_string(),

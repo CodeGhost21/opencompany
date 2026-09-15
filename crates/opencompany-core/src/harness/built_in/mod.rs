@@ -6244,6 +6244,7 @@ mod tests {
         // the company already allows. `payment.send` is NOT in `allow`, so the
         // overlay cannot escalate to it — the security invariant.
         let scoped = OverlayAgent {
+            provider: None,
             id: "scoped".into(),
             name: "Scoped".into(),
             role: "Researcher".into(),
@@ -6267,6 +6268,7 @@ mod tests {
         // An absent (`None`) overlay grant is the standard company-wide grant.
         // Since #1804 this is `None`, NOT an empty list (which is a deny-all).
         let standard = OverlayAgent {
+            provider: None,
             id: "std".into(),
             name: "Std".into(),
             role: "Generalist".into(),
@@ -6291,6 +6293,7 @@ mod tests {
     #[test]
     fn overlay_agent_to_manifest_carries_the_display_name() {
         let overlay = OverlayAgent {
+            provider: None,
             id: "alex".into(),
             name: "Alex".into(),
             role: "Content Writer".into(),
@@ -6318,6 +6321,7 @@ mod tests {
     fn overlay_fingerprint_moves_on_a_tools_only_edit() {
         let one = |tools: Option<Vec<String>>| {
             vec![OverlayAgent {
+                provider: None,
                 id: "a".into(),
                 name: "A".into(),
                 role: "r".into(),
@@ -6358,6 +6362,7 @@ mod tests {
     fn overlay_fingerprint_moves_on_a_model_or_harness_change() {
         let one = |model: Option<&str>, harness: Option<&str>| {
             vec![OverlayAgent {
+                provider: None,
                 id: "a".into(),
                 name: "A".into(),
                 role: "r".into(),
@@ -7210,6 +7215,7 @@ description = "Builds the product."
         let fx = fixture();
         let mut rec = record();
         rec.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "growth".into(),
             name: "Jamie".into(),
             role: "Growth Lead".into(),
@@ -7279,6 +7285,7 @@ description = "Builds the product."
         let fx = fixture();
         let mut rec = record();
         rec.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "ceo".into(),
             name: "Impostor".into(),
             role: "Shadow CEO".into(),
@@ -7405,6 +7412,7 @@ description = "Builds the product."
         // The runtime-added teammate. The overlay fingerprint moves, so this
         // `ensure` takes the rebuild path rather than the cached fast path.
         rec.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "designer".into(),
             name: "Dana".into(),
             role: "Designer".into(),
@@ -10742,6 +10750,7 @@ description = "Builds the product."
         // `AddAgentTool` and the console `POST .../team` route both use.
         let mut updated = rec.clone();
         updated.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "growth".into(),
             name: "Jamie".into(),
             role: "Growth Lead".into(),
@@ -12772,6 +12781,7 @@ description = "Builds the product."
 
         let mut rec = record();
         rec.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "growth".into(),
             name: "Jamie".into(),
             role: "Growth Lead".into(),
@@ -13066,6 +13076,7 @@ description = "Builds the product."
             }];
         }
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -13192,6 +13203,7 @@ description = "Builds the product."
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),

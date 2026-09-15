@@ -6048,6 +6048,7 @@ mod tests {
 
     fn agent(id: &str, tier: Option<&str>) -> ManifestAgent {
         ManifestAgent {
+            provider: None,
             global: false,
             id: id.to_string(),
             role: "Role".to_string(),
@@ -7665,6 +7666,7 @@ members = ["legal_counsel"]
         let _claim = queue.claim();
         let mut record = peers_record(&company);
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "dana_designer".to_string(),
             name: "Dana Designer".to_string(),
             role: "Designer".to_string(),
@@ -7708,6 +7710,7 @@ members = ["legal_counsel"]
         let mut record = peers_record(&company);
         for id in ["dana_designer", "dana_designer_2"] {
             record.overlay_agents.push(OverlayAgent {
+                provider: None,
                 id: id.to_string(),
                 name: "Dana Designer".to_string(),
                 role: "Designer".to_string(),
@@ -8307,6 +8310,7 @@ name = "Morning"
         // persistence shape.
         let mut record = seeded_record(&CompanyId::new("acme"));
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "fact-fetcher".to_string(),
             name: "Fact Fetcher".to_string(),
             role: "Researcher".to_string(),
@@ -8356,6 +8360,7 @@ name = "Morning"
         let id = record.mint_agent_id("Dana Designer");
         assert_eq!(id, "dana_designer", "the id and the name must differ");
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: id.clone(),
             name: "Dana Designer".to_string(),
             role: "Designer".to_string(),

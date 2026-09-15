@@ -1270,6 +1270,7 @@ description = "Finds things."
             record
                 .overlay_agents
                 .push(crate::ports::types::OverlayAgent {
+                    provider: None,
                     id: id.to_string(),
                     name: name.to_string(),
                     role: "Growth".to_string(),

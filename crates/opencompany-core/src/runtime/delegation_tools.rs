@@ -1125,6 +1125,7 @@ members = ["counsel"]
         record
             .overlay_agents
             .push(crate::ports::types::OverlayAgent {
+                provider: None,
                 id: "main".to_string(),
                 name: "Mainard".to_string(),
                 role: "Analyst".to_string(),
@@ -1184,6 +1185,7 @@ members = ["counsel"]
         record
             .overlay_agents
             .push(crate::ports::types::OverlayAgent {
+                provider: None,
                 id: "main".to_string(),
                 name: "Mainard".to_string(),
                 role: "Analyst".to_string(),

@@ -2449,6 +2449,7 @@ agent = "claude"
             created_at_millis: None,
         };
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "scoped".to_string(),
             name: "Scoped".to_string(),
             role: "Researcher".to_string(),
@@ -2458,6 +2459,7 @@ agent = "claude"
             harness: None,
         });
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "standard".to_string(),
             name: "Standard".to_string(),
             role: "Generalist".to_string(),
@@ -2468,6 +2470,7 @@ agent = "claude"
             harness: None,
         });
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "denied".to_string(),
             name: "Denied".to_string(),
             role: "Contractor".to_string(),
@@ -5052,6 +5055,7 @@ agent = "claude"
             created_at_millis: None,
         };
         record.overlay_agents.push(crate::ports::OverlayAgent {
+            provider: None,
             id: "growth".to_string(),
             name: "Growth".to_string(),
             role: "Growth Marketer".to_string(),
