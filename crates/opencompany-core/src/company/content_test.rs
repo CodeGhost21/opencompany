@@ -1,4 +1,4 @@
-//! Content-validation walk over the shipped `companies/*` and `skills/*`.
+//! Content-validation walk over the shipped `companies/*`, their skills included.
 //!
 //! These tests parse every data file the WS1 readers cover against the real
 //! on-disk content, so any future content edit that breaks the frozen formats
@@ -10,7 +10,8 @@ use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
     grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, load_dir_ledgers, load_dir_skills, parse_workflow,
+    grants_workspace_write_explicit, load_catalog_skills, load_dir_ledgers, load_dir_skills,
+    parse_workflow,
     walk_workspace,
 };
 use crate::runtime::builder::{agent_scoped_grants, effective_grants};
@@ -105,11 +106,11 @@ fn every_company_skill_and_workspace_parses() {
 /// Templates that must carry an explicit `search` grant (issues #312, #878).
 ///
 /// The reason is the work the roster is described as doing, not anything on
-/// disk under the company: the search-dependent skills (`web-research`,
-/// `seo-audit`, `competitor-scan`) live in the *repo-level* `skills/` registry,
-/// which is global and unscoped, so an operator can install any of them into
-/// any company at runtime. No company ships a copy in its own `skills/` dir.
-/// Whether a template belongs here is therefore a judgement about its charter —
+/// disk under the company: the search-dependent skills (`web-research` in the
+/// baseline, `seo-audit` and `competitor-scan` in the bundles that author
+/// them) are all in the skill registry, which is global and unscoped, so an
+/// operator can install any of them into any company at runtime. Whether a
+/// template belongs here is therefore a judgement about its charter —
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
 const SEARCH_GRANTED_COMPANIES: [&str; 21] = [
@@ -600,12 +601,12 @@ fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
 }
 
 #[test]
-fn the_repo_skill_registry_parses() {
-    let skills = load_dir_skills(&repo_root().join("skills"))
-        .unwrap_or_else(|err| panic!("repo skills: {err}"));
+fn the_skill_registry_parses() {
+    let skills = load_catalog_skills(&repo_root().join("companies"))
+        .unwrap_or_else(|err| panic!("bundle skills: {err}"));
     assert!(
         skills.iter().any(|skill| skill.slug == "web-research"),
-        "expected the web-research skill in the shared registry"
+        "expected the baseline's web-research skill in the registry"
     );
     for skill in &skills {
         assert!(!skill.name.is_empty(), "skill `{}` has no name", skill.slug);
