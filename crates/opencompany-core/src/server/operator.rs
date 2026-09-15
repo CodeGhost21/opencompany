@@ -1644,23 +1644,29 @@ fn project_event_for_viewer(
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
-            o["text"] = json!(text);
             // The same pair `MessageView` ships on reload: the operator-facing
             // body, and the body as the model wrote it. They differ only on a
             // desk that deliberates, where `readable_moves` turns
             // `!support #topic ^3` into prose — see `MessageView::cue_text`.
             //
-            // Live carried only one of them, and a reader that needs the
-            // grammar had no choice but to scrape it back out of `text`. That
-            // is what `frontend/src/lib/hive/episode.ts` does today
-            // (`moveOf(m.text)`), and it is why cleaning `text` on this frame
-            // silently costs the deliberation panel: the room's own moves are
-            // how the fold knows an episode happened at all.
-            //
-            // Additive and inert on its own — nothing reads it yet, and it is
-            // byte-equal to `text` on every row `readable_moves` leaves alone,
-            // which is every reply on every desk that does not deliberate.
+            // Order matters here, and cost a PR to learn: the grammar has to
+            // reach `cueText` before `text` may lose it. The fold reads the
+            // room's moves to know an episode happened at all, so cleaning
+            // `text` while it was the only body on this frame took the
+            // deliberation panel with it.
             o["cueText"] = json!(text);
+            // What the operator reads, rewritten exactly as the reload already
+            // rewrites it. A room's grammar is addressed to the fold, and the
+            // journal keeps it — a room whose own transcript had been cleaned
+            // could not count itself — so this lives at the display edge and
+            // nowhere earlier. Every agent-facing path (`EpisodePrompt`,
+            // `elsewhere_for`, `referral_prompt`, `chat_seed`) still reads the
+            // stored line, which is how a seat can cite `^16` against a row it
+            // can identify.
+            //
+            // A reply carrying no move is returned unchanged, which is every
+            // reply on every desk that does not deliberate.
+            o["text"] = json!(crate::server::chat_history::readable_moves(text.clone()));
             // Keys rework #2306, round-2 review KR-L2-03: re-classifies the
             // same bare X9 sentence `spawn_chat_turn` wrote into `text` for
             // exactly this class of failure. Omitted (reads as absent/false)
@@ -14585,6 +14591,10 @@ mode = "full"
         assert_eq!(
             value["cueText"], "!support #kettle ^16 the swap is the customer's first preference",
             "the room's grammar is what the fold reads; it must survive on this frame: {value}"
+        );
+        assert_eq!(
+            value["text"], "the swap is the customer's first preference",
+            "and the operator reads prose, exactly as the reload already gives them: {value}"
         );
     }
 
