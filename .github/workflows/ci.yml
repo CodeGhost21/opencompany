@@ -268,6 +268,11 @@ jobs:
               # Same reasoning for the release-notes generator and its test,
               # which also run in `Console`.
               - 'scripts/release/**'
+              # And for the staging deploy. No filter listed this file at all,
+              # so a PR editing it selected no lane and ran nothing — while the
+              # gate inside it is the one thing a failed deploy on main is
+              # reported by. `test-tenant-landed-gate.sh` runs in `Console`.
+              - '.github/workflows/deploy-staging.yml'
             desktop:
               - '.github/workflows/ci.yml'
               - 'crates/opencompany-app/**'
