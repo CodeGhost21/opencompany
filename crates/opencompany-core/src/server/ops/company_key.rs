@@ -256,10 +256,21 @@ fn prober_for(runtime: &CompanyRuntime) -> Box<dyn company_key::InferenceProber>
 
 /// Test-only: force [`prober_for`]'s answer for one company, exactly as
 /// [`super::composio`]'s `probe_override` does for the Composio draft probe.
+///
+/// KR review comment 4012285739: a company-keyed *global* map here would never
+/// clear an entry between tests, so a later test reusing a company id would
+/// silently inherit an earlier test's forced answer. `thread_local!` sidesteps
+/// that rather than relying on every test to remember a teardown call: every
+/// test in this file uses the default (single-threaded) `#[tokio::test]`
+/// runtime, so a test's own body and every future it drives — including the
+/// router call this override answers — run on that one OS thread, and libtest
+/// gives each test function its own thread. A fresh, empty map per thread
+/// means a fresh map per test, with no entry able to outlive the test that
+/// wrote it.
 #[cfg(test)]
 mod prober_override {
+    use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
 
     use async_trait::async_trait;
 
@@ -267,24 +278,18 @@ mod prober_override {
 
     pub(super) type Outcome = std::result::Result<Vec<String>, ProbeClass>;
 
-    fn map() -> &'static Mutex<HashMap<String, Outcome>> {
-        static MAP: OnceLock<Mutex<HashMap<String, Outcome>>> = OnceLock::new();
-        MAP.get_or_init(|| Mutex::new(HashMap::new()))
+    thread_local! {
+        static MAP: RefCell<HashMap<String, Outcome>> = RefCell::new(HashMap::new());
     }
 
     pub(super) fn set(company: &str, outcome: Outcome) {
-        map()
-            .lock()
-            .expect("company-key prober override")
-            .insert(company.to_string(), outcome);
+        MAP.with(|map| {
+            map.borrow_mut().insert(company.to_string(), outcome);
+        });
     }
 
     pub(super) fn get(company: &str) -> Option<Outcome> {
-        map()
-            .lock()
-            .expect("company-key prober override")
-            .get(company)
-            .cloned()
+        MAP.with(|map| map.borrow().get(company).cloned())
     }
 
     pub(super) struct Forced(pub(super) Outcome);
