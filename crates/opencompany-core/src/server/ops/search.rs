@@ -1087,6 +1087,21 @@ async fn put_search(
     };
 
     if provider == MANAGED_PROVIDER {
+        // DEPRECATED(keys-rework #2306): the legacy single-slot `PUT
+        // …/search` route's own "select managed" branch, clearing
+        // `search/default` below; replaced by the indexed
+        // `search/providers`/`search/default` flow, which never clears the
+        // marker on a confirmed disable or removal
+        // (X14/D-never-clear-default, `docs/key-reworks/in-use-guards.md`
+        // §4). This branch still does, and — unlike every guarded route on
+        // this page — that is an intentional, documented carve-out rather
+        // than an oversight: the console has no caller for this route
+        // (`saveSearch` in `frontend/src/api/search.ts` is defined but never
+        // called; confirmed by grepping `frontend/src` for it), so nothing
+        // reachable today exercises this clear. See in-use-guards.md §4 for
+        // the full note. Removable when the route itself is removed, no
+        // earlier — routes are not removed silently.
+        //
         // Selecting managed has always meant "stop using my own account", and
         // the honest expression of that is still NOT to store `managed` as
         // though it were a connection.
@@ -1194,11 +1209,44 @@ async fn apply_to(
 /// The [`SecretStore`](crate::ports::SecretStore) port has no delete, so a
 /// cleared credential is stored as the empty string; every read site treats an
 /// empty value as unset, and resolution then falls back to managed search.
+///
+/// Guarded like every other destructive action on this page
+/// (`docs/key-reworks/in-use-guards.md` §1/§2, keys rework #2306): refused
+/// with `409 in_use` unless `?confirmInUse=true` when `search/default` is
+/// currently set to **any** provider — this is the bulk form of the same
+/// disable/remove/key-clear guard, so `usedBy` here is always exactly
+/// `{ "default": true }` rather than naming one specific slug the way a
+/// single-row guard's `usedBy` does. On a confirmed disconnect-all,
+/// `search/default` is **not** cleared (X14/D-never-clear-default, §4): the
+/// marker is left in place so `SearchStatus.default_notice` picks up that it
+/// now names a removed provider, exactly as a confirmed single-row removal
+/// already does.
 async fn delete_search(
     company: AdminScopedCompany,
+    Query(ConfirmInUseQuery { confirm_in_use }): Query<ConfirmInUseQuery>,
     State(_state): State<AppState>,
 ) -> Result<Json<SearchStatus>, ApiError> {
     let runtime = &company.runtime;
+    // Computed before the delete, per in-use-guards.md §3, so a confirmed
+    // disconnect-all echoes exactly what it would have refused with — named by
+    // whichever provider is currently marked, the same label a single-row
+    // guard would use for it. The bulk action just sweeps every row rather
+    // than one.
+    let marked = store::load_default_slug(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+    if let Some(slug) = marked.as_deref()
+        && !confirm_in_use
+    {
+        return Err(ApiError(OpenCompanyError::InUse {
+            message: copy::provider_in_use_message(&label_for(slug)),
+            used_by: UsedBy {
+                default: true,
+                ..Default::default()
+            },
+        }));
+    }
+
     // Every provider goes, not just the active one: this route has always meant
     // "disconnect my own search", and leaving a second account's key behind
     // under a page that now says "managed" would be storing a credential the
@@ -1213,7 +1261,9 @@ async fn delete_search(
         .map(|key| (key, String::new()))
         .collect();
     write_all(runtime, &cleared).await?;
-    store::clear_default_slug(runtime.id(), runtime.secrets().as_ref()).await?;
+    // X14 (`in-use-guards.md` §4): never clear the marker, even confirmed —
+    // `default_notice_for` is what turns a marker now naming nothing into the
+    // console's banner.
     Ok(Json(status_of(runtime).await?))
 }
 
@@ -1571,10 +1621,15 @@ mod tests {
         )
         .await;
 
+        // The legacy `PUT …/search` route marks whatever it connects as the
+        // default, so this disconnect-all is exactly the case item 1's guard
+        // exists for (`in-use-guards.md` §1/§2) — hence `confirmInUse: true`.
+        // This test is about the cleanup's scope (provider AND endpoint, not
+        // just the key), not the guard, so it confirms.
         let (status, cleared) = call(
             &state,
             "DELETE",
-            "/api/v1/companies/acme/search/key",
+            "/api/v1/companies/acme/search/key?confirmInUse=true",
             &admin,
             None,
         )
@@ -1738,6 +1793,51 @@ mod tests {
         assert_eq!(
             back["effectiveProvider"], "exa",
             "the round trip has to come back: {back}"
+        );
+    }
+
+    /// DEPRECATED(keys-rework #2306) carve-out, pinned: unlike every guarded
+    /// route on this page (X14/D-never-clear-default,
+    /// `docs/key-reworks/in-use-guards.md` §4), the legacy `PUT …/search`
+    /// route's "select managed" branch still clears `search/default` outright
+    /// rather than leaving the marker in place — so no `defaultNotice` banner
+    /// ever appears afterward, even though the provider it just switched off
+    /// is exactly the shape that banner exists for. §4 now documents this as
+    /// the accepted, intentional exception: the route has no console caller
+    /// (`saveSearch` in `frontend/src/api/search.ts` is defined but never
+    /// called), so nothing reachable is affected by the discrepancy — but it
+    /// must not drift further in silence, which is what this test is for.
+    #[tokio::test]
+    async fn legacy_select_managed_clears_the_default_marker_unlike_the_guarded_routes() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "exa", "apiKey": "exa-not-a-real-key"})),
+        )
+        .await;
+
+        let (status, after) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search",
+            &admin,
+            Some(json!({"provider": "managed"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        // If the marker had survived (the guarded routes' behavior under
+        // X14), this would read "The search default uses Exa, which is
+        // turned off. …". It does not: the legacy route's own clear removed
+        // the marker outright.
+        assert!(
+            after.get("defaultNotice").is_none(),
+            "pinning the legacy route's own clear of search/default: {after}"
         );
     }
 
@@ -2209,6 +2309,90 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{after}");
+    }
+
+    // ── disconnect-all (`DELETE …/search/key`): the same guard, applied in
+    //    bulk (item 1, keys rework #2306 review) ──
+
+    #[tokio::test]
+    async fn disconnect_all_is_refused_without_confirmation_when_a_default_is_set() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, body) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/key",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "in_use", "{body}");
+        assert_eq!(body["error"], "Exa is the search default.", "{body}");
+        assert_eq!(body["usedBy"]["default"], true, "{body}");
+        assert!(body["usedBy"]["agents"].is_null(), "{body}");
+        assert!(body["usedBy"]["surfaces"].is_null(), "{body}");
+
+        // Refused, so nothing was touched: both rows survive.
+        let (_, after) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+        let slugs: Vec<&str> = after["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .map(|row| row["slug"].as_str().unwrap())
+            .collect();
+        assert!(slugs.contains(&"exa"), "{after}");
+        assert!(slugs.contains(&"brave"), "{after}");
+    }
+
+    #[tokio::test]
+    async fn disconnect_all_confirmed_clears_every_provider_but_keeps_the_default_marker() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
+
+        let (status, after) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/key?confirmInUse=true",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert!(
+            after["providers"].as_array().expect("providers").is_empty(),
+            "every row is gone: {after}"
+        );
+        // X14: the marker is never cleared, even by a confirmed disconnect-all
+        // — `search/default` still names Exa, and the status banner says so.
+        assert_eq!(after["effectiveProvider"], "managed", "{after}");
+        assert_eq!(
+            after["defaultNotice"],
+            "The search default uses Exa, which is removed. Choose a new search \
+             default in Connections \u{2192} API Keys \u{2192} Search.",
+            "{after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_all_needs_no_confirmation_when_nothing_is_marked() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        // Nothing connected, nothing marked — there is nothing a disconnect-all
+        // could strand.
+        let (status, after) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/search/key",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert!(after.get("defaultNotice").is_none(), "{after}");
     }
 
     #[tokio::test]
