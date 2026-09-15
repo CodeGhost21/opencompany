@@ -152,7 +152,9 @@ describe("the chat cognition banner", () => {
     const link = notice!.querySelector("a");
     expect(link).not.toBeNull();
     expect(link!.getAttribute("href")).toBe("#/connections/inference");
-    expect(link!.textContent).toContain("Connections → Inference");
+    // KR-ACCT-02: the two-level path predates the "API Keys" group; every
+    // other rework surface points here by its full name.
+    expect(link!.textContent).toContain("Connections → API Keys → LLM");
   });
 
   it("names the host, not a setting, when no harness is available", async () => {

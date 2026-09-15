@@ -83,7 +83,12 @@ export function DefaultModelDialog({
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) {
+        // Live lane 1, KR-L1-05: ignored while `busy`, the same guard the
+        // other dialogs in this rework use (round-2 review, P0-2) — a save
+        // is in flight, and closing out from under it is exactly the
+        // moment a stuck-looking control gets reported against a dialog
+        // that already moved on.
+        if (!next && !busy) {
           setConfirming(false);
           onCancel();
         }
@@ -96,7 +101,8 @@ export function DefaultModelDialog({
           </DialogTitle>
           {confirming && (
             <DialogDescription>
-              Every agent with no pinned pair of its own moves to this the moment you confirm.
+              Every agent with no pinned pair of its own moves to this default the moment you
+              confirm.
             </DialogDescription>
           )}
         </DialogHeader>

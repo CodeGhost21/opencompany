@@ -154,9 +154,6 @@ async fn graphiql() -> impl IntoResponse {
     Html(async_graphql::http::graphiql_source("/graphql", None))
 }
 
-/// Milliseconds in one UTC day.
-const MILLIS_PER_DAY: u64 = 86_400_000;
-
 /// The current wall-clock time in epoch millis (UTC).
 pub(crate) fn now_millis() -> u64 {
     std::time::SystemTime::now()
@@ -165,30 +162,12 @@ pub(crate) fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// The `(year, month, day)` of an epoch day, via Hinnant's public-domain
-/// `civil_from_days`. Kept local so the read plane needs no date dependency.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m, d)
-}
-
-/// Formats epoch-millis as an RFC-3339 / ISO-8601 UTC timestamp (second
-/// precision), the string form the console's `updatedAt`/`at` fields use.
-pub(crate) fn iso8601(at_millis: u64) -> String {
-    let (y, m, d) = civil_from_days((at_millis / MILLIS_PER_DAY) as i64);
-    let secs = (at_millis % MILLIS_PER_DAY) / 1000;
-    let (h, min, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z")
-}
+// `iso8601` (RFC-3339 formatting for the read plane's `updatedAt`/`at`
+// fields) moved to `crate::ports::iso8601` (keys rework #2306, P3-7 review):
+// a pure, dependency-free formatter belongs at the `ports` layer every layer
+// can already reach, not under `server` — the account-key fan-out
+// (`company::company_key::fan_out`) needed the same formatter, and
+// `src/company/` must never import from `server`.
 
 #[cfg(test)]
 mod test;

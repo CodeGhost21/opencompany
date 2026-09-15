@@ -451,7 +451,14 @@ async fn spawn_host(model: String) -> Host {
                 credential: Credential::from_value("scripted"),
                 extra_headers: Vec::new(),
             },
-            None,
+            // A real model id, never a tier name (keys rework, issue #2306,
+            // slice 2d): the manifest declares no `[inference]` section, so
+            // with no override every agent's tier-derived request (`chat-v1`)
+            // has nowhere configured to resolve to and every chat turn is
+            // refused with "No model is chosen for this company." The
+            // scripted endpoint above never inspects the outbound `model`
+            // field, so any real-looking id satisfies `model_on_the_wire`.
+            Some("stub-model".to_string()),
         )
         .build()
         .await

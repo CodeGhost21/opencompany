@@ -134,7 +134,7 @@ test.afterAll(async ({ playwright }, testInfo) => {
       await request.delete(`/api/v1/company/composio/connections/${id}/default`);
     }
     const cleared = await request.put("/api/v1/company/composio/token", {
-      data: { token: "" },
+      data: { token: "", confirmInUse: true },
     });
     // Asserted, not fired and forgotten. A silently-refused cleanup is what
     // broke the run above, and it broke it somewhere else — two files later, in

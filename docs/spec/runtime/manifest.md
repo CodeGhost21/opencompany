@@ -39,6 +39,13 @@ prompt = "Write for the reader."   # appended to the generated persona
 prompt_files = ["prompts/tone.md"] # checked-in briefing docs, under `agents/`
 context = ["brief.md"]             # live workspace docs routed into the prompt
 classes = ["evidence"]             # routing exclusions: evidence | judge | directive
+harness = "embedded"               # which [[harness]] below runs this agent
+provider = "openrouter"            # on a built_in harness: this agent's own
+model = "deepseek/deepseek-chat"   # {provider, model} pair — see agents.md.
+                                   # Together or not at all; omit both to
+                                   # follow the company default. Refused on
+                                   # an acp harness, where `model` instead
+                                   # forwards a hint to that CLI's own session.
 # A roster may instead live one file per teammate under `agents/<id>.toml`, with
 # these same keys and the filename as the id. The two forms are exclusive —
 # declaring both is a validation error. See runtime/agents.md.

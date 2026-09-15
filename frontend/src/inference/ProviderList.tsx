@@ -605,7 +605,7 @@ function ProviderRow({
                 switch (action.id) {
                   case "edit":
                     return onEdit(provider);
-                  case "default":
+                  case "setDefault":
                     return onMakeDefault(provider);
                   case "replaceKey":
                     return onReplaceKey(provider);

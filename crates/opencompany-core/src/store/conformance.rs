@@ -184,6 +184,11 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
     use crate::ports::types::OverlayAgent;
     vec![
         OverlayAgent {
+            // The provider half of the pair (keys rework slice 3a), set
+            // alongside `model` on this row so a backend that drops either
+            // fails the round-trip — the same reasoning `model`/`harness`
+            // below already give for being set together here.
+            provider: Some("acme".to_string()),
             id: "aria_stone".to_string(),
             name: "Aria Stone".to_string(),
             role: "Head of Support".to_string(),
@@ -196,6 +201,7 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             harness: Some("claude".to_string()),
         },
         OverlayAgent {
+            provider: None,
             id: "pax_ivory".to_string(),
             name: "Pax Ivory".to_string(),
             role: "Analyst".to_string(),
@@ -210,6 +216,7 @@ fn sample_overlay_agents() -> Vec<crate::ports::types::OverlayAgent> {
             harness: None,
         },
         OverlayAgent {
+            provider: None,
             id: "nix_slate".to_string(),
             name: "Nix Slate".to_string(),
             role: "Contractor".to_string(),
@@ -277,6 +284,9 @@ fn sample_overlay_desk_members() -> Vec<crate::ports::types::OverlayDeskMember> 
 /// console that silently re-inherits the blueprint after a restart.
 fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
     vec![crate::ports::types::AgentOverride {
+        // Set alongside `model` below (keys rework slice 3a), for the same
+        // round-trip reason that field's own comment gives.
+        provider: Some("acme".to_string()),
         agent_id: "ceo".to_string(),
         name: Some("Robin".to_string()),
         role: Some("Chief Vibes".to_string()),

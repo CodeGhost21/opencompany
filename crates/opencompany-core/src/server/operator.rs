@@ -1645,6 +1645,22 @@ fn project_event_for_viewer(
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
             o["text"] = json!(text);
+            // Keys rework #2306, round-2 review KR-L2-03: re-classifies the
+            // same bare X9 sentence `spawn_chat_turn` wrote into `text` for
+            // exactly this class of failure. Omitted (reads as absent/false)
+            // for every ordinary reply and every other failure class, so the
+            // legacy frame shape is unchanged for them.
+            if let Some(resolution) = crate::company::inference::copy::classify(text) {
+                o["userFacing"] = json!(true);
+                o["code"] = json!(resolution.code);
+                o["message"] = json!(resolution.message);
+                if let Some(id) = &resolution.pair_agent_id {
+                    o["pairAgentId"] = json!(id);
+                }
+                if let Some(slug) = &resolution.provider_slug {
+                    o["providerSlug"] = json!(slug);
+                }
+            }
             // Issue #364: which thread inside the channel this reply belongs
             // to, so a console watching live folds it under the same row a
             // reload would. Omitted for a reply in the channel itself, so the
@@ -3802,6 +3818,122 @@ mod turn_failure_notice_tests {
     }
 }
 
+/// Keys rework #2306, round-2 review KR-L2-03: the structured turn-failure
+/// fields (`userFacing`, `code`, `message`, `pairAgentId`, `providerSlug`),
+/// end to end through `MessageView`/`ChatHistoryMessageDto` — the
+/// `in-use-guards.md` §5 wire contract Agent C's console codes directly
+/// against.
+#[cfg(test)]
+mod resolution_failure_wire_tests {
+    use super::{ChatHistoryMessageDto, turn_failure_notice};
+    use crate::company::inference::copy;
+    use crate::server::chat_history::MessageView;
+
+    /// A classified `MessageView` (as `MessageView::project` would build one
+    /// from a stored `AgentReply` whose `text` is the bare X9 sentence) turns
+    /// into exactly the five documented keys, camelCased, with nothing else
+    /// added or renamed.
+    #[test]
+    fn a_classified_failure_serialises_the_documented_wire_keys() {
+        let sentence = copy::with_agent_marker(
+            copy::pair_broken("Researcher", "acme", copy::ProviderGone::Removed),
+            "researcher",
+        );
+        let resolution = copy::classify(&sentence).expect("this sentence classifies");
+
+        let mut view = MessageView::for_test("1", "system", &resolution.message, Vec::new());
+        view.resolution_user_facing = true;
+        view.resolution_code = Some(resolution.code.to_string());
+        view.resolution_pair_agent_id = resolution.pair_agent_id.clone();
+        view.resolution_provider_slug = resolution.provider_slug.clone();
+
+        let dto = ChatHistoryMessageDto::from(view);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["userFacing"], true);
+        assert_eq!(json["code"], "pair_provider_removed");
+        assert_eq!(json["message"], resolution.message);
+        assert_eq!(json["pairAgentId"], "researcher");
+        assert_eq!(json["providerSlug"], "acme");
+        // The full sentence, verbatim — never re-derived or paraphrased, and
+        // with no trace of the hidden agent-id marker.
+        assert!(!json["message"].as_str().unwrap().contains('\u{0}'));
+    }
+
+    /// An ordinary reply — the overwhelmingly common case — carries none of
+    /// the five keys at all, not even as `null`, so an old console reading
+    /// this DTO sees exactly the shape it always has.
+    #[test]
+    fn an_ordinary_reply_carries_none_of_the_five_keys() {
+        let view = MessageView::for_test("1", "researcher", "Here's the summary.", Vec::new());
+        let dto = ChatHistoryMessageDto::from(view);
+        let json = serde_json::to_value(&dto).unwrap();
+
+        for key in [
+            "userFacing",
+            "code",
+            "message",
+            "pairAgentId",
+            "providerSlug",
+        ] {
+            assert!(json.get(key).is_none(), "{key} must be absent: {json}");
+        }
+    }
+
+    /// A generic (non-resolution) failure — a rate limit, an empty response,
+    /// a tool timeout — is not reclassified as a resolution failure just
+    /// because it also failed a turn: `userFacing` stays absent.
+    #[test]
+    fn a_generic_failure_is_not_marked_user_facing() {
+        let text = turn_failure_notice("the tool call exceeded its wall-clock budget");
+        assert!(
+            copy::classify(&text).is_none(),
+            "a generic failure's wrapped text must not classify"
+        );
+
+        let view = MessageView::for_test("1", "system", &text, Vec::new());
+        let dto = ChatHistoryMessageDto::from(view);
+        let json = serde_json::to_value(&dto).unwrap();
+        assert!(json.get("userFacing").is_none(), "{json}");
+    }
+
+    /// One test per code (KR-L2-03's explicit ask): every producible code
+    /// round-trips through the same DTO with the exact wire spelling the
+    /// console's `TURN_FAILURE_CODES` list names.
+    #[test]
+    fn every_producible_code_reaches_the_wire_unmodified() {
+        let cases = [
+            (copy::nothing_resolved_for_company(), "no_model_chosen"),
+            (
+                copy::pair_broken("Researcher", "Acme", copy::ProviderGone::TurnedOff),
+                "pair_provider_off",
+            ),
+            (
+                copy::default_broken("Acme", copy::ProviderGone::Removed),
+                "default_provider_removed",
+            ),
+            (
+                copy::default_broken("Acme", copy::ProviderGone::TurnedOff),
+                "default_provider_off",
+            ),
+            (
+                copy::provider_has_no_key("Researcher", "Acme"),
+                "provider_no_key",
+            ),
+        ];
+        for (sentence, code) in cases {
+            let resolution = copy::classify(&sentence).unwrap_or_else(|| panic!("{sentence}"));
+            let mut view = MessageView::for_test("1", "system", &resolution.message, Vec::new());
+            view.resolution_user_facing = true;
+            view.resolution_code = Some(resolution.code.to_string());
+            let dto = ChatHistoryMessageDto::from(view);
+            let json = serde_json::to_value(&dto).unwrap();
+            assert_eq!(json["code"], code, "{sentence}");
+            assert_eq!(json["userFacing"], true, "{sentence}");
+        }
+    }
+}
+
 /// What an operator is told when a turn could not be finished.
 ///
 /// The raw error is a diagnostic and never belongs in company chat. On the
@@ -3953,6 +4085,23 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                 // reply, and is distinguishable on disk from a real teammate
                 // bubble. `err.0` is the inner error (it carries `Display`);
                 // the `ApiError` newtype does not.
+                let detail = err.0.to_string();
+                // Keys rework #2306, round-2 review KR-L2-03: when the abort
+                // is a classified resolution failure (a broken pin, a broken
+                // default, no key, no model chosen at all), the bare X9
+                // sentence is written here UNWRAPPED — no "Nothing was left
+                // half-done, send it again" — because that closing line is
+                // actively wrong advice for this class: resending fixes
+                // nothing until the named setting is fixed. Every other
+                // failure keeps `turn_failure_notice`'s wrapped generic
+                // wording exactly as before. `MessageView::project` and the
+                // SSE builder re-classify this same text at read time — no
+                // new field on this event, so none of `AgentReply`'s ~30
+                // other construction sites need to change.
+                let text = match crate::company::inference::copy::classify(&detail) {
+                    Some(resolution) => resolution.message,
+                    None => turn_failure_notice(&detail),
+                };
                 let notice = CompanyEvent::AgentReply {
                     audience: Vec::new(),
                     // Issue #1890 D: threaded on exactly the terms a successful
@@ -3972,7 +4121,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
                     parent: reply_thread(parent, accepted.message_seq),
                     chat_id: desk.clone(),
                     agent_id: crate::ports::SYSTEM_AUTHOR.to_string(),
-                    text: turn_failure_notice(&err.0.to_string()),
+                    text,
                     steps: Vec::new(),
                     task_id: None,
                     outputs: Vec::new(),
@@ -4628,6 +4777,33 @@ struct ChatHistoryMessageDto {
     /// legacy shape is unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<ChatAttachmentDto>,
+    /// Whether this row is a classified resolution failure (keys rework
+    /// #2306, round-2 review KR-L2-03) — a pinned provider gone or switched
+    /// off, a broken company default, a provider with no key, or no model
+    /// chosen at all. Absent (reads as falsy) for every ordinary reply and
+    /// every other failure class, which keep only `text`'s generic wording,
+    /// exactly as before this field existed. See
+    /// `docs/key-reworks/in-use-guards.md` §5 for the full field contract.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    user_facing: bool,
+    /// One of the codes `docs/key-reworks/in-use-guards.md` §5 names, when
+    /// `userFacing` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    /// The exact X9 sentence, present only when `userFacing` is `true` —
+    /// identical to `text` for a classified failure, carried as its own
+    /// field so a reader need not also parse `text`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    /// The agent this failure's pair names, when the classifier could
+    /// recover one — see `company::inference::copy::classify`'s own doc for
+    /// the one call site (the pin pre-check) that has an id to attach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_agent_id: Option<String>,
+    /// The provider slug the failure names, when the classifier could
+    /// recover one — only `pair_provider_removed` today.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_slug: Option<String>,
 }
 
 /// One file attached to a history message (issue #1682). Mirrors `Attachment`
@@ -4718,6 +4894,14 @@ impl From<ReactionView> for ChatReactionDto {
 
 impl From<MessageView> for ChatHistoryMessageDto {
     fn from(view: MessageView) -> Self {
+        // Keys rework #2306, round-2 review KR-L2-03: `message` reuses
+        // `view.text` rather than a separate stored field — they are
+        // identical for a classified failure by construction
+        // (`spawn_chat_turn` writes the bare X9 sentence into `text` for
+        // exactly this case, and `MessageView::project` classifies that same
+        // text back). Cloned before `view.text` moves into the `text` field
+        // below.
+        let message = view.resolution_user_facing.then(|| view.text.clone());
         Self {
             aside_conversation: view.aside_conversation.map(|aside| AsideConversationDto {
                 members: aside.members,
@@ -4788,6 +4972,11 @@ impl From<MessageView> for ChatHistoryMessageDto {
                 .into_iter()
                 .map(ChatAttachmentDto::from)
                 .collect(),
+            user_facing: view.resolution_user_facing,
+            message,
+            code: view.resolution_code,
+            pair_agent_id: view.resolution_pair_agent_id,
+            provider_slug: view.resolution_provider_slug,
         }
     }
 }

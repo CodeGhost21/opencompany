@@ -8002,6 +8002,7 @@ members = ["engineer"]
         let (brain, tasks) = brain_with_tasks(dir.path());
         brain.mutate_record(|r| {
             r.overlay_agents.push(OverlayAgent {
+                provider: None,
                 id: "nova".into(),
                 name: "Nova".into(),
                 role: "Growth".into(),
@@ -8740,6 +8741,7 @@ members = ["ceo", "engineer"]
         let (brain, _tasks) = brain_with_desk(dir.path());
         brain.mutate_record(|r| {
             r.overlay_agents.push(OverlayAgent {
+                provider: None,
                 id: "main".into(),
                 name: "Mainard".into(),
                 role: "Analyst".into(),
@@ -9041,6 +9043,7 @@ members = ["eng1", "eng2"]
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
             overlay_agents: vec![crate::ports::types::OverlayAgent {
+                provider: None,
                 id: "cto".to_string(),
                 name: "Cto".to_string(),
                 role: "CTO".to_string(),

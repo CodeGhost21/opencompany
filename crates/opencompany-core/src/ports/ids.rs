@@ -21,6 +21,50 @@ pub fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Milliseconds in one UTC day.
+///
+/// `pub(crate)`: `server::graphql::usage` also buckets by UTC day and reused
+/// this constant from its old home in `server::graphql` — kept reachable
+/// under its new one rather than growing a second copy (P3-7, keys rework
+/// #2306 review).
+pub(crate) const MILLIS_PER_DAY: u64 = 86_400_000;
+
+/// The `(year, month, day)` of an epoch day, via Hinnant's public-domain
+/// `civil_from_days`. Kept local so [`iso8601`] needs no date dependency.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m, d)
+}
+
+/// Formats epoch-millis as an RFC-3339 / ISO-8601 UTC timestamp (second
+/// precision) — the crate's one formatter for this shape: the console's
+/// GraphQL read plane (`updatedAt`/`at`), analytics event timestamps, the
+/// account-key fan-out's health record, and every other dependency-free
+/// `now_rfc3339`-style helper in the tree all call this rather than growing a
+/// second copy of the civil-date arithmetic.
+///
+/// Moved here from `server::graphql` (keys rework #2306, P3-7 review): a
+/// pure, dependency-free formatter belongs at the `ports` layer every other
+/// layer can already reach, not under `server` — `src/company/` must never
+/// import from `server`, and the account-key fan-out
+/// (`company::company_key::fan_out`) needs exactly this formatter for its
+/// own health record.
+pub fn iso8601(at_millis: u64) -> String {
+    let (y, m, d) = civil_from_days((at_millis / MILLIS_PER_DAY) as i64);
+    let secs = (at_millis % MILLIS_PER_DAY) / 1000;
+    let (h, min, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z")
+}
+
 /// Mints a fresh process-unique id of the form `{millis:012x}-{counter:012x}`.
 ///
 /// The counter is strictly increasing, so two calls always differ and — given
@@ -157,6 +201,17 @@ pub fn agent_slug(display_name: &str) -> String {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn iso8601_formats_a_known_instant() {
+        // 2024-01-02T03:04:05Z, independently computed.
+        assert_eq!(iso8601(1_704_164_645_000), "2024-01-02T03:04:05Z");
+    }
+
+    #[test]
+    fn iso8601_formats_the_epoch() {
+        assert_eq!(iso8601(0), "1970-01-01T00:00:00Z");
+    }
 
     #[test]
     fn generated_ids_are_distinct_and_monotonic() {

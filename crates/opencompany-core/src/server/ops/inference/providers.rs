@@ -57,7 +57,7 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::inference::{TierVocabulary, catalogue, probe, resolve, store};
+use crate::company::inference::{catalogue, paged_catalog, probe, resolve, store};
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::server::error::ApiError;
@@ -154,9 +154,9 @@ struct AddProvider {
     /// optional. **The field that was missing, and the reason the reported
     /// 404 existed**: `add_provider` used to write `models: BTreeMap::new()`
     /// with no way to supply one at all, so a provider whose catalog
-    /// published neither the tier names nor the shipped ids was connected
-    /// with four tiers unmapped — and `model_for_tier`'s `Unknown` arm then
-    /// put the bare tier on the wire.
+    /// published no vocabulary this host recognised was connected with four
+    /// tiers unmapped — and the bare tier name went out on the wire (no
+    /// longer possible at all since slice 2d's `model_on_the_wire`).
     #[serde(default)]
     model: Option<String>,
     /// Also make this row the company default `{provider, model}` (keys
@@ -267,43 +267,26 @@ struct ProbeResultDto {
     model_known: Option<bool>,
     /// The ids the endpoint published, so the add dialog can offer one.
     ///
-    /// **This is what closes the loop `TierVocabulary::Unknown` was built to
-    /// open.** That variant exists to refuse to guess, and `tier_defaults()`
-    /// returns an empty map for it *so the console will ask* — but nothing on
-    /// the add path ever consulted it, so the empty map shipped straight to a
-    /// turn. The catalog is already in hand at the moment of the probe; sending
-    /// it means the operator is asked with the answers in front of them rather
-    /// than told no after a round trip.
+    /// The catalog is already in hand at the moment of the probe; sending it
+    /// means the operator is asked with the answers in front of them —
+    /// choosing from the real list — rather than typing one blind or being
+    /// told no after a round trip. Every kind asks for a model now (2c), so
+    /// this is always worth sending when the endpoint published anything.
     ///
-    /// Capped, because a catalog can run to hundreds of ids and this rides on
-    /// every probe response. The console offers free text alongside the list.
+    /// Sorted and deduplicated, never truncated below what the paged read
+    /// returned (round-3a review P2-5: a 500-id cap used to filter a large
+    /// catalog by name, which is exactly what this feature promises never to
+    /// do). The console offers free text alongside the list regardless.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     models: Vec<String>,
-    /// Whether this endpoint cannot serve a workload until a model is named.
-    ///
-    /// Decided from the published catalog, never from the kind — see
-    /// [`needs_an_explicit_model`].
-    needs_model: bool,
 }
 
-/// How many published model ids ride back on a probe.
-///
-/// A mirror of a large catalog runs to hundreds of entries, and this is a
-/// response body the console holds in memory for one dialog. Enough to choose
-/// from, and the field the operator types into accepts anything anyway.
-const PROBE_CATALOGUE_LIMIT: usize = 500;
-
-/// The published ids to offer, sorted and capped.
-///
-/// Sorted because a catalog's own order is whatever the endpoint felt like, and
-/// a select an operator has to scan is worth putting in one.
-fn catalogue_offer(models: &[String]) -> Vec<String> {
-    let mut ids: Vec<String> = models.to_vec();
-    ids.sort_unstable();
-    ids.dedup();
-    ids.truncate(PROBE_CATALOGUE_LIMIT);
-    ids
-}
+// `catalogue_offer` (the published ids to offer, sorted and deduplicated —
+// never capped, round-3a review P2-5) moved to `paged_catalog::catalogue_offer`
+// (keys rework #2306, P3-7 review): the account-key fan-out
+// (`company::company_key::fan_out`) needs the same "sort, dedupe" this probe
+// route decided, and `company` must never import from `server` — so the one
+// place that decides it lives at a layer both already reach.
 
 /// What `POST …/providers/{slug}/test` may be asked.
 #[derive(Debug, Default, Deserialize)]
@@ -341,33 +324,133 @@ struct ProviderMutation {
 /// (keys rework, issue #2306; `docs/key-reworks/in-use-guards.md` §1/§6):
 /// `default: true` when the company default names this slug — bare
 /// (`DefaultChoice::ProviderOnly`) or full — and `agents` from every agent
-/// pair naming it. `agents` is unconditionally empty until slice 3a adds
-/// `Agent.provider`: with no such field anywhere in a record, no agent can
-/// name a provider yet, so empty is the correct answer, not a stub.
+/// whose own `{provider, model}` pair (slice 3a) names it, counted on the
+/// provider slug alone per §6 ("no exception for a blank model") — an agent
+/// naming this provider with no model yet still depends on it, and the
+/// missing model is the manifest's own problem to refuse, not a reason for
+/// this guard to look away.
+///
 /// `surfaces` is never populated here — unlike the account key or a Composio
 /// credential, a provider row already names exactly what depends on it via
 /// `default`/`agents`, so tagging it with the redundant `"llm"` surface
 /// would say the same fact twice in two shapes.
 ///
-/// `pub(super)`: also called from `provider_list` in the parent module
-/// (`ops/inference.rs`) to fill `ProviderDto.usedBy` on every status read,
-/// not only inside a guarded mutation.
+/// A record load failure degrades to "no agents named" rather than refusing
+/// the whole guard: the `default` half still answers, and a company whose
+/// record cannot be read has bigger problems than an incomplete advisory.
+///
+/// The pure half of the guard: from an already-resolved default and an
+/// already-loaded record, whether `slug` is used, and by what.
+///
+/// Split out (round-3a review P3-6) so a status read computing this for every
+/// row in the list can load the default and the record **once** for the
+/// whole request — see `ops::inference::provider_list` — instead of each row
+/// repeating both reads through [`provider_used_by`].
+///
+/// `default` is read from the [`store::DefaultChoice`] itself, not
+/// re-fetched, precisely so a caller that could not read the real one can
+/// pass [`store::DefaultChoice::Unset`] and get an honest "not the default"
+/// rather than this function silently going back to the store a second time
+/// and hitting the same failure.
+///
+/// `pub(super)`: `ops::inference::provider_list` calls this directly, once
+/// per row, over one default and one record loaded for the whole request.
+pub(super) fn used_by_from(
+    default: &store::DefaultChoice,
+    record: Option<&crate::ports::types::CompanyRecord>,
+    slug: &str,
+) -> Option<crate::error::UsedBy> {
+    let is_default = default.provider().is_some_and(|p| p == slug);
+    let agents = record
+        .map(|r| agents_pinned_to(r, slug))
+        .unwrap_or_default();
+    let used_by = crate::error::UsedBy {
+        default: is_default,
+        agents,
+        surfaces: Vec::new(),
+    };
+    (!used_by.is_empty()).then_some(used_by)
+}
+
+/// `pub(super)`: called from the three guarded mutations below (delete,
+/// disable, key clear) and from the agent-pair PATCH
+/// (`server::ops::team_agent`) — never from a read path, which computes
+/// [`used_by_from`] directly over data it already loaded once for the whole
+/// request (round-3a review P3-6).
+///
+/// **A guard fails closed, a read degrades — this is the guard half**
+/// (round-3a review P2-1). The company record is read fresh here because a
+/// mutation's whole job is to decide whether it is safe to proceed *right
+/// now*; a load error therefore propagates as `Err` rather than reading as
+/// "no agents named", which used to let a transient store error turn an
+/// unconfirmed delete, disable or key clear on a pinned-only provider into a
+/// silent 200. `Ok(None)` — the record genuinely does not exist — still reads
+/// as no agents: that is not a failure to recover from, it is the company
+/// having nothing to strand.
+///
+/// The stored default, by contrast, is read leniently
+/// ([`store::load_default_lenient`], round-3a review P2-4): a corrupt or
+/// unreadable `inference/default` must never block an otherwise-unrelated
+/// delete, disable or key clear — the guard still answers about `agents`, and
+/// `default` reads as `false` rather than the whole request failing.
 pub(super) async fn provider_used_by(
     runtime: &CompanyRuntime,
     slug: &str,
 ) -> Result<Option<crate::error::UsedBy>, ApiError> {
     let secrets = runtime.secrets().as_ref();
-    let default = store::load_default(runtime.id(), secrets)
-        .await
-        .map_err(ApiError)?
-        .provider()
-        .is_some_and(|p| p == slug);
-    let used_by = crate::error::UsedBy {
-        default,
-        agents: Vec::new(),
-        surfaces: Vec::new(),
-    };
-    Ok((!used_by.is_empty()).then_some(used_by))
+    let (default, unreadable) = store::load_default_lenient(runtime.id(), secrets).await;
+    if unreadable {
+        tracing::warn!(
+            company = %runtime.id(),
+            slug = %slug,
+            "computing usedBy for a guarded mutation with an unreadable default; treating it \
+             as not the default rather than refusing the mutation",
+        );
+    }
+    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
+    Ok(used_by_from(&default, record.as_ref(), slug))
+}
+
+/// Every effective roster agent whose own pair names `slug` (keys rework,
+/// issue #2306, slice 3a) — manifest agents merged with their overrides
+/// (retired ones already excluded by `effective_agents`), plus every overlay
+/// teammate. An `acp`-bound agent never contributes: validation refuses a
+/// pair there, but an unvalidated manifest must not be trusted to have run
+/// it, the same reasoning `runtime::builder::agent_pairs` gives for its own
+/// identical skip.
+fn agents_pinned_to(
+    record: &crate::ports::types::CompanyRecord,
+    slug: &str,
+) -> Vec<crate::error::UsedByAgent> {
+    use crate::runtime::builder::agent_harness_kind;
+
+    let mut agents = Vec::new();
+    for agent in record.effective_agents() {
+        if agent_harness_kind(&record.manifest, agent.harness.as_deref()).as_deref() == Some("acp")
+        {
+            continue;
+        }
+        if agent.provider.as_deref() == Some(slug) {
+            agents.push(crate::error::UsedByAgent {
+                id: agent.id.clone(),
+                name: agent.name.clone().unwrap_or(agent.role.clone()),
+            });
+        }
+    }
+    for overlay in &record.overlay_agents {
+        if agent_harness_kind(&record.manifest, overlay.harness.as_deref()).as_deref()
+            == Some("acp")
+        {
+            continue;
+        }
+        if overlay.provider.as_deref() == Some(slug) {
+            agents.push(crate::error::UsedByAgent {
+                id: overlay.id.clone(),
+                name: overlay.name.clone(),
+            });
+        }
+    }
+    agents
 }
 
 /// §2's sentence, naming every dependent in one line:
@@ -421,9 +504,53 @@ async fn add_provider(
             .map(str::trim)
             .is_some_and(|k| !k.is_empty()),
     )?;
+    // Keys rework (#2306), slice 4a: the account-key fan-out
+    // (`company_key::fan_out`) reads and writes this exact slug's row and key
+    // under the same lock. Held only for the `tinyhumans` slug — every other
+    // add is untouched by the fan-out and needs no serialisation with it.
+    let _fan_out_guard = if plan.slug == crate::company::inference::MANAGED_SLUG {
+        Some(crate::company::company_key::slot_guard(runtime.id()).await)
+    } else {
+        None
+    };
     let existing = store::list_providers(runtime.id(), secrets)
         .await
         .map_err(ApiError)?;
+    // Decision X1 (round-3a review P0, 2026-09-15): auto-default requires more
+    // than "no stored default" — every company that predates this rework has
+    // no stored default, so that test alone would silently move an existing
+    // company's traffic (entry zero, a manifest `[inference]` section, an env
+    // default, or the managed chain) onto whatever it "tried out" next, with
+    // no confirm. X1 means "the first provider this company has ever
+    // connected", so both must hold, read from the state as it stood before
+    // this add:
+    //   (a) there were zero provider rows;
+    //   (b) nothing else resolves for the company at all — `resolve_effective`
+    //       is the one seam that already answers exactly that question, for
+    //       the turn path and the boot path alike.
+    //
+    // Must run **before** this add's own row exists: asked afterwards, (b)
+    // would trivially see this very row resolving as sole positional primary
+    // and answer "nothing else" regardless of what was true before. Locked
+    // only for this read — released here, long before the write below and
+    // the network probe further down; re-validated under the lock again,
+    // narrowly, at the point that actually writes the default.
+    let first_provider_ever = if existing.is_empty() {
+        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
+        let (manifest, _harness_id) = super::manifest_inference(runtime).await?;
+        let platform = super::platform_default(&crate::app::config::ProcessEnv);
+        crate::company::inference::resolve_effective(
+            runtime.id(),
+            &manifest,
+            platform.as_ref(),
+            secrets,
+        )
+        .await
+        .map_err(ApiError)?
+        .is_none()
+    } else {
+        false
+    };
     // The catalogue check applies to a *typed* name only. Adding the catalogue's
     // own `groq` entry should take the slug `groq` — that is the same provider,
     // not a collision.
@@ -491,7 +618,7 @@ async fn add_provider(
             label: plan.label.clone(),
             kind: plan.kind.clone(),
             base_url: plan.base_url.clone(),
-            models: tier_overrides(Some(&model)),
+            models: uniform_models(Some(&model)),
             // New providers arrive on. Adding something and then having to
             // switch it on is a second step for a decision already made.
             enabled: true,
@@ -556,8 +683,7 @@ async fn add_provider(
                     message: None,
                     model_count: models.len(),
                     model_known: None,
-                    models: catalogue_offer(&models),
-                    needs_model: needs_an_explicit_model(&models),
+                    models: paged_catalog::catalogue_offer(&models),
                 }),
                 format!("{} is connected and answering.", provider.label),
             )
@@ -587,7 +713,16 @@ async fn add_provider(
                 )));
             }
             record_health(runtime, &provider.slug, failure.class.as_str()).await;
-            let message = probe::describe(failure.class, &advisory_subject(&provider));
+            // Bug KR-L1-01: a catalog too large to read is not "the check did
+            // not complete" — the connection and the credential are both
+            // fine, and the operator needs to know it is specifically the
+            // model list that could not be read, never a silent zero-models
+            // "ok".
+            let message = if failure.truncated {
+                format!("The model list from {} could not be read.", provider.label)
+            } else {
+                probe::describe(failure.class, &advisory_subject(&provider))
+            };
             (
                 Some(ProbeResultDto {
                     ok: false,
@@ -596,7 +731,6 @@ async fn add_provider(
                     model_count: 0,
                     model_known: None,
                     models: Vec::new(),
-                    needs_model: false,
                 }),
                 message,
             )
@@ -619,19 +753,12 @@ async fn add_provider(
     // Two reasons this runs, matched independently rather than one flag:
     // - `body.make_default` (2c): the operator explicitly ticked "Make this
     //   the default", which is honoured whatever the default already held.
-    // - Decision D-first-default (X1, 2026-09-15): the *first* provider a
-    //   company ever connects becomes its default automatically, with no
-    //   opt-out — `load_default()` is `Unset` only for a company that has
-    //   never set one, so this never overwrites an operator's existing
-    //   choice (X1's second half: "adding never changes it").
-    let auto_default = !body.make_default
-        && matches!(
-            store::load_default(runtime.id(), secrets)
-                .await
-                .map_err(ApiError)?,
-            store::DefaultChoice::Unset
-        );
-    let note = if body.make_default || auto_default {
+    // - Decision D-first-default / X1 (round-3a review P0, 2026-09-15): the
+    //   *first* provider a company has ever connected becomes its default
+    //   automatically, with no opt-out — gated on `first_provider_ever`
+    //   above, not merely on `load_default` reading `Unset` (X1's second
+    //   half, "adding never changes it", still holds either way).
+    let note = if body.make_default {
         let choice = store::ModelChoice {
             provider: provider.slug.clone(),
             model: model.clone(),
@@ -648,12 +775,49 @@ async fn add_provider(
                     error = %err,
                     "added a provider but could not make it the default",
                 );
-                if body.make_default {
-                    format!("{note} It could not be made the default. Use Set as default.")
-                } else {
+                format!("{note} It could not be made the default. Use Set as default.")
+            }
+        }
+    } else if first_provider_ever {
+        // Re-validated under the lock right before the write: the snapshot
+        // above was taken before this add's own row was written and before
+        // its probe ran, both of which took real time a concurrent request
+        // could have used to add a second row or set an explicit default —
+        // either of which means this is no longer "the first provider ever".
+        let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
+        let still_unset = matches!(
+            store::load_default(runtime.id(), secrets)
+                .await
+                .map_err(ApiError)?,
+            store::DefaultChoice::Unset
+        );
+        let still_only_row = store::list_providers(runtime.id(), secrets)
+            .await
+            .map_err(ApiError)?
+            .len()
+            == 1;
+        if still_unset && still_only_row {
+            let choice = store::ModelChoice {
+                provider: provider.slug.clone(),
+                model: model.clone(),
+            };
+            match store::set_default_choice(runtime.id(), secrets, &choice).await {
+                Ok(()) => format!(
+                    "{note} New work now goes through {} · {model}.",
+                    provider.label
+                ),
+                Err(err) => {
+                    tracing::warn!(
+                        company = %runtime.id(),
+                        provider = %provider.slug,
+                        error = %err,
+                        "added a provider but could not make it the default",
+                    );
                     note
                 }
             }
+        } else {
+            note
         }
     } else {
         note
@@ -803,29 +967,16 @@ fn is_the_only_thing_that_can_answer(
     table_is_empty && !managed_answers && sole
 }
 
-/// Whether a catalog leaves every tier unresolvable, so a row over it is
-/// unusable until a model is named.
+/// One model id stored under every tier key: a storage encoding, not a
+/// selection (keys rework, issue #2306, slice 2d).
 ///
-/// **Keyed on what the endpoint published, never on its kind or its hostname.**
-/// "Direct vendor APIs need a model, gateways do not" is the right intuition and
-/// the wrong rule: a self-hosted LiteLLM that publishes `agentic-v1` resolves
-/// tiers no matter who runs it, and a vendor that starts publishing them would
-/// have to be removed from a hand-kept list nobody would remember to edit.
-/// [`TierVocabulary::from_catalog_ids`] already answers this from evidence, and
-/// one evidence-based rule covers cloud, local and gateway alike.
-fn needs_an_explicit_model(models: &[String]) -> bool {
-    TierVocabulary::from_catalog_ids(models.iter().map(String::as_str)) == TierVocabulary::Unknown
-}
-
-/// One model id, pinned to every tier.
-///
-/// A provider that cannot resolve tier names needs a concrete id for each one,
-/// and the add dialog asks for a single model rather than four: at the moment
-/// something is connected there is no reason to believe its four workloads want
-/// different models, and the Routing tab is where that decision belongs. This
-/// writes the same id to all four so no tier is left to fall through to the
-/// passthrough that produced the 404.
-fn tier_overrides(model: Option<&str>) -> BTreeMap<String, String> {
+/// A row's `models` map holds one tier-keyed shape for every provider,
+/// whatever it can resolve — the legacy arm's
+/// [`legacy_tiers::configured_model_for_tier`](crate::company::inference::legacy_tiers::configured_model_for_tier)
+/// reads whichever tier a request names, and 2c's `check_model_id` already
+/// refuses to store a tier name as the value, so this never has to guess
+/// which of the four a turn will ask for.
+fn uniform_models(model: Option<&str>) -> BTreeMap<String, String> {
     let Some(model) = model else {
         return BTreeMap::new();
     };
@@ -1066,8 +1217,8 @@ async fn restore_previous_key(runtime: &CompanyRuntime, slug: &str, previous: Op
 /// A health record is a decoration on a row. Failing an otherwise successful add
 /// because a decoration could not be written would be the tail wagging the dog.
 async fn record_health(runtime: &CompanyRuntime, slug: &str, state: &str) {
-    // Dependency-free: the same formatter the GraphQL layer already carries.
-    let at = crate::server::graphql::iso8601(crate::ports::now_millis());
+    // Dependency-free: the crate's one RFC-3339 formatter (`ports::iso8601`).
+    let at = crate::ports::iso8601(crate::ports::now_millis());
     match store::record_health(runtime.id(), runtime.secrets().as_ref(), slug, state, &at).await {
         Ok(true) => tracing::info!(
             company = %runtime.id(),
@@ -1102,6 +1253,13 @@ async fn edit_provider(
 ) -> Result<Json<ProviderMutation>, ApiError> {
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
+    // Keys rework (#2306), slice 4a: held only for the `tinyhumans` slug —
+    // see `add_provider`'s own guard for why.
+    let _fan_out_guard = if params.slug == crate::company::inference::MANAGED_SLUG {
+        Some(crate::company::company_key::slot_guard(runtime.id()).await)
+    } else {
+        None
+    };
     let existing = require_provider(runtime, &params.slug).await?;
 
     if existing.origin == store::ProviderOrigin::EntryZero {
@@ -1182,6 +1340,15 @@ async fn edit_provider(
         ))));
     }
 
+    // Keys rework (#2306), round-3a review P2-2: held from the key-clear
+    // guard's check through every write below, so a concurrent request (a
+    // pin, a delete, another edit) cannot pass its own check against a row
+    // this request is about to change out from under it. Nothing under this
+    // guard makes a network call — every write here is to the secret store —
+    // so it is dropped before `effective_status` rebuilds the response,
+    // never held across a probe.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
+
     // Keys rework (#2306), slice 2c: an edit that **clears** the key
     // (`key: Some("")`) is a guard the same way a disable is — a row with no
     // credential cannot serve the default or an agent pair that names it any
@@ -1210,7 +1377,7 @@ async fn edit_provider(
         None => None,
     };
     let models = match &model {
-        Some(m) => tier_overrides(Some(m)),
+        Some(m) => uniform_models(Some(m)),
         None => existing.models.clone(),
     };
 
@@ -1319,6 +1486,7 @@ async fn edit_provider(
         }
     }
 
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note: format!("{} updated.", provider.label),
@@ -1361,6 +1529,13 @@ async fn delete_provider(
 ) -> Result<Json<ProviderMutation>, ApiError> {
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
+    // Keys rework (#2306), slice 4a: held only for the `tinyhumans` slug —
+    // see `add_provider`'s own guard for why.
+    let _fan_out_guard = if params.slug == crate::company::inference::MANAGED_SLUG {
+        Some(crate::company::company_key::slot_guard(runtime.id()).await)
+    } else {
+        None
+    };
     let provider = require_provider(runtime, &params.slug).await?;
 
     if provider.origin == store::ProviderOrigin::EntryZero {
@@ -1370,6 +1545,14 @@ async fn delete_provider(
                 .to_string(),
         )));
     }
+
+    // Keys rework (#2306), round-3a review P2-2: held from the guard's check
+    // through every write below, so a concurrent pin or edit cannot pass its
+    // own check against a row this delete is about to remove out from under
+    // it. Every write in this span is a secret-store write — no network call
+    // — and the guard is dropped before `effective_status` rebuilds the
+    // response.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
 
     // Keys rework (#2306), slice 2c: a delete is a removal in the fullest
     // sense — refused unless confirmed, same as a disable or a key clear.
@@ -1458,6 +1641,7 @@ async fn delete_provider(
             }
         )
     };
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note,
@@ -1491,6 +1675,14 @@ async fn set_enabled(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let provider = require_provider(runtime, &params.slug).await?;
+
+    // Keys rework (#2306), round-3a review P2-2: held from the guard's check
+    // through the switch below, so a concurrent pin or delete cannot pass its
+    // own check against a row this request is about to disable out from
+    // under it. Every write in this span is a secret-store write — no
+    // network call — and the guard is dropped before `effective_status`
+    // rebuilds the response.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
 
     // Keys rework (#2306), slice 2c: a disable is guarded the same way a
     // delete is — the row keeps existing, but it stops being able to serve
@@ -1579,6 +1771,7 @@ async fn set_enabled(
             if parked.len() == 1 { "is" } else { "are" }
         ),
     };
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note,
@@ -1613,6 +1806,15 @@ async fn set_default(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let model = store::check_model_id(body.model.as_deref().unwrap_or("")).map_err(ApiError)?;
+    // Keys rework (#2306), round-3a review P2-2: held from the enabled check
+    // through both writes below, so a concurrent disable or delete of this
+    // same provider cannot land between this handler's check and its write.
+    // Set-default carries no `usedBy` guard of its own (round-3a review P2-6:
+    // the console's own confirmation, naming the old and new provider, is the
+    // guard — see `docs/key-reworks/in-use-guards.md` §1); this lock is only
+    // about not racing the row's own state, and it never holds across a
+    // network call.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
     let provider = require_provider(runtime, &params.slug).await?;
     if !provider.enabled {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
@@ -1636,7 +1838,7 @@ async fn set_default(
     let rewrite = provider.origin == store::ProviderOrigin::Indexed
         && !matches!(provider.model(), store::ModelOnRow::One(ref m) if *m == model);
     if rewrite {
-        store::put_provider(runtime.id(), secrets, draft(tier_overrides(Some(&model))))
+        store::put_provider(runtime.id(), secrets, draft(uniform_models(Some(&model))))
             .await
             .map_err(ApiError)?;
     }
@@ -1664,6 +1866,7 @@ async fn set_default(
         return Err(ApiError(err));
     }
 
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note: format!("New work now goes through {} · {model}.", provider.label),
@@ -1909,8 +2112,7 @@ async fn test_managed(
                 message: None,
                 model_count: models.len(),
                 model_known: None,
-                models: catalogue_offer(&models),
-                needs_model: needs_an_explicit_model(&models),
+                models: paged_catalog::catalogue_offer(&models),
             }))
         }
         Err(failure) => {
@@ -1921,14 +2123,18 @@ async fn test_managed(
                 "managed inference test failed",
             );
             record_health(runtime, inference::MANAGED_SLUG, failure.class.as_str()).await;
+            let message = if failure.truncated {
+                format!("The model list from {subject} could not be read.")
+            } else {
+                probe::describe(failure.class, &subject)
+            };
             Ok(Json(ProbeResultDto {
                 ok: false,
                 class: Some(failure.class.as_str().to_string()),
-                message: Some(probe::describe(failure.class, &subject)),
+                message: Some(message),
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),
-                needs_model: false,
             }))
         }
     }
@@ -2063,6 +2269,11 @@ async fn set_managed_key(
     Json(body): Json<SetManagedKey>,
 ) -> Result<Json<ProviderMutation>, ApiError> {
     let runtime = company.runtime.as_ref();
+    // Keys rework (#2306), slice 4a: this handler always writes the
+    // `tinyhumans` slug's key, so — unlike `add_provider`/`edit_provider`/
+    // `delete_provider`, which take the lock only for that one slug —
+    // it is held unconditionally.
+    let _fan_out_guard = crate::company::company_key::slot_guard(runtime.id()).await;
     let secrets = runtime.secrets().as_ref();
     let key = body.key.trim();
 
@@ -2191,8 +2402,7 @@ async fn test_provider(
                 message: None,
                 model_count: models.len(),
                 model_known,
-                models: catalogue_offer(&models),
-                needs_model: needs_an_explicit_model(&models),
+                models: paged_catalog::catalogue_offer(&models),
             }))
         }
         Err(failure) => {
@@ -2209,14 +2419,18 @@ async fn test_provider(
             // destroying it would make the button that reports a problem the
             // button that causes one.
             record_health(runtime, &provider.slug, failure.class.as_str()).await;
+            let message = if failure.truncated {
+                format!("The model list from {} could not be read.", provider.label)
+            } else {
+                probe::describe(failure.class, &advisory_subject(&provider))
+            };
             Ok(Json(ProbeResultDto {
                 ok: false,
                 class: Some(failure.class.as_str().to_string()),
-                message: Some(probe::describe(failure.class, &advisory_subject(&provider))),
+                message: Some(message),
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),
-                needs_model: false,
             }))
         }
     }
@@ -2266,8 +2480,7 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
             message: None,
             model_count: models.len(),
             model_known: None,
-            needs_model: needs_an_explicit_model(&models),
-            models: catalogue_offer(&models),
+            models: paged_catalog::catalogue_offer(&models),
         })
         .into_response(),
         Err(failure) => {
@@ -2281,14 +2494,24 @@ async fn probe_draft(company: AdminScopedCompany, Json(body): Json<ProbeDraft>) 
             // the answer is "that endpoint did not work". A gateway status would
             // make the console's error handling treat a correct answer as a
             // broken host.
+            //
+            // Bug KR-L1-01: a catalog too large to read is not "the check did
+            // not complete" — the credential is not in question, and the
+            // model step must say specifically that its list could not be
+            // read rather than silently opening on free text with `ok: true`
+            // and zero models.
+            let message = if failure.truncated {
+                format!("The model list from {subject} could not be read.")
+            } else {
+                probe::describe(failure.class, &subject)
+            };
             Json(ProbeResultDto {
                 ok: false,
                 class: Some(failure.class.as_str().to_string()),
-                message: Some(probe::describe(failure.class, &subject)),
+                message: Some(message),
                 model_count: 0,
                 model_known: None,
                 models: Vec::new(),
-                needs_model: false,
             })
             .into_response()
         }
@@ -2613,66 +2836,11 @@ mod tests {
         assert!(plan_add("ollama", None, None, false).is_ok());
     }
 
-    // ---- a tier-unaware provider must not reach a turn --------------------
-
-    fn ids(values: &[&str]) -> Vec<String> {
-        values.iter().map(|v| (*v).to_string()).collect()
-    }
-
-    /// The reported defect: Anthropic connected with no model, the row rendered
-    /// healthy, and every turn came back
-    /// `404 {"message": "model: agentic-v1"}` because the tier name went out as
-    /// the model id. Anthropic's catalog publishes neither the tier names nor
-    /// the ids `DEFAULT_TIER_MODELS` ships, so nothing could have mapped it.
-    #[test]
-    fn a_direct_vendor_catalog_needs_a_model_named() {
-        assert!(needs_an_explicit_model(&ids(&[
-            "claude-sonnet-5",
-            "claude-opus-5",
-            "claude-haiku-4",
-        ])));
-    }
-
-    /// The same is true of a local runtime, which is why this is not a rule
-    /// about cloud vendors: Ollama publishes its own pulled tags and would 404
-    /// `agentic-v1` exactly as Anthropic does.
-    #[test]
-    fn a_local_runtime_catalog_needs_a_model_named() {
-        assert!(needs_an_explicit_model(&ids(&[
-            "llama3:latest",
-            "qwen2.5-coder:7b",
-        ])));
-    }
-
-    /// And an endpoint that resolves tiers itself does not, whoever runs it —
-    /// the managed endpoint and a self-hosted gateway are the same case. A
-    /// static per-kind flag would get this wrong for a self-hosted LiteLLM.
-    #[test]
-    fn a_tier_native_catalog_needs_nothing_named() {
-        assert!(!needs_an_explicit_model(&ids(&[
-            "chat-v1",
-            "reasoning-v1",
-            "agentic-v1",
-            "vision-v1",
-        ])));
-    }
-
-    /// Nor does one publishing the shipped ids, which is what the substitution
-    /// in `model_for_tier` is for.
-    #[test]
-    fn a_catalog_of_shipped_ids_needs_nothing_named() {
-        let shipped: Vec<String> = crate::company::inference::DEFAULT_TIER_MODELS
-            .iter()
-            .map(|(_, model)| (*model).to_string())
-            .collect();
-        assert!(!needs_an_explicit_model(&shipped));
-    }
-
     /// A named model is written to every tier, so no workload is left to fall
     /// through to the passthrough that produced the 404.
     #[test]
     fn a_named_model_covers_every_tier() {
-        let overrides = tier_overrides(Some("claude-sonnet-5"));
+        let overrides = uniform_models(Some("claude-sonnet-5"));
         assert_eq!(overrides.len(), crate::company::INFERENCE_TIERS.len());
         for tier in crate::company::INFERENCE_TIERS {
             assert_eq!(
@@ -2680,7 +2848,7 @@ mod tests {
                 Some("claude-sonnet-5")
             );
         }
-        assert!(tier_overrides(None).is_empty());
+        assert!(uniform_models(None).is_empty());
     }
 
     // ---- the one case where routing a new provider is not a guess ---------
@@ -2780,19 +2948,7 @@ mod tests {
         );
     }
 
-    /// The catalogue that rides back on a probe is sorted, deduplicated and
-    /// capped: it is a select an operator scans, on a response that is held in
-    /// memory for one dialog.
-    #[test]
-    fn the_offered_catalogue_is_sorted_and_capped() {
-        assert_eq!(
-            catalogue_offer(&ids(&["b", "a", "b"])),
-            ids(&["a", "b"]),
-            "a catalog's own order is whatever the endpoint felt like"
-        );
-        let many: Vec<String> = (0..PROBE_CATALOGUE_LIMIT + 50)
-            .map(|n| format!("model-{n:04}"))
-            .collect();
-        assert_eq!(catalogue_offer(&many).len(), PROBE_CATALOGUE_LIMIT);
-    }
+    // `the_offered_catalogue_is_sorted_and_capped` moved to
+    // `company::inference::paged_catalog::tests` alongside `catalogue_offer`
+    // itself (keys rework #2306, P3-7 review).
 }

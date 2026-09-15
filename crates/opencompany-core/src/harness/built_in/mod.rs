@@ -708,6 +708,21 @@ pub struct CompanyAgent {
     /// because it is deliberately **not** keyed on a conversation: surviving a
     /// channel switch is the whole point of it.
     session: Mutex<agent_session::AgentSessionState>,
+    /// The [`HarnessModel`] this agent's turns actually run against — the same
+    /// `Arc` [`build::build_agent_with_model`] wired onto the embedded `Agent`
+    /// above, not a fresh read of `deps.provider` (issue #2306 / Codex round 2,
+    /// comment 4012457318).
+    ///
+    /// `deps.provider` is the company **default**; an agent with its own
+    /// `{provider, model}` pin runs against a distinct
+    /// [`TenantProvider`](provider::TenantProvider) that carries its own
+    /// telemetry cells. Metering from `deps.provider` for such an agent read
+    /// the default's telemetry (or another pass's stale reading) rather than
+    /// what this agent's turn actually spent. Held here, alongside the `Agent`
+    /// it was built with, so `meter_turn_costs` reads the SAME instance the
+    /// turn ran through — re-resolving the pin at meter time would mint a
+    /// second `TenantProvider` with telemetry cells the turn never touched.
+    chat_model: Arc<dyn HarnessModel>,
 }
 
 /// The graceful reply returned when a turn yields the transient empty-response
@@ -2305,6 +2320,127 @@ fn attempt_event_segments(
         .collect()
 }
 
+/// The [`HarnessModel`] a **per-agent auxiliary** model pass (today: payload
+/// extraction; any future one built inside [`build::build_agent_with_model`])
+/// should run against, given that agent's own `{provider, model}` pin when it
+/// has one (keys rework, issue #2306, X12; round-2 review comment
+/// 4012457329).
+///
+/// Order, never silently swapped:
+///
+/// 1. the company default (`deps.provider`) is tried first, on every call;
+/// 2. `pin`, when given, is tried only once the default's own call fails —
+///    so a company running solely on per-agent pins (no default configured
+///    at all) still gets these passes, instead of losing them outright to a
+///    default that was never going to answer;
+/// 3. neither: the caller sees the default's own error (`DefaultFirstModel`
+///    below), the same failure it would have surfaced before this existed —
+///    a non-essential pass reads that as "skip", an essential one surfaces
+///    it through `company::inference::copy` exactly as the primary turn
+///    model does.
+///
+/// Deliberately the **opposite** priority from the primary chat model's own
+/// pin resolution (decision X8/F6, [`HarnessModel::pinned`]): a pinned
+/// agent's primary turn fails closed on its own pin and never silently
+/// reroutes to the default, because the pin is that agent's explicit choice.
+/// An auxiliary pass has no choice of its own to honour — it is company
+/// bookkeeping riding along with whichever agent happened to trigger it — so
+/// it prefers the shared default and reaches for an agent's pin only as a
+/// last resort to keep running at all.
+///
+/// Returns `deps.provider` unchanged when `pin` is `None`: there is nothing
+/// to fall back to, and this is exactly the pre-X12 behaviour every
+/// company-wide pass (title, triage, planning, selector) still gets — none
+/// of them has a single agent to pin against (each is built once per company
+/// in [`brain`](crate::harness::built_in::brain), before any agent is
+/// chosen), so `pass_model` is not wired into them; their own "unreachable ⇒
+/// skip" contract already satisfies point 3 above with no agent pin to fall
+/// back to.
+pub(crate) fn pass_model(
+    deps: &HarnessDeps,
+    pin: Option<Arc<dyn HarnessModel>>,
+) -> Arc<dyn HarnessModel> {
+    match pin {
+        Some(pinned) => Arc::new(DefaultFirstModel {
+            default: deps.provider.clone(),
+            pin: pinned,
+            served_from_pin: std::sync::atomic::AtomicBool::new(false),
+        }),
+        None => deps.provider.clone(),
+    }
+}
+
+/// [`pass_model`]'s combinator: tries `default` on every call, falls back to
+/// `pin` only when `default`'s own call errors, and reports telemetry for
+/// whichever one actually answered the most recent call.
+///
+/// `served_from_pin` is sequenced by nothing stronger than the two `invoke`
+/// calls' own ordering — the same approximate-under-concurrency bound
+/// [`HarnessModel::telemetry_model`] already documents for a single shared
+/// provider serving overlapping turns.
+struct DefaultFirstModel {
+    default: Arc<dyn HarnessModel>,
+    pin: Arc<dyn HarnessModel>,
+    served_from_pin: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl tinyinference::model::ChatModel<()> for DefaultFirstModel {
+    fn profile(&self) -> Option<&tinyinference::model::ModelProfile> {
+        self.default.profile()
+    }
+
+    async fn invoke(
+        &self,
+        state: &(),
+        request: tinyinference::model::ModelRequest,
+    ) -> tinyinference::Result<tinyinference::model::ModelResponse> {
+        match self.default.invoke(state, request.clone()).await {
+            Ok(response) => {
+                self.served_from_pin
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                Ok(response)
+            }
+            Err(default_err) => match self.pin.invoke(state, request).await {
+                Ok(response) => {
+                    self.served_from_pin
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(response)
+                }
+                // The default's error is the actionable one — company config
+                // an operator can fix in Connections — where the pin's own
+                // failure is either the same story or a second, narrower one
+                // this pass never asked to surface on its own.
+                Err(_pin_err) => Err(default_err),
+            },
+        }
+    }
+}
+
+impl HarnessModel for DefaultFirstModel {
+    fn telemetry_provider_id(&self) -> String {
+        if self
+            .served_from_pin
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.pin.telemetry_provider_id()
+        } else {
+            self.default.telemetry_provider_id()
+        }
+    }
+
+    fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
+        if self
+            .served_from_pin
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.pin.telemetry_model()
+        } else {
+            self.default.telemetry_model()
+        }
+    }
+}
+
 /// Writes every attempt's spend of a **finished** turn to the ledger and the
 /// usage meter, whether that turn succeeded or failed.
 ///
@@ -2318,16 +2454,24 @@ async fn meter_turn_costs(
     agent_id: &str,
     company: &CompanyId,
     deps: &HarnessDeps,
+    chat_model: &dyn HarnessModel,
     run_id: Option<&str>,
 ) -> crate::Result<()> {
     // Attribute cost to the provider and model this turn actually resolved to.
-    // With a per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
-    // a console BYOK switch changes the slug between turns, so read both live
-    // rather than trusting the static `deps.provider_slug` baked at build. The
-    // model is folded onto the closed vocabulary at the provider so no
-    // operator-authored model name reaches the meter (issue #1749).
-    let provider_slug = deps.provider.telemetry_provider_id();
-    let model_slug = deps.provider.telemetry_model();
+    // `chat_model` is the SAME [`HarnessModel`] the agent's `Agent` was built
+    // against — `deps.provider` for an unpinned agent, or that agent's own
+    // pinned [`TenantProvider`](crate::harness::provider::TenantProvider) when
+    // the manifest names a `{provider, model}` pair. Reading `deps.provider`
+    // unconditionally here booked every pinned agent's turn to the company
+    // default's telemetry instead of the provider that actually served it
+    // (issue #2306 / Codex round 2, comment 4012457318). With a per-tenant
+    // `TenantProvider` a console BYOK switch changes the slug between turns,
+    // so both are still read live rather than trusting a static value baked
+    // at build. The model is folded onto the closed vocabulary at the
+    // provider so no operator-authored model name reaches the meter (issue
+    // #1749).
+    let provider_slug = chat_model.telemetry_provider_id();
+    let model_slug = chat_model.telemetry_model();
     for turn_cost in turn_costs {
         record_turn_cost(
             turn_cost,
@@ -4408,6 +4552,11 @@ impl HarnessPool {
             agent: Mutex::new(confined),
             bound_chat: Mutex::new(None),
             session: Mutex::new(agent_session::AgentSessionState::default()),
+            // A confined turn carries no manifest teammate and therefore no
+            // pin — `build_confined_agent` wires `deps.provider` directly, so
+            // metering it from the same `Arc` is exactly the pre-#2306
+            // behaviour.
+            chat_model: deps.provider.clone(),
         };
 
         let stream_ctx = Some(crate::turn_stream::TurnStreamCtx {
@@ -4444,8 +4593,15 @@ impl HarnessPool {
 
         // Metered before the outcome is unwrapped: a copilot turn that failed
         // still consumed whatever it consumed before it failed.
-        let metered =
-            meter_turn_costs(&turn_costs, confine::CONFINED_AGENT_ID, company, deps, None).await;
+        let metered = meter_turn_costs(
+            &turn_costs,
+            confine::CONFINED_AGENT_ID,
+            company,
+            deps,
+            agent.chat_model.as_ref(),
+            None,
+        )
+        .await;
         turn_result_after_metering(outcome, metered, company, confine::CONFINED_AGENT_ID)
     }
 
@@ -4885,6 +5041,7 @@ impl HarnessPool {
             agent_id,
             company,
             deps,
+            agent.chat_model.as_ref(),
             run_sink.as_ref().map(|s| s.run_id()),
         )
         .await;
@@ -5196,6 +5353,7 @@ fn is_avatar_only(edit: &crate::ports::types::AgentOverride) -> bool {
         && edit.instructions.is_none()
         && edit.model.is_none()
         && edit.harness.is_none()
+        && edit.provider.is_none()
 }
 
 /// A stable fingerprint of the roster overlay — the operator-added teammates
@@ -5255,6 +5413,10 @@ fn overlay_fingerprint(
         // resolver's reset-to-blueprint contract depends on.
         edit.model.hash(&mut hasher);
         edit.harness.hash(&mut hasher);
+        // The provider half of the pair (keys rework slice 3a) moves the same
+        // roster binding `model`/`harness` do, so it has to move this
+        // fingerprint for the same reason.
+        edit.provider.hash(&mut hasher);
     }
     agents.len().hash(&mut hasher);
     for agent in agents {
@@ -5275,6 +5437,7 @@ fn overlay_fingerprint(
         // manifest one does.
         agent.model.hash(&mut hasher);
         agent.harness.hash(&mut hasher);
+        agent.provider.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -5589,6 +5752,7 @@ fn override_fingerprint(overrides: &[AgentOverride]) -> u64 {
         // `None` ("never edited").
         entry.model.hash(&mut hasher);
         entry.harness.hash(&mut hasher);
+        entry.provider.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -5814,7 +5978,7 @@ pub(crate) fn build_roster(
         {
             agent_policy = agent_policy.with_connected_composio_toolkits(config.toolkits.clone());
         }
-        let agent = build::build_agent(
+        let (agent, chat_model) = build::build_agent_with_model(
             &company.id,
             company_name,
             manifest_agent,
@@ -5842,6 +6006,11 @@ pub(crate) fn build_roster(
             agent: Mutex::new(agent),
             bound_chat: Mutex::new(None),
             session: Mutex::new(agent_session::AgentSessionState::default()),
+            // Issue #2306 / Codex round 2, comment 4012457318: the same
+            // `TenantProvider` (pinned or the shared default) the `Agent`
+            // above was just built against, so metering reads the telemetry
+            // cells this agent's turns actually write.
+            chat_model,
         }));
     }
 
@@ -5907,7 +6076,7 @@ pub(crate) fn build_roster(
         {
             agent_policy = agent_policy.with_connected_composio_toolkits(config.toolkits.clone());
         }
-        let agent = build::build_agent(
+        let (agent, chat_model) = build::build_agent_with_model(
             &company.id,
             company_name,
             &manifest_agent,
@@ -5935,6 +6104,10 @@ pub(crate) fn build_roster(
             agent: Mutex::new(agent),
             bound_chat: Mutex::new(None),
             session: Mutex::new(agent_session::AgentSessionState::default()),
+            // Same reasoning as the manifest-agent loop above: an overlay
+            // teammate can carry its own pin too (`overlay_agent_to_manifest`
+            // copies `provider`/`model` straight through).
+            chat_model,
         }));
     }
 
@@ -5957,6 +6130,11 @@ pub(crate) fn build_roster(
 /// the name on its own DM header.
 fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
     ManifestAgent {
+        // Carried straight through, exactly like `model` below — an overlay
+        // teammate's own `{provider, model}` pair (keys rework slice 3a) is
+        // resolved the same way a manifest agent's is, once it reaches
+        // `TenantProvider::resolve`.
+        provider: overlay.provider.clone(),
         global: false,
         id: overlay.id.clone(),
         role: overlay.role.clone(),
@@ -6239,6 +6417,7 @@ mod tests {
         // the company already allows. `payment.send` is NOT in `allow`, so the
         // overlay cannot escalate to it — the security invariant.
         let scoped = OverlayAgent {
+            provider: None,
             id: "scoped".into(),
             name: "Scoped".into(),
             role: "Researcher".into(),
@@ -6262,6 +6441,7 @@ mod tests {
         // An absent (`None`) overlay grant is the standard company-wide grant.
         // Since #1804 this is `None`, NOT an empty list (which is a deny-all).
         let standard = OverlayAgent {
+            provider: None,
             id: "std".into(),
             name: "Std".into(),
             role: "Generalist".into(),
@@ -6286,6 +6466,7 @@ mod tests {
     #[test]
     fn overlay_agent_to_manifest_carries_the_display_name() {
         let overlay = OverlayAgent {
+            provider: None,
             id: "alex".into(),
             name: "Alex".into(),
             role: "Content Writer".into(),
@@ -6305,6 +6486,27 @@ mod tests {
         );
     }
 
+    /// Keys rework slice 3a: an overlay teammate's own `{provider, model}` pair
+    /// carries straight through to the synthesized `ManifestAgent`, the same
+    /// way `model`/`harness` already do — `build_agent`'s pin logic reads it
+    /// from there.
+    #[test]
+    fn overlay_agent_to_manifest_carries_the_provider() {
+        let overlay = OverlayAgent {
+            provider: Some("anthropic".into()),
+            id: "sam".into(),
+            name: "Sam".into(),
+            role: "Web search".into(),
+            description: None,
+            tools: None,
+            model: Some("test-model-small".into()),
+            harness: None,
+        };
+        let manifest = overlay_agent_to_manifest(&overlay);
+        assert_eq!(manifest.provider.as_deref(), Some("anthropic"));
+        assert_eq!(manifest.model.as_deref(), Some("test-model-small"));
+    }
+
     /// Issue #661 / L5: a grant edit changes the roster the harness must build, so
     /// it has to move the overlay fingerprint — otherwise a re-grant would
     /// persist, render as applied, and be silently ignored until the process
@@ -6313,6 +6515,7 @@ mod tests {
     fn overlay_fingerprint_moves_on_a_tools_only_edit() {
         let one = |tools: Option<Vec<String>>| {
             vec![OverlayAgent {
+                provider: None,
                 id: "a".into(),
                 name: "A".into(),
                 role: "r".into(),
@@ -6353,6 +6556,7 @@ mod tests {
     fn overlay_fingerprint_moves_on_a_model_or_harness_change() {
         let one = |model: Option<&str>, harness: Option<&str>| {
             vec![OverlayAgent {
+                provider: None,
                 id: "a".into(),
                 name: "A".into(),
                 role: "r".into(),
@@ -6389,6 +6593,51 @@ mod tests {
         assert_eq!(
             overlay_fingerprint(&model, &[], &[]),
             overlay_fingerprint(&model_again, &[], &[])
+        );
+    }
+
+    /// G5: a provider-only change to the pair (keys rework slice 3a) must move
+    /// both the overlay and the override fingerprints on its own — the same
+    /// staleness the `model`/`harness` hashes above guard against. Without
+    /// this a PATCH that only rebinds the provider half would save and change
+    /// nothing about the running roster until a restart.
+    #[test]
+    fn a_provider_edit_moves_the_overlay_and_override_fingerprints() {
+        let overlays = |provider: Option<&str>| {
+            vec![OverlayAgent {
+                provider: provider.map(str::to_string),
+                id: "a".into(),
+                name: "A".into(),
+                role: "r".into(),
+                description: None,
+                tools: None,
+                model: Some("test-model-large".into()),
+                harness: None,
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&overlays(None), &[], &[]),
+            overlay_fingerprint(&overlays(Some("anthropic")), &[], &[]),
+            "an overlay's provider must move the overlay fingerprint"
+        );
+
+        let edits = |provider: Option<&str>| {
+            vec![crate::ports::types::AgentOverride {
+                agent_id: "ceo".into(),
+                provider: provider.map(str::to_string),
+                model: Some("test-model-large".to_string()),
+                ..Default::default()
+            }]
+        };
+        assert_ne!(
+            overlay_fingerprint(&[], &edits(None), &[]),
+            overlay_fingerprint(&[], &edits(Some("anthropic")), &[]),
+            "a manifest teammate's provider edit must move the overlay fingerprint too"
+        );
+        assert_ne!(
+            override_fingerprint(&edits(None)),
+            override_fingerprint(&edits(Some("anthropic"))),
+            "and the override fingerprint on its own"
         );
     }
 
@@ -7205,6 +7454,7 @@ description = "Builds the product."
         let fx = fixture();
         let mut rec = record();
         rec.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "growth".into(),
             name: "Jamie".into(),
             role: "Growth Lead".into(),
@@ -7274,6 +7524,7 @@ description = "Builds the product."
         let fx = fixture();
         let mut rec = record();
         rec.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "ceo".into(),
             name: "Impostor".into(),
             role: "Shadow CEO".into(),
@@ -7400,6 +7651,7 @@ description = "Builds the product."
         // The runtime-added teammate. The overlay fingerprint moves, so this
         // `ensure` takes the rebuild path rather than the cached fast path.
         rec.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "designer".into(),
             name: "Dana".into(),
             role: "Designer".into(),
@@ -8090,6 +8342,163 @@ description = "Builds the product."
         assert_eq!(
             pool.note_workspace_attempt(&rec.id, "ceo", false),
             WorkspaceReport::Recovered
+        );
+    }
+
+    /// A provider double with its own, distinct telemetry identity — stands
+    /// in for a pinned agent's own `TenantProvider` sibling
+    /// ([`HarnessModel::pinned`]) without going through real pin resolution.
+    struct PinnedProvider;
+
+    #[async_trait]
+    impl ChatModel<()> for PinnedProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: ModelRequest,
+        ) -> tinyinference::Result<ModelResponse> {
+            Ok(ModelResponse::assistant("ok"))
+        }
+    }
+
+    impl HarnessModel for PinnedProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "pinned-provider".to_string()
+        }
+
+        fn telemetry_model(&self) -> Option<crate::metering::ModelSlug> {
+            Some(crate::metering::ModelSlug::OTHER)
+        }
+    }
+
+    /// Issue #2306 / Codex round 2, comment 4012457318: `meter_turn_costs`
+    /// used to read `deps.provider` (the company default) unconditionally, so
+    /// every pinned agent's turn was booked to the default's telemetry
+    /// instead of the pinned `TenantProvider` sibling that actually served
+    /// it. Fixed by having every caller pass the [`HarnessModel`] the agent's
+    /// `Agent` was actually built against — see
+    /// [`CompanyAgent::chat_model`](CompanyAgent) — so this asserts the meter
+    /// reads THAT model's telemetry rather than `fixture()`'s "mock" default.
+    #[tokio::test]
+    async fn meter_turn_costs_books_a_pinned_agents_turn_to_its_own_provider() {
+        let fx = fixture();
+        // Sanity: the company default and the pinned double really do disagree,
+        // or this test would pass no matter which one `meter_turn_costs` read.
+        assert_eq!(fx.deps.provider.telemetry_provider_id(), "mock");
+
+        let pinned: Arc<dyn HarnessModel> = Arc::new(PinnedProvider);
+        let turn_costs = vec![TurnUsage {
+            input_tokens: 100,
+            output_tokens: 40,
+            cached_input_tokens: 0,
+            cost_usd: 0.02,
+        }];
+
+        meter_turn_costs(
+            &turn_costs,
+            "engineer",
+            &CompanyId::new("acme"),
+            &fx.deps,
+            pinned.as_ref(),
+            None,
+        )
+        .await
+        .expect("meters");
+
+        let samples = fx.meter.samples.lock().unwrap().clone();
+        assert_eq!(samples.len(), 1, "one attempt, one sample: {samples:?}");
+        assert_eq!(
+            samples[0].provider, "pinned-provider",
+            "booked to the pinned provider that actually served the turn, not \
+             the company default: {samples:?}"
+        );
+        assert_eq!(samples[0].model, Some(crate::metering::ModelSlug::OTHER));
+
+        let ledger = fx.store.ledger.lock().unwrap().clone();
+        assert_eq!(ledger.len(), 1, "one attempt, one ledger entry: {ledger:?}");
+    }
+
+    /// A provider double whose every call fails — stands in for a company
+    /// with no default configured at all (X12's "pinned-only" case), so a
+    /// caller of [`pass_model`] can be proven to fall back to the agent's own
+    /// pin instead of losing the pass outright.
+    struct AlwaysFailsProvider;
+
+    #[async_trait]
+    impl ChatModel<()> for AlwaysFailsProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: ModelRequest,
+        ) -> tinyinference::Result<ModelResponse> {
+            Err(tinyinference::Error::Model(
+                "no company default configured".to_string(),
+            ))
+        }
+    }
+
+    impl HarnessModel for AlwaysFailsProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "no-default".to_string()
+        }
+    }
+
+    /// Issue #2306 / Codex round 2, comment 4012457329 (X12): "a company
+    /// configured solely through agent pins builds its auxiliary passes on
+    /// the pin" — `pass_model` falls back to the agent's own pin once the
+    /// company default's own call fails, instead of an auxiliary pass (here
+    /// payload extraction) failing outright for a company with no default.
+    #[tokio::test]
+    async fn pass_model_falls_back_to_the_agent_pin_when_the_default_cannot_serve() {
+        let mut fx = fixture();
+        fx.deps.provider = Arc::new(AlwaysFailsProvider);
+        let pinned: Arc<dyn HarnessModel> = Arc::new(PinnedProvider);
+
+        let model = pass_model(&fx.deps, Some(pinned));
+        let response = model
+            .invoke(&(), ModelRequest::default())
+            .await
+            .expect("falls back to the agent's own pin rather than losing the pass");
+        assert_eq!(response.text(), "ok");
+        assert_eq!(
+            model.telemetry_provider_id(),
+            "pinned-provider",
+            "telemetry follows whichever provider actually answered the call"
+        );
+    }
+
+    /// The company default is tried FIRST on every call — `pass_model` never
+    /// reaches for the pin while the default can still answer it, so a
+    /// company running a working default keeps its auxiliary passes on the
+    /// shared credential rather than an agent's narrower one.
+    #[tokio::test]
+    async fn pass_model_prefers_the_company_default_while_it_resolves() {
+        let fx = fixture();
+        let pinned: Arc<dyn HarnessModel> = Arc::new(PinnedProvider);
+
+        let model = pass_model(&fx.deps, Some(pinned));
+        model
+            .invoke(&(), ModelRequest::default())
+            .await
+            .expect("the company default answers");
+        assert_eq!(
+            model.telemetry_provider_id(),
+            "mock",
+            "the default is preferred while it can still serve the call"
+        );
+    }
+
+    /// No pin at all: `pass_model` is exactly `deps.provider`, unchanged —
+    /// the pre-X12 behaviour every company-wide pass (title, triage,
+    /// planning, selector) still gets, since none of them has a single agent
+    /// to pin against.
+    #[test]
+    fn pass_model_with_no_pin_is_the_company_default() {
+        let fx = fixture();
+        let model = pass_model(&fx.deps, None);
+        assert_eq!(
+            model.telemetry_provider_id(),
+            fx.deps.provider.telemetry_provider_id()
         );
     }
 
@@ -10737,6 +11146,7 @@ description = "Builds the product."
         // `AddAgentTool` and the console `POST .../team` route both use.
         let mut updated = rec.clone();
         updated.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "growth".into(),
             name: "Jamie".into(),
             role: "Growth Lead".into(),
@@ -12767,6 +13177,7 @@ description = "Builds the product."
 
         let mut rec = record();
         rec.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "growth".into(),
             name: "Jamie".into(),
             role: "Growth Lead".into(),
@@ -13061,6 +13472,7 @@ description = "Builds the product."
             }];
         }
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -13187,6 +13599,7 @@ description = "Builds the product."
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),

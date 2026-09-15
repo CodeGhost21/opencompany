@@ -1886,6 +1886,7 @@ mod test {
         }];
         // An operator-added teammate, not in the manifest.
         let agents = vec![OverlayAgent {
+            provider: None,
             id: "designer".into(),
             name: "Dana Designer".into(),
             role: "Design".into(),

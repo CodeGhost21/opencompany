@@ -119,13 +119,15 @@ pub(super) enum AgentSource {
 /// The fields a `PATCH` accepts for a teammate — manifest-declared or overlay
 /// alike. Sent to the console so it renders the same rule the host enforces.
 ///
-/// Seven since `feat/external-acp` met #1530 on `main`: that issue added
-/// `instructions` and widened this list from overlay-only to both kinds, while
-/// #1245's harness-picker follow-up added `model` and `harness`. Neither knew
-/// about the other, so this is their union. It widens nothing on its own —
-/// `tools`, `model` and `harness` stay admin-gated in [`edit_agent`], and
+/// Grown from `feat/external-acp` meeting #1530 on `main`: that issue added
+/// `instructions` and widened this list from overlay-only to both kinds,
+/// #1245's harness-picker follow-up added `model` and `harness`, and the keys
+/// rework (issue #2306, slice 3a) added `provider` alongside `model` for its
+/// `{provider, model}` pair on a `built_in` harness. None of these knew about
+/// the others, so this is their union. It widens nothing on its own — `tools`,
+/// `model`, `harness` and `provider` stay admin-gated in [`edit_agent`], and
 /// [`EDITABLE_FIELDS_MEMBER`] is unchanged from what #1530 left it.
-const EDITABLE_FIELDS: [&str; 8] = [
+const EDITABLE_FIELDS: [&str; 9] = [
     "name",
     "role",
     "description",
@@ -134,6 +136,7 @@ const EDITABLE_FIELDS: [&str; 8] = [
     "avatar",
     "model",
     "harness",
+    "provider",
 ];
 
 /// The subset a **non-admin** member may `PATCH` (issue #619).
@@ -193,14 +196,23 @@ pub(super) struct AgentDetailDto {
     /// declared set, including which one that is.
     #[serde(skip_serializing_if = "Option::is_none")]
     harness: Option<String>,
-    /// This teammate's own model override, when it has one (issue #1245's
-    /// per-agent follow-up) — a manifest `[[agent]].model` line, or its
-    /// overlay `OverlayAgent::model` equivalent. Unlike `tier`, both kinds
-    /// can carry one. Meaningful only when the teammate resolves to an `acp`
-    /// harness; the console has no way to know that from this response alone
-    /// and should treat it as informational rather than validating it.
+    /// This teammate's own model, in one of two unrelated meanings depending
+    /// on the harness it is bound to: on an **ACP** harness (issue #1245's
+    /// per-agent follow-up) it is the model hint forwarded to it, shown as
+    /// informational since this response does not itself say which harness
+    /// that is; on a **built_in** harness it is the model half of this
+    /// teammate's own `{provider, model}` pair (keys rework, issue #2306,
+    /// slice 3a), set only together with [`provider`](Self::provider).
+    /// Absent means the teammate uses the company default.
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// The provider half of this teammate's own `{provider, model}` pair
+    /// (keys rework, issue #2306, slice 3a). Set only together with `model`,
+    /// and only meaningful on a `built_in` harness — refused on `acp`, where
+    /// `model` keeps its ACP meaning instead. Absent means the teammate uses
+    /// the company default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     /// Whether this teammate is the company's orchestrator — resolved by the
     /// roster rule (tagged tier first, else the first declared agent), not read
     /// off `tier` alone, so an untagged roster's real orchestrator is named.
@@ -348,6 +360,23 @@ pub(super) fn declared_model(record: &CompanyRecord, agent_id: &str) -> Option<S
                 .iter()
                 .find(|agent| agent.id == agent_id)
                 .and_then(|agent| agent.model.clone())
+        })
+}
+
+/// The declared provider half of the pair for `agent_id` (keys rework, issue
+/// #2306, slice 3a) — a sibling of [`declared_model`] in every respect,
+/// including the same reason it reads through `effective_agent` rather than
+/// the raw manifest row: a blueprint teammate's edit is stored as an overlay.
+pub(super) fn declared_provider(record: &CompanyRecord, agent_id: &str) -> Option<String> {
+    record
+        .effective_agent(agent_id)
+        .and_then(|agent| agent.provider.clone())
+        .or_else(|| {
+            record
+                .overlay_agents
+                .iter()
+                .find(|agent| agent.id == agent_id)
+                .and_then(|agent| agent.provider.clone())
         })
 }
 
@@ -573,6 +602,14 @@ pub(super) struct EditAgent {
     /// harness's serve set.
     #[serde(default, deserialize_with = "double_option")]
     harness: Option<Option<String>>,
+    /// The provider half of this teammate's `{provider, model}` pair (keys
+    /// rework, issue #2306, slice 3a). Same double-option shape and the same
+    /// admin gate as `model` — see [`edit_agent`]: `null` clears it (back to
+    /// the company default), a slug sets it. Sent together with `model` by
+    /// the console; the host validates the pair it is about to store rather
+    /// than one half against the other.
+    #[serde(default, deserialize_with = "double_option")]
+    provider: Option<Option<String>>,
 }
 
 /// `GET {scope}/team/{agent_id}` — one agent, read.
@@ -772,7 +809,11 @@ async fn edit_agent(
     // Deliberately unlike `set_budget`, which authorises first: that route is
     // admin-only in full, so admin-first is self-consistent there. This one is
     // admin-only *per field*, which is what makes the ordering load-bearing.
-    if body.tools.is_some() || body.model.is_some() || body.harness.is_some() {
+    if body.tools.is_some()
+        || body.model.is_some()
+        || body.harness.is_some()
+        || body.provider.is_some()
+    {
         require_admin(&headers, &state, &company.runtime, peer).await?;
     }
 
@@ -802,6 +843,11 @@ async fn edit_agent(
     let harness = body
         .harness
         .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    // The provider half of the pair (keys rework, issue #2306, slice 3a) —
+    // same hoist, same blank-means-cleared contract as `model`/`harness`.
+    let provider = body
+        .provider
+        .map(|text| text.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
 
     // A coding CLI this build drives is bindable without any `[[harness]]`
     // naming it, and `GET {scope}/harnesses` offers exactly those ids in the
@@ -830,57 +876,140 @@ async fn edit_agent(
         }
     }
 
-    // A model override only means anything on an `acp` harness — the same
-    // rule `CompanyManifest::validate` enforces for a manifest agent's own
-    // `model`, applied here because an overlay teammate never passes through
-    // that validation (it lives on the record, not the parsed manifest).
-    // Resolved against the harness this edit actually leaves the teammate
-    // on: the new binding when one was sent, else its current one — so
-    // setting a model in the same request as switching to an ACP harness
-    // is accepted, not rejected against the stale binding.
+    // `model` means one of two unrelated things depending on the harness this
+    // edit leaves the teammate on — resolved against the *resulting* binding
+    // (the new one when this request sends one, else the current one), so
+    // setting a model in the same request as switching harness kind is
+    // validated against where the teammate is actually headed, not its stale
+    // binding. On `acp` it is the pre-existing per-agent model hint (issue
+    // #1245); `CompanyManifest::validate` enforces the identical rule for a
+    // manifest agent's own `model`, but an overlay teammate never passes
+    // through that validation (it lives on the record, not the parsed
+    // manifest), so it is repeated here. On `built_in` it is the model half
+    // of the `{provider, model}` pair (keys rework, issue #2306, slice 3a),
+    // and `provider` is validated alongside it — a partial pair, an unknown
+    // provider, or a disabled one are all refused before anything is written.
+    let resulting_harness_id = harness
+        .clone()
+        .unwrap_or_else(|| declared_harness(&record, &agent_id))
+        .unwrap_or_else(|| record.manifest.default_harness_id());
+    let bound = record.manifest.harness_by_id(&resulting_harness_id);
+    let on_acp = bound.as_ref().map(|h| h.kind.as_str()) == Some("acp");
     let resulting_model = model
         .clone()
         .unwrap_or_else(|| declared_model(&record, &agent_id));
-    if let Some(model_value) = &resulting_model {
-        let resulting_harness_id = harness
-            .clone()
-            .unwrap_or_else(|| declared_harness(&record, &agent_id))
-            .unwrap_or_else(|| record.manifest.default_harness_id());
-        let bound = record.manifest.harness_by_id(&resulting_harness_id);
-        if bound.as_ref().map(|h| h.kind.as_str()) != Some("acp") {
+    let resulting_provider = provider
+        .clone()
+        .unwrap_or_else(|| declared_provider(&record, &agent_id));
+
+    // Keys rework (#2306), round-3a review P2-2: held from the provider
+    // check below through the record save (`record.upsert_agent_override` /
+    // `agent.provider = …` and `store().save(&record)`), so a concurrent
+    // provider delete, disable or key clear cannot pass its own `usedBy`
+    // check against a pair this request is about to write — every provider
+    // mutation that could strand this pair now takes the same lock.
+    // `write_lock` (the roster lock, taken above) always outranks it here:
+    // this is the only site that holds both, and it always acquires
+    // `write_lock` first — see `index_lock`'s own lock-order note in
+    // `company/inference/store.rs`. Never held across a network call: the
+    // check below is a secret-store read, and the ACP branch above returns
+    // before ever reaching here.
+    let _index_guard = crate::company::inference::store::index_lock(company.id()).await;
+
+    if on_acp {
+        // An ACP agent brings its own credential — a provider naming a
+        // console-managed one has nowhere to go, independent of `model`.
+        if let Some(provider_value) = &resulting_provider {
             return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "`{model_value}` names a model, but this teammate's harness has no ACP \
-                 transport to forward it to. Bind it to an ACP harness first, or clear \
-                 the model."
+                "`{provider_value}` names a provider, but harness `{resulting_harness_id}` is \
+                 an ACP harness, which brings its own. Clear the provider, or bind a built-in \
+                 harness."
             )))
             .into());
         }
-        // `kind = "acp"` is not sufficient: a `runner` transport is ACP and
-        // still cannot carry a model, because the runner wire protocol has no
-        // field for one. `CompanyManifest::validate` already refuses this
-        // combination, so accepting it here let the API store a binding a
-        // manifest is not allowed to declare — and one that could never take
-        // effect. The wording is the validator's, so both refusals read the
-        // same.
-        if bound
-            .as_ref()
-            .and_then(|h| h.acp.as_ref())
-            .map(|acp| acp.transport.as_str())
-            == Some("runner")
-        {
-            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
-                "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
-                 `transport = \"runner\"`. Model overrides aren't supported for a runner \
-                 yet — the runner wire protocol doesn't carry them."
-            )))
-            .into());
+        if let Some(model_value) = &resulting_model {
+            // `kind = "acp"` is not sufficient: a `runner` transport is ACP
+            // and still cannot carry a model, because the runner wire
+            // protocol has no field for one. `CompanyManifest::validate`
+            // already refuses this combination, so accepting it here let the
+            // API store a binding a manifest is not allowed to declare — and
+            // one that could never take effect. The wording is the
+            // validator's, so both refusals read the same.
+            if bound
+                .as_ref()
+                .and_then(|h| h.acp.as_ref())
+                .map(|acp| acp.transport.as_str())
+                == Some("runner")
+            {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "`{model_value}` names a model, but harness `{resulting_harness_id}` uses \
+                     `transport = \"runner\"`. Model overrides aren't supported for a runner \
+                     yet — the runner wire protocol doesn't carry them."
+                )))
+                .into());
+            }
+        }
+    } else {
+        match (&resulting_provider, &resulting_model) {
+            (None, None) => {}
+            (Some(provider_value), None) => {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "Choose a model for `{provider_value}`, or clear the provider to use the \
+                     company default."
+                )))
+                .into());
+            }
+            (None, Some(model_value)) => {
+                return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                    "`{model_value}` names a model but no provider. Choose a provider too, or \
+                     clear the model to use the company default."
+                )))
+                .into());
+            }
+            (Some(provider_value), Some(model_value)) => {
+                // Only when this request actually touches the pair or the
+                // harness binding: a name-only edit must not 400 because a
+                // provider was switched off since the pair was saved — see
+                // the gotcha this reasoning shares with `resolve_for_turn`'s
+                // own fail-closed check at turn time, which is where a pin
+                // that goes bad *after* being saved is caught instead.
+                if provider.is_some() || model.is_some() || harness.is_some() {
+                    match crate::company::inference::store::get_provider(
+                        company.id(),
+                        company.runtime.secrets().as_ref(),
+                        provider_value,
+                    )
+                    .await
+                    .map_err(ApiError)?
+                    {
+                        None => {
+                            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                                "This company has no provider `{provider_value}`. Add it in \
+                                 Connections → API Keys → LLM first."
+                            )))
+                            .into());
+                        }
+                        Some(row) if !row.enabled => {
+                            return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+                                "Provider `{}` is switched off. Switch it on in Connections → \
+                                 API Keys → LLM, or choose another.",
+                                row.label
+                            )))
+                            .into());
+                        }
+                        Some(_) => {}
+                    }
+                    crate::company::inference::store::check_model_id(model_value)
+                        .map_err(|why| ApiError(why).into_response())?;
+                }
+            }
         }
     }
 
-    // Captured before the two are consumed below. `Some` means the request
+    // Captured before the three are consumed below. `Some` means the request
     // carried the field at all — including a `null` that clears it, which
     // changes routing exactly as much as setting one does.
-    let routing_changed = model.is_some() || harness.is_some();
+    let routing_changed = model.is_some() || harness.is_some() || provider.is_some();
 
     if is_manifest {
         // Stored as an overlay on the record, exactly like the daily-budget
@@ -915,6 +1044,12 @@ async fn edit_agent(
         }
         if let Some(harness) = harness {
             entry.harness = Some(harness.unwrap_or_default());
+        }
+        // The provider half of the pair (keys rework, issue #2306, slice 3a):
+        // same blank-means-cleared contract, same reason to carry it —
+        // cross-validated above alongside `model`.
+        if let Some(provider) = provider {
+            entry.provider = Some(provider.unwrap_or_default());
         }
         record.upsert_agent_override(entry);
     } else {
@@ -957,6 +1092,11 @@ async fn edit_agent(
         if let Some(harness) = harness {
             agent.harness = harness;
         }
+        // Keys rework, issue #2306, slice 3a: already trimmed/blank-cleared
+        // and cross-validated above.
+        if let Some(provider) = provider {
+            agent.provider = provider;
+        }
     }
 
     // Issue #1530: the persona override, written to the record for **either**
@@ -998,12 +1138,14 @@ async fn edit_agent(
 
     company.runtime.store().save(&record).await?;
 
-    // Release the write lock before the possible rebuild below (PR #1875
-    // review finding): `rebuild_company` now serializes its own
-    // load-through-save of the record on this same lock, and this task
-    // holding it while calling in would deadlock a non-reentrant
-    // `tokio::sync::Mutex` against itself. The save above already landed
-    // under the lock; nothing past this point still needs it held.
+    // Release both locks before the possible rebuild below (PR #1875 review
+    // finding): `rebuild_company` now serializes its own load-through-save of
+    // the record on this same write lock, and this task holding it while
+    // calling in would deadlock a non-reentrant `tokio::sync::Mutex` against
+    // itself. The save above already landed under both locks; nothing past
+    // this point still needs either held. Released in acquisition-reverse
+    // order (`index_lock`, taken second, drops first).
+    drop(_index_guard);
     drop(_lock);
 
     // A harness or model change needs the runtime rebuilt, not just saved.
@@ -1217,6 +1359,7 @@ async fn detail(
         tier: declared_tier(record, agent_id),
         harness: declared_harness(record, agent_id),
         model: declared_model(record, agent_id),
+        provider: declared_provider(record, agent_id),
         is_orchestrator: is_orchestrator(record, agent_id),
         tools: agent_tools(record, agent_id),
         desks: desks_for(record, agent_id),
@@ -2318,6 +2461,7 @@ agent = "claude"
             created_at_millis: None,
         };
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "scoped".to_string(),
             name: "Scoped".to_string(),
             role: "Researcher".to_string(),
@@ -2327,6 +2471,7 @@ agent = "claude"
             harness: None,
         });
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "standard".to_string(),
             name: "Standard".to_string(),
             role: "Generalist".to_string(),
@@ -2337,6 +2482,7 @@ agent = "claude"
             harness: None,
         });
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "denied".to_string(),
             name: "Denied".to_string(),
             role: "Contractor".to_string(),
@@ -2503,6 +2649,30 @@ agent = "claude"
         .await;
         assert_eq!(status, StatusCode::OK, "{created}");
         created["id"].as_str().unwrap().to_string()
+    }
+
+    /// Seeds one `inference/providers` row directly on `agent`'s secret
+    /// store, for the pin-validation tests (keys rework, issue #2306, slice
+    /// 3a) — the same pattern `server::ops::inference`'s own tests use.
+    async fn seed_provider(state: &AppState, slug: &str, enabled: bool) {
+        use crate::company::inference::store;
+
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).expect("company registered");
+        store::put_provider(
+            &id,
+            runtime.secrets().as_ref(),
+            store::ProviderDraft {
+                slug: slug.to_string(),
+                label: slug.to_string(),
+                kind: "custom".to_string(),
+                base_url: "http://127.0.0.1:9/v1".to_string(),
+                models: std::collections::BTreeMap::new(),
+                enabled,
+            },
+        )
+        .await
+        .unwrap();
     }
 
     fn strings(value: &Value) -> Vec<String> {
@@ -3741,7 +3911,8 @@ prompt = "Lead decisively."
                 "instructions",
                 "avatar",
                 "model",
-                "harness"
+                "harness",
+                "provider"
             ],
             "{agent}"
         );
@@ -4177,6 +4348,219 @@ agent = "claude"
         assert!(after["model"].is_null(), "{after}");
     }
 
+    // ---- agent pair: {provider, model} (keys rework, issue #2306, slice 3a) ----
+
+    /// A pin naming a provider this company does not have, one that is
+    /// switched off, and a provider with no model at all are each refused
+    /// with a distinct 400 before anything is written.
+    #[tokio::test]
+    async fn pinning_a_built_in_agent_needs_an_existing_enabled_provider() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        seed_provider(&state, "anthropic", true).await;
+        seed_provider(&state, "groq", false).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, refusal) =
+            patch_agent(&state, &jamie, json!({"provider": "nope", "model": "m"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nope"),
+            "{refusal}"
+        );
+
+        let (status, refusal) =
+            patch_agent(&state, &jamie, json!({"provider": "groq", "model": "m"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("switched off"),
+            "{refusal}"
+        );
+
+        let (status, refusal) = patch_agent(&state, &jamie, json!({"provider": "anthropic"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Choose a model"),
+            "{refusal}"
+        );
+    }
+
+    /// The happy path: both halves save together and read back together, for
+    /// both an overlay teammate and a manifest one. That saving one moves the
+    /// overlay/override fingerprint is `mod.rs`'s own
+    /// `a_provider_edit_moves_the_overlay_and_override_fingerprints` — this
+    /// route's test fixture wires no `HarnessPool` (like its
+    /// `harness`/`model` siblings above), so it stays scoped to the route's
+    /// own read/write contract.
+    #[tokio::test]
+    async fn pinning_saves_both_and_rebuilds() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        seed_provider(&state, "anthropic", true).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, set) = patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "anthropic", "model": "test-model-small"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        assert_eq!(set["provider"], "anthropic");
+        assert_eq!(set["model"], "test-model-small");
+
+        let (_, reread) = get_agent(&state, &jamie).await;
+        assert_eq!(reread["provider"], "anthropic", "{reread}");
+        assert_eq!(reread["model"], "test-model-small", "{reread}");
+
+        // Same for a manifest teammate.
+        let (status, set) = patch_agent(
+            &state,
+            "ceo",
+            json!({"provider": "anthropic", "model": "test-model-large"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+        let (_, reread) = get_agent(&state, "ceo").await;
+        assert_eq!(reread["provider"], "anthropic", "{reread}");
+        assert_eq!(reread["model"], "test-model-large", "{reread}");
+    }
+
+    /// Clearing both halves returns the teammate to the company default —
+    /// the DTO reports both absent, matching `model`'s existing clear
+    /// contract.
+    #[tokio::test]
+    async fn clearing_the_pin_returns_to_the_default() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        seed_provider(&state, "anthropic", true).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "anthropic", "model": "test-model-small"}),
+        )
+        .await;
+
+        let (status, cleared) =
+            patch_agent(&state, &jamie, json!({"provider": null, "model": null})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["provider"].is_null(), "{cleared}");
+        assert!(cleared["model"].is_null(), "{cleared}");
+    }
+
+    /// `provider`/`model` are admin-gated exactly like `tools`/`harness` —
+    /// same 403 a member meets for those.
+    #[tokio::test]
+    async fn a_member_cannot_pin() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        seed_provider(&state, "anthropic", true).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, refusal) = send_as(
+            &state,
+            "PATCH",
+            &format!("/api/v1/company/team/{jamie}"),
+            Some(json!({"provider": "anthropic", "model": "x"})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+    }
+
+    /// An ACP agent brings its own credential — a provider is refused
+    /// outright, independent of whether `model` is also sent.
+    #[tokio::test]
+    async fn an_acp_agent_rejects_a_provider() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ACP_ROSTER).await;
+        seed_provider(&state, "anthropic", true).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, refusal) = patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "anthropic", "model": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ACP harness"),
+            "{refusal}"
+        );
+    }
+
+    /// A pin is validated against the provider list only when the request
+    /// actually touches the pair or the harness binding — a name-only edit
+    /// must not 400 because the provider was switched off since the pin was
+    /// saved. `resolve_for_turn`'s own fail-closed check is what catches a
+    /// pin that goes bad after being saved, at turn time.
+    #[tokio::test]
+    async fn a_name_edit_does_not_revalidate_a_disabled_pin() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        seed_provider(&state, "anthropic", true).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, set) = patch_agent(
+            &state,
+            &jamie,
+            json!({"provider": "anthropic", "model": "test-model-small"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{set}");
+
+        seed_provider(&state, "anthropic", false).await;
+
+        let (status, renamed) = patch_agent(&state, &jamie, json!({"name": "Jamie R."})).await;
+        assert_eq!(status, StatusCode::OK, "{renamed}");
+        assert_eq!(renamed["provider"], "anthropic", "{renamed}");
+    }
+
+    /// `provider` is offered in `editable` to an admin only — the same rule
+    /// `model`/`harness`/`tools` already follow.
+    #[tokio::test]
+    async fn the_agent_detail_editable_list_offers_provider_to_an_admin_only() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (_, as_admin) = get_agent(&state, &jamie).await;
+        assert!(
+            strings(&as_admin["editable"]).contains(&"provider".to_string()),
+            "{as_admin}"
+        );
+
+        let (_, as_member) = send_as(
+            &state,
+            "GET",
+            &format!("/api/v1/company/team/{jamie}"),
+            None,
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert!(
+            !strings(&as_member["editable"]).contains(&"provider".to_string()),
+            "{as_member}"
+        );
+    }
+
     /// Resetting instructions must not take the harness and model with it.
     ///
     /// `clear_agent_override` drops an override row once nothing is left in
@@ -4480,7 +4864,8 @@ agent = "claude"
                 "instructions",
                 "avatar",
                 "model",
-                "harness"
+                "harness",
+                "provider"
             ],
             "{as_admin}"
         );
@@ -4921,6 +5306,7 @@ agent = "claude"
             created_at_millis: None,
         };
         record.overlay_agents.push(crate::ports::OverlayAgent {
+            provider: None,
             id: "growth".to_string(),
             name: "Growth".to_string(),
             role: "Growth Marketer".to_string(),

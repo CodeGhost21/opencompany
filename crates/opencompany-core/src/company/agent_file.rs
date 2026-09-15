@@ -100,6 +100,13 @@ struct AgentFile {
     /// otherwise.
     #[serde(default)]
     model: Option<String>,
+    /// The provider half of this agent's `{provider, model}` pair (keys
+    /// rework slice 3a, issue #2306) — see
+    /// [`Agent::provider`](crate::company::Agent::provider). Cross-checked
+    /// alongside `model` in `CompanyManifest::validate`, for the same reason
+    /// as `model` above: this file cannot see the company's provider list.
+    #[serde(default)]
+    provider: Option<String>,
     /// Carried verbatim onto [`Agent::tools`](crate::company::Agent::tools),
     /// whose three-state contract (issue #1804) this mirrors: an absent `tools`
     /// key parses to `None` (inherit the standard grant — every `agents/*.toml`
@@ -271,6 +278,7 @@ fn parse_agent_file(
     }
 
     Ok(Agent {
+        provider: file.provider,
         id: stem,
         role,
         description: file.description,
@@ -521,6 +529,25 @@ mod tests {
             Some("claude-opus-4-5"),
             "a model in the file must reach the agent, or it is neither honoured nor refused"
         );
+    }
+
+    /// The provider half of the pair (keys rework slice 3a, issue #2306)
+    /// reaches the built `Agent` the same way `model` does — same reasoning
+    /// as the test above: an unwired field is silently neither honoured nor
+    /// refused.
+    #[test]
+    fn a_per_file_teammate_carries_its_provider() {
+        let dir = bundle(&[(
+            "researcher.toml",
+            "role = \"Researcher\"\nprovider = \"anthropic\"\nmodel = \"test-model-large\"\n",
+        )]);
+        let agents = load_agents(dir.path()).expect("loads");
+        let researcher = agents
+            .iter()
+            .find(|a| a.id == "researcher")
+            .expect("parsed");
+        assert_eq!(researcher.provider.as_deref(), Some("anthropic"));
+        assert_eq!(researcher.model.as_deref(), Some("test-model-large"));
     }
 
     #[test]

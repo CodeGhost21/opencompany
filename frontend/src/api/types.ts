@@ -202,6 +202,27 @@ export interface OutboundMessage {
    * treats the bubble as un-threadable rather than inventing an id for it.
    */
   messageId?: string;
+  /**
+   * Whether {@link message} is the exact, user-facing sentence for a
+   * fail-closed turn (keys rework, issue #2306, round-2 review KR-L2-03) —
+   * a pinned provider switched off or removed, a broken company default, or
+   * no model chosen at all. Absent (or `false`) means `text` already carries
+   * whatever prose applies — the generic retry line, or a provider/network
+   * failure's own classified sentence — and the console renders that as
+   * always.
+   *
+   * Field names match `docs/key-reworks/in-use-guards.md` §5 — see
+   * `src/lib/turn-failure.ts`'s own module doc for the full explanation.
+   */
+  userFacing?: boolean;
+  /** One of the codes `src/lib/turn-failure.ts`'s `TURN_FAILURE_CODES` names, when {@link userFacing} is true. */
+  code?: string;
+  /** The X9 sentence itself, with display names — present only when {@link userFacing} is true. */
+  message?: string;
+  /** The agent this failure's pair names, when the code names one — never this reply's own author (see `channel`), which is a different question. */
+  pairAgentId?: string;
+  /** The provider slug the failure names, when there is one. */
+  providerSlug?: string;
 }
 
 /** Channel-specific reply addressing. Mirrors `ReplyTo` in `src/ports/types.rs`. */
@@ -584,6 +605,21 @@ export interface ChatHistoryMessageDto {
    * on a host that predates the field.
    */
   mentions?: ChatMentionDto[];
+  /**
+   * Whether {@link message} is the exact, user-facing sentence for a
+   * fail-closed turn (keys rework, issue #2306, round-2 review KR-L2-03) —
+   * see {@link OutboundMessage.userFacing}'s doc; this is the same shape,
+   * rehydrated.
+   */
+  userFacing?: boolean;
+  /** One of the codes `src/lib/turn-failure.ts`'s `TURN_FAILURE_CODES` names, when {@link userFacing} is true. */
+  code?: string;
+  /** The X9 sentence itself, with display names — present only when {@link userFacing} is true. */
+  message?: string;
+  /** The agent this failure's pair names, when the code names one. */
+  pairAgentId?: string;
+  /** The provider slug the failure names, when there is one. */
+  providerSlug?: string;
 }
 
 /**

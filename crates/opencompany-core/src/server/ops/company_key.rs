@@ -31,25 +31,16 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 
 use crate::AppState;
-use crate::company::company_key::{key_configured, load, resolve, store_key};
+use crate::company::company_key::{self, account_key_used_by, key_configured, load, resolve};
 use crate::company::credentials::CredentialSource;
+use crate::company::inference::store as inference_store;
 use crate::company::runtime::CompanyRuntime;
-use crate::error::OpenCompanyError;
+use crate::error::{OpenCompanyError, UsedBy};
 use crate::ports::types::CompanyEvent;
+use crate::server::cognition::InferenceResolution;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 use crate::server::users::token::OsTokens;
-
-/// The reminder attached to every mutating response.
-///
-/// Names Composio rather than claiming "every brokered surface". The seam is
-/// built so that any surface wired to it moves together, but Composio is the
-/// only one wired **today** — inference and embeddings still resolve from the
-/// environment (#585). Promising breadth the build does not have would be the
-/// same overclaim this PR removed from the status route.
-const SWITCH_NOTE: &str = "Agents present the new credential on their next cycle — no restart \
-     needed. Composio picks it up at once, and any other surface wired to this credential moves \
-     with it.";
 
 /// What an admin most needs to understand before pasting: this key is the
 /// company's wallet, and membership in the company is what grants access to it.
@@ -72,23 +63,25 @@ const SWITCH_NOTE: &str = "Agents present the new credential on their next cycle
 /// It also states the **billing move**, which neither string used to — but
 /// states it conditionally, because it is conditional twice over. This notice
 /// is returned by [`set_key`] *and* [`finish_link`] *and* [`get_status`], and
-/// the two write paths do different amounts: a paste writes `tinyhumans/key`
-/// and stops, while the grant also declares the `managed` provider. And the
-/// managed chain has two rungs above this key — a key pasted for TinyHumans on
-/// the LLM page, and the legacy `inference/key` — either of which goes on
-/// answering after this one is set (#2266). A flat "setting this moves every
-/// agent turn onto this account" would be false on both counts, which is the
-/// same shape of overclaim the rest of this change removes, pointing the other
-/// way.
+/// the two write paths do different amounts: a paste fans the key out to
+/// Composio and the LLM TinyHumans slots
+/// ([`company_key::fan_out`](crate::company::company_key::fan_out), keys
+/// rework #2306, slice 4a) and stops there, while the grant runs the same
+/// fan-out and declares no provider of its own (Q10). And the managed chain
+/// has two rungs above the copy this fan-out makes — a key pasted for
+/// TinyHumans on the LLM page directly, and the legacy `inference/key` —
+/// either of which goes on answering after this one is set (#2266). A flat
+/// "setting this moves every agent turn onto this account" would be false on
+/// both counts, which is the same shape of overclaim the rest of this change
+/// removes, pointing the other way.
 const CONSEQUENCE: &str = "This is the company's TinyHumans account key — the identity the platform presents when it \
      connects providers like Gmail or Slack on your behalf. Every member's agents act and spend \
      through it, and a provider connected with it belongs to the company rather than to the \
      person who connected it. Spend arrives as one account, so it cannot be attributed per \
-     member. Where this company's models are set to TinyHumans, its agents' turns resolve through \
-     this same key and are billed here too — unless a TinyHumans key set on the LLM page outranks \
-     it. Connecting points the models here as well as the apps; pasting a key sets the identity \
-     and leaves the choice of provider alone. It is not a model provider's own key: an OpenRouter \
-     key, or your own endpoint's, belongs on the LLM page and will not serve as an identity here.";
+     member. Saving it also copies it to TinyHumans on the LLM page and to Composio wherever \
+     those hold no key of their own, and makes TinyHumans the default only when no default is \
+     set. It is not a model provider's own key: an OpenRouter key, or your own endpoint's, \
+     belongs on the LLM page and will not serve as an identity here.";
 
 /// Said instead when nothing is configured and the instance carries no identity
 /// either — the honest degraded state, rather than a picker that will fail.
@@ -147,6 +140,32 @@ struct CredentialStatusDto {
     /// console renders exactly what it renders today rather than a button that
     /// would 404.
     hub_link: bool,
+    /// The LLM TinyHumans key slot holds a key that is not the account key.
+    /// Saving leaves it alone (Q7). Never the key — see
+    /// [`company_key::SlotFacts`] (keys rework #2306, slice 4b).
+    inference_has_own_key: bool,
+    /// The same for `composio/tinyhumans/key` (with 1a's legacy read).
+    composio_has_own_key: bool,
+    /// `inference/default` is set (`ProviderOnly` or `Full`).
+    default_set: bool,
+    /// Whether the `tinyhumans` row saving would fill already carries a
+    /// model — so saving here would not leave anything for step two to ask
+    /// (KR-ACCT-01, 2026-09-15). `true` only when the row exists (the fan-out's
+    /// own `Slot::Provider` origin, `ProviderOrigin::Indexed`) **and**
+    /// [`inference_store::Provider::model`] resolves to exactly one id —
+    /// mirroring the same test [`company_key::fan_out`]'s own "picked" logic
+    /// applies when it decides whether a save can complete the row without a
+    /// `model` in the request body.
+    inference_has_model: bool,
+    /// What a **clear** of this key would strand right now — the same
+    /// [`account_key_used_by`] computation [`company_key::fan_out`]'s own
+    /// guard runs atomically under its lock (P3-6, keys rework #2306 review),
+    /// exposed here so the Remove-key dialog can name dependents the moment
+    /// it opens rather than only after a refused, uninformed attempt
+    /// (`docs/key-reworks/in-use-guards.md` §1-2; keys rework #2306, KR-L3-01).
+    /// `None` when the key is unset or nothing would be stranded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    used_by: Option<UsedBy>,
 }
 
 /// The two account pages the console links out to.
@@ -171,14 +190,155 @@ struct HubAccountLinks {
 struct MutationResponse {
     status: CredentialStatusDto,
     note: String,
+    /// What the fan-out (`company_key::fan_out`, keys rework #2306, slice 4a)
+    /// did to each of the five slots it touches, always in order composio,
+    /// inference, provider, default, health.
+    slots: Vec<SlotReportDto>,
+    /// Whether a `tinyhumans` row could not be created or defaulted for want
+    /// of a model — the console's cue to ask for one.
+    needs_model: bool,
+    /// Whether a model sent on a follow-up request would also become the
+    /// company default.
+    sets_default: bool,
+    /// Catalog ids to offer, only ever alongside `needsModel`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    models: Vec<String>,
+    /// Echoes what a **confirmed** clear would have refused with
+    /// (`docs/key-reworks/in-use-guards.md` §3) — the shape computed before
+    /// the mutation applied, so the console can show what it just broke.
+    /// `None` on every mutation that is not a guarded clear, and on a guarded
+    /// one that had nothing to warn about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    used_by: Option<UsedBy>,
+    /// Whether the config this write just landed needs a restart before
+    /// agents actually run on it (KR-ACCT-01, 2026-09-15) — same wire name
+    /// and meaning as `ops::inference`'s own
+    /// `InferenceStatusDto.restart_required`, computed the identical way
+    /// ([`restart_required_for`]) so the Account page and the LLM page can
+    /// never disagree about the same company. The fan-out can create the
+    /// first `tinyhumans` row and make it the default, but a company that
+    /// booted with no inference configured is already running the
+    /// echo/hosted brain and an unwired workflow runner
+    /// (`RuntimeBuilder::build` picks the brain once, at boot) — so a save
+    /// here can leave the company *reporting* a working default while turns
+    /// keep running on the old brain until an operator restarts. Never
+    /// serialized as `false` — the same "absent means nothing to report"
+    /// convention [`UsedBy::default`](crate::error::UsedBy) uses — so an
+    /// older console reads a missing field exactly as it always has.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    restart_required: bool,
+}
+
+/// Wire spelling of one [`company_key::SlotReport`] — moved to
+/// [`super::slot_report`] (keys rework #2306, slice 4c) so the Composio route
+/// serialises the same shape rather than a second copy of it.
+use super::slot_report::SlotReportDto;
+
+/// Whether a slot's outcome actually changed stored state — the same test a
+/// catalog-cache eviction and a journal line both apply (keys rework #2306,
+/// slice 4a): `Kept`, `Skipped`, `Failed` and the two health outcomes leave
+/// the slot exactly as it was.
+fn slot_changed(outcome: company_key::SlotOutcome) -> bool {
+    use company_key::SlotOutcome;
+    matches!(
+        outcome,
+        SlotOutcome::Filled | SlotOutcome::Rotated | SlotOutcome::Cleared | SlotOutcome::RolledBack
+    )
 }
 
 /// Set-key body. `key` is write-only intake (never returned): a non-empty value
-/// sets or rotates it, an explicit empty string clears it.
+/// sets or rotates it, an explicit empty string clears it. `model` names the
+/// model a `tinyhumans` row should carry if the fan-out creates one (keys
+/// rework #2306, slice 4a) — ignored while clearing. `confirmInUse` proceeds
+/// with a clear the in-use guard would otherwise refuse
+/// (`docs/key-reworks/in-use-guards.md` §2); ignored on a set/rotate, which is
+/// never guarded.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetKey {
     key: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    confirm_in_use: bool,
+}
+
+/// The real inference prober in production, or a per-company override in
+/// tests (mirrors [`super::composio`]'s `probe_override`: keyed by company id
+/// rather than held as one global, because the test binary runs many
+/// companies' fan-outs concurrently in one process). `#[cfg(test)]`
+/// throughout — there is no seam here in a shipped build.
+fn prober_for(runtime: &CompanyRuntime) -> Box<dyn company_key::InferenceProber> {
+    #[cfg(test)]
+    {
+        if let Some(forced) = prober_override::get(runtime.id().as_ref()) {
+            return Box::new(prober_override::Forced(forced));
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = runtime;
+    }
+    Box::new(company_key::LiveProber)
+}
+
+/// Test-only: force [`prober_for`]'s answer for one company, exactly as
+/// [`super::composio`]'s `probe_override` does for the Composio draft probe.
+///
+/// KR review comment 4012285739: a company-keyed *global* map here would never
+/// clear an entry between tests, so a later test reusing a company id would
+/// silently inherit an earlier test's forced answer. `thread_local!` sidesteps
+/// that rather than relying on every test to remember a teardown call: every
+/// test in this file uses the default (single-threaded) `#[tokio::test]`
+/// runtime, so a test's own body and every future it drives — including the
+/// router call this override answers — run on that one OS thread, and libtest
+/// gives each test function its own thread. A fresh, empty map per thread
+/// means a fresh map per test, with no entry able to outlive the test that
+/// wrote it.
+#[cfg(test)]
+mod prober_override {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use async_trait::async_trait;
+
+    use crate::company::inference::probe::{ProbeClass, ProbeFailure};
+
+    pub(super) type Outcome = std::result::Result<Vec<String>, ProbeClass>;
+
+    thread_local! {
+        static MAP: RefCell<HashMap<String, Outcome>> = RefCell::new(HashMap::new());
+    }
+
+    pub(super) fn set(company: &str, outcome: Outcome) {
+        MAP.with(|map| {
+            map.borrow_mut().insert(company.to_string(), outcome);
+        });
+    }
+
+    pub(super) fn get(company: &str) -> Option<Outcome> {
+        MAP.with(|map| map.borrow().get(company).cloned())
+    }
+
+    pub(super) struct Forced(pub(super) Outcome);
+
+    #[async_trait]
+    impl crate::company::company_key::InferenceProber for Forced {
+        async fn probe(
+            &self,
+            _base_url: &str,
+            _key: &str,
+        ) -> std::result::Result<Vec<String>, ProbeFailure> {
+            match &self.0 {
+                Ok(ids) => Ok(ids.clone()),
+                Err(class) => Err(ProbeFailure {
+                    class: *class,
+                    raw: "forced".to_string(),
+                    truncated: false,
+                }),
+            }
+        }
+    }
 }
 
 /// Resolves the credential status DTO for a company.
@@ -211,6 +371,13 @@ async fn effective_status(
     .await
     .map_err(ApiError)?
     .source();
+    let facts = company_key::slot_facts(runtime.id(), secrets.as_ref())
+        .await
+        .map_err(ApiError)?;
+    let used_by = account_key_used_by(runtime.id(), secrets.as_ref())
+        .await
+        .map_err(ApiError)?;
+    let inference_has_model = tinyhumans_row_has_model(runtime).await?;
     Ok(CredentialStatusDto {
         configured,
         source,
@@ -224,7 +391,51 @@ async fn effective_status(
             top_up_url: crate::server::hub_account::top_up_url(&site),
         }),
         hub_link: state.hub_identity().is_some(),
+        inference_has_own_key: facts.inference_has_own_key,
+        composio_has_own_key: facts.composio_has_own_key,
+        default_set: facts.default_set,
+        inference_has_model,
+        used_by,
     })
+}
+
+/// Whether the `tinyhumans` row exists and already carries exactly one model
+/// — see [`CredentialStatusDto::inference_has_model`]'s doc for why "exactly
+/// one" is the bar rather than merely "non-empty": it mirrors the same test
+/// [`company_key::fan_out`]'s own default-slot logic applies to a row's
+/// `models` map (`ModelOnRow::One` only) when it decides whether a follow-up
+/// save can complete the row without a `model` of its own.
+async fn tinyhumans_row_has_model(runtime: &CompanyRuntime) -> Result<bool, ApiError> {
+    let row = inference_store::list_providers(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?
+        .into_iter()
+        .find(|p| {
+            p.origin == inference_store::ProviderOrigin::Indexed
+                && p.slug == crate::company::inference::MANAGED_SLUG
+        });
+    Ok(row.is_some_and(|p| matches!(p.model(), inference_store::ModelOnRow::One(_))))
+}
+
+/// Whether this company needs a restart before a mutation here actually
+/// reaches agent turns (KR-ACCT-01, 2026-09-15) — see
+/// [`MutationResponse::restart_required`]'s doc for why.
+///
+/// Computed the identical way [`super::inference`]'s own
+/// `InferenceStatusDto.restart_required` is: whether a tenant config resolves
+/// *now* ([`super::inference::inference_resolution`], folding an unreadable
+/// manifest into "not configured" exactly as that function already does for
+/// the LLM page), fed through [`super::inference::restart_pending`]. One
+/// reader shared by both surfaces, so they cannot drift apart on the same
+/// company. Never fails — an unreadable manifest reads as "not configured",
+/// which answers `false` here rather than surfacing a second error on top of
+/// whatever the fan-out itself already reported.
+async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
+    let configured = matches!(
+        super::inference::inference_resolution(runtime).await,
+        InferenceResolution::Resolved
+    );
+    super::inference::restart_pending(runtime, configured)
 }
 
 /// `GET …/credential` — whether this company has its own key, and which identity
@@ -238,25 +449,62 @@ async fn get_status(
     ))
 }
 
-/// `PUT …/credential` — set / rotate / clear the company's write-only TinyHumans
-/// credential. **Admin-only** — see the module docs.
+/// `PUT …/credential` — set / rotate / clear the company's write-only
+/// TinyHumans credential, and fan it out to Composio and the LLM TinyHumans
+/// slots (`company_key::fan_out`, keys rework #2306, slice 4a). **Admin-only**
+/// — see the module docs.
+///
+/// Only a **clear** is guarded (`docs/key-reworks/in-use-guards.md` §2): a
+/// set/rotate cannot strand a dependent, since the credential it presents only
+/// gets more likely to resolve. The `usedBy` check now runs **inside**
+/// `fan_out` itself (P3-6, keys rework #2306 review) — atomically, right after
+/// it takes its own lock and before it writes anything — rather than here
+/// beforehand, which used to leave an unlocked window between the check and
+/// the write a concurrent save could land in. A refused clear still leaves
+/// every slot exactly as it was; `fan_out`'s `Err` just now guarantees that
+/// rather than this handler's own pre-check.
 async fn set_key(
     State(state): State<AppState>,
     company: AdminScopedCompany,
     Json(body): Json<SetKey>,
 ) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
-    store_key(runtime.id(), runtime.secrets().as_ref(), &body.key)
-        .await
-        .map_err(ApiError)?;
+    let clearing = body.key.trim().is_empty();
+
+    let prober = prober_for(runtime);
+    let report = company_key::fan_out(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        company_key::FanOutRequest {
+            key: &body.key,
+            model: body.model.as_deref(),
+            confirm_in_use: body.confirm_in_use,
+        },
+        prober.as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
+    // Echoes what a confirmed clear would have refused with
+    // (`in-use-guards.md` §3) — computed by `fan_out` itself, atomically,
+    // before it wrote anything; `None` on a set/rotate or a clear with
+    // nothing to warn about.
+    let used_by = report.used_by.clone();
+
     // The credential decides which account the backend resolves, so a change can
     // change which Composio catalog this company gets. Drop the cached one
     // rather than serving the previous account's answer for up to `CATALOG_TTL`.
     super::composio::evict_catalog_cache(runtime);
-    // After the store, so the journal records a completed change. An empty value
-    // is a clear, not a set — worth telling apart in an audit trail, since one
-    // grants access and the other withdraws it.
-    //
+    // Same reasoning for the inference model-list cache, only when the LLM
+    // copy itself actually moved — a `Kept`/`Skipped`/`Failed` inference slot
+    // left `provider/tinyhumans/key` exactly as it was.
+    if report
+        .slots
+        .iter()
+        .any(|s| s.slot == company_key::Slot::Inference && slot_changed(s.outcome))
+    {
+        crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
+    }
+
     // Namespaced `company_key_*` rather than reusing `ops::composio`'s
     // `credential_set` / `credential_cleared`. Both routes append
     // `ToolAccessChanged` to the same log, and with one shared vocabulary a
@@ -264,15 +512,17 @@ async fn set_key(
     // "the admin swapped the Composio token" — two changes with different blast
     // radii. An audit line that cannot name what changed is most of the way to
     // not having one.
-    let change = if body.key.trim().is_empty() {
-        "company_key_cleared"
-    } else {
-        "company_key_set"
-    };
-    journal(&company, change).await?;
+    journal_fan_out(&company, clearing, &report).await?;
+
     Ok(Json(MutationResponse {
         status: effective_status(&state, runtime).await?,
-        note: SWITCH_NOTE.to_string(),
+        note: company_key::fan_out_note(clearing, &report, body.model.as_deref()),
+        slots: report.slots.iter().map(SlotReportDto::from).collect(),
+        needs_model: report.needs_model,
+        sets_default: report.sets_default,
+        models: report.models.clone(),
+        used_by,
+        restart_required: restart_required_for(runtime).await,
     }))
 }
 
@@ -427,22 +677,26 @@ fn is_loopback_origin(origin: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-/// `POST …/credential/link/finish` — redeem the code and store what comes back.
+/// `POST …/credential/link/finish` — redeem the code, store what comes back,
+/// and run it through the same fan-out `set_key` does.
 ///
 /// The key lands in **one** place: `tinyhumans/key`, the company's identity for
-/// everything the platform brokers. The same grant still gives its agents
-/// something to think with, which is the whole point of the flow — but by
-/// *resolution* rather than by a copy, because
-/// [`resolve_effective`](crate::company::inference::resolve_effective) now reads
+/// everything the platform brokers — the fan-out's own copies (Composio, the
+/// LLM TinyHumans slot) are derived from it, never a second source of truth.
+/// It declares **no provider of its own** (Q10): a managed turn already
+/// resolves through this key by *resolution* rather than by a copy, because
+/// [`resolve_effective`](crate::company::inference::resolve_effective) reads
 /// the company's account key for a managed provider.
 ///
-/// It used to write the key into `inference/key` as well, and that copy was two
-/// bugs. It went **stale**: rotating the account key through the ordinary route
-/// left the inference copy presenting the old value until someone replaced it
-/// separately. And it **misrouted**: it was stored with `provider: "managed"`,
-/// which `normalize_provider` folded onto `openrouter` before the managed branch
-/// was consulted, so a `th_…` key was presented as a bearer to `openrouter.ai`.
-/// With one slot and one resolution seam neither is reachable (issue #2266).
+/// This used to also write `inference/config = {provider: "managed"}`
+/// directly, and that declaration was two bugs. It went **stale**: rotating
+/// the account key through the ordinary route left the inference copy
+/// presenting the old value until someone replaced it separately. And it
+/// **misrouted**: it was stored with `provider: "managed"`, which
+/// `normalize_provider` folded onto `openrouter` before the managed branch was
+/// consulted, so a `th_…` key was presented as a bearer to `openrouter.ai`.
+/// With one slot, one resolution seam, and the fan-out's own copy-if-empty
+/// rule, neither is reachable (issue #2266).
 async fn finish_link(
     State(state): State<AppState>,
     company: AdminScopedCompany,
@@ -470,37 +724,49 @@ async fn finish_link(
         .await
         .map_err(ApiError)?;
 
-    // Stored before anything else can fail. The hub emits the plaintext exactly
-    // once and cannot reissue it, so a key dropped here is a key nobody can
-    // recover — the person would have to run the whole flow again, and the one
-    // they just minted would linger in their account doing nothing.
-    store_key(runtime.id(), runtime.secrets().as_ref(), &key)
-        .await
-        .map_err(ApiError)?;
-    // The key alone does not arm inference: with no runtime declaration the
-    // status route reports the platform default, so an operator would see a
-    // company that is connected but still cannot think. Declaring `managed` is
-    // what points its turns at the platform endpoint — and that is also what
-    // makes the company's own account key the credential they travel with,
-    // since an identity reaches a vendor only when the vendor is its own.
-    crate::company::inference::save_runtime_config(
+    // The fan-out stores the account key before anything else can fail. The
+    // hub emits the plaintext exactly once and cannot reissue it, so a key
+    // dropped here is a key nobody can recover — the person would have to run
+    // the whole flow again, and the one they just minted would linger in
+    // their account doing nothing. A grant never names a model, so it never
+    // creates a `tinyhumans` row or a default on its own (Q10) — only the key
+    // itself, and its Composio/LLM copies.
+    let prober = prober_for(runtime);
+    let report = company_key::fan_out(
         runtime.id(),
         runtime.secrets().as_ref(),
-        &crate::company::inference::RuntimeInference {
-            provider: "managed".to_string(),
-            base_url: None,
-            models: Default::default(),
+        company_key::FanOutRequest {
+            key: &key,
+            model: None,
+            // A grant never clears (Q10) — this flag never gates anything on
+            // this path, so it is set unconditionally rather than threaded
+            // from a request that has no such field.
+            confirm_in_use: true,
         },
+        prober.as_ref(),
     )
     .await
     .map_err(ApiError)?;
 
     super::composio::evict_catalog_cache(runtime);
-    journal(&company, "company_key_set").await?;
+    if report
+        .slots
+        .iter()
+        .any(|s| s.slot == company_key::Slot::Inference && slot_changed(s.outcome))
+    {
+        crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
+    }
+    journal_fan_out(&company, false, &report).await?;
 
     Ok(Json(MutationResponse {
         status: effective_status(&state, runtime).await?,
-        note: SWITCH_NOTE.to_string(),
+        note: company_key::fan_out_note(false, &report, None),
+        slots: report.slots.iter().map(SlotReportDto::from).collect(),
+        needs_model: report.needs_model,
+        sets_default: report.sets_default,
+        models: report.models.clone(),
+        used_by: None,
+        restart_required: restart_required_for(runtime).await,
     }))
 }
 
@@ -525,6 +791,48 @@ async fn journal(company: &AdminScopedCompany, change: &str) -> Result<(), ApiEr
         )
         .await
         .map_err(ApiError)?;
+    Ok(())
+}
+
+/// Journals a fan-out (§3.5 of the plan): first the unchanged
+/// `company_key_set` / `company_key_cleared` line, then one entry per slot
+/// whose outcome actually changed stored state —
+/// `company_key_{slot}_{filled|rotated|cleared|rolled_back}`, slot in
+/// `composio|inference|provider|default` (the row is
+/// `company_key_provider_filled`). No entry for `kept`, `skipped`, `failed` or
+/// the health slot, which never changes anything this journal's vocabulary
+/// describes.
+async fn journal_fan_out(
+    company: &AdminScopedCompany,
+    clearing: bool,
+    report: &company_key::FanOutReport,
+) -> Result<(), ApiError> {
+    journal(
+        company,
+        if clearing {
+            "company_key_cleared"
+        } else {
+            "company_key_set"
+        },
+    )
+    .await?;
+    for slot_report in &report.slots {
+        let slot_name = match slot_report.slot {
+            company_key::Slot::Composio => "composio",
+            company_key::Slot::Inference => "inference",
+            company_key::Slot::Provider => "provider",
+            company_key::Slot::Default => "default",
+            company_key::Slot::Health => continue,
+        };
+        let suffix = match slot_report.outcome {
+            company_key::SlotOutcome::Filled => "filled",
+            company_key::SlotOutcome::Rotated => "rotated",
+            company_key::SlotOutcome::Cleared => "cleared",
+            company_key::SlotOutcome::RolledBack => "rolled_back",
+            _ => continue,
+        };
+        journal(company, &format!("company_key_{slot_name}_{suffix}")).await?;
+    }
     Ok(())
 }
 

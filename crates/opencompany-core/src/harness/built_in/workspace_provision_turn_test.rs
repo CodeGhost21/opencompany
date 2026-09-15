@@ -446,6 +446,7 @@ async fn an_agent_with_files_and_no_shell_writes_on_a_company_that_has_never_run
 async fn an_overlay_teammate_added_at_runtime_writes_on_its_first_turn() {
     let dir = tempfile::tempdir().unwrap();
     let overlay = OverlayAgent {
+        provider: None,
         id: OVERLAY_AGENT.to_string(),
         name: "Analyst".to_string(),
         role: "Analyst".to_string(),

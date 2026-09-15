@@ -77,9 +77,14 @@ use crate::company::composio::{
 use crate::company::composio_probe::{ComposioProbeClass, classify, describe, describe_verdict};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
+// Keys rework (#2306), slice 4c: the Composio half of the account-key reuse
+// banner. `company_key::copy_account_key_to_composio` is 4c's own function;
+// the rest of this surface never otherwise reaches into `company_key`.
+use crate::company::company_key::{self, SlotOutcome};
 use crate::ports::types::CompanyEvent;
 use crate::server::error::ApiError;
 use crate::server::ops::composio_toolkits::{self, CatalogSource, OpenModeToolkits};
+use crate::server::ops::slot_report::SlotReportDto;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
 /// The reminder attached to a set / rotate response.
@@ -279,6 +284,10 @@ pub fn router() -> Router<AppState> {
         .merge(scoped("/composio/token", put(set_token)))
         .merge(scoped("/composio/api-key", put(set_api_key)))
         .merge(scoped("/composio/api-key/test", post(test_api_key)))
+        .merge(scoped(
+            "/composio/tinyhumans/key/from-account",
+            post(copy_account_key),
+        ))
         .merge(scoped("/composio/authorize", post(authorize)))
         .merge(scoped("/composio/connections", get(connections)))
         .merge(scoped(
@@ -433,6 +442,12 @@ struct MutationResponse {
     /// had nothing to warn about.
     #[serde(skip_serializing_if = "Option::is_none")]
     used_by: Option<crate::error::UsedBy>,
+    /// What [`copy_account_key`] did to the Composio slot (keys rework #2306,
+    /// slice 4c) — always exactly one entry, `Slot::Composio`. Empty (and
+    /// omitted) on every other mutation on this surface, which touches this
+    /// company's own credential directly rather than copying the account key.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    slots: Vec<SlotReportDto>,
 }
 
 /// Set-token body. `token` is write-only intake (never returned): a non-empty
@@ -733,6 +748,12 @@ async fn set_token(
     Json(body): Json<SetToken>,
 ) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
+    // Keys rework (#2306), slice 4a: this route writes the same
+    // `composio/tinyhumans/key` slot the account-key fan-out
+    // (`company_key::fan_out`) copies into, under the same lock — so a
+    // concurrent paste here and account-key save cannot interleave and leave
+    // the two disagreeing about which value is current.
+    let _fan_out_guard = crate::company::company_key::slot_guard(runtime.id()).await;
     let clearing = body.token.trim().is_empty();
     // Only a clear is guarded (in-use-guards.md §1/§6): setting or rotating a
     // non-empty token cannot strand anything this company already had — the
@@ -800,6 +821,7 @@ async fn set_token(
         advisory: None,
         probe_class: None,
         used_by,
+        slots: Vec::new(),
     }))
 }
 
@@ -834,6 +856,27 @@ async fn set_api_key(
     } else {
         ComposioMode::Byok
     };
+
+    // This route writes `composio/mode` — the same fact the account-key
+    // fan-out's in-use check (`company_key::account_key_used_by`) reads to
+    // decide whether an UNCONFIRMED account-key clear may touch
+    // `composio/tinyhumans/key` (round-2 review comment 4012457339, keys
+    // rework #2306). Without sharing the fan-out's `slot_guard`, a mode
+    // switch landing here and a concurrent account-key clear could each see
+    // the OTHER's pre-image: the clear sees the OLD mode and decides the
+    // managed slot is inactive so an unconfirmed clear is safe, the switch
+    // then lands and makes the managed slot active — and now it is keyless,
+    // with neither request ever having confirmed that outcome. Taking the
+    // same guard here closes the window the same way `set_token` already
+    // does for `composio/tinyhumans/key` itself.
+    //
+    // Held only around the reads/decision below and the final write, never
+    // across the network probe: a probe can take seconds, and blocking every
+    // other account-key/Composio route on this company for that long — to
+    // say nothing of holding a lock across a call to a third party — is the
+    // wrong trade. (Lock order, for any future caller that also needs
+    // `inference_store::index_lock`: this guard first, never the reverse.)
+    let guard = crate::company::company_key::slot_guard(runtime.id()).await;
     let before_mode = load_mode(runtime.id(), runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
@@ -862,10 +905,13 @@ async fn set_api_key(
             used_by,
         }));
     }
+    drop(guard);
 
     // Probe the DRAFT, before anything is written. The clear path is never
     // probed — withdrawing a credential is always allowed, and there would be
     // nothing to check — and `skipVerify` is the operator's explicit opt-out.
+    // Unguarded (see above): this is the network round trip the lock must
+    // never be held across.
     let probe = if api_key.is_empty() || body.skip_verify {
         None
     } else {
@@ -882,9 +928,29 @@ async fn set_api_key(
             describe(class).to_string(),
         )));
     }
+
+    // Re-acquire, and re-check `composio/mode` before writing: the probe ran
+    // unguarded, so a concurrent write to `composio/mode` — another
+    // `set_api_key` call — could have landed in that window. `before_mode`
+    // above is what this request's `switching`/`used_by`/confirmation
+    // decision was computed against; writing over a mode that has since moved
+    // would silently apply that stale decision to a different transition than
+    // the one actually confirmed. Refuse and ask the caller to retry rather
+    // than guess.
+    let guard = crate::company::company_key::slot_guard(runtime.id()).await;
+    let mode_now = load_mode(runtime.id(), runtime.secrets().as_ref())
+        .await
+        .map_err(ApiError)?;
+    if mode_now != before_mode {
+        return Err(ApiError(crate::error::OpenCompanyError::Conflict(
+            "Composio's mode changed while this key was being checked; reload and try again."
+                .to_string(),
+        )));
+    }
     let mode = store_api_key(runtime.id(), runtime.secrets().as_ref(), api_key)
         .await
         .map_err(ApiError)?;
+    drop(guard);
     evict_catalog_cache(runtime);
     journal(
         &company,
@@ -906,6 +972,7 @@ async fn set_api_key(
         advisory: probe.map(|class| describe(class).to_string()),
         probe_class: probe,
         used_by,
+        slots: Vec::new(),
     }))
 }
 
@@ -1125,6 +1192,78 @@ struct ApiKeyTestDto {
     /// [`describe_verdict`]'s fixed copy, never the upstream error text.
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+/// `POST …/composio/tinyhumans/key/from-account` — copy this company's
+/// TinyHumans account key (`company_key::KEY_KEY`, set on the Account page)
+/// into `composio/tinyhumans/key`, for the reuse banner offered once Composio's
+/// own copy is gone but the account key still exists
+/// (`docs/key-reworks/phase-4c-reuse-banner.md`, keys rework #2306).
+///
+/// ## No body, and there never will be one
+///
+/// The key is read from this company's own store; there is nothing for a
+/// request body to name. See [`test_api_key`]'s own "no body" note for the
+/// same shape of reasoning against a route that could otherwise be tempted to
+/// take one.
+///
+/// ## Admin-only
+///
+/// The same boundary [`set_token`] and [`set_api_key`] carry: this decides
+/// which account the company's Composio tool calls present.
+///
+/// Refuses with `400 invalid_request` before any write when there is no
+/// account key to copy, or when the Composio slot already holds a different,
+/// non-empty key of its own
+/// ([`company_key::copy_account_key_to_composio`]'s own refusal table).
+/// Never touches `composio/mode` or `composio/byok/key`.
+async fn copy_account_key(company: AdminScopedCompany) -> Result<Json<MutationResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let report =
+        company_key::copy_account_key_to_composio(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+
+    // The account key can change which Composio entity the backend resolves,
+    // exactly as a direct token/API-key write does — drop the cached catalog
+    // so this response (and every read after it) reflects the new credential
+    // rather than the previous one's.
+    evict_catalog_cache(runtime);
+
+    let filled = report
+        .slots
+        .iter()
+        .any(|s| matches!(s.outcome, SlotOutcome::Filled));
+    // P3-3 (keys rework #2306 review): journal only when the copy actually
+    // changed stored state, matching 4a §3.5's convention ("one entry per
+    // slot whose outcome changed stored state ... no entry for kept, skipped,
+    // failed"). `copy_account_key_to_composio`'s own doc comment says its
+    // successful report only ever carries `Filled` or `Kept(AlreadyCurrent)`
+    // — a `CustomKey` conflict returns `Err` before any `FanOutReport` exists,
+    // and this call never rotates or clears — so `filled` is exactly the
+    // right and only test: a `Kept` outcome changed nothing, and an audit
+    // line for it would misreport "this admin changed something" for an
+    // action that did not.
+    if filled {
+        journal(&company, "company_key_composio_filled", None).await?;
+    }
+
+    let note = if filled {
+        "Composio now uses your account key. A key you created by hand may lack the \
+         connections permission Composio needs."
+            .to_string()
+    } else {
+        "Composio already uses your account key.".to_string()
+    };
+
+    Ok(Json(MutationResponse {
+        status: effective_status(runtime).await?,
+        note,
+        advisory: None,
+        probe_class: None,
+        used_by: None,
+        slots: report.slots.iter().map(SlotReportDto::from).collect(),
+    }))
 }
 
 /// Records who changed the company's tool access (issue #403).
@@ -2930,6 +3069,224 @@ mod tests {
         assert_eq!(body["code"], "forbidden", "{body}");
     }
 
+    /// `POST …/composio/tinyhumans/key/from-account` copies the account key
+    /// into the Composio slot, evicts the cached catalog and reports the one
+    /// slot it touched (keys rework #2306, slice 4c).
+    #[tokio::test]
+    async fn the_from_account_route_fills_the_composio_key_and_reports_one_slot() {
+        use crate::company::composio::TINYHUMANS_KEY_KEY;
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-composio", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-composio");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-account-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let (code, body, raw) = send_for(
+            &state,
+            "reuse-composio",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(
+            read_slot(&runtime, TINYHUMANS_KEY_KEY).await.as_deref(),
+            Some("th-not-a-real-account-key")
+        );
+        let slots = body["slots"].as_array().expect("slots array");
+        assert_eq!(slots.len(), 1, "{body}");
+        assert_eq!(slots[0]["slot"], "composio", "{body}");
+        assert_eq!(slots[0]["outcome"], "filled", "{body}");
+        assert!(
+            body["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("Composio now uses your account key")),
+            "{body}"
+        );
+        assert!(
+            !raw.contains("th-not-a-real-account-key"),
+            "the response leaked the key: {raw}"
+        );
+    }
+
+    /// P3-3 (keys rework #2306 review): a `Filled` copy is journaled — the
+    /// counterpart to `copying_an_already_current_key_does_not_journal`
+    /// below, which proves the opposite for `Kept`.
+    #[tokio::test]
+    async fn copying_a_new_composio_key_journals_the_fill() {
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-journal-fill", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-journal-fill");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-account-key".into()),
+            )
+            .await
+            .unwrap();
+
+        let (code, _, raw) = send_for(
+            &state,
+            "reuse-journal-fill",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+
+        let events = runtime
+            .events()
+            .read_from(&CompanyId::new("reuse-journal-fill"), EventSeq::new(0), 100)
+            .await
+            .unwrap();
+        let journaled = events.iter().any(|stored| {
+            matches!(
+                &stored.event,
+                CompanyEvent::ToolAccessChanged { change, .. }
+                    if change == "company_key_composio_filled"
+            )
+        });
+        assert!(journaled, "a Filled copy must be journaled: {events:?}");
+    }
+
+    /// P3-3 (keys rework #2306 review): a copy whose outcome is
+    /// `Kept(AlreadyCurrent)` — the Composio slot already held exactly the
+    /// account key's value — changes no stored state, so it must not add a
+    /// journal entry either, matching 4a §3.5's "no entry for kept" rule.
+    #[tokio::test]
+    async fn copying_an_already_current_key_does_not_journal() {
+        use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-journal-kept", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-journal-kept");
+        const ACCOUNT_KEY: &str = "th-not-a-real-account-key";
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue(ACCOUNT_KEY.into()),
+            )
+            .await
+            .unwrap();
+        // The Composio slot already agrees with the account key, so the copy
+        // is a no-op (`Kept(AlreadyCurrent)`), not a fill.
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::composio::TINYHUMANS_KEY_KEY,
+                crate::ports::types::SecretValue(ACCOUNT_KEY.into()),
+            )
+            .await
+            .unwrap();
+
+        let (code, body, raw) = send_for(
+            &state,
+            "reuse-journal-kept",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{raw}");
+        assert_eq!(body["slots"][0]["outcome"], "kept", "{body}");
+
+        let events = runtime
+            .events()
+            .read_from(&CompanyId::new("reuse-journal-kept"), EventSeq::new(0), 100)
+            .await
+            .unwrap();
+        let journaled = events.iter().any(|stored| {
+            matches!(
+                &stored.event,
+                CompanyEvent::ToolAccessChanged { change, .. }
+                    if change == "company_key_composio_filled"
+            )
+        });
+        assert!(
+            !journaled,
+            "a Kept(AlreadyCurrent) copy changed nothing and must not journal: {events:?}"
+        );
+    }
+
+    /// Copying with no account key on file is refused before any write.
+    #[tokio::test]
+    async fn the_from_account_route_refuses_without_an_account_key() {
+        use crate::company::composio::TINYHUMANS_KEY_KEY;
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-no-key", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-no-key");
+
+        let (code, body, raw) = send_for(
+            &state,
+            "reuse-no-key",
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{raw}");
+        assert_eq!(body["code"], "invalid_request", "{body}");
+        assert_eq!(
+            read_slot(&runtime, TINYHUMANS_KEY_KEY).await,
+            None,
+            "nothing is written on a refusal"
+        );
+    }
+
+    /// Whose account the company's Composio calls present is an admin's
+    /// decision, exactly as the token and API-key writes on this surface are
+    /// (issue #403).
+    #[tokio::test]
+    async fn a_member_cannot_copy_the_account_key_to_composio() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "reuse-member", GRANTED).await;
+        let runtime = runtime_of(&state, "reuse-member");
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::company_key::KEY_KEY,
+                crate::ports::types::SecretValue("th-not-a-real-account-key".into()),
+            )
+            .await
+            .unwrap();
+        let member = crate::server::test_support::seed_session(
+            &state,
+            "reuse-member",
+            crate::ports::UserRole::Member,
+        )
+        .await;
+
+        let (code, body, raw) = send_as(
+            &state,
+            "POST",
+            "/api/v1/company/composio/tinyhumans/key/from-account",
+            None,
+            Auth::Cookie(member),
+        )
+        .await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "{raw}");
+        assert_eq!(body["code"], "forbidden", "{body}");
+    }
+
     /// A build with no Composio client cannot check a key — and treats that as
     /// **un-probeable**, not as a rejected credential.
     ///
@@ -4254,6 +4611,62 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
         assert!(body.get("usedBy").is_none(), "{body}");
+        assert_eq!(
+            crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap(),
+            crate::company::composio::ComposioMode::Byok
+        );
+    }
+
+    /// Round-2 review, comment 4012457339 (keys rework #2306): `set_api_key`
+    /// writes `composio/mode`, the same fact `company_key::fan_out`'s own
+    /// in-use check reads to decide whether an unconfirmed account-key clear
+    /// may touch `composio/tinyhumans/key`. Before this fix the route took no
+    /// lock at all, so a confirmed mode switch landing here and a concurrent,
+    /// unconfirmed account-key clear could each act on the OTHER's pre-image
+    /// — the clear sees the old mode and decides the managed slot is
+    /// inactive, the switch then makes it active, and it is left keyless with
+    /// neither request ever having confirmed that outcome.
+    ///
+    /// This proves the route now shares `company_key::fan_out`'s own
+    /// `slot_guard`: while a test holds that company's guard directly (the
+    /// same acquisition `fan_out` makes for the whole of an account-key
+    /// save), the real `PUT …/composio/api-key` handler must not complete —
+    /// it has to be waiting on the same lock, not racing past it.
+    #[tokio::test]
+    async fn set_api_key_blocks_while_the_account_keys_fan_out_lock_is_held() {
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "composio-lock-blocks", GRANTED).await;
+        let runtime = runtime_of(&state, "composio-lock-blocks");
+        super::probe_override::set("composio-lock-blocks", Ok(()));
+
+        // The exact acquisition `company_key::fan_out` makes for the whole of
+        // an account-key save.
+        let held = crate::company::company_key::slot_guard(runtime.id()).await;
+
+        let request = send_for(
+            &state,
+            "composio-lock-blocks",
+            "PUT",
+            "/api/v1/company/composio/api-key",
+            Some(json!({ "apiKey": "ak_not_a_real_key_0123456789" })),
+        );
+        tokio::pin!(request);
+        tokio::select! {
+            _ = &mut request => panic!(
+                "set_api_key must not write composio/mode while the account-key \
+                 fan-out's own lock is held elsewhere"
+            ),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+
+        drop(held);
+        let (status, _body, raw) =
+            tokio::time::timeout(std::time::Duration::from_millis(1000), request)
+                .await
+                .expect("set_api_key proceeds once the lock is released");
+        assert_eq!(status, StatusCode::OK, "{raw}");
         assert_eq!(
             crate::company::composio::load_mode(runtime.id(), runtime.secrets().as_ref())
                 .await

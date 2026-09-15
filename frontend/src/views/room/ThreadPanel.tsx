@@ -10,7 +10,7 @@ import type { TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
-import { FailedSendNotice, OutputLinkRow } from "./MessageRow";
+import { FailedSendNotice, OutputLinkRow, TurnFailureNotice } from "./MessageRow";
 import { MessageAttachments } from "./MessageAttachments";
 import { AsideConversation, ReferralChip, ReferralConversation, StepTimeline } from "./StepTimeline";
 import { MessageComposer } from "./MessageComposer";
@@ -484,18 +484,26 @@ function Line({
             {formatTime(message.at)}
           </span>
         </div>
-        <Markdown
-          mentions={message.mentions}
-          className={cn(
-            "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
-            // Same rule and the same reason as `MessageRow` (B-099): a threaded
-            // reply that never left the browser must not read as delivered just
-            // because this panel draws replies with its own renderer.
-            message.sendFailed !== undefined && "text-muted-foreground",
-          )}
-        >
-          {message.text}
-        </Markdown>
+        {message.turnFailure ? (
+          // KR-L2-03, same rule as `MessageRow`: a fail-closed turn's own
+          // exact sentence, verbatim, plus the action that fixes it — a
+          // threaded reply must not fall back to the generic text just
+          // because this panel draws replies with its own renderer.
+          <TurnFailureNotice failure={message.turnFailure} />
+        ) : (
+          <Markdown
+            mentions={message.mentions}
+            className={cn(
+              "text-sm leading-6 break-words prose-p:my-0 prose-pre:my-1.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-1",
+              // Same rule and the same reason as `MessageRow` (B-099): a threaded
+              // reply that never left the browser must not read as delivered just
+              // because this panel draws replies with its own renderer.
+              message.sendFailed !== undefined && "text-muted-foreground",
+            )}
+          >
+            {message.text}
+          </Markdown>
+        )}
         {message.sendFailed !== undefined && (
           <FailedSendNotice
             reason={message.sendFailed || "something went wrong"}

@@ -528,6 +528,10 @@ impl MessageView {
             mentions: Vec::new(),
             attachments: Vec::new(),
             outputs: Vec::new(),
+            resolution_user_facing: false,
+            resolution_code: None,
+            resolution_pair_agent_id: None,
+            resolution_provider_slug: None,
         }
     }
 }
@@ -766,6 +770,32 @@ pub struct MessageView {
     /// every operator message journaled before this field existed — the shared
     /// [`MessageView`], so REST and GraphQL carry the same rows (issue #65).
     pub attachments: Vec<Attachment>,
+    /// Whether this row is a classified resolution failure (keys rework
+    /// #2306, round-2 review KR-L2-03) — a pinned provider gone or switched
+    /// off, a broken company default, a provider with no key, or no model
+    /// chosen at all. `false` for every ordinary reply and every other
+    /// failure class (a tool timeout, an empty response, a rate limit),
+    /// which keep only [`Self::text`]'s generic retry wording, exactly as
+    /// before this field existed.
+    ///
+    /// Derived in [`Self::project`] from the stored `AgentReply`'s own
+    /// `text` — `server::operator::spawn_chat_turn` writes the bare X9
+    /// sentence there, unwrapped, for exactly this class of failure — rather
+    /// than a new field on [`CompanyEvent::AgentReply`] itself, so the ~30
+    /// other call sites that construct that variant need no change.
+    pub resolution_user_facing: bool,
+    /// One of the codes `docs/key-reworks/in-use-guards.md` §5 names, when
+    /// [`Self::resolution_user_facing`] is `true`.
+    pub resolution_code: Option<String>,
+    /// The agent this failure's *pair* names, when the classifier could
+    /// recover one (`company::inference::copy::classify`'s hidden marker —
+    /// today, only the pin pre-check attaches one).
+    pub resolution_pair_agent_id: Option<String>,
+    /// The provider slug the failure names, when the classifier could
+    /// recover one — only `pair_provider_removed`'s sentence names a raw
+    /// slug rather than a display label (there is no row left to read one
+    /// from); every other code leaves this `None`.
+    pub resolution_provider_slug: Option<String>,
 }
 
 /// One mention inside one message, as a reader sees it.
@@ -933,36 +963,52 @@ impl MessageView {
                 mentions,
                 audience,
                 ..
-            } => MessageView {
-                id,
-                channel: agent_id.clone(),
-                admin_only: agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR,
-                // `body_of`'s `AgentReply` arm names the agent, so this does.
-                cue_author: agent_id.clone(),
-                author: agent_id,
-                // `body_of`'s `AgentReply` arm hands the agent `text.clone()`
-                // untouched — clone before `readable_moves` consumes it below.
-                cue_text: text.clone(),
-                text: readable_moves(text),
-                at_millis,
-                mine: false,
-                // The runtime wrote this, whichever brain produced it.
-                by_person: false,
-                // Set by the referral fold in `history_for_desk`, never here.
-                referred_from: None,
-                referral_conversation: None,
-                aside_audience: audience,
-                aside_conversation: None,
-                steps,
-                task_id,
-                outputs,
-                parent_id: parent.map(|seq| seq.value().to_string()),
-                reactions: Vec::new(),
-                mentions: project_mentions(&mentions, authors, viewer),
-                // A reply is the company's own voice and carries no operator
-                // upload (issue #1682).
-                attachments: Vec::new(),
-            },
+            } => {
+                // Keys rework #2306, round-2 review KR-L2-03: re-classifies
+                // the stored `text` against the same X9 sentences
+                // `server::operator::spawn_chat_turn` writes verbatim (no
+                // "Nothing was left half-done" wrapper) for exactly this
+                // class of failure. `None` for every ordinary reply and
+                // every other failure class, which keep their existing text
+                // unchanged.
+                let resolution = crate::company::inference::copy::classify(&text);
+                MessageView {
+                    id,
+                    channel: agent_id.clone(),
+                    admin_only: agent_id == crate::runtime::OWNER_FALLBACK_REPORT_AUTHOR,
+                    // `body_of`'s `AgentReply` arm names the agent, so this does.
+                    cue_author: agent_id.clone(),
+                    author: agent_id,
+                    // `body_of`'s `AgentReply` arm hands the agent `text.clone()`
+                    // untouched — clone before `readable_moves` consumes it below.
+                    cue_text: text.clone(),
+                    text: readable_moves(text),
+                    at_millis,
+                    mine: false,
+                    // The runtime wrote this, whichever brain produced it.
+                    by_person: false,
+                    // Set by the referral fold in `history_for_desk`, never here.
+                    referred_from: None,
+                    referral_conversation: None,
+                    aside_audience: audience,
+                    aside_conversation: None,
+                    steps,
+                    task_id,
+                    outputs,
+                    parent_id: parent.map(|seq| seq.value().to_string()),
+                    reactions: Vec::new(),
+                    mentions: project_mentions(&mentions, authors, viewer),
+                    // A reply is the company's own voice and carries no operator
+                    // upload (issue #1682).
+                    attachments: Vec::new(),
+                    resolution_user_facing: resolution.is_some(),
+                    resolution_code: resolution.as_ref().map(|r| r.code.to_string()),
+                    resolution_pair_agent_id: resolution
+                        .as_ref()
+                        .and_then(|r| r.pair_agent_id.clone()),
+                    resolution_provider_slug: resolution.and_then(|r| r.provider_slug),
+                }
+            }
             CompanyEvent::OperatorMessage {
                 text,
                 by,
@@ -1059,6 +1105,12 @@ impl MessageView {
                     // through so a reload renders the same chips the live send
                     // showed.
                     attachments,
+                    // An operator message is never a resolution failure — that
+                    // notice is authored by the runtime (`AgentReply`, above).
+                    resolution_user_facing: false,
+                    resolution_code: None,
+                    resolution_pair_agent_id: None,
+                    resolution_provider_slug: None,
                 }
             }
             // The dispatch terminal (issue #377), as the channel marker a
@@ -1125,6 +1177,11 @@ impl MessageView {
                 reactions: Vec::new(),
                 mentions: Vec::new(),
                 attachments: Vec::new(),
+                // A dispatch marker is never a resolution failure.
+                resolution_user_facing: false,
+                resolution_code: None,
+                resolution_pair_agent_id: None,
+                resolution_provider_slug: None,
             },
             // `owns` never admits other variants into a history.
             other => MessageView {
@@ -1154,6 +1211,11 @@ impl MessageView {
                 reactions: Vec::new(),
                 mentions: Vec::new(),
                 attachments: Vec::new(),
+                // The defensive fallback is never a resolution failure.
+                resolution_user_facing: false,
+                resolution_code: None,
+                resolution_pair_agent_id: None,
+                resolution_provider_slug: None,
             },
         }
     }
@@ -2277,6 +2339,10 @@ mod test {
             mentions: Vec::new(),
             attachments: Vec::new(),
             outputs: Vec::new(),
+            resolution_user_facing: false,
+            resolution_code: None,
+            resolution_pair_agent_id: None,
+            resolution_provider_slug: None,
         }
     }
 
@@ -3409,6 +3475,7 @@ mod test {
             record
                 .overlay_agents
                 .push(crate::ports::types::OverlayAgent {
+                    provider: None,
                     id: "workflow".to_string(),
                     name: "Workflow".to_string(),
                     role: "Worker".to_string(),

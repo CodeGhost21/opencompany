@@ -100,8 +100,10 @@ use oh::tools::{
 };
 
 use crate::company::Agent as ManifestAgent;
+use crate::company::inference::store as inference_store;
 use crate::error::OpenCompanyError;
 use crate::harness::HarnessDeps;
+use crate::harness::built_in::provider::HarnessModel;
 #[cfg(feature = "mcp")]
 use crate::harness::mcp::{
     OcMcpCallTool, OcMcpListServersTool, capability_brief, granted_secrets, registry_for_agent,
@@ -289,8 +291,19 @@ fn sandbox_brief_flags(
 // bundling them into a struct would only relocate the surface. (Pre-existing —
 // surfaced only under the full `openhuman,mcp` clippy combo, which CI
 // does not build; see the OpenCompany full-feature CI-gap note.)
+//
+// Returns the [`Agent`] alongside the [`HarnessModel`] it was actually wired
+// to — `deps.provider` for an unpinned agent, or the per-agent
+// [`TenantProvider`](crate::harness::built_in::provider::TenantProvider)
+// [`pinned`](HarnessModel::pinned) minted when the manifest names a
+// `{provider, model}` pair (issue #2306 / Codex round 2, comment 4012457318).
+// A pinned agent's own `TenantProvider` carries telemetry cells the shared
+// `deps.provider` never sees, so metering a pinned turn from `deps.provider`
+// silently books it to the company default. The caller that goes on to meter
+// this agent's turns must keep this exact `Arc` — not re-resolve the pin —
+// so it reads the same telemetry cells the turn actually wrote.
 #[allow(clippy::too_many_arguments)]
-pub fn build_agent(
+pub fn build_agent_with_model(
     company: &CompanyId,
     company_name: &str,
     manifest_agent: &ManifestAgent,
@@ -309,7 +322,7 @@ pub fn build_agent(
     // handing it the whole manifest so it could re-derive one flag would give
     // it a second, drifting opinion about the company.
     speech_enabled: bool,
-) -> crate::Result<Agent> {
+) -> crate::Result<(Agent, Arc<dyn HarnessModel>)> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
         company.clone(),
         manifest_agent.id.clone(),
@@ -1208,6 +1221,57 @@ pub fn build_agent(
         .clone()
         .unwrap_or_else(|| model_for_tier(manifest_agent.tier.as_deref()));
 
+    // Keys rework slice 3a (issue #2306): this agent's own `{provider, model}`
+    // pair, when it has one. Only `built_in` lanes reach `build_agent`, and
+    // `CompanyManifest::validate` refuses a pair on an `acp` agent, so no
+    // harness-kind check is needed here. `deps.provider.pinned` returns
+    // `None` for an implementation that cannot pin (test doubles) — falling
+    // back to the un-pinned provider rather than failing the whole roster
+    // build over a fixture that predates this field.
+    let pin = match (
+        manifest_agent.provider.as_deref(),
+        manifest_agent.model.as_deref(),
+    ) {
+        (Some(provider), Some(model))
+            if !provider.trim().is_empty() && !model.trim().is_empty() =>
+        {
+            Some(inference_store::ModelChoice {
+                provider: provider.trim().to_string(),
+                model: model.trim().to_string(),
+            })
+        }
+        _ => None,
+    };
+    // `Some` only when `pin` names a pair AND `deps.provider` can actually
+    // mint a sibling for it — never a synthetic pin that turns out to be
+    // `deps.provider` itself. Auxiliary per-agent passes (issue #2306, X12;
+    // round-2 review comment 4012457329) key their own default-first
+    // fallback on this being a genuinely distinct provider — see
+    // [`crate::harness::built_in::pass_model`].
+    let pinned_model: Option<Arc<dyn HarnessModel>> = pin.as_ref().and_then(|choice| {
+        deps.provider.pinned(
+            &manifest_agent.id,
+            manifest_agent
+                .name
+                .as_deref()
+                .unwrap_or(manifest_agent.role.as_str()),
+            choice,
+        )
+    });
+    if pin.is_some() && pinned_model.is_none() {
+        tracing::warn!(
+            agent = %manifest_agent.id,
+            "this provider cannot pin; the agent pair is ignored"
+        );
+    }
+    // The primary chat model: the agent's own pin, fails closed on its own
+    // terms (X8/F6) rather than falling back to `deps.provider` — the
+    // `unwrap_or_else` below only covers the "this provider cannot pin"
+    // case above, never a *working* pin that later fails at turn time.
+    let chat_model: Arc<dyn HarnessModel> = pinned_model
+        .clone()
+        .unwrap_or_else(|| deps.provider.clone());
+
     // Capability-tier seam (Cell A): one filtering pass over the fully assembled
     // tool vector, just before it is handed to the builder. Today `AllowAll` is
     // the only production variant (identity); a future capability-tier cell only
@@ -1248,8 +1312,7 @@ pub fn build_agent(
     // every turn is pinned to prompt-XML and a model that narrates prose instead
     // of the exact `<tool_call>` tag silently runs no tools (bug #1).
     use oh::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher};
-    let native_tools = deps
-        .provider
+    let native_tools = chat_model
         .profile()
         .map(|profile| profile.tool_calling)
         .unwrap_or(false);
@@ -1277,7 +1340,7 @@ pub fn build_agent(
     let mut agent = AgentBuilder::default()
         // `HarnessModel` upcasts to the tinyinference `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
-        .chat_model(deps.provider.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
+        .chat_model(chat_model.clone() as Arc<dyn tinyinference::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
         .tool_dispatcher(tool_dispatcher)
@@ -1310,8 +1373,16 @@ pub fn build_agent(
         // multi-tenancy), so `PayloadExtractor` serves the same trait with one
         // bounded model call — built `from_deps` like every other one-shot pass
         // here, so it spends the company's own credential and meters against it.
+        // `pinned_model.clone()` (issue #2306, X12; round-2 review comment
+        // 4012457329) so this agent's own pair is reachable when the company
+        // default cannot serve the call, instead of always failing extraction
+        // for a company configured solely through agent pins.
         .payload_summarizer(std::sync::Arc::new(
-            crate::harness::payload_extract::PayloadExtractor::from_deps(deps, company),
+            crate::harness::payload_extract::PayloadExtractor::from_deps(
+                deps,
+                company,
+                pinned_model.clone(),
+            ),
         ))
         .model_name(model)
         .workspace_dir(workspace)
@@ -1346,7 +1417,45 @@ pub fn build_agent(
     // [`MAX_TOOL_ITERATIONS`] for why 25, and why this is the only lever that
     // works on this construction path.
     agent.set_max_tool_iterations(MAX_TOOL_ITERATIONS);
-    Ok(agent)
+    Ok((agent, chat_model))
+}
+
+/// [`build_agent_with_model`], discarding the [`HarnessModel`] it resolved.
+///
+/// For every caller that only wants the [`Agent`] — every test in this crate
+/// that builds one to exercise its tools/prompt/policy, plus any future
+/// non-metering caller. The roster construction path that meters this agent's
+/// turns must call [`build_agent_with_model`] directly and keep the model it
+/// returns; see that function's doc comment for why the pinned `Arc` cannot be
+/// re-resolved after the fact.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent(
+    company: &CompanyId,
+    company_name: &str,
+    manifest_agent: &ManifestAgent,
+    policy: ApprovalPolicy,
+    deps: &HarnessDeps,
+    grants: &[String],
+    skill_deltas: &[SkillState],
+    routed_context: &[(String, String)],
+    instructions: Option<&str>,
+    is_orchestrator: bool,
+    speech_enabled: bool,
+) -> crate::Result<Agent> {
+    build_agent_with_model(
+        company,
+        company_name,
+        manifest_agent,
+        policy,
+        deps,
+        grants,
+        skill_deltas,
+        routed_context,
+        instructions,
+        is_orchestrator,
+        speech_enabled,
+    )
+    .map(|(agent, _chat_model)| agent)
 }
 
 /// The intrinsic deliberate-memory tools (`memory_store` / `memory_recall` /
@@ -1978,6 +2087,7 @@ mod tests {
 
     fn manifest_agent(role: &str, description: Option<&str>) -> ManifestAgent {
         ManifestAgent {
+            provider: None,
             global: false,
             id: "ceo".to_string(),
             role: role.to_string(),
@@ -2195,6 +2305,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.events = Some(Arc::new(crate::store::FsEventLog::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "designer".to_string(),
             role: "Designer".to_string(),
@@ -2273,6 +2384,7 @@ mod tests {
             "this test exercises the no-journal case; pin_deps must still default to it"
         );
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "designer".to_string(),
             role: "Designer".to_string(),
@@ -2333,6 +2445,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = pin_deps(dir.path().to_path_buf());
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -2386,6 +2499,7 @@ mod tests {
             crate::company::DEFAULT_SEARCH_DAILY_CALLS,
         ));
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -2438,6 +2552,7 @@ mod tests {
             crate::company::DEFAULT_SEARCH_DAILY_CALLS,
         ));
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -2516,6 +2631,7 @@ mod tests {
             Some("https://searx.example"),
         ));
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -2616,6 +2732,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.workspace = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -2663,6 +2780,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.artifacts = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -3117,6 +3235,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.mcp_home = None;
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -3187,6 +3306,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = pin_deps(dir.path().to_path_buf());
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "ceo".to_string(),
             role: "Chief Executive".to_string(),
@@ -3448,6 +3568,7 @@ mod tests {
         let deps = enabled_git_deps(dir.path().to_path_buf());
         let company = CompanyId::new("acme");
         let manifest_agent = ManifestAgent {
+            provider: None,
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
@@ -3586,6 +3707,7 @@ mod tests {
 
         let build_with = |tier: Option<&str>, budget: Option<f64>, is_orchestrator: bool| {
             let manifest_agent = ManifestAgent {
+                provider: None,
                 global: false,
                 id: "desk".to_string(),
                 role: "Desk Lead".to_string(),

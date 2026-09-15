@@ -311,6 +311,7 @@ members = []
     fn an_overlay_teammate_resolves() {
         let mut record = acme();
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "nova".into(),
             name: "Nova".into(),
             role: "Growth".into(),
@@ -347,6 +348,7 @@ members = []
     fn an_overlay_member_can_lead_a_manifest_empty_desk() {
         let mut record = acme();
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "nova".into(),
             name: "Nova".into(),
             role: "Growth".into(),
@@ -478,6 +480,7 @@ members = ["ceo"]
     fn an_operator_added_teammate_resolves_by_display_name() {
         let mut record = acme();
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "01J9XKQ2M7Z4B8N0".into(),
             name: "Shane".into(),
             role: "Support".into(),
@@ -505,6 +508,7 @@ members = ["ceo"]
     fn a_display_name_cannot_shadow_a_manifest_id() {
         let mut record = acme();
         record.overlay_agents.push(OverlayAgent {
+            provider: None,
             id: "01J9XKQ2M7Z4B8N0".into(),
             name: "engineer".into(),
             role: "Support".into(),
@@ -528,6 +532,7 @@ members = ["ceo"]
         let mut record = acme();
         for id in ["01J9XKQ2M7Z4B8N0", "01J9XKQ2M7Z4B8N1"] {
             record.overlay_agents.push(OverlayAgent {
+                provider: None,
                 id: id.into(),
                 name: "Shane".into(),
                 role: "Support".into(),

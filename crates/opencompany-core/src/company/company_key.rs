@@ -55,6 +55,15 @@ use crate::company::credentials::{Credential, TinyhumansTokenSource};
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
+mod fan_out;
+mod types;
+
+pub use fan_out::{
+    CopyDecision, InferenceProber, LiveProber, SlotFacts, account_key_used_by,
+    copy_account_key_to_composio, decide_copy, fan_out, fan_out_note, slot_facts, slot_guard,
+};
+pub use types::{FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport};
+
 /// The canonical per-company TinyHumans credential key. Write-only via the
 /// console; the value is the raw key string.
 ///

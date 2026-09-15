@@ -52,7 +52,8 @@
 //! behind is not untidiness: re-adding that slug would silently inherit a
 //! credential the operator thought they had removed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,63 @@ use super::{KEY_KEY, RuntimeInference, normalize_provider};
 /// The [`SecretStore`] key holding the provider index — every provider *except*
 /// entry zero, without credentials.
 pub const PROVIDER_INDEX_KEY: &str = "inference/providers";
+
+// ---------------------------------------------------------------------------
+// The per-company inference-config lock
+// ---------------------------------------------------------------------------
+
+/// One process-wide lock per company, guarding every mutation that reads an
+/// in-use guard and then writes: provider delete, disable and key clear
+/// (`server::ops::inference::providers`), the agent-pair PATCH
+/// (`server::ops::team_agent`), set-default, and the X1 first-add
+/// auto-default. [`company::company_key::fan_out`](crate::company::company_key::fan_out)'s
+/// account-key save also takes it before writing [`PROVIDER_INDEX_KEY`] or the
+/// default marker, so a fan-out save and a provider-page edit can never both
+/// pass their checks against the same pre-write state.
+///
+/// Mirrors `company_key::fan_out::slot_guard`'s pattern exactly — itself
+/// copied from `search::store`'s `INDEX_LOCKS` — one `tokio::sync::Mutex` per
+/// company id in a process-wide map. This serialises mutations **within one
+/// process**, which is the whole of a deployment (one container per tenant);
+/// it is not a distributed lock and does nothing across replicas.
+///
+/// Never hold the guard across a network call: probe a provider's catalog
+/// before taking it, or after releasing it, never while it is held. Take it,
+/// re-read the state the guard check depends on, check, write, drop.
+///
+/// **Lock order:** a caller that also holds
+/// [`slot_guard`](crate::company::company_key::fan_out::slot_guard) — today
+/// only the account-key fan-out — must take `slot_guard` first and this lock
+/// second. No path here takes `slot_guard` at all, so that order is the only
+/// one that can ever be built; keep it that way rather than introducing a
+/// second acquisition order two call sites could deadlock on.
+///
+/// `server::ops::team_agent::edit_agent` also holds its own per-company
+/// roster write lock (`company_write_lock`) across the same span. It always
+/// takes that lock first and this one second — the reverse never happens
+/// anywhere in this codebase, so keep it that way rather than building a
+/// second order those two locks could deadlock on.
+static INDEX_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// Takes this company's inference-config lock, held until the returned guard
+/// is dropped.
+///
+/// The inner `std` mutex is held only long enough to clone an `Arc` — never
+/// across an `await` — so a panicking holder cannot poison anything a later
+/// request needs.
+pub async fn index_lock(company: &CompanyId) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = INDEX_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(company.as_ref().to_string())
+            .or_default()
+            .clone()
+    };
+    lock.lock_owned().await
+}
 
 /// The credential slot for one provider.
 ///
@@ -997,6 +1055,43 @@ pub async fn load_default(company: &CompanyId, secrets: &dyn SecretStore) -> Res
     parse_default(&raw)
 }
 
+/// [`load_default`], but never fails (round-3a review P2-4).
+///
+/// A read path — a status response, or an in-use guard ahead of a delete,
+/// disable or key clear — has to be able to answer even when
+/// `inference/default` cannot be: a store read error or a hand-corrupted
+/// value used to 500 every one of those, so the only repair left for an
+/// operator was `POST …/default` from curl. Read as [`DefaultChoice::Unset`]
+/// instead, with a `warn!` and `true` in the second half of the pair so the
+/// caller can say so (`InferenceStatusDto::default_unreadable`) rather than
+/// silently reporting "no default" as if the operator had never set one.
+///
+/// **Never writes.** An unreadable value is never overwritten by this call —
+/// only an explicit [`set_default_choice`] ever rewrites the key — so once
+/// the underlying corruption is fixed by hand, the next read recovers on its
+/// own.
+///
+/// Turn-time resolution does not use this: a broken default there fails a
+/// turn closed with a named sentence (`company::inference::copy`), which is
+/// the opposite instinct from a read path degrading quietly.
+pub async fn load_default_lenient(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> (DefaultChoice, bool) {
+    match load_default(company, secrets).await {
+        Ok(choice) => (choice, false),
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                error = %err,
+                "inference default could not be read; treating it as unset rather than \
+                 failing the read",
+            );
+            (DefaultChoice::Unset, true)
+        }
+    }
+}
+
 /// Writes a full default as **one** JSON value, e.g.
 /// `{"provider":"tinyhumans","model":"acme/test-model"}` (keys rework, issue
 /// #2306, slice 2b). One write, so a provider can never be paired with
@@ -1242,6 +1337,106 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+
+    // ---- index_lock (keys rework, issue #2306, round-3b lock coordination) -
+
+    #[tokio::test]
+    async fn index_lock_serialises_two_holders_on_the_same_company() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let company = CompanyId::new("acme-co");
+        let inside = Arc::new(AtomicBool::new(false));
+        let overlapped = Arc::new(AtomicBool::new(false));
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let company = company.clone();
+            let inside = inside.clone();
+            let overlapped = overlapped.clone();
+            tasks.push(tokio::spawn(async move {
+                let _guard = index_lock(&company).await;
+                if inside.swap(true, Ordering::SeqCst) {
+                    overlapped.store(true, Ordering::SeqCst);
+                }
+                tokio::task::yield_now().await;
+                inside.store(false, Ordering::SeqCst);
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert!(
+            !overlapped.load(Ordering::SeqCst),
+            "two holders of the same company's lock ran inside the guarded section at once"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_lock_does_not_block_a_different_company() {
+        let a = CompanyId::new("acme-co");
+        let b = CompanyId::new("other-co");
+        let _guard_a = index_lock(&a).await;
+        // A different company's lock must not wait on this one.
+        tokio::time::timeout(std::time::Duration::from_secs(2), index_lock(&b))
+            .await
+            .expect("a different company's lock must not wait on this one");
+    }
+
+    /// Round-3a review P2-2's exact scenario, reproduced directly: "a
+    /// concurrent PATCH that pins `acme` and a DELETE of `acme` can both pass
+    /// their checks." Two different guarded mutations — not two holders of
+    /// the same shape, which [`index_lock_serialises_two_holders_on_the_same_company`]
+    /// already covers — each doing a check, a yield (so a race would need to
+    /// interleave right here to go unnoticed), then a write. If the lock
+    /// wired into both call sites actually serialises them, the delete's read
+    /// of the row always happens either wholly before or wholly after the
+    /// pin's check-and-write, never in between it.
+    #[tokio::test]
+    async fn a_pin_and_a_delete_of_the_same_provider_never_interleave() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let company = CompanyId::new("acme-co");
+        let row_present = Arc::new(AtomicBool::new(true));
+        let pin_saw_row_gone_mid_write = Arc::new(AtomicBool::new(false));
+
+        let pin_row_present = row_present.clone();
+        let pin_saw_gone = pin_saw_row_gone_mid_write.clone();
+        let pin_company = company.clone();
+        let pin = tokio::spawn(async move {
+            let _guard = index_lock(&pin_company).await;
+            // Check: the pin validates the row exists, exactly as
+            // `server::ops::team_agent::edit_agent` does under this lock.
+            let existed = pin_row_present.load(Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            // Write: only meaningful if the row was still there when checked —
+            // a delete that ran inside this critical section would make this
+            // pin write against a row it never actually validated.
+            if existed && !pin_row_present.load(Ordering::SeqCst) {
+                pin_saw_gone.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let delete_row_present = row_present.clone();
+        let delete_company = company.clone();
+        let delete = tokio::spawn(async move {
+            let _guard = index_lock(&delete_company).await;
+            // Check: the delete reads `usedBy`, exactly as
+            // `server::ops::inference::providers::delete_provider` does under
+            // this lock.
+            let _used_by_snapshot = delete_row_present.load(Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            // Write: the row goes.
+            delete_row_present.store(false, Ordering::SeqCst);
+        });
+
+        pin.await.unwrap();
+        delete.await.unwrap();
+        assert!(
+            !pin_saw_row_gone_mid_write.load(Ordering::SeqCst),
+            "the pin's check and write must never straddle the delete's write — the lock \
+             wired into both handlers should have serialised them"
+        );
+    }
 
     // ---- check_model_id (keys rework, issue #2306, slice 2c) ---------------
 
@@ -2113,6 +2308,50 @@ mod tests {
                 "raw: {raw}: {err}"
             );
         }
+    }
+
+    /// Round-3a review P2-4: the read side of a corrupt default must degrade,
+    /// never 500 — see [`load_default_lenient`]'s own doc for why.
+    #[tokio::test]
+    async fn a_corrupt_default_reads_as_unset_and_unreadable_never_written() {
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company(),
+                DEFAULT_PROVIDER_KEY,
+                SecretValue(r#"{oops"#.to_string()),
+            )
+            .await
+            .unwrap();
+
+        let (choice, unreadable) = load_default_lenient(&company(), &secrets).await;
+        assert_eq!(choice, DefaultChoice::Unset);
+        assert!(unreadable);
+
+        // Never rewritten: the corrupt value is still on disk, byte for byte,
+        // so fixing it by hand and reading again recovers on its own.
+        let raw = secrets
+            .get(&company(), DEFAULT_PROVIDER_KEY)
+            .await
+            .unwrap()
+            .map(|SecretValue(v)| v);
+        assert_eq!(raw.as_deref(), Some(r#"{oops"#));
+    }
+
+    #[tokio::test]
+    async fn a_readable_default_round_trips_through_the_lenient_reader_unmarked() {
+        let secrets = MemSecrets::default();
+        let choice = ModelChoice {
+            provider: "acme".to_string(),
+            model: "test-model".to_string(),
+        };
+        set_default_choice(&company(), &secrets, &choice)
+            .await
+            .unwrap();
+
+        let (read, unreadable) = load_default_lenient(&company(), &secrets).await;
+        assert_eq!(read, DefaultChoice::Full(choice));
+        assert!(!unreadable);
     }
 
     #[tokio::test]

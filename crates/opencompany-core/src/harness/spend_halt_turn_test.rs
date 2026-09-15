@@ -326,12 +326,13 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
         mcp_home: None,
         workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
-        // Left unset so the turn runs on the tier the manifest resolves
-        // (`chat-v1`), which is a *priced* row in openhuman's tier table. The
-        // budget hook reads an estimate off that table when the backend echoes
-        // no charged amount, so pinning a made-up model name here would make the
-        // spend figure depend on a pricing fallback instead of a stated rate.
-        model_override: None,
+        // Keys rework, issue #2306, slice 2d: `HostedProvider` has no decl
+        // and therefore no configured map, so a bare tier name is refused
+        // outright rather than sent. This fixture's own assertions only ever
+        // check that some spend was recorded (`> 0.0`) and the operator's
+        // own declared cap, never a specific priced figure tied to the model
+        // name, so a stub id changes nothing they check.
+        model_override: Some("stub-model".to_string()),
         tasks: Some(ops.clone()),
         artifacts: None,
         skills: None,
