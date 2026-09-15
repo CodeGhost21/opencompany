@@ -201,6 +201,15 @@ pub(super) struct AgentDetailDto {
     /// and should treat it as informational rather than validating it.
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// The provider half of this teammate's own `{provider, model}` pair on a
+    /// `built_in` harness (keys rework, issue #2306, slice 3a) — always
+    /// present alongside `model` when set, absent when the teammate uses the
+    /// company default. Refused outright on an `acp` harness, where `model`
+    /// keeps its ACP-hint meaning instead. Persisted and round-tripped by
+    /// `PATCH`/`GET`; not yet consulted on the turn path — see
+    /// `crate::company::types::Agent::provider`'s doc for why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     /// Whether this teammate is the company's orchestrator — resolved by the
     /// roster rule (tagged tier first, else the first declared agent), not read
     /// off `tier` alone, so an untagged roster's real orchestrator is named.
