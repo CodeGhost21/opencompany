@@ -54,6 +54,7 @@ Rules:
 | The account key (`tinyhumans/key`) clear/disable | **A** | See §2's `surfaces` table below — `"llm"` appears only when a `tinyhumans` provider row exists (D-set/X5) |
 | **Search** provider removal, disable, and the search default | **A** | Corrected from the first draft, which wrongly filed this under C and wrongly guessed search had no default. Search **does** have a default (`search/default`) and **does** get confirm dialogs on removal/disable, on the same `usedBy`/`confirmInUse`/409 contract as everything else here. X14 (§4) extends the same way: disabling or deleting the search default's provider never clears `search/default` — A implements this; kept here so the two never drift. |
 | Console dialogs (LLM, Composio, search) | **C** for LLM/Composio pages, **A** for the search page it owns | A confirm dialog on every destructive action and toggle; `usedBy` rendered in it; a 409 reopens the dialog with fresh `usedBy` |
+| Set-default (`POST …/inference/providers/{slug}/default`) | **B** | **Not a `usedBy` producer and not a 409 case** (round-3a review P2-6) — see §2. Nothing depending on the provider being replaced as default loses anything; the console's own confirm dialog, naming the old and new provider, is the whole guard. |
 
 ## 2. Refusal without confirmation
 
@@ -72,6 +73,19 @@ every dependent it already had, just with a different credential behind it.
 The first draft of this file did not list rotate as guarded, but said it
 imprecisely enough that a reader could infer it was — this line removes that
 reading.
+
+**Set-default (`POST …/inference/providers/{slug}/default`) is never guarded
+either, and it is not a 409 case** (round-3a review P2-6, decided
+2026-09-15). Unlike a delete, disable or key clear, set-default strands
+nothing: the provider being *replaced* as the default keeps existing, keeps
+its key, and keeps serving every agent pair that names it directly — only the
+*unpinned* traffic moves, and moving unpinned traffic to a different provider
+is the one thing this route exists to do. X4 already puts the safeguard on
+the client: the console's confirm dialog names the old and the new provider
+before the request is sent, and that confirmation — not a server-side
+`usedBy`/`confirmInUse`/409 round trip — is the guard. `SetDefault` therefore
+carries no `confirmInUse` field and `provider_used_by` is never called on
+this path.
 
 **Refusal is HTTP 409**, in the repo's existing API error envelope. That
 envelope is `ApiError` (`src/server/error.rs`), built from

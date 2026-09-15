@@ -7,6 +7,12 @@
  * exists in this project (see `test/unit/budget-pause-notice.test.ts`'s
  * header), so this pins the decision `ComposioSection.tsx` renders from
  * rather than the markup around it.
+ *
+ * `@/inference/reuse-banner` (round-3b review, item 6) is the shared module
+ * that now also holds the LLM page's own `showsInferenceReuseBanner`, not
+ * implemented yet — see that file's header. This file stays Composio-only
+ * until that lands; it is not renamed to a shared `reuse-banner.test.ts` for
+ * the same reason (a plainer name would read as covering both).
  */
 
 import { describe, expect, it } from "vitest";
@@ -16,7 +22,7 @@ import {
   reuseDismissKey,
   showsComposioReuseBanner,
   writeDismissed,
-} from "@/composio/reuse-banner";
+} from "@/inference/reuse-banner";
 
 describe("showsComposioReuseBanner", () => {
   const base = {

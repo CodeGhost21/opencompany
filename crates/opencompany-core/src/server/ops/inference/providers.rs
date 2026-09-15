@@ -1293,6 +1293,15 @@ async fn edit_provider(
         ))));
     }
 
+    // Keys rework (#2306), round-3a review P2-2: held from the key-clear
+    // guard's check through every write below, so a concurrent request (a
+    // pin, a delete, another edit) cannot pass its own check against a row
+    // this request is about to change out from under it. Nothing under this
+    // guard makes a network call — every write here is to the secret store —
+    // so it is dropped before `effective_status` rebuilds the response,
+    // never held across a probe.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
+
     // Keys rework (#2306), slice 2c: an edit that **clears** the key
     // (`key: Some("")`) is a guard the same way a disable is — a row with no
     // credential cannot serve the default or an agent pair that names it any
@@ -1430,6 +1439,7 @@ async fn edit_provider(
         }
     }
 
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note: format!("{} updated.", provider.label),
@@ -1488,6 +1498,14 @@ async fn delete_provider(
                 .to_string(),
         )));
     }
+
+    // Keys rework (#2306), round-3a review P2-2: held from the guard's check
+    // through every write below, so a concurrent pin or edit cannot pass its
+    // own check against a row this delete is about to remove out from under
+    // it. Every write in this span is a secret-store write — no network call
+    // — and the guard is dropped before `effective_status` rebuilds the
+    // response.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
 
     // Keys rework (#2306), slice 2c: a delete is a removal in the fullest
     // sense — refused unless confirmed, same as a disable or a key clear.
@@ -1576,6 +1594,7 @@ async fn delete_provider(
             }
         )
     };
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note,
@@ -1609,6 +1628,14 @@ async fn set_enabled(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let provider = require_provider(runtime, &params.slug).await?;
+
+    // Keys rework (#2306), round-3a review P2-2: held from the guard's check
+    // through the switch below, so a concurrent pin or delete cannot pass its
+    // own check against a row this request is about to disable out from
+    // under it. Every write in this span is a secret-store write — no
+    // network call — and the guard is dropped before `effective_status`
+    // rebuilds the response.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
 
     // Keys rework (#2306), slice 2c: a disable is guarded the same way a
     // delete is — the row keeps existing, but it stops being able to serve
@@ -1697,6 +1724,7 @@ async fn set_enabled(
             if parked.len() == 1 { "is" } else { "are" }
         ),
     };
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note,
@@ -1731,6 +1759,15 @@ async fn set_default(
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
     let model = store::check_model_id(body.model.as_deref().unwrap_or("")).map_err(ApiError)?;
+    // Keys rework (#2306), round-3a review P2-2: held from the enabled check
+    // through both writes below, so a concurrent disable or delete of this
+    // same provider cannot land between this handler's check and its write.
+    // Set-default carries no `usedBy` guard of its own (round-3a review P2-6:
+    // the console's own confirmation, naming the old and new provider, is the
+    // guard — see `docs/key-reworks/in-use-guards.md` §1); this lock is only
+    // about not racing the row's own state, and it never holds across a
+    // network call.
+    let _index_guard = crate::company::inference::store::index_lock(runtime.id()).await;
     let provider = require_provider(runtime, &params.slug).await?;
     if !provider.enabled {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
@@ -1782,6 +1819,7 @@ async fn set_default(
         return Err(ApiError(err));
     }
 
+    drop(_index_guard);
     Ok(Json(ProviderMutation {
         status: effective_status(&state, runtime).await?,
         note: format!("New work now goes through {} · {model}.", provider.label),

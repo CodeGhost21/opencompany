@@ -1,19 +1,28 @@
-// The Composio half of the account-key reuse banner (keys rework, issue
+// The account-key reuse banner's shared decision logic (keys rework, issue
 // #2306, slice 4c; docs/key-reworks/phase-4c-reuse-banner.md §3.4). PURE — no
 // React, no fetch — mirroring `@/composio/in-use`'s own reasoning: this
 // project has no component-test harness, so anything worth a test has to be a
 // function a component's state derives from, not markup a render would
-// exercise. `ComposioSection.tsx` calls these; it does not reimplement the
-// decision inline.
+// exercise. `ComposioSection.tsx` and (once wired) `ProvidersTab.tsx` call
+// these; neither reimplements a decision inline.
 //
-// The LLM page gets the analogous `showsInferenceReuseBanner` in its own
-// module (out of scope here — a separate dispatch owns `frontend/src/inference/**`).
-// The two are intentionally not unified into one shared function: the LLM
-// banner's visibility also depends on `defaultChoice`/agent-pair references
-// that have no Composio analogue (Composio has no default/agent-pair concept
-// at all — `docs/key-reworks/in-use-guards.md` §1), so a single shared
-// predicate would need a parameter neither caller could give an honest
-// default for.
+// Moved here from `@/composio/reuse-banner` (round-3b review, item 6): that
+// module's own header argued the LLM half could never share this file because
+// its visibility also depends on `defaultChoice`/agent-pair references
+// Composio has no analogue for. That is still true of `showsInferenceReuseBanner`
+// itself — the two predicates below take different, non-overlapping
+// arguments and neither calls the other — but a shared *file* costs nothing
+// once both live here, and `reuseDismissKey` was already parametrised by
+// `page` to avoid the two halves importing each other. One file, two
+// unrelated functions.
+//
+// `showsInferenceReuseBanner` is not implemented yet: it needs
+// `InferenceStatus.accountKeyAvailable` / `.tinyhumansReferenced`, which land
+// on the host with the `POST …/inference/tinyhumans/key/from-account` route
+// (phase-4c-reuse-banner.md §3.3-3.4) — not yet on `origin/feat/key-reworks-impl`
+// as of this file. Add it here, beside `showsComposioReuseBanner`, once that
+// route and its status fields land; `ProvidersTab.tsx`'s render wiring is the
+// same follow-up.
 
 import type { ComposioMode } from "@/api/composio";
 
@@ -59,17 +68,11 @@ export function showsComposioReuseBanner(a: {
 
 /**
  * The `localStorage` key a "Not now" dismissal is recorded under, namespaced
- * per page and per company so dismissing the Composio banner for one company
- * never hides the (separate, out-of-scope-here) LLM banner or another
- * company's Composio banner.
- *
- * Only `"composio"` is a valid `page` from this module — the LLM half of this
- * key shape belongs to `frontend/src/inference/reuse-banner.ts`, a different
- * dispatch's file. The `page` parameter exists so the two halves agree on the
- * key shape without importing from each other.
+ * per page and per company so dismissing one page's banner never hides the
+ * other page's, or another company's.
  */
 export function reuseDismissKey(
-  page: "composio",
+  page: "inference" | "composio",
   company: string | null,
 ): string {
   return `oc.reuse-account-key.${page}.${company ?? "_"}`;

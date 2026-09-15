@@ -1,25 +1,26 @@
 import { Button } from "@/components/ui/button";
 
 /**
- * "Use the same key for Composio?" — offered when the company's TinyHumans
- * account key exists but the managed Composio slot has nothing of its own
- * (keys rework, issue #2306, slice 4c;
+ * "Use the same key for LLM/Composio?" — offered when the company's
+ * TinyHumans account key exists but a page's own managed slot has nothing of
+ * its own (keys rework, issue #2306, slice 4c;
  * `docs/key-reworks/phase-4c-reuse-banner.md` §4 step 10).
  *
- * Self-contained rather than shared: the LLM page's own banner (a separate,
- * concurrent dispatch's `frontend/src/inference/ReuseAccountKeyBanner.tsx`)
- * needs a model-choice follow-up step this one never does — a Composio copy
- * is a single-slot fill with nothing left to configure — so a shared
- * component would need a variant prop neither caller could give an honest
- * default for. Worth revisiting once both exist side by side: if the two
- * really do converge to a plain "Yes / Not now" question over a caption, a
- * later change can move this shape to `@/components` and have the LLM page's
- * simple case (no `needsModel`) use it too.
+ * Shared by both pages that can offer this (round-3b review, item 6): the LLM
+ * page's copy is a single-slot fill exactly like Composio's, with its own
+ * follow-up model step handled entirely by the caller (a separate `Dialog`
+ * next to this banner, the same shape `AccountKeyDialog`'s step two already
+ * uses) — not by this component, which stays the same plain "Yes / Not now"
+ * question over a caption either way. Originally written Composio-only
+ * (`@/composio/ReuseAccountKeyBanner`, keys-rework slice 1a/4c) on the
+ * reasoning that the LLM variant would need a shape neither caller could give
+ * an honest default for; the plan doc settled on giving the model step to the
+ * caller instead, which is what makes one component enough.
  *
  * Deliberately dumb: no fetch, no dismissal state, no visibility decision.
- * `ComposioSection.tsx` decides whether to render this at all
- * (`@/composio/reuse-banner`'s `showsComposioReuseBanner`) and owns every
- * callback's effect.
+ * `ComposioSection.tsx` and (once wired) `ProvidersTab.tsx` decide whether to
+ * render this at all (`@/inference/reuse-banner`'s `showsComposioReuseBanner`
+ * / `showsInferenceReuseBanner`) and own every callback's effect.
  */
 export function ReuseAccountKeyBanner({
   testId,
