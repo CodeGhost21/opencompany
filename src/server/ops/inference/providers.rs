@@ -346,13 +346,20 @@ struct ProviderMutation {
 /// (keys rework, issue #2306; `docs/key-reworks/in-use-guards.md` §1/§6):
 /// `default: true` when the company default names this slug — bare
 /// (`DefaultChoice::ProviderOnly`) or full — and `agents` from every agent
-/// pair naming it. `agents` is unconditionally empty until slice 3a adds
-/// `Agent.provider`: with no such field anywhere in a record, no agent can
-/// name a provider yet, so empty is the correct answer, not a stub.
+/// whose own `{provider, model}` pair (slice 3a) names it, counted on the
+/// provider slug alone per §6 ("no exception for a blank model") — an agent
+/// naming this provider with no model yet still depends on it, and the
+/// missing model is the manifest's own problem to refuse, not a reason for
+/// this guard to look away.
+///
 /// `surfaces` is never populated here — unlike the account key or a Composio
 /// credential, a provider row already names exactly what depends on it via
 /// `default`/`agents`, so tagging it with the redundant `"llm"` surface
 /// would say the same fact twice in two shapes.
+///
+/// A record load failure degrades to "no agents named" rather than refusing
+/// the whole guard: the `default` half still answers, and a company whose
+/// record cannot be read has bigger problems than an incomplete advisory.
 ///
 /// `pub(super)`: also called from `provider_list` in the parent module
 /// (`ops/inference.rs`) to fill `ProviderDto.usedBy` on every status read,
@@ -367,12 +374,58 @@ pub(super) async fn provider_used_by(
         .map_err(ApiError)?
         .provider()
         .is_some_and(|p| p == slug);
+    let agents = match runtime.store().load(runtime.id()).await {
+        Ok(Some(record)) => agents_pinned_to(&record, slug),
+        Ok(None) | Err(_) => Vec::new(),
+    };
     let used_by = crate::error::UsedBy {
         default,
-        agents: Vec::new(),
+        agents,
         surfaces: Vec::new(),
     };
     Ok((!used_by.is_empty()).then_some(used_by))
+}
+
+/// Every effective roster agent whose own pair names `slug` (keys rework,
+/// issue #2306, slice 3a) — manifest agents merged with their overrides
+/// (retired ones already excluded by `effective_agents`), plus every overlay
+/// teammate. An `acp`-bound agent never contributes: validation refuses a
+/// pair there, but an unvalidated manifest must not be trusted to have run
+/// it, the same reasoning `runtime::builder::agent_pairs` gives for its own
+/// identical skip.
+fn agents_pinned_to(
+    record: &crate::ports::types::CompanyRecord,
+    slug: &str,
+) -> Vec<crate::error::UsedByAgent> {
+    use crate::runtime::builder::agent_harness_kind;
+
+    let mut agents = Vec::new();
+    for agent in record.effective_agents() {
+        if agent_harness_kind(&record.manifest, agent.harness.as_deref()).as_deref() == Some("acp")
+        {
+            continue;
+        }
+        if agent.provider.as_deref() == Some(slug) {
+            agents.push(crate::error::UsedByAgent {
+                id: agent.id.clone(),
+                name: agent.name.clone().unwrap_or(agent.role.clone()),
+            });
+        }
+    }
+    for overlay in &record.overlay_agents {
+        if agent_harness_kind(&record.manifest, overlay.harness.as_deref()).as_deref()
+            == Some("acp")
+        {
+            continue;
+        }
+        if overlay.provider.as_deref() == Some(slug) {
+            agents.push(crate::error::UsedByAgent {
+                id: overlay.id.clone(),
+                name: overlay.name.clone(),
+            });
+        }
+    }
+    agents
 }
 
 /// §2's sentence, naming every dependent in one line:
