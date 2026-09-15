@@ -635,10 +635,10 @@ fn digest_hex(bytes: &[u8]) -> String {
 
 /// Current wall-clock time as an RFC 3339 / ISO-8601 UTC instant.
 ///
-/// No `chrono`/`time` dependency in this crate; reuses the same
-/// dependency-free formatter the console's GraphQL layer already carries.
+/// No `chrono`/`time` dependency in this crate; reuses the crate's one
+/// dependency-free formatter, `ports::iso8601`.
 fn now_rfc3339() -> String {
-    crate::server::graphql::iso8601(crate::ports::now_millis())
+    crate::ports::iso8601(crate::ports::now_millis())
 }
 
 /// A minimal, dependency-free lowercase-hex encoder.

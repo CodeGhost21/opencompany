@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use async_graphql::{Enum, ID, SimpleObject};
 
-use super::iso8601;
 use super::pagination::Page;
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::facts::{FactKind, FactRecord};
+use crate::ports::iso8601;
 
 /// The kind of a remembered fact, in the console's memory taxonomy.
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
