@@ -3645,6 +3645,13 @@ pub struct AgentOverride {
     /// and a distinct `None` here would mean "never edited" instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The provider half of this teammate's `{provider, model}` pair on a
+    /// `built_in` harness (keys rework, issue #2306, slice 3a) — a company
+    /// provider list slug. Cleared the same way as [`Self::model`], and always
+    /// set together with it: [`edit_agent`](crate::server::ops::team_agent)
+    /// refuses one without the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// The harness this teammate is bound to, as an overlay on the blueprint.
     ///
     /// Cleared the same way as [`Self::model`].
