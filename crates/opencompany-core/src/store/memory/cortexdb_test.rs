@@ -721,7 +721,7 @@ async fn recall_keeps_the_highest_scored_hit_under_a_tight_limit_not_the_newest(
         )
         .await
         .expect("store succeeds");
-    // `now_rfc3339` (src/server/graphql/mod.rs::iso8601) has one-second
+    // `now_rfc3339` (`crate::ports::iso8601`) has one-second
     // resolution, so the two writes need to straddle a real second boundary
     // for their `observed_at` to differ — otherwise the initial recency sort
     // is a no-op tie and this test would pass on insertion order alone,

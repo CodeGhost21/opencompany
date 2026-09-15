@@ -61,5 +61,6 @@ pub(crate) fn skip_reason_str(reason: company_key::SkipReason) -> &'static str {
         SkipReason::InferenceNotWritten => "inferenceNotWritten",
         SkipReason::InferenceRejected => "inferenceRejected",
         SkipReason::KeyCleared => "keyCleared",
+        SkipReason::ProviderDisabled => "providerDisabled",
     }
 }
