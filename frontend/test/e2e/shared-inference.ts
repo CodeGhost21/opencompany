@@ -1,8 +1,8 @@
 import type { APIRequestContext } from "@playwright/test";
 
 /**
- * Puts the shared E2E company's inference back into a state every other spec
- * can run against, after a spec that connected a provider to it.
+ * Disconnects the providers a spec connected to the shared E2E company, after
+ * that spec — including after one that timed out.
  *
  * ## Why a spec that adds a provider owes the rest of the run this
  *
@@ -14,32 +14,32 @@ import type { APIRequestContext } from "@playwright/test";
  * make that far more than a stray row in a list:
  *
  * - **D-first-default (X1):** the first provider a company ever connects
- *   becomes its default automatically, with no opt-out. Every turn whose
- *   workload has no explicit route resolves through the default.
+ *   becomes its default automatically, with no opt-out. `resolve_for_turn`
+ *   resolves every turn through a full default *before* it looks at routes.
  * - **D-never-clear-default (X14):** deleting or disabling that provider never
  *   clears `inference/default`. A turn then fails closed — "The company
- *   default uses …, which is removed" — and there is no route that unsets the
- *   default; the only supported way back is to pick another provider, or to
- *   route the workloads explicitly.
+ *   default uses …, which is removed" — and no route unsets the default or
+ *   points it back at the platform brain, which is a credential chain rather
+ *   than a row (`DELETE …/inference`, the console's "Reset to default", clears
+ *   only the legacy single-slot config and its key).
  *
  * So a spec that connects a row pointing at the discard port and leaves it
- * turns every later agent turn in the run into `inference request failed …
- * 127.0.0.1:9/v1/chat/completions`, and a spec that deletes it afterwards
- * turns them into the fail-closed sentence instead. Thirty-odd unrelated specs
- * went red that way on the live-brain lane.
+ * sends every later agent turn in the run to `127.0.0.1:9/v1/chat/completions`
+ * (thirty-odd unrelated specs went red that way on the live-brain lane), and
+ * with the row deleted every later turn fails closed on the stale default
+ * instead. The second is the honest failure — it names the cause — but it is
+ * still a failure: the shared company cannot be handed back to the platform
+ * brain through the API as it stands. Until it can (a reset that also clears
+ * the default, or a lane of their own for the specs that connect providers),
+ * a spec that connects a provider to the shared company breaks every turn
+ * after it, and this helper only makes that failure say so.
  *
  * ## What this does
  *
- * 1. Deletes each slug in `slugs`, confirming the in-use guard (a delete of
- *    the default, or of a pinned provider, is refused with `409 in_use`
- *    otherwise). A slug already gone answers 404 and is ignored.
- * 2. If the company now has a default at all — the pristine harness company
- *    has none, so any default was written by a spec, and after step 1 it
- *    names a provider that no longer exists — routes every workload through
- *    `managed` explicitly. That is the platform-injected brain, which on this
- *    run is `mock-brain.mjs` / `live-brain-proxy.mjs`, and it is exactly what
- *    the console's Managed mode writes; an explicit route outranks the default
- *    on the turn path (`resolve_effective_for_tier`), so turns think again.
+ * Deletes each slug in `slugs`, confirming the in-use guard: a delete of the
+ * default, or of a pinned provider, is refused with `409 in_use` otherwise —
+ * which is why a plain `DELETE` in a `finally` never cleared these rows even
+ * when it ran. A slug already gone answers 404 and is ignored.
  *
  * Call it from a `test.afterEach` hook, **not** from a `finally` inside the
  * test: when a test hits its timeout Playwright abandons the test function
@@ -47,30 +47,10 @@ import type { APIRequestContext } from "@playwright/test";
  * happened in the first place. A hook runs after a timed-out test, with a
  * request context that still works.
  */
-export async function restoreSharedInference(request: APIRequestContext, slugs: string[]) {
+export async function disconnectSharedProviders(request: APIRequestContext, slugs: string[]) {
   for (const slug of slugs) {
     await request
       .delete(`/api/v1/company/inference/providers/${slug}?confirmInUse=true`)
       .catch(() => {});
   }
-
-  const status = await request.get("/api/v1/company/inference").catch(() => null);
-  if (!status || !status.ok()) return;
-  const body = (await status.json().catch(() => null)) as {
-    defaultChoice?: { provider?: string } | null;
-  } | null;
-  if (!body?.defaultChoice?.provider) return;
-
-  await request
-    .put("/api/v1/company/inference/routes", {
-      data: {
-        routes: {
-          "chat-v1": "managed",
-          "reasoning-v1": "managed",
-          "agentic-v1": "managed",
-          "vision-v1": "managed",
-        },
-      },
-    })
-    .catch(() => {});
 }
