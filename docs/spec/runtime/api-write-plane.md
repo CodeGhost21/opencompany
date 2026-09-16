@@ -482,8 +482,8 @@ window on the legacy path alone, and closing it there would need a conditional
 write that `SecretStore` cannot express today.
 
 `…/credential` is the company's **one** TinyHumans key, presented by every
-surface wired to it — see [`credentials.md`](credentials.md) for the resolution
-order, the rotation guarantee, and where a key grant's return leg lands.
+surface wired to it — [`credentials.md`](credentials.md) has the resolution
+order, the rotation guarantee, and where a grant's return leg lands.
 
 ### Retired native OAuth callback
 
