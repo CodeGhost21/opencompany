@@ -1195,5 +1195,8 @@ fn data_dir_from(
 }
 
 #[cfg(test)]
-#[path = "config_tests.rs"]
-mod tests;
+#[path = "config_resolution_tests.rs"]
+mod tests_resolution;
+#[cfg(test)]
+#[path = "config_serialization_tests.rs"]
+mod tests_serialization;
