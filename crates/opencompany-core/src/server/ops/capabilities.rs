@@ -503,6 +503,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
     };
     // Media + composio are opt-in per tool grant (explicit namespace, never `*`)
     // and live on the manifest regardless of whether a `[plan]` is configured.
+    let search_credential_source = search_credential_source(runtime).await;
     let flags = OptInFlags {
         cognition,
         media_granted: crate::company::grants_media_explicit(&record.manifest.tools.allow),
@@ -539,8 +540,9 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         // ceiling, not a token budget — so both travel with the plan-independent
         // flags.
         search_granted: crate::company::grants_search_explicit(&record.manifest.tools.allow),
-        search_credential_source: search_credential_source(runtime).await,
-        search_credential_configured: None,
+        search_credential_source,
+        search_credential_configured: search_credential_source
+            .map(|source| source != CredentialSource::None),
         search_daily_call_cap: record
             .manifest
             .tools
