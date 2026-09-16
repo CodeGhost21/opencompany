@@ -56,7 +56,7 @@ pub(crate) const NUDGE_MARKER: &str = "published none of them";
 
 /// What the scripted model does on each successive call.
 #[derive(Clone, Debug)]
-enum Turn {
+pub(crate) enum Turn {
     /// Emit a tool call with these literal arguments.
     Call { tool: &'static str, args: Value },
     /// Finish the turn with plain assistant text.
@@ -72,12 +72,12 @@ enum Turn {
 }
 
 /// A scripted OpenAI-compatible `/chat/completions` endpoint.
-struct Script {
-    turns: Mutex<Vec<Turn>>,
+pub(crate) struct Script {
+    pub(crate) turns: Mutex<Vec<Turn>>,
     /// Every request body the harness sent, for post-hoc assertions.
-    seen: Mutex<Vec<Value>>,
+    pub(crate) seen: Mutex<Vec<Value>>,
     /// Set once [`Turn::Boom`] is reached; every later request fails too.
-    poisoned: std::sync::atomic::AtomicBool,
+    pub(crate) poisoned: std::sync::atomic::AtomicBool,
 }
 
 /// Serve the script on loopback and return its base URL plus the shared handle.
