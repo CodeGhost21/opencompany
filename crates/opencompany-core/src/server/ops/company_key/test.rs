@@ -947,9 +947,16 @@ async fn put_credential_model_completes_the_row_from_the_stored_key() {
     assert_eq!(resp["needsModel"], false);
     assert!(!raw.contains(KEY), "response leaked the key: {raw}");
 
-    let (_, inference, raw) = send(&state, "fanmodel", "GET", "/api/v1/company/inference", None).await;
-    assert_eq!(inference["defaultChoice"]["provider"], "tinyhumans", "{raw}");
-    assert_eq!(inference["defaultChoice"]["model"], "acme/test-model", "{raw}");
+    let (_, inference, raw) =
+        send(&state, "fanmodel", "GET", "/api/v1/company/inference", None).await;
+    assert_eq!(
+        inference["defaultChoice"]["provider"], "tinyhumans",
+        "{raw}"
+    );
+    assert_eq!(
+        inference["defaultChoice"]["model"], "acme/test-model",
+        "{raw}"
+    );
 }
 
 /// A member may not finish the model any more than set the key.
@@ -957,7 +964,12 @@ async fn put_credential_model_completes_the_row_from_the_stored_key() {
 async fn a_member_cannot_finish_the_model() {
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), "fanmodelm", GRANTED).await;
-    let cookie = crate::server::test_support::member_cookie(&state, "fanmodelm").await;
+    let cookie = crate::server::test_support::seed_session(
+        &state,
+        "fanmodelm",
+        crate::ports::UserRole::Member,
+    )
+    .await;
     let (status, _, _) = send_as(
         &state,
         "PUT",
