@@ -4,12 +4,7 @@ use super::*;
 use crate::ports::workspace::WorkspaceOrigin;
 use crate::store::FsOps;
 
-async fn note(
-    ws: &Arc<dyn WorkspaceStore>,
-    company: &CompanyId,
-    name: &str,
-    body: &str,
-) -> String {
+async fn note(ws: &Arc<dyn WorkspaceStore>, company: &CompanyId, name: &str, body: &str) -> String {
     let id = crate::ports::generate_id();
     ws.create(
         company,

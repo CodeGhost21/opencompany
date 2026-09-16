@@ -1,7 +1,7 @@
 //! workflow_create: happy-path creation, guardrail validation failures, and the no-source-directory (hosted) case.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 // --- happy path ----------------------------------------------------------
 
@@ -207,10 +207,9 @@ async fn unknown_roster_teammate_is_invalid() {
     let mut draft = valid_draft("wf", "WF");
     draft.nodes[1].agent = Some("ghost".to_string());
 
-    let err =
-        create_company_workflow(&company, Some(dir.path()), &store, None, draft, None, None)
-            .await
-            .expect_err("unknown teammate");
+    let err = create_company_workflow(&company, Some(dir.path()), &store, None, draft, None, None)
+        .await
+        .expect_err("unknown teammate");
     assert!(
         matches!(err, OpenCompanyError::InvalidRequest(_)),
         "{err:?}"
@@ -229,10 +228,9 @@ async fn missing_agent_on_agent_node_is_invalid() {
     let mut draft = valid_draft("wf", "WF");
     draft.nodes[1].agent = None;
 
-    let err =
-        create_company_workflow(&company, Some(dir.path()), &store, None, draft, None, None)
-            .await
-            .expect_err("agent node with no teammate");
+    let err = create_company_workflow(&company, Some(dir.path()), &store, None, draft, None, None)
+        .await
+        .expect_err("agent node with no teammate");
     assert!(
         matches!(err, OpenCompanyError::InvalidRequest(_)),
         "{err:?}"
@@ -251,19 +249,17 @@ async fn zero_or_two_triggers_is_invalid() {
     // Zero triggers.
     let mut zero = valid_draft("z", "Z");
     zero.nodes[0].kind = "output".to_string();
-    let err =
-        create_company_workflow(&company, Some(dir.path()), &store, None, zero, None, None)
-            .await
-            .expect_err("no trigger");
+    let err = create_company_workflow(&company, Some(dir.path()), &store, None, zero, None, None)
+        .await
+        .expect_err("no trigger");
     assert!(err.to_string().contains("exactly one `trigger`"), "{err}");
 
     // Two triggers.
     let mut two = valid_draft("t", "T");
     two.nodes[2].kind = "trigger".to_string();
-    let err =
-        create_company_workflow(&company, Some(dir.path()), &store, None, two, None, None)
-            .await
-            .expect_err("two triggers");
+    let err = create_company_workflow(&company, Some(dir.path()), &store, None, two, None, None)
+        .await
+        .expect_err("two triggers");
     assert!(err.to_string().contains("exactly one `trigger`"), "{err}");
 }
 
@@ -320,10 +316,9 @@ async fn oversized_node_count_is_invalid() {
         });
     }
     assert!(draft.nodes.len() > MAX_WORKFLOW_NODES);
-    let err =
-        create_company_workflow(&company, Some(dir.path()), &store, None, draft, None, None)
-            .await
-            .expect_err("too many nodes");
+    let err = create_company_workflow(&company, Some(dir.path()), &store, None, draft, None, None)
+        .await
+        .expect_err("too many nodes");
     assert!(err.to_string().contains("at most"), "{err}");
 }
 
@@ -338,10 +333,9 @@ async fn oversized_toml_bytes_is_invalid() {
     // Stay within the node cap but blow the byte cap with a huge summary.
     let mut draft = valid_draft("fat", "Fat");
     draft.nodes[0].summary = Some("x".repeat(MAX_WORKFLOW_TOML_BYTES + 10));
-    let err =
-        create_company_workflow(&company, Some(dir.path()), &store, None, draft, None, None)
-            .await
-            .expect_err("too many bytes");
+    let err = create_company_workflow(&company, Some(dir.path()), &store, None, draft, None, None)
+        .await
+        .expect_err("too many bytes");
     assert!(err.to_string().contains("byte"), "{err}");
 }
 
@@ -677,4 +671,3 @@ async fn arming_a_scheduled_graph_with_a_stage_still_works() {
     .await
     .expect("a graph that can actually run may be armed");
 }
-

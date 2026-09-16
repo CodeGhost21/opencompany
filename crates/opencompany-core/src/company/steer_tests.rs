@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn entry(key: &str, kind: InflightKind) -> InflightEntry {

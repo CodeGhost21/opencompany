@@ -472,8 +472,7 @@ async fn releasing_the_stop_redelivers_a_continuation_the_stop_itself_refused() 
         .tempdir()
         .expect("tempdir");
     let gate = Arc::new(
-        crate::policy::ManifestApprovalGate::new(manifest().policy.clone())
-            .with_ttl_millis(0),
+        crate::policy::ManifestApprovalGate::new(manifest().policy.clone()).with_ttl_millis(0),
     );
     let brain = Arc::new(ExplicitRequestBrain::default());
     let rt = Arc::new(

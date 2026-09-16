@@ -424,8 +424,8 @@ fn postcondition_field_dotted_into_text_or_agent_ref_is_rejected() {
             to = "worker"
         "#
         );
-        let err = parse_workflow(&src)
-            .expect_err(&format!("field `{field}` dots into a scalar root"));
+        let err =
+            parse_workflow(&src).expect_err(&format!("field `{field}` dots into a scalar root"));
         assert!(
             err.to_string().contains("always a plain string"),
             "field `{field}`: {err}"
@@ -742,4 +742,3 @@ fn route_with_matching_error_edge_is_valid() {
     "#;
     assert!(parse_workflow(src).is_ok());
 }
-

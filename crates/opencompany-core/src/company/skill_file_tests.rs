@@ -20,14 +20,14 @@ fn parses_both_shipped_repo_skills() {
     assert!(web.body.contains("# Web Research"));
     assert!(web.body.contains("## When to use"));
 
-    let weekly =
-        parse_skill_md("weekly-report", WEEKLY_REPORT).expect("weekly-report is valid");
+    let weekly = parse_skill_md("weekly-report", WEEKLY_REPORT).expect("weekly-report is valid");
     assert_eq!(weekly.name, "Weekly Report");
 }
 
 #[test]
 fn reads_optional_category_and_tolerates_unknown_keys() {
-    let src = "---\nname: Demo\ndescription: A demo skill\ncategory: research\nowner: eve\n---\n# Demo\n";
+    let src =
+        "---\nname: Demo\ndescription: A demo skill\ncategory: research\nowner: eve\n---\n# Demo\n";
     let doc = parse_skill_md("demo", src).expect("valid");
     assert_eq!(doc.category.as_deref(), Some("research"));
     assert_eq!(doc.body, "# Demo\n");

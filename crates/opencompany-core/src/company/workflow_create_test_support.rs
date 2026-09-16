@@ -5,8 +5,7 @@ use std::sync::Mutex as StdMutex;
 
 use crate::company::{CompanyManifest, RawEdge, RawNode, load_workflow_union};
 use crate::ports::types::{
-    CompanyRecord, CompanySummary, EventSeq, LedgerEntry, OverlayDesk, ResponderMode,
-    StoredEvent,
+    CompanyRecord, CompanySummary, EventSeq, LedgerEntry, OverlayDesk, ResponderMode, StoredEvent,
 };
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};

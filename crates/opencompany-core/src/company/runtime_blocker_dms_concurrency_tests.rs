@@ -55,7 +55,6 @@ fn assignee(id: &str) -> BlockerSenderSignals {
 /// no payload beyond the one-line title.
 #[tokio::test]
 
-
 /// Manually parks a blocker with an arbitrary `at_millis` (and
 /// therefore an arbitrary deadline), bypassing `park_blocker`'s
 /// always-now stamp — the same technique `seed_parked` uses elsewhere

@@ -222,4 +222,3 @@ fn the_fallback_is_a_whole_curated_team_and_says_so() {
 // ---------------------------------------------------------------------
 // Synthesising a company from the answers
 // ---------------------------------------------------------------------
-

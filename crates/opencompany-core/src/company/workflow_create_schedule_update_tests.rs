@@ -1,7 +1,7 @@
 //! workflow_create: undeliverable-schedule refusal (issue #1046) and issue #259's update path.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 // --- Undeliverable-schedule refusal (issue #1046) ------------------------
 
@@ -699,4 +699,3 @@ async fn an_edit_preserves_overlay_order() {
         .collect();
     assert_eq!(ids, vec!["a", "b", "c"], "an edit must not reorder");
 }
-

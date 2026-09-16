@@ -1,7 +1,7 @@
 //! workflow_create: issue #276 arming, disarming, and the operator switch.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 // --- issue #276: arming, disarming, and the switch -----------------------
 
@@ -560,4 +560,3 @@ async fn a_seed_defined_workflow_can_be_paused_even_though_it_cannot_be_edited()
         "pausing must not materialize an overlay body for a seed graph"
     );
 }
-

@@ -350,10 +350,9 @@ fn ledger_access_defaults_to_unrestricted_record() {
 /// stating an access level does not silently hand out write access.
 #[test]
 fn a_ledger_grant_with_no_access_key_defaults_to_read() {
-    let agent: Agent = toml::from_str(
-        "id = \"critic\"\nrole = \"Critic\"\nledgers = [{ name = \"tasks\" }]\n",
-    )
-    .unwrap();
+    let agent: Agent =
+        toml::from_str("id = \"critic\"\nrole = \"Critic\"\nledgers = [{ name = \"tasks\" }]\n")
+            .unwrap();
     assert_eq!(agent.ledger_access("tasks"), Some(LedgerAccess::Read));
 }
 

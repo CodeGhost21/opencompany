@@ -21,8 +21,7 @@ fn only_the_two_prose_fields_are_draftable() {
 #[test]
 fn a_long_mandate_is_clamped_to_the_card() {
     let long = "x ".repeat(MAX_DESCRIPTION);
-    let draft =
-        ProfileDraft::from_answer(ProfileField::Description, "here you go", Some(&long));
+    let draft = ProfileDraft::from_answer(ProfileField::Description, "here you go", Some(&long));
     let text = draft.text().expect("a long answer still drafts");
     assert!(
         text.chars().count() <= MAX_DESCRIPTION + 1,
@@ -539,8 +538,7 @@ fn a_role_that_is_only_the_brief_is_refused() {
     // No brief to compare against is not a refusal — the rule needs an
     // input, and a caller without one still gets every other check.
     assert!(
-        TeammateDesign::from_parts("Handles payroll", "Owns payroll.", "Be terse.", "")
-            .is_some(),
+        TeammateDesign::from_parts("Handles payroll", "Owns payroll.", "Be terse.", "").is_some(),
         "an empty brief cannot make a role a duplicate of anything"
     );
 }

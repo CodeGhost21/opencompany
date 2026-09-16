@@ -1,17 +1,12 @@
 //! workflow_create: output destinations (issue #981) and issue #813's required config.args.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 // --- output destinations (issue #981) ------------------------------------
 
 /// [`valid_draft`] with the `output` node routed to `kind` / `target`.
-fn draft_with_destination(
-    id: &str,
-    name: &str,
-    kind: &str,
-    target: Option<&str>,
-) -> RawWorkflow {
+fn draft_with_destination(id: &str, name: &str, kind: &str, target: Option<&str>) -> RawWorkflow {
     let mut draft = valid_draft(id, name);
     let output = draft
         .nodes
@@ -610,4 +605,3 @@ async fn tool_call_with_a_blank_required_arg_is_invalid() {
         "both blank args are named: {msg}"
     );
 }
-

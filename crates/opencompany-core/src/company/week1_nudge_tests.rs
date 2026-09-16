@@ -87,15 +87,9 @@ async fn own_attributed_create_inside_the_window_counts() {
     journal_created(&events, &id, signup, Some("user-1")).await;
 
     assert!(
-        user_saved_workflow_in_week1(
-            &id,
-            &events,
-            "user-1",
-            signup,
-            signup + SEVEN_DAYS_MILLIS
-        )
-        .await
-        .unwrap(),
+        user_saved_workflow_in_week1(&id, &events, "user-1", signup, signup + SEVEN_DAYS_MILLIS)
+            .await
+            .unwrap(),
         "the user's own attributed create must count"
     );
 }
@@ -111,15 +105,9 @@ async fn a_teammates_create_does_not_count() {
     journal_created(&events, &id, signup, Some("teammate")).await;
 
     assert!(
-        !user_saved_workflow_in_week1(
-            &id,
-            &events,
-            "user-1",
-            signup,
-            signup + SEVEN_DAYS_MILLIS
-        )
-        .await
-        .unwrap(),
+        !user_saved_workflow_in_week1(&id, &events, "user-1", signup, signup + SEVEN_DAYS_MILLIS)
+            .await
+            .unwrap(),
         "a teammate's create must not activate a different user"
     );
 }
@@ -135,15 +123,9 @@ async fn an_unattributed_create_does_not_count() {
     journal_created(&events, &id, signup, None).await;
 
     assert!(
-        !user_saved_workflow_in_week1(
-            &id,
-            &events,
-            "user-1",
-            signup,
-            signup + SEVEN_DAYS_MILLIS
-        )
-        .await
-        .unwrap(),
+        !user_saved_workflow_in_week1(&id, &events, "user-1", signup, signup + SEVEN_DAYS_MILLIS)
+            .await
+            .unwrap(),
     );
 }
 

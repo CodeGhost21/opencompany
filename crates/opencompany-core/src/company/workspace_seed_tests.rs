@@ -2,7 +2,8 @@ use super::*;
 
 #[test]
 fn extracts_plain_and_aliased_wikilinks_in_order() {
-    let md = "See [[Spring launch]] and [[Brand voice|how we sound]], plus [[ Campaign checklist ]].";
+    let md =
+        "See [[Spring launch]] and [[Brand voice|how we sound]], plus [[ Campaign checklist ]].";
     let links = extract_wikilinks(md);
     assert_eq!(
         links,

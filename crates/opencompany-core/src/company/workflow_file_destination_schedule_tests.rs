@@ -41,8 +41,8 @@ fn output_destinations_parse_for_every_kind() {
     assert_eq!(dest.kind, "owner");
     assert_eq!(dest.target, None);
 
-    let email = parse_workflow(&with_destination("email", Some("ada@example.com")))
-        .expect("email parses");
+    let email =
+        parse_workflow(&with_destination("email", Some("ada@example.com"))).expect("email parses");
     let dest = email.nodes[1].destination.as_ref().expect("present");
     assert_eq!(dest.kind, "email");
     assert_eq!(dest.target.as_deref(), Some("ada@example.com"));
@@ -722,4 +722,3 @@ fn legacy_graph_without_schedule_re_renders_byte_identically() {
     };
     assert_eq!(render_workflow(&round_tripped).expect("re-renders"), first);
 }
-

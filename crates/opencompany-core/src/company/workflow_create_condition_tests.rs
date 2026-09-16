@@ -1,7 +1,7 @@
 //! workflow_create: issue #661/#682 required config and condition labels on the draft path.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 // --- issue #661/#682: required config + condition labels on the draft path
 
@@ -222,4 +222,3 @@ async fn draft_http_request_missing_method_and_url_reports_both() {
     assert!(message.contains("config.method"), "{message}");
     assert!(message.contains("config.url"), "{message}");
 }
-

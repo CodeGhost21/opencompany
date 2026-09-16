@@ -122,10 +122,7 @@ async fn pending_approvals_names_the_stopped_steps_kind() {
         .collect();
     assert_eq!(
         kinds,
-        std::collections::HashSet::from([
-            Some("task".to_string()),
-            Some("node".to_string())
-        ]),
+        std::collections::HashSet::from([Some("task".to_string()), Some("node".to_string())]),
         "a task-step and a node-step blocker must project distinct step kinds, not the \
          same value: {pending:?}"
     );

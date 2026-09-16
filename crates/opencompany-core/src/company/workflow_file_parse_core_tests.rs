@@ -464,4 +464,3 @@ fn unknown_top_level_keys_are_tolerated() {
     "#;
     assert!(parse_workflow(src).is_ok());
 }
-

@@ -1,7 +1,7 @@
 //! workflow_create: issue #259's delete path and the version token.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 // --- #259: delete ------------------------------------------------------
 
@@ -527,4 +527,3 @@ fn the_version_token_is_stable_and_body_derived() {
         "{a}"
     );
 }
-

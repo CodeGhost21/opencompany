@@ -5,8 +5,8 @@ use crate::company::runtime::CompanyRuntime;
 use crate::company::task_intent::BlockerReplyIntent;
 use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
 use crate::ports::tasks::{
-    COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable,
-    TaskRecord, TaskTitle,
+    COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord,
+    TaskTitle,
 };
 use crate::ports::types::CompanyId;
 use std::path::Path;
@@ -183,7 +183,6 @@ async fn dm_replies(
         })
         .collect()
 }
-
 
 async fn a_resume_note_threads_off_the_question_it_answers() {
     use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
@@ -503,9 +502,7 @@ async fn releasing_the_stop_redrives_a_blocker_answer_the_stop_itself_refused() 
         }
     })
     .await
-    .unwrap_or_else(|_| {
-        panic!("releasing the stop must redrive the banked answer, not strand it")
-    });
+    .unwrap_or_else(|_| panic!("releasing the stop must redrive the banked answer, not strand it"));
 
     assert_eq!(
         stored(&runtime, "t-1").await.column,
@@ -618,10 +615,9 @@ async fn a_resume_waits_for_the_board_write_lock() {
             .await
     });
 
-    let raced_ahead =
-        tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
-            .await
-            .is_ok();
+    let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+        .await
+        .is_ok();
     assert!(
         !raced_ahead,
         "a resume moved the card while task_writes was held elsewhere — its \
@@ -677,10 +673,9 @@ async fn a_resume_leaves_a_card_an_operator_moved_while_it_waited() {
     // on the lock when the operator's edit lands. Without that it would
     // pass trivially — the resume would have finished before the move,
     // and the final column would be the operator's either way.
-    let raced_ahead =
-        tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
-            .await
-            .is_ok();
+    let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
+        .await
+        .is_ok();
     assert!(
         !raced_ahead,
         "the resume finished before the operator's edit, so this test would prove \

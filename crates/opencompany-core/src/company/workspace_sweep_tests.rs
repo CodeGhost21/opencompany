@@ -438,8 +438,7 @@ fn a_folder_holding_only_an_unaddressable_child_is_not_a_candidate() {
 
     // What a path-shaped emptiness check would have measured: the rendered
     // paths beneath `agents/ceo`. It sees nothing — that is the bug.
-    let by_id: HashMap<&str, &WorkspaceNode> =
-        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let by_id: HashMap<&str, &WorkspaceNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let beneath = nodes
         .iter()
         .filter(|node| {

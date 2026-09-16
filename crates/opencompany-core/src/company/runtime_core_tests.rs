@@ -68,10 +68,7 @@ impl crate::ports::journal::JournalStore for RefusingJournalStore {
         self.inner.read_journal(id).await
     }
 
-    async fn journal_imported(
-        &self,
-        id: &crate::ports::types::CompanyId,
-    ) -> crate::Result<bool> {
+    async fn journal_imported(&self, id: &crate::ports::types::CompanyId) -> crate::Result<bool> {
         self.inner.journal_imported(id).await
     }
 
@@ -124,10 +121,7 @@ impl crate::ports::journal::JournalStore for RacingJournalStore {
         self.inner.read_journal(id).await
     }
 
-    async fn journal_imported(
-        &self,
-        id: &crate::ports::types::CompanyId,
-    ) -> crate::Result<bool> {
+    async fn journal_imported(&self, id: &crate::ports::types::CompanyId) -> crate::Result<bool> {
         self.inner.journal_imported(id).await
     }
 
@@ -530,10 +524,9 @@ async fn planning_first_clears_a_stale_bounce_chip_same_as_a_redispatch() {
     use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO, TaskRecord};
 
     let home = tempfile::tempdir().expect("tempdir");
-    let manifest: crate::company::CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
-    )
-    .expect("manifest");
+    let manifest: crate::company::CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n")
+            .expect("manifest");
     let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
         .with_id(crate::ports::types::CompanyId::new("acme"))
         .build()
@@ -609,10 +602,9 @@ async fn a_direct_move_to_done_clears_a_stale_bounce_chip() {
     use crate::ports::tasks::{COLUMN_DONE, COLUMN_TODO, TaskRecord};
 
     let home = tempfile::tempdir().expect("tempdir");
-    let manifest: crate::company::CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n",
-    )
-    .expect("manifest");
+    let manifest: crate::company::CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n")
+            .expect("manifest");
     let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
         .with_id(crate::ports::types::CompanyId::new("acme"))
         .build()
@@ -668,4 +660,3 @@ async fn a_direct_move_to_done_clears_a_stale_bounce_chip() {
          if the card ever comes back to To-do"
     );
 }
-

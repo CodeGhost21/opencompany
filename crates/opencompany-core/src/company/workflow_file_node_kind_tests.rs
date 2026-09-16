@@ -690,4 +690,3 @@ fn legacy_files_without_new_fields_parse_unchanged() {
     assert!(start.requires_approval.is_none());
     assert!(start.destination.is_none());
 }
-

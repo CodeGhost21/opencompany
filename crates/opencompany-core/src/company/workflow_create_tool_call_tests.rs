@@ -1,7 +1,7 @@
 //! workflow_create: issue #540 author-time tool_call validation.
 
-use super::*;
 use super::test_support::*;
+use super::*;
 
 // --- #540: author-time tool_call validation ----------------------------
 
@@ -307,4 +307,3 @@ async fn update_gates_tool_calls_through_the_shared_helper() {
         "{err}"
     );
 }
-

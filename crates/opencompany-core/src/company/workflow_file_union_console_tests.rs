@@ -282,9 +282,13 @@ fn destination_messages_match_the_console() {
 /// can never choose.
 #[test]
 fn destination_kinds_match_the_console() {
-    let start = CONSOLE_API.find("export const DESTINATION_KINDS").unwrap_or_else(|| {
-        panic!("`DESTINATION_KINDS` is gone from {CONSOLE_API_PATH} — it is what this test reads")
-    });
+    let start = CONSOLE_API
+        .find("export const DESTINATION_KINDS")
+        .unwrap_or_else(|| {
+            panic!(
+                "`DESTINATION_KINDS` is gone from {CONSOLE_API_PATH} — it is what this test reads"
+            )
+        });
     // Slice from the array opener, NOT from the declaration: the type
     // annotation in between ends `WorkflowDestination["kind"];`, which
     // contains a literal `"];` and would close the block before the first
@@ -438,8 +442,7 @@ fn output_parser_is_schema_less_by_default() {
 
 #[test]
 fn output_parser_with_well_typed_keys_is_accepted() {
-    let config =
-        cfg("auto_fix = true\nconnection_ref = \"conn\"\n[schema]\nname = \"string\"\n");
+    let config = cfg("auto_fix = true\nconnection_ref = \"conn\"\n[schema]\nname = \"string\"\n");
     assert!(problems(WorkflowNodeKind::OutputParser, Some(&config)).is_empty());
 }
 

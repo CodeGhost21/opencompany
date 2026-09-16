@@ -108,8 +108,7 @@ impl crate::ports::events::EventLog for FailingReadsEventLog {
     fn subscribe(
         &self,
         id: &CompanyId,
-    ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem>
-    {
+    ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
         self.inner.subscribe(id)
     }
 }
@@ -128,9 +127,8 @@ async fn runtime_with(
          [[group_chat]]\nid = \"strategy\"\nname = \"Strategy\"\nmembers = [\"ceo\"]\n",
     )
     .expect("manifest");
-    let mut builder =
-        crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-            .with_id(CompanyId::new("acme"));
+    let mut builder = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+        .with_id(CompanyId::new("acme"));
     if let Some(tasks) = tasks {
         builder = builder.with_tasks(tasks);
     }

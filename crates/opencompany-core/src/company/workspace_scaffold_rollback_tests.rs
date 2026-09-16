@@ -162,11 +162,7 @@ impl WorkspaceStore for InjectChildAfterFirstTree {
         Ok(snapshot)
     }
 
-    async fn read(
-        &self,
-        company: &CompanyId,
-        id: &str,
-    ) -> Result<Option<(WorkspaceNode, String)>> {
+    async fn read(&self, company: &CompanyId, id: &str) -> Result<Option<(WorkspaceNode, String)>> {
         self.inner.read(company, id).await
     }
     async fn read_capped(
