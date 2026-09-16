@@ -10,11 +10,11 @@ use tinyinference::usage::Usage;
 use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::agent::copilot_persona;
+use super::tests_pass_1::agent_deps;
 use super::tools::{
     AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
     ProposeWorkflowTool,
 };
-use super::tests_pass_1::agent_deps;
 use super::workflow_build_fixtures_tests::*;
 use super::*;
 use crate::company::CompanyManifest;

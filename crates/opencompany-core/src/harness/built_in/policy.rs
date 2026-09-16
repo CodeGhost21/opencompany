@@ -2175,6 +2175,9 @@ fn classify_group(tool_name: &str, args: &serde_json::Value) -> EffectGroup {
 }
 
 #[cfg(test)]
+#[path = "policy/policy_spend_cap_tests.rs"]
+mod policy_spend_cap_tests;
+#[cfg(test)]
 #[cfg(test)]
 #[path = "policy/policy_test_helpers_tests.rs"]
 mod policy_test_helpers_tests;
@@ -2205,9 +2208,6 @@ mod tests_path_split;
 #[cfg(test)]
 #[path = "policy/policy_scopes_tests.rs"]
 mod tests_scopes;
-#[cfg(test)]
-#[path = "policy/policy_spend_cap_tests.rs"]
-mod policy_spend_cap_tests;
 #[cfg(test)]
 #[path = "policy/policy_ssrf_guardrail_tests.rs"]
 mod tests_ssrf_guardrail;

@@ -2530,6 +2530,9 @@ pub async fn probe(decl: &InferenceDecl, model: &str, harness: Option<&str>) -> 
 }
 
 #[cfg(test)]
+#[path = "provider/provider_tenant_tests.rs"]
+mod provider_tenant_tests;
+#[cfg(test)]
 #[path = "provider/provider_test_helpers_tests.rs"]
 mod provider_test_helpers_tests;
 #[cfg(test)]
@@ -2550,6 +2553,3 @@ mod tests_credential_3;
 #[cfg(test)]
 #[path = "provider/provider_early_tests.rs"]
 mod tests_early;
-#[cfg(test)]
-#[path = "provider/provider_tenant_tests.rs"]
-mod provider_tenant_tests;

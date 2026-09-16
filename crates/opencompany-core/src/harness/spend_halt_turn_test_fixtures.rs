@@ -23,11 +23,11 @@ use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 use crate::harness::{HarnessBrain, HarnessDeps, HarnessPool};
 use crate::ports::ContextStore;
 use crate::ports::brain::{Brain, CycleHost};
-use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 use crate::ports::types::{
     ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
     Effect, EffectDisposition, OutboundMessage, ToolCall, ToolResult,
 };
+use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
 /// The agent every test here talks to.
 pub(super) const AGENT: &str = "ceo";

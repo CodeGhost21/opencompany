@@ -6,8 +6,8 @@
 //! [`super::built_in_test_fixtures_2`].
 
 use super::built_in_test_fixtures::*;
-use super::built_in_test_fixtures_2::*;
 use super::built_in_test_fixtures_2::skill_scratch;
+use super::built_in_test_fixtures_2::*;
 use super::*;
 use crate::harness::provider::MockProvider;
 

@@ -8,8 +8,8 @@
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
 use super::*;
-use std::sync::Mutex as StdMutex;
 use crate::company::CompanyManifest;
+use std::sync::Mutex as StdMutex;
 
 /// An **overlay** teammate — one added from the console, with no manifest
 /// row — can be capped through the same override, and is refused when it has
