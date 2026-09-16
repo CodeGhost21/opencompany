@@ -248,7 +248,7 @@ pub(super) struct FailingRunner {
 }
 
 impl FailingRunner {
-    fn new(message: &str) -> (Arc<Self>, Arc<AtomicUsize>) {
+    pub(super) fn new(message: &str) -> (Arc<Self>, Arc<AtomicUsize>) {
         let attempts = Arc::new(AtomicUsize::new(0));
         let runner = Arc::new(Self {
             message: message.to_string(),
