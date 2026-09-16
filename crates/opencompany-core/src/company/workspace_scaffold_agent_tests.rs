@@ -6,16 +6,15 @@ use std::sync::Arc;
 use super::*;
 use crate::store::FsOps;
 
-
 fn agent(id: &str) -> WorkspaceOrigin {
     WorkspaceOrigin::Agent { id: id.to_string() }
-
+}
 
 async fn store() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let ops: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
     (dir, ops)
-
+}
 
 /// A node's rendered `parent/child` path, for readable assertions.
 fn path_of(nodes: &[WorkspaceNode], node: &WorkspaceNode) -> String {
@@ -24,16 +23,19 @@ fn path_of(nodes: &[WorkspaceNode], node: &WorkspaceNode) -> String {
         Some(parent) => match nodes.iter().find(|n| &n.id == parent) {
             Some(p) => format!("{}/{}", path_of(nodes, p), node.name),
             None => node.name.clone(),
-
         },
     }
 }
 
 fn paths(nodes: &[WorkspaceNode]) -> Vec<String> {
-
     let mut out: Vec<String> = nodes.iter().map(|n| path_of(nodes, n)).collect();
     out.sort();
     out
+}
+
+async fn tree_paths(ws: &Arc<dyn WorkspaceStore>, company: &CompanyId) -> Vec<String> {
+    paths(&ws.tree(company).await.unwrap())
+}
 
 async fn ensure_agent_folder_is_idempotent_and_stable() {
     let (_dir, ws) = store().await;

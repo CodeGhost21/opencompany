@@ -6,16 +6,14 @@ use std::sync::Arc;
 use super::*;
 use crate::store::FsOps;
 
-
 fn agent(id: &str) -> WorkspaceOrigin {
     WorkspaceOrigin::Agent { id: id.to_string() }
-
+}
 
 async fn store() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let ops: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
     (dir, ops)
-
 }
 
 /// Seeds root folders that share `name` by writing the workspace index
@@ -63,7 +61,9 @@ async fn seed_duplicate_roots(
         bundle.workspace_index_json(),
         serde_json::to_vec(&index).expect("index json"),
     )
-
+    .await
+    .expect("seed index");
+}
 
 /// A node's rendered `parent/child` path, for readable assertions.
 fn path_of(nodes: &[WorkspaceNode], node: &WorkspaceNode) -> String {
@@ -72,17 +72,14 @@ fn path_of(nodes: &[WorkspaceNode], node: &WorkspaceNode) -> String {
         Some(parent) => match nodes.iter().find(|n| &n.id == parent) {
             Some(p) => format!("{}/{}", path_of(nodes, p), node.name),
             None => node.name.clone(),
-
         },
     }
 }
 
 fn paths(nodes: &[WorkspaceNode]) -> Vec<String> {
-
     let mut out: Vec<String> = nodes.iter().map(|n| path_of(nodes, n)).collect();
     out.sort();
     out
-
 }
 
 async fn tree_paths(ws: &Arc<dyn WorkspaceStore>, company: &CompanyId) -> Vec<String> {
@@ -91,7 +88,6 @@ async fn tree_paths(ws: &Arc<dyn WorkspaceStore>, company: &CompanyId) -> Vec<St
 
 fn scaffold_paths() -> Vec<&'static str> {
     vec![
-
         "agents",
         "artifacts",
         "artifacts/readme.md",
@@ -100,10 +96,6 @@ fn scaffold_paths() -> Vec<&'static str> {
     ]
 }
 
-/// The scaffold has an empty agent root plus the operator-only secrets
-/// folder and its explanatory note. It never creates roster member folders
-/// or the unused `desks/` root.
-#[tokio::test]
 async fn it_provisions_one_empty_system_root() {
     let (_dir, ws) = store().await;
     let company = CompanyId::new("acme");
