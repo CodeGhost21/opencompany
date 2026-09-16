@@ -63,7 +63,7 @@ impl crate::ports::RunStore for FailingRunHistory {
 /// to prove the handed-task briefing's per-card attempt lookup is bounded
 /// rather than growing with however many cards an assignee has open.
 pub(super) struct CountingRunHistory {
-    inner: Arc<dyn crate::ports::RunStore>,
+    pub(super) inner: Arc<dyn crate::ports::RunStore>,
     pub(super) list_runs_calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -174,7 +174,7 @@ pub(super) fn operator() -> Actor {
 
 /// A brain that emits one caller-supplied effect on each `OperatorMessage`.
 pub(super) struct EffectBrain {
-    effect: Effect,
+    pub(super) effect: Effect,
 }
 
 #[async_trait]
@@ -292,7 +292,7 @@ impl Brain for CountingBrain {
 /// through [`CycleHost::park_effect`] — the shape the harness brain produces
 /// when its openhuman policy blocked a tool call inside the turn (#172).
 pub(super) struct ParkingBrain {
-    effect: Effect,
+    pub(super) effect: Effect,
 }
 
 #[async_trait]
@@ -383,8 +383,8 @@ impl Brain for FailingBrain {
 /// on the harness path — so the backstop can be shown to leave a rich settle
 /// alone rather than racing it.
 pub(super) struct SettlingBrain {
-    runs: Arc<dyn crate::ports::RunStore>,
-    status: RunStatus,
+    pub(super) runs: Arc<dyn crate::ports::RunStore>,
+    pub(super) status: RunStatus,
 }
 
 #[async_trait]
@@ -582,7 +582,7 @@ pub(super) async fn park_one(
 
 /// Parks one tool call, then fails every follow-up turn.
 pub(super) struct FailingContinuationBrain {
-    effect: Effect,
+    pub(super) effect: Effect,
 }
 
 #[async_trait]
