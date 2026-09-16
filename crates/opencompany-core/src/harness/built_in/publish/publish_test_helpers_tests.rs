@@ -4,9 +4,7 @@
 //! queue semantics, scan bounds and the nudge's wording. Whether the tool is
 //! reachable from a real model-driven turn is a different question, and it is
 
-
 use super::*;
-
 
 /// A workspace with the given `path → contents` files written into it.
 pub(crate) fn workspace(files: &[(&str, &[u8])]) -> tempfile::TempDir {
@@ -48,4 +46,3 @@ pub(crate) fn text_of(result: &ToolResult) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-

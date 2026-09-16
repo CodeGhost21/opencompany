@@ -1,6 +1,6 @@
+use super::publish_test_helpers_tests::*;
 use super::*;
 use serde_json::json;
-use super::publish_test_helpers_tests::*;
 
 // ── Queue semantics ───────────────────────────────────────────────────────
 
@@ -209,4 +209,3 @@ fn a_long_file_list_is_bounded_and_says_so() {
     // Under the bound, nothing is added.
     assert_eq!(name_files(&["a.md".to_string()]), "a.md");
 }
-

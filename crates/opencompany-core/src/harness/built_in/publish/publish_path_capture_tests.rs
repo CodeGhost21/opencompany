@@ -1,6 +1,6 @@
+use super::publish_test_helpers_tests::*;
 use super::*;
 use serde_json::json;
-use super::publish_test_helpers_tests::*;
 
 // ── Path validation ───────────────────────────────────────────────────────
 
@@ -497,4 +497,3 @@ async fn an_unknown_kind_is_refused_by_name() {
     assert!(message.contains("markdown"), "{message}");
     assert_eq!(queue.queued(), 0);
 }
-
