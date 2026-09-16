@@ -54,20 +54,17 @@ const toasts = (page: Page) => page.locator("[data-sonner-toast]");
 
 async function open(page: Page, hash: string): Promise<void> {
   await page.goto(hash);
-  const any = page.getByRole("button", { name: /^(Skip setup|Skip for now)$/ });
-  await any
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await skip
     .first()
     .waitFor({ state: "visible", timeout: 3_000 })
     .catch(() => {});
   let dismissed = false;
-  for (const name of ["Skip setup", "Skip for now"]) {
-    const skip = page.getByRole("button", { name });
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      if (!(await skip.isVisible().catch(() => false))) break;
-      dismissed = true;
-      await skip.click({ force: true }).catch(() => {});
-      await page.waitForTimeout(300);
-    }
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (!(await skip.isVisible().catch(() => false))) break;
+    dismissed = true;
+    await skip.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(300);
   }
   if (dismissed) await page.goto(hash);
 }

@@ -708,8 +708,7 @@ describe("COMPOSIO_MANAGED_HIDDEN, as the rows read it", () => {
   // only choice", and the rows did not read it at all — its one runtime
   // consumer was onboarding copy. Turning it back on as a rollback would have
   // changed the instructions and left every control that acts on the route
-  // exactly where it was. Written in the conditional idiom
-  // `onboarding-gate-integration-credential.test.ts` uses, so the branch is
+  // exactly where it was. Written in a conditional idiom, so the branch is
   // pinned to the flag rather than to its current value.
   it("takes the way in, and only the way in", () => {
     const rows = composioRows(
