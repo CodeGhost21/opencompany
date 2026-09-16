@@ -1,12 +1,4 @@
-use std::path::Path as FsPath;
-
 use super::*;
-
-fn write_bundle(root: &FsPath, slug: &str, contents: &str) {
-    let dir = root.join("skills").join(slug);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("SKILL.md"), contents).unwrap();
-}
 
 /// HTTP-level coverage of the two path-slug handlers. A slug that fails
 /// `valid_slug` must be rejected with `400` **before** any write, so the
