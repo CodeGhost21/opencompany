@@ -16,7 +16,7 @@ use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::runtime::workflow_resume::{
-    CONTINUATION_BLOCKER_KEY, blocker_answer_for, workflow_node_turn_key,
+    blocker_answer_for, workflow_node_turn_key,
 };
 
 const RUN_ID: &str = "run-that-blocked";

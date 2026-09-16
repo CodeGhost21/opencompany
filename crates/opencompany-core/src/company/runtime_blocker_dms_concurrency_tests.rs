@@ -1,7 +1,7 @@
 //! Runtime blocker DMs: idempotent late replies, banked verdicts, and concurrent-resolve races.
 
 use crate::company::blocker_sender::BlockerSenderSignals;
-use crate::company::runtime::{BlockerReplyPlan, CompanyRuntime};
+use crate::company::runtime::CompanyRuntime;
 use crate::company::task_intent::BlockerReplyIntent;
 use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
 use crate::ports::types::CompanyId;

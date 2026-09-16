@@ -1,6 +1,5 @@
 use super::gate_approval_tests::*;
 use super::*;
-use crate::ports::types::ActorKind;
 
 /// Issue #243: the four outcomes the port's `Option<Effect>` cannot tell
 /// apart. The important pair is `Denied` vs `NotParked` — the caller must

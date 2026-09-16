@@ -1,20 +1,11 @@
 use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
+use crate::ports::types::CompanyId;
 use crate::runtime::RuntimeBuilder;
-use crate::server::ops::ConnectionsRuntime;
-use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
-use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
-use crate::server::users::token;
-use crate::server::users::wallet::{self, VerifyRequest};
-use crate::{AppConfig, AppState};
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use ed25519_dalek::{Signer as _, SigningKey};
-use std::sync::Arc;
 use tower::ServiceExt;
 
 use super::mode_test_support_1::*;

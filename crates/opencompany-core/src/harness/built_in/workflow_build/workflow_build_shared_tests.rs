@@ -1,28 +1,15 @@
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde_json::{Value, json};
-use tinyinference::model::{ChatModel, ModelProfile, ModelResponse};
-use tinyinference::tool::ToolCall;
-use tinyinference::usage::Usage;
-use tinyinference::{Error as InferenceError, Result as TaResult};
 
-use super::agent::copilot_persona;
 use super::tests_pass_1::agent_deps;
-use super::tools::{
-    AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
-    ProposeWorkflowTool,
-};
 use super::workflow_build_fixtures_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
-use crate::ports::{UsageMeter, UsageSample};
-use openhuman_core::tools::traits::Tool;
+use crate::ports::UsageMeter;
 
 /// [`MANIFEST`] plus one desk, so the runtime's deliverable channel set is
 /// exactly `["engineering"]` (issue #1191). The default fixture declares no

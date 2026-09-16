@@ -1,6 +1,5 @@
 use super::steps_fixtures_tests::*;
 use super::*;
-use oh::tools::status::FailureCategory;
 
 // The incremental trace stays identical to the fold
 // -----------------------------------------------------------------------

@@ -37,29 +37,13 @@
 //!   both directions;
 //! - and the notice never reaches memory, for the reason #926 established.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
-use axum::Json;
-use axum::routing::post;
-use serde_json::{Value, json};
 
 use super::spend_halt_turn_test_fixtures::*;
-use crate::company::CompanyManifest;
-use crate::company::credentials::Credential;
 use crate::harness::brain::{iteration_cap_pause_notice, spend_halt_notice};
-use crate::harness::mcp_probe::McpFailureQueue;
-use crate::harness::memory_loop;
-use crate::harness::orchestrator::{DelegationQueue, WorkflowRunnerHandle};
-use crate::harness::policy::ApprovalRequestQueue;
-use crate::harness::provider::{HostedProvider, HostedProviderConfig};
-use crate::harness::{HarnessBrain, HarnessDeps, HarnessPool};
-use crate::ports::ContextStore;
-use crate::ports::brain::{Brain, CycleHost};
-use crate::ports::types::{
-    ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
-    Effect, EffectDisposition, OutboundMessage, ToolCall, ToolResult,
-};
+use crate::harness::{HarnessBrain, HarnessPool};
+use crate::ports::brain::Brain;
 use crate::store::FsContextStore;
 
 // ---------------------------------------------------------------------------

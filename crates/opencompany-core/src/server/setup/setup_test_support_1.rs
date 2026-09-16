@@ -5,7 +5,6 @@
 //! into a file nothing will read, and that the open-while-unconfigured access
 //! gate closes the moment either of its two conditions stops holding.
 
-use crate::app::config::MapEnv;
 use crate::company::CompanyManifest;
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::CompanyStore;

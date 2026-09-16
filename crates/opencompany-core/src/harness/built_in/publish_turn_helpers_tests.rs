@@ -35,8 +35,8 @@ use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 use crate::harness::publish::PUBLISH_ARTIFACT_TOOL;
 use crate::harness::{HarnessBrain, HarnessDeps, HarnessPool};
 use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
-use crate::ports::brain::{Brain, CycleHost};
-use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, TaskRecord, TaskStore, TaskTitle};
+use crate::ports::brain::CycleHost;
+use crate::ports::tasks::{COLUMN_IN_PROGRESS, TaskRecord, TaskStore, TaskTitle};
 use crate::ports::types::{
     ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
     Effect, EffectDisposition, ToolCall, ToolResult,

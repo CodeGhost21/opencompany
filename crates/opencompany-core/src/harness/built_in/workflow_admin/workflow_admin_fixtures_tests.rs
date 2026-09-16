@@ -16,7 +16,7 @@ use futures::stream::{self, BoxStream};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::company::{CompanyManifest, update_company_workflow};
+use crate::company::CompanyManifest;
 use crate::error::Result;
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompanySummary, EventSeq, LedgerEntry, OverlayWorkflow,

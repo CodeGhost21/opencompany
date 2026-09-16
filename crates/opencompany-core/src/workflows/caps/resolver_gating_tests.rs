@@ -1,9 +1,6 @@
 use super::tests_resolution::{overlay, overlay_resolver, parent_of, store_with};
 use super::*;
 
-use crate::company::CompanyManifest;
-use crate::error::Result as OcResult;
-use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
 
 // ---- Issue #617: gating child calls -----------------------------------
 

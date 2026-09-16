@@ -9,7 +9,7 @@ use crate::ports::UserRecord;
 use crate::ports::types::CompanyId;
 use crate::ports::types::SecretValue;
 use crate::runtime::channel::{
-    DeskChannel, DurableOperatorChannel, OPERATOR_CHANNEL, OperatorChannel,
+    DurableOperatorChannel, OperatorChannel,
 };
 use crate::server::ops::mailer::{MailSender, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};

@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 /// Issue #435, guarding #379's decision: a grant's origin is **routing, not
 /// identity**. Neither the channel nor the thread within it may join the

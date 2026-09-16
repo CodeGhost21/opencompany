@@ -1,6 +1,5 @@
 use super::types_test_support::*;
 use super::*;
-use crate::ports::workflow_runner::DeliveryStatus;
 
 /// Issue #259's two variants pin their wire shape the same way
 /// `WorkflowCreated` does: `kind` + `workflow_id` + `name`, with `by`

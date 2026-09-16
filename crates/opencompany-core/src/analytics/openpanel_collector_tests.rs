@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::analytics::config::{
-    CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENABLE_ENV, ENDPOINT_ENV, resolve,
+    CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENDPOINT_ENV, resolve,
 };
 use crate::analytics::types::OpaqueId;
 use crate::analytics::{Event, Outcome, Trigger};

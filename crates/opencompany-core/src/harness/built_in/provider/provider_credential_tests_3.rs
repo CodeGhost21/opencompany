@@ -1,11 +1,5 @@
 use super::provider_test_helpers_tests::*;
 use super::*;
-use crate::app::config::MapEnv;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Legacy sibling of the above: `finish_reason: "function_call"` with no
 /// `message.function_call` field at all, beside a nonempty array-shaped

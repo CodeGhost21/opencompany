@@ -16,8 +16,6 @@
 //! test files that need it).
 #![cfg(test)]
 
-use super::*;
-use crate::company::{list_workflows_union, load_workflow_union};
 
 /// The listed rows this company itself has, with the global baseline
 /// filtered out. Every company lists the baseline graphs; these tests are

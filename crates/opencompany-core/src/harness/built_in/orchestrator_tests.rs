@@ -1,5 +1,4 @@
 use super::*;
-use crate::ports::tasks::TaskTitle;
 use std::sync::Mutex as StdMutex;
 
 use crate::ports::runs::RunStatus;

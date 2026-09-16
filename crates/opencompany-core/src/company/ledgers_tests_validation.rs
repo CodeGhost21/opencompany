@@ -2,11 +2,8 @@
 //! and the write/read parity checks (split out of `ledgers_tests.rs`).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::json;
-use tokio::sync::Notify;
 
 use super::*;
 use crate::company::runtime::CompanyRuntime;

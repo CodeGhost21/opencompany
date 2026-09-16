@@ -1,6 +1,5 @@
 use super::tests_core::*;
 use super::tests_core2::*;
-use super::*;
 
 /// The responder's own pause survives the relay turn replacing its text —
 /// the budget-pause analogue of

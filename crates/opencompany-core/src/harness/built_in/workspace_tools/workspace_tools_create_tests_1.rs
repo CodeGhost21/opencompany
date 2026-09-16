@@ -1,6 +1,5 @@
 use super::tests::*;
 use super::*;
-use crate::store::FsOps;
 
 // -- workspace_create (issue #551) ---------------------------------------
 

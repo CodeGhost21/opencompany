@@ -2,14 +2,10 @@ use std::sync::Arc;
 
 use super::lifecycle_fixtures_tests::*;
 use super::*;
-use crate::company::workspace_scaffold::{ensure_agent_folder, ensure_workspace_scaffold};
-use crate::harness::workspace_tools::tests::{TEST_AGENT, agent_origin, file, folder, text, ws};
-use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+use crate::harness::workspace_tools::tests::{TEST_AGENT, file, text, ws};
+use crate::ports::artifacts::ArtifactStore;
 use crate::ports::types::CompanyId;
-use crate::ports::workspace::{
-    BlobStream, FolderClaim, WorkspaceNode, WorkspaceOrigin, WorkspaceStore,
-};
-use crate::store::FsOps;
+use crate::ports::workspace::WorkspaceStore;
 
 // ---------------------------------------------------------------------------
 // workspace_delete — the happy paths

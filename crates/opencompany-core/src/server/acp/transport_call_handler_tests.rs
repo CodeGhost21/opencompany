@@ -1,5 +1,4 @@
 use super::*;
-use async_trait::async_trait;
 use serde_json::json;
 
 use axum::body::Body;
@@ -7,16 +6,13 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
-use crate::ports::EventSeq;
-use crate::ports::types::{ApprovalId, CompressedTrace, CycleRequest, CycleResult, TokenUsage};
+use crate::ports::types::ApprovalId;
 use crate::ports::users::{UserRecord, UserRole, UserStatus};
-use crate::ports::{Brain, CompanyStore, CycleHost, SessionKind, SessionRecord};
-use crate::server::graphql::auth::UserPrincipal;
-use crate::server::platform_auth::PlatformClaims;
+use crate::ports::{CompanyStore, SessionKind, SessionRecord};
 use crate::server::users::cookie::session_cookie_name;
 use crate::server::users::token::{OsTokens, mint_session_token, sha256_hex};
 use crate::store::FsCompanyStore;
-use crate::{AppConfig, ports::types::CompanyRecord};
+use crate::ports::types::CompanyRecord;
 
 use super::test_support::*;
 

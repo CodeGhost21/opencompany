@@ -1,12 +1,6 @@
 use super::provider_tenant_tests::MemSecrets;
 use super::provider_test_helpers_tests::*;
 use super::*;
-use crate::app::config::MapEnv;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 #[tokio::test]
 async fn tenant_turn_preserves_a_provider_status() {

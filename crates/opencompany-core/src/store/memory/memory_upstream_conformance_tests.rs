@@ -26,8 +26,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, Query, State};
-use axum::routing::{delete, get, post, put};
+use axum::extract::State;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use tinymemory::registry::DriverClass;

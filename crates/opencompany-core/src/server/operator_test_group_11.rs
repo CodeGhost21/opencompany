@@ -1,13 +1,8 @@
 use super::*;
 use crate::company::CompanyManifest;
-use crate::ports::tasks::TaskTitle;
-use crate::ports::types::CompanyRecord;
-use crate::ports::types::{EventSeq, StoredEvent};
-use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
-use crate::runtime::RuntimeBuilder;
+use crate::ports::types::EventSeq;
 use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+use crate::AppConfig;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
@@ -15,7 +10,6 @@ use tower::ServiceExt;
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
-use super::operator_test_support_4::*;
 
 /// A second resolve of the same approval is a success, not a failure, and
 /// mints nothing (issue #243). `detach` reports that as `alreadyResolved`,

@@ -1,6 +1,5 @@
 use super::tests::*;
 use super::*;
-use crate::store::FsOps;
 
 // -- path rendering and validation --------------------------------------
 

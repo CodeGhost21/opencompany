@@ -5,18 +5,14 @@
 use super::tests_offline::{effect_frame, tool_call_frame, usage_frame};
 use super::*;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
 use crate::brain::medulla::MockTransport;
 use crate::brain::medulla::wire::{
-    self, EffectFrame, OrchErrorCode, Role, ToolCallFrame, UsageFrame,
+    self,
 };
-use crate::ports::types::{
-    ApprovalId, ChunkAddr, ChunkHit, CompanyEvent, ContextOp, ContextOpResult, Effect,
-    EffectDisposition, ToolResult,
-};
+use crate::ports::types::CompanyEvent;
 
 // ---------------------------------------------------------------------------
 // End-to-end tests through a real CompanyRuntime

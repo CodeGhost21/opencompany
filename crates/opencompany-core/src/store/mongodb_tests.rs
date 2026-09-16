@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::store::conformance;
 
 static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 

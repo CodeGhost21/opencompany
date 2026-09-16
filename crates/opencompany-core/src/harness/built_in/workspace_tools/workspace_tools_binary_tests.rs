@@ -1,6 +1,5 @@
 use super::tests::*;
 use super::*;
-use crate::store::FsOps;
 
 // -- binary nodes (issue #553) ------------------------------------------
 

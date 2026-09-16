@@ -7,7 +7,6 @@ use super::tests_a_company_on_the::{BrokenSecrets, GRANTS_COMPOSIO, platform_ide
 use super::{CredentialSource, TinyhumansTokenSource};
 use crate::company::CompanyManifest;
 use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::ports::usage::{SampleKind, UsageSample};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;

@@ -1,7 +1,5 @@
 use super::tests_core::*;
-use super::*;
 
-use super::*;
 
 fn desk(id: &str, tools: &[&str]) -> GroupChat {
     GroupChat {

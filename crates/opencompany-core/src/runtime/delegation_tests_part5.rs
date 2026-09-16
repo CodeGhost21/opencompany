@@ -1,6 +1,4 @@
-use super::tests_core::*;
 use super::tests_core2::*;
-use super::*;
 
 /// **Issue #984, the second caller.** `open_work_card` has two callers, and
 /// the test above this one only drives the direct path. This drives the

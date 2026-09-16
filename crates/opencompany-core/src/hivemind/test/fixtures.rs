@@ -1,11 +1,10 @@
 //! Shared fixtures for the hive-mind desk-seam unit tests: an in-memory
 //! journal, a scripted turn runner, and small manifest/desk builders.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
-use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
 
 use super::super::*;
 use crate::Result;

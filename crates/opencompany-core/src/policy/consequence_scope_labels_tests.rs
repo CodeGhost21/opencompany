@@ -1,10 +1,5 @@
-use super::consequence_composio_tests::*;
-use super::consequence_fetch_grant_tests::*;
 use super::consequence_hosting_tests::*;
-use super::consequence_mcp_roster_tests::*;
-use super::consequence_shell_git_mcp_tests::*;
 use super::*;
-use crate::ports::types::Verdict;
 use serde_json::json;
 
 /// The two halves of #457's scoping, exercised **together and directly**

@@ -1,5 +1,4 @@
 use super::workflows_test_support::running::*;
-use super::workflows_test_support::*;
 use super::*;
 
 /// **A synchronous run can be cancelled mid-request, and its response

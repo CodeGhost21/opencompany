@@ -8,7 +8,7 @@ use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{
-    Attachment, CompanyId, CompanyRecord, EventSeq, Mention, MentionTarget, MessageIntent,
+    CompanyId, CompanyRecord,
 };
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::grants::RedeemContext;

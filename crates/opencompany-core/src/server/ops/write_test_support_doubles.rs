@@ -7,7 +7,6 @@ use super::*;
 
 use crate::AppState;
 use crate::ports::types::CompanyId;
-use serde_json::Value;
 
 pub(crate) struct FaultyArtifacts {
     pub(crate) listed: Vec<crate::ports::artifacts::ArtifactRecord>,

@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 /// A cancel abandons the work, so neither the writer nor the reader will
 /// carry one into a run.

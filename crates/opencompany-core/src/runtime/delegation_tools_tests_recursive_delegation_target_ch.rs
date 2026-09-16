@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 #[test]
 fn manifest_entries_cover_both_delegation_tools() {

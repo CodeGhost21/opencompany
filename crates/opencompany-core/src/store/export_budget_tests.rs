@@ -1,4 +1,4 @@
-use super::tests::{admin_actor, budget_manifest, company_record, fs_ports, manifest, tmp_root};
+use super::tests::{admin_actor, budget_manifest, fs_ports, manifest, tmp_root};
 use super::*;
 
 /// The same guard on the way IN: a bundle written by a host that predates

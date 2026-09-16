@@ -1,6 +1,5 @@
 use super::tests_core::*;
 use super::tests_core2::*;
-use super::tests_core3::*;
 use super::*;
 
 /// The default scope is byte-identical to pre-#374 behaviour.

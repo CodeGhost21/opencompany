@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 #[test]
 fn gate_inner_call_reads_the_call_the_card_shows() {

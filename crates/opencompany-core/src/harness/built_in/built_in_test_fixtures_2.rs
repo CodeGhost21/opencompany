@@ -8,19 +8,17 @@ use super::*;
 pub(super) use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;
-pub(super) use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
 pub(super) use crate::company::CompanyManifest;
 pub(super) use crate::harness::provider::MockProvider;
 pub(super) use crate::ports::UsageSample;
 pub(super) use crate::ports::types::{
-    ChunkAddr, ChunkHit, ChunkMeta, CompanySummary, ContextChunk, LedgerEntry,
+    CompanySummary, LedgerEntry,
 };
 // The two-level resolver. Test-only now: the roster build goes through
 // `agent_scoped_grants`, and these tests assert the desk-less case still
 // resolves identically to what shipped before desks could scope tools.
 use super::built_in_test_fixtures::*;
-use crate::runtime::builder::agent_effective_grants;
 
 /// Build a single [`CompanyAgent`] over a scripted provider so the wrapper can
 /// be exercised directly (its retry logic is the unit under test).

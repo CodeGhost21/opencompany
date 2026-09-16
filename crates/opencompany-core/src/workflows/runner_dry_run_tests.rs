@@ -6,8 +6,7 @@ use super::*;
 
 use crate::company::parse_workflow;
 use crate::harness::provider::MockProvider;
-use crate::ports::run_output::WorkflowRunOutputStore;
-use crate::store::{FsCompanyStore, FsContextStore, FsOps};
+use crate::store::FsOps;
 
 /// **The clean-cancel arm (issue #398).** The counterpart to the hard-abort
 /// keystone: here the wedged node is *released* right after the stop, so the

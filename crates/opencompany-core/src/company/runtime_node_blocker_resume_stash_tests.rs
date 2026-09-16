@@ -9,14 +9,14 @@ use crate::company::CompanyManifest;
 use crate::company::runtime::CompanyRuntime;
 use crate::company::task_intent::BlockerReplyIntent;
 use crate::ports::blockers::{
-    BlockerKind, BlockerPayload, BlockerSource, BlockerStep, BlockerVerdict,
+    BlockerKind, BlockerPayload, BlockerSource, BlockerStep,
 };
 use crate::ports::types::{CompanyId, Effect, EffectGroup};
 use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::runtime::workflow_resume::{
-    CONTINUATION_BLOCKER_KEY, blocker_answer_for, workflow_node_turn_key,
+    CONTINUATION_BLOCKER_KEY, workflow_node_turn_key,
 };
 
 const RUN_ID: &str = "run-that-blocked";

@@ -1,8 +1,3 @@
-use super::consequence_composio_tests::*;
-use super::consequence_hosting_tests::*;
-use super::consequence_mcp_roster_tests::*;
-use super::consequence_scope_labels_tests::*;
-use super::consequence_shell_git_mcp_tests::*;
 use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;

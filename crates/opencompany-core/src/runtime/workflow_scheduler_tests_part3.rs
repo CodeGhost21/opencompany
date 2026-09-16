@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 /// A workflow committed as a seed file (not an overlay) is scheduled too, so
 /// the union really is the read path.

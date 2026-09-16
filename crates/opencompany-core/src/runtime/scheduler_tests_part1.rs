@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 #[tokio::test]
 async fn fires_once_per_matching_minute_and_dedupes() {

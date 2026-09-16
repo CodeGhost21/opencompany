@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 /// Issue #638: a run's notices survive onto the journaled outcome, which is
 /// the row the console's history panel reads.

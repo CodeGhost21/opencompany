@@ -2,22 +2,13 @@
 //! skills, team, inbox-read, and desk chat — exercised end-to-end over the
 //! router against a real fs-backed company.
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
-use tower::ServiceExt;
+use axum::http::StatusCode;
+use serde_json::json;
 
 use super::write_test_support::*;
 use crate::company::CompanyManifest;
-use crate::company::steer::{InflightEntry, InflightKind};
-use crate::ports::facts::{FactKind, FactRecord};
-use crate::ports::tasks::{TaskRecord, TaskTitle};
-use crate::ports::types::{CompanyId, CompanyRecord, CompressedTrace, ContextChunk};
-use crate::runtime::RuntimeBuilder;
-use crate::runtime::journal::{ApprovalConversation, TaskLink};
-use crate::server::router;
+use crate::ports::types::CompanyId;
 use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
 
 /// **Regression, issue #1882 review — blank must default the same as absent.**
 /// A stored proposal that names `ownerDesk` as a blank/whitespace string (a

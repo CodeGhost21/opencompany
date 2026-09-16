@@ -1,6 +1,5 @@
 use super::config_resolution_tests::*;
 use super::*;
-use crate::company::CompanyManifest;
 
 // -----------------------------------------------------------------
 // resolve_serve_bind: the layers `serve` actually honours.

@@ -6,20 +6,14 @@
 //! would be asserting the model's compliance rather than this host's
 //! enforcement.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 
-use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote};
+use super::memory::HiveMemory;
 use super::moves_fixtures_tests::*;
-use super::moves_grammar_tests::*;
-use super::moves_misc_tests::*;
-use super::test::{MemoryLog, desk_of, record};
+use super::test::{MemoryLog, desk_of};
 use super::*;
-use crate::Result;
 use crate::ports::events::EventLog;
-use crate::ports::types::{CompanyEvent, EventSeq};
 
 // ---------------------------------------------------------------------------
 // Desk memory

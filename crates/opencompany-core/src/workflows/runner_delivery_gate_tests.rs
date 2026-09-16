@@ -3,9 +3,8 @@ use super::tests_reclassify::RecordingLane;
 use super::*;
 
 use crate::company::parse_workflow;
-use crate::harness::provider::MockProvider;
 use crate::ports::run_output::WorkflowRunOutputStore;
-use crate::store::{FsCompanyStore, FsContextStore, FsOps};
+use crate::store::FsOps;
 
 /// The guard's whole reason to exist: a genuinely broken node alongside a
 /// blocked one must still fail the check, so the real error is not hidden.

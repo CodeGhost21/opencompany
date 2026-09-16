@@ -1,17 +1,9 @@
 pub(super) use super::tests_core::*;
-pub(super) use super::*;
 pub(super) use crate::ports::tasks::TaskTitle;
 
-pub(super) use std::collections::VecDeque;
 pub(super) use std::sync::Mutex;
 
 pub(super) use crate::ports::TaskStore;
-pub(super) use crate::ports::tasks::{
-    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
-    TaskOutputSource,
-};
-pub(super) use crate::ports::types::LedgerEntry;
-pub(super) use crate::store::FsOps;
 
 impl ScriptedTriage {
     pub(super) fn new(verdict: crate::harness::triage::TriageVerdict) -> Self {

@@ -1,6 +1,5 @@
 use super::steps_fixtures_tests::*;
 use super::*;
-use oh::tools::status::FailureCategory;
 
 // #411: what came back
 // -----------------------------------------------------------------------

@@ -1,6 +1,5 @@
 use super::*;
 
-use super::test_support::*;
 
 /// A catalog read is refused at an address a model endpoint is never on.
 ///

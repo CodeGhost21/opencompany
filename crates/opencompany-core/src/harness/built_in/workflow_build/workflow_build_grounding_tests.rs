@@ -1,28 +1,11 @@
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
-use async_trait::async_trait;
-use serde_json::{Value, json};
-use tinyinference::model::{ChatModel, ModelProfile, ModelResponse};
-use tinyinference::tool::ToolCall;
-use tinyinference::usage::Usage;
-use tinyinference::{Error as InferenceError, Result as TaResult};
+use serde_json::json;
 
-use super::agent::copilot_persona;
-use super::tools::{
-    AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
-    ProposeWorkflowTool,
-};
 use super::workflow_build_fixtures_tests::*;
 use super::workflow_build_shared_tests::*;
 use super::*;
-use crate::company::CompanyManifest;
-use crate::ports::runs::{NewRun, RunStatus};
-use crate::ports::tasks::TaskTitle;
-use crate::ports::types::CompanyId;
-use crate::ports::{UsageMeter, UsageSample};
-use openhuman_core::tools::traits::Tool;
+use crate::ports::runs::RunStatus;
 
 // ---------------------------------------------------------------------------
 // Grounding & gates (issue #813) — unit tier over the pure helpers

@@ -1,5 +1,4 @@
 use super::*;
-use crate::ports::workflow_runner::DeliveryStatus;
 
 #[test]
 fn chat_outputs_reject_metadata_for_the_wrong_kind() {

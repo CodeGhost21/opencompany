@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 /// A cancelled run carries `error: None`, so it clears the ledger — and that
 /// is correct: a cancelled run returns before `deliver_outputs`, so it

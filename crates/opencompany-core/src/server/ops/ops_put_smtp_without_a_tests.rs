@@ -12,7 +12,6 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
-use crate::company::dns::StaticDnsResolver;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
 use crate::runtime::RuntimeBuilder;
@@ -21,7 +20,6 @@ use crate::server::ops::mailer::RecordingMailSender;
 use crate::server::router;
 #[cfg(not(feature = "webhooks"))]
 use crate::server::webhook::DefaultHashSigner;
-use crate::server::webhook::WebhookSigner;
 use crate::{AppConfig, AppState};
 
 fn home() -> tempfile::TempDir {

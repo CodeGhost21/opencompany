@@ -1,22 +1,6 @@
 use super::*;
-use std::sync::Arc;
 
-use async_trait::async_trait;
-use axum::body::Body;
-use axum::http::Request;
-use tower::ServiceExt;
 
-use crate::AppConfig;
-use crate::company::CompanyManifest;
-use crate::economy::signer::LocalSigner;
-use crate::economy::x402::X402Challenge;
-use crate::economy::{MockTinyplaceClient, TinyplaceEconomy};
-use crate::ports::types::{
-    CompanyId, CompressedTrace, CycleRequest, CycleResult, EventSeq, TokenUsage,
-};
-use crate::ports::{AgentEconomy, Brain, CompanyStore, CycleHost};
-use crate::runtime::RuntimeBuilder;
-use crate::store::FsCompanyStore;
 
 use super::test_support::*;
 

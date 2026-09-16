@@ -1,6 +1,4 @@
 use super::*;
-use serde_json::json;
-use std::collections::HashSet;
 
 pub(crate) fn names(tools: &[Box<dyn Tool>]) -> Vec<&str> {
     tools.iter().map(|t| t.name()).collect()

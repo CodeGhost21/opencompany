@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 /// A park line written before #379 has no `thread` key. It must replay as
 /// "no thread" rather than failing to parse — which is what leaves every

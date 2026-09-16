@@ -6,7 +6,6 @@ use tower::ServiceExt;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::ports::usage::{SampleKind, UsageSample};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;

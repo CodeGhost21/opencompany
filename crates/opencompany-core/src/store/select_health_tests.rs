@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::app::config::MapEnv;
 
 /// A stub whose every mandatory read fails, so the probe has something to
 /// find. `NullMemoryProvider` answers everything, which is the right

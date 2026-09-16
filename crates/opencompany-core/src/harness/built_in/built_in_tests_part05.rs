@@ -6,7 +6,6 @@
 //! [`super::built_in_test_fixtures_2`].
 
 use super::built_in_test_fixtures::*;
-use super::built_in_test_fixtures_2::*;
 use super::*;
 
 /// Codex review (PR #2053) — **the regression.** A ledger write is a

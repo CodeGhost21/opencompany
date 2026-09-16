@@ -21,16 +21,11 @@ use crate::runtime::RuntimeBuilder;
 use crate::server::ops::ConnectionsRuntime;
 use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
-use crate::server::router;
-use crate::server::users::token;
-use crate::server::users::wallet::{self, VerifyRequest};
 use crate::{AppConfig, AppState};
 use axum::body::{Body, to_bytes};
-use axum::extract::ConnectInfo;
-use axum::http::{Request, StatusCode};
-use ed25519_dalek::{Signer as _, SigningKey};
+use axum::http::Request;
+use ed25519_dalek::SigningKey;
 use std::sync::Arc;
-use tower::ServiceExt;
 
 pub(super) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()

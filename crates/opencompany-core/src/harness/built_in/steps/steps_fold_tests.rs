@@ -1,6 +1,5 @@
 use super::steps_fixtures_tests::*;
 use super::*;
-use oh::tools::status::FailureCategory;
 
 // Shape of the fold (unchanged by #411)
 // -----------------------------------------------------------------------

@@ -1,11 +1,4 @@
-use super::provider_test_helpers_tests::*;
 use super::*;
-use crate::app::config::MapEnv;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::Mutex;
 
 /// Multiple `{"type":"refusal",…}` parts in the same array-shaped
 /// `content`. `extract_array_refusal_text`'s `find_map` stops at the

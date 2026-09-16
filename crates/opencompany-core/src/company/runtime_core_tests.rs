@@ -136,10 +136,6 @@ impl crate::ports::journal::JournalStore for RacingJournalStore {
     }
 }
 
-use super::{
-    CompanyEvent, continuation_failure_notice, emergency_from_load, task_enters_in_progress,
-    task_enters_planning,
-};
 use crate::ports::tasks::TaskTitle;
 
 /// Issue #880: which parked approvals name a workflow run, and which must
@@ -320,7 +316,7 @@ fn a_workflow_parks_continuation_owns_no_desk_and_no_dm() {
 }
 
 #[cfg(feature = "openhuman")]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 #[cfg(feature = "openhuman")]
 use async_trait::async_trait;

@@ -22,7 +22,7 @@ use tinymemory_api::types::{
 use super::BoundMemory;
 use super::tests_behavior::ConformanceStores;
 use crate::ports::{
-    CompanyId, CompressedTrace, ContextChunk, EvictionPolicy, FactKind, FactRecord,
+    CompanyId, ContextChunk, FactKind, FactRecord,
 };
 use crate::store::conformance;
 use crate::store::{FsCompanyStore, FsEventLog};

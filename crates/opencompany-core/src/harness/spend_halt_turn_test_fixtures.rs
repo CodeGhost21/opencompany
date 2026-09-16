@@ -14,15 +14,14 @@ use serde_json::{Value, json};
 
 use crate::company::CompanyManifest;
 use crate::company::credentials::Credential;
-use crate::harness::brain::{iteration_cap_pause_notice, spend_halt_notice};
 use crate::harness::mcp_probe::McpFailureQueue;
 use crate::harness::memory_loop;
 use crate::harness::orchestrator::{DelegationQueue, WorkflowRunnerHandle};
 use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::provider::{HostedProvider, HostedProviderConfig};
-use crate::harness::{HarnessBrain, HarnessDeps, HarnessPool};
+use crate::harness::HarnessDeps;
 use crate::ports::ContextStore;
-use crate::ports::brain::{Brain, CycleHost};
+use crate::ports::brain::CycleHost;
 use crate::ports::types::{
     ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
     Effect, EffectDisposition, OutboundMessage, ToolCall, ToolResult,

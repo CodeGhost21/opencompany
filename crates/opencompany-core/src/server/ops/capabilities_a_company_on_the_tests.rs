@@ -3,7 +3,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use super::{CredentialSource, TinyhumansTokenSource};
+use super::TinyhumansTokenSource;
 use crate::company::CompanyManifest;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::ports::usage::{SampleKind, UsageSample};

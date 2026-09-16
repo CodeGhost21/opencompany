@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 /// The allowlist refusal must name what the member CAN reach: the model has
 /// no other way to learn its own `delegates_to`.

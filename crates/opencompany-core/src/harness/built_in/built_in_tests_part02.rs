@@ -6,7 +6,6 @@
 //! [`super::built_in_test_fixtures_2`].
 
 use super::built_in_test_fixtures::*;
-use super::built_in_test_fixtures_2::*;
 use super::*;
 use async_trait::async_trait;
 use std::sync::Mutex as StdMutex;

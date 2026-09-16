@@ -1,16 +1,13 @@
 //! Tests for the company journal read as a `tinyhivemind` session log.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
 use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
 
 use super::super::*;
 use super::fixtures::*;
-use crate::Result;
-use crate::ports::events::{EventLog, EventStreamItem};
-use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, StoredEvent};
+use crate::ports::events::EventLog;
+use crate::ports::types::{CompanyEvent, EventSeq};
 
 pub(crate) async fn seed_desk(log: &MemoryLog) -> EventSeq {
     let company = MemoryLog::company();

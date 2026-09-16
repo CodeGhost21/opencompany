@@ -1,16 +1,10 @@
 //! Tests for the episode watermark divider rendered into a transcript.
 
-use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
-use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
+use tinyhivemind_hive::{Sequence, SessionAuthor};
 
 use super::super::*;
 use super::fixtures::*;
-use crate::Result;
-use crate::ports::events::{EventLog, EventStreamItem};
-use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, StoredEvent};
 
 /// One transcript row, as the projection hands it to a prompt.
 fn message(sequence: u64, author: &str, content: &str) -> tinyhivemind_hive::SessionMessage {

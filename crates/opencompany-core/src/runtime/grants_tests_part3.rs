@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 #[test]
 fn redeem_matching_reserves_when_the_id_still_matches() {

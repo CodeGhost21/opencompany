@@ -21,15 +21,8 @@ use tinyinference::tool::ToolCall;
 use tinyinference::usage::Usage;
 use tinyinference::{Error as InferenceError, Result as TaResult};
 
-use super::agent::copilot_persona;
-use super::tools::{
-    AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
-    ProposeWorkflowTool,
-};
 use super::*;
 use crate::company::CompanyManifest;
-use crate::ports::runs::{NewRun, RunStatus};
-use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;

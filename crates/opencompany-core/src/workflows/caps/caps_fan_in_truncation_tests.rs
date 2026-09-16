@@ -1,4 +1,4 @@
-use super::tests_multi_call_notices::{MARKER_SLACK, overflowing_runner_notices, source_envelope};
+use super::tests_multi_call_notices::{MARKER_SLACK, source_envelope};
 use super::tests_turn_dispatch::single_turn;
 use super::*;
 

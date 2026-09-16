@@ -1,5 +1,4 @@
 use super::tests_peer_record::{ConsultedPeerTurn, record_with_peer};
-use super::tests_turn_dispatch::single_turn;
 use super::*;
 
 impl ConsultedPeerTurn {

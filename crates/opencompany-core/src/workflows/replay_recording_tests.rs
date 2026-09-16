@@ -1,7 +1,6 @@
 use super::*;
 use crate::ports::run_output::RUN_OUTPUT_MAX_BYTES;
 use crate::runtime::workflow_resume::CONTINUATION_PERFORMED_KEY;
-use crate::workflows::caps::resolver::ChildGateRecord;
 use tinyflows::model::Node;
 
 use crate::company::{WorkflowEdgeDef, WorkflowNodeDef};

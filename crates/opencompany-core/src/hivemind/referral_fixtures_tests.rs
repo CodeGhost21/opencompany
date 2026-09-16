@@ -13,9 +13,6 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::moves_fixtures_tests::Runner;
-use super::referral;
-use super::referral_crossing_tests::*;
-use super::referral_prompt_tests::*;
 use super::test::{MemoryLog, desk_of, record};
 use super::*;
 use crate::Result;

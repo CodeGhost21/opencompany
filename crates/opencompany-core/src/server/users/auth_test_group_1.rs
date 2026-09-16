@@ -1,10 +1,8 @@
-use crate::company::CompanyManifest;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::ports::{CompanyStore, SessionKind, SessionRecord, UserRecord, UserRole, UserStatus};
+use crate::ports::types::CompanyId;
+use crate::ports::{SessionKind, SessionRecord, UserRecord, UserRole, UserStatus};
 use crate::runtime::RuntimeBuilder;
 use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 use crate::server::router;
-use crate::server::users::cookie::session_cookie_name;
 use crate::server::users::token::{OsTokens, mint_session_token, sha256_hex};
 use crate::{AppConfig, AppState};
 use axum::body::Body;

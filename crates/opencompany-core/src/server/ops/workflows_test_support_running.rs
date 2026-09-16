@@ -6,7 +6,7 @@ pub(crate) use std::sync::Arc;
 pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) use axum::body::{Body, to_bytes};
-pub(crate) use axum::http::{Request, StatusCode};
+pub(crate) use axum::http::Request;
 pub(crate) use tower::ServiceExt;
 
 pub(crate) use crate::company::CompanyManifest;

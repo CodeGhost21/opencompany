@@ -1,16 +1,9 @@
 //! Tests for the [`HiveConfig`] manifest knob.
 
-use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
-use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
 
 use super::super::*;
 use super::fixtures::*;
-use crate::Result;
-use crate::ports::events::{EventLog, EventStreamItem};
-use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, StoredEvent};
 
 #[test]
 fn a_desk_with_two_members_deliberates_by_default() {

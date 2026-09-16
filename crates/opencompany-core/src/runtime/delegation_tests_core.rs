@@ -6,8 +6,7 @@ pub(super) use std::sync::Mutex;
 
 pub(super) use crate::ports::TaskStore;
 pub(super) use crate::ports::tasks::{
-    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
-    TaskOutputSource,
+    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING,
 };
 pub(super) use crate::ports::types::LedgerEntry;
 pub(super) use crate::store::FsOps;

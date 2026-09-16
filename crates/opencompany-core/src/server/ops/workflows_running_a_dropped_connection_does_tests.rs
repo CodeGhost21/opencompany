@@ -1,5 +1,4 @@
 use super::workflows_test_support::running::*;
-use super::workflows_test_support::*;
 use super::*;
 
 /// **The keystone.** A client that walks away mid-run must not take the

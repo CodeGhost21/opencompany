@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::company::{CompanyManifest, parse_workflow};
 use crate::harness::HarnessPool;

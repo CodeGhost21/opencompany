@@ -1,12 +1,5 @@
-use super::super::*;
 use super::*;
-pub(super) use crate::company::steer::{InflightKind, InflightRegistry};
-pub(super) use crate::ports::TaskStore;
 pub(super) use crate::ports::tasks::TaskTitle;
-use std::collections::VecDeque;
-use std::sync::Mutex as StdMutex;
-use tinyinference::Result as TaResult;
-use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
 pub(super) use crate::company::CompanyManifest;
@@ -16,7 +9,7 @@ pub(super) use crate::hivemind::referral::HiveReferralRunner;
 pub(super) use crate::ports::brain::CycleHost;
 // Issue #301: every lifecycle return now lands in To-do (the `backlog` pool
 // is gone), so these assertions read the const rather than a literal.
-pub(super) use crate::ports::tasks::{COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO};
+pub(super) use crate::ports::tasks::{COLUMN_PAUSED, COLUMN_TODO};
 pub(super) use crate::ports::types::{
     ApprovalId, CompanyId, ContextOp, ContextOpResult, Effect, EffectDisposition, OverlayAgent,
     ToolCall, ToolResult,

@@ -1,17 +1,10 @@
 use super::*;
-use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
-use crate::store::FsOps;
-use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
+use crate::ports::workspace::WorkspaceStore;
 
 // Issue #470: the `composio_execute` fixtures are built here, from the same
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
 use super::policy_test_helpers_tests::*;
-use crate::policy::test_support::{
-    COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
-    composio_read_args, composio_send_args, composio_unclassified_args,
-    composio_unclassified_args_numbered,
-};
 
 // --- scopes: a turn's entries are its own, and nobody else's (#439) ------
 

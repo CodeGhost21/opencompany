@@ -24,9 +24,7 @@ use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::*;
 use crate::company::CompanyManifest;
-use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
-use tempfile;
 
 // ---------------------------------------------------------------------------
 // A scripted model

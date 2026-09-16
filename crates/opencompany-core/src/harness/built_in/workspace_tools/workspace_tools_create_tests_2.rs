@@ -1,7 +1,6 @@
 use super::tests::*;
 use super::tests_create_1::*;
 use super::*;
-use crate::store::FsOps;
 
 /// Issue #1801, Fix B: a folder create that slips past the up-front
 /// duplicate check because the folder appeared *after* the snapshot was

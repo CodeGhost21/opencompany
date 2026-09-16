@@ -8,19 +8,15 @@
 //! desk, under an author that cannot be counted as a supporter, and only when
 //! the desk opted in, is entirely ours.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 
 use super::moves_fixtures_tests::Runner;
 use super::referral;
-use super::referral_crossing_tests::*;
 use super::referral_fixtures_tests::*;
 use super::test::{MemoryLog, desk_of, record};
 use super::*;
-use crate::Result;
 use crate::ports::events::EventLog;
-use crate::ports::types::{CompanyEvent, EventSeq};
 
 // ---------------------------------------------------------------------------
 // The prompt

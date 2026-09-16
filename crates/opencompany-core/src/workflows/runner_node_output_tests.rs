@@ -2,9 +2,8 @@ use super::tests_capped_halt::{GREET, deps, record, tools_record};
 use super::*;
 
 use crate::company::parse_workflow;
-use crate::harness::provider::MockProvider;
 use crate::ports::run_output::WorkflowRunOutputStore;
-use crate::store::{FsCompanyStore, FsContextStore, FsOps};
+use crate::store::FsOps;
 
 /// CodeRabbit review on #1937 (issue #1866) — a downstream binding of the
 /// SAME value the postcondition gate certified.

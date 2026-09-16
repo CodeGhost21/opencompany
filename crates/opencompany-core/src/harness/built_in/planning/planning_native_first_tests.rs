@@ -1,16 +1,12 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use tinyinference::model::{ChatModel, ModelResponse};
 use tinyinference::usage::Usage;
-use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::planning_fixtures_tests::*;
 use super::planning_whole_pass_tests::{card, read};
 use super::*;
 use crate::company::CompanyManifest;
-use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use tempfile;
 

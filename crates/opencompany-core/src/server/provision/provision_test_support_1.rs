@@ -1,24 +1,21 @@
 //! End-to-end axum tests for provisioning, per-tenant auth, lifecycle controls,
 //! quotas, and webhook emission. All offline (default build, no features).
 
-use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::Brain;
 pub(super) use crate::ports::types::{
     CompanyEvent, CompanyId, CompanyRecord, CompanySummary, CompressedTrace, CycleRequest,
     CycleResult, Effect, EffectGroup, EventSeq, LedgerEntry, OutboundMessage, TokenUsage,
 };
-use crate::ports::{CompanyStore, CycleHost, EventLog};
+use crate::ports::{CompanyStore, CycleHost};
 use crate::runtime::RuntimeBuilder;
-use crate::server::graphql::auth::GqlAuth;
 use crate::server::platform_auth::{PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier};
 use crate::server::router;
-use crate::server::webhook::{WebhookConfig, WebhookKind};
-use crate::store::{FsCompanyStore, FsEventLog};
+use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::Request;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tower::ServiceExt;

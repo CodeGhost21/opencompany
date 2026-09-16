@@ -2,14 +2,11 @@
 //! search- and billing-grant rules every shipped template must obey
 //! (split out of `content_tests.rs`).
 
-use std::path::{Path, PathBuf};
 
 use super::content_tests_support::*;
-use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
-    grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, load_catalog_skills, load_dir_ledgers, load_dir_skills,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_skills,
     parse_workflow, walk_workspace,
 };
 use crate::runtime::builder::{agent_scoped_grants, effective_grants};

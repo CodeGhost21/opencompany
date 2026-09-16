@@ -2,9 +2,6 @@ use super::tests_capped_halt::{deps, deps_with_source, tools_record, write_wf};
 use super::*;
 
 use crate::company::parse_workflow;
-use crate::harness::provider::MockProvider;
-use crate::ports::run_output::WorkflowRunOutputStore;
-use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
 /// T3 — `on_error = "route"` plus an `error`-labeled edge routes the failure
 /// item down the recovery branch.

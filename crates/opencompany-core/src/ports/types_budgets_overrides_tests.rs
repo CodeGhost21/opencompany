@@ -1,6 +1,5 @@
 use super::types_test_support::*;
 use super::*;
-use crate::ports::workflow_runner::DeliveryStatus;
 
 /// A stored override wins over the manifest in both directions — raising a
 /// cap and lowering one. This is the "no redeploy" property at its source:

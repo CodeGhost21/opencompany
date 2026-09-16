@@ -1,6 +1,6 @@
 pub(super) use super::*;
 pub(super) use crate::openhuman::MockOpenHumanRpc;
-pub(super) use crate::ports::types::{AgentOverride, CompanyId, CompressedTrace, ToolCall};
+pub(super) use crate::ports::types::{CompanyId, CompressedTrace, ToolCall};
 pub(super) use crate::runtime::journal::ExecutedEffect;
 
 #[derive(Clone)]

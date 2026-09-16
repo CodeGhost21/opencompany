@@ -1,6 +1,5 @@
 use super::tests_core::*;
 use super::tests_core2::*;
-use super::tests_core3::*;
 use super::*;
 
 /// Issue #845, the wiring: the briefing actually reaches the brain.
