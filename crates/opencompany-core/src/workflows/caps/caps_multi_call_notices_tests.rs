@@ -597,7 +597,7 @@ pub(super) fn source_envelope(marker: &str, chars: usize) -> Value {
 /// compete for room would mean the truncation marker could itself be the
 /// thing squeezed out (the reasoning `memory_loop`'s skipped-hit marker
 /// arrived at first).
-const MARKER_SLACK: usize = 2_000;
+pub(super) const MARKER_SLACK: usize = 2_000;
 
 /// The reported shape: three fetched sources fan in to one ranking agent.
 /// Every source must still be represented, the turn must be bounded, and
