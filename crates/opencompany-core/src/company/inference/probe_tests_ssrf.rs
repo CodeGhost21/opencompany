@@ -363,4 +363,3 @@ fn a_refusal_names_the_next_thing_to_do() {
         "the auth sentence is unchanged — it was already right"
     );
 }
-

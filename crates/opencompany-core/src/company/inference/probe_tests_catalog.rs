@@ -143,8 +143,7 @@ async fn a_paged_probe_reads_every_page_with_the_bearer() {
     let app = axum::Router::new().route(
         "/agent-integrations/openrouter/models",
         axum::routing::get(
-            move |Query(params): Query<HashMap<String, String>>,
-                  headers: axum::http::HeaderMap| {
+            move |Query(params): Query<HashMap<String, String>>, headers: axum::http::HeaderMap| {
                 let seen = seen_for_route.clone();
                 async move {
                     let query = params
@@ -157,7 +156,10 @@ async fn a_paged_probe_reads_every_page_with_the_bearer() {
                         .and_then(|v| v.to_str().ok())
                         .map(str::to_string);
                     seen.lock().unwrap().push((query, auth));
-                    let offset: usize = params.get("offset").and_then(|o| o.parse().ok()).unwrap_or(0);
+                    let offset: usize = params
+                        .get("offset")
+                        .and_then(|o| o.parse().ok())
+                        .unwrap_or(0);
                     let data = if offset == 0 {
                         serde_json::json!([{"id": "acme/test-model"}, {"id": "acme/other-model"}])
                     } else {
@@ -244,9 +246,7 @@ async fn a_realistic_sized_catalog_past_the_old_64kib_cap_is_read_in_full() {
     // staying far under `CATALOG_BODY_CAP` (16 MiB).
     let filler = "x".repeat(1600);
     let entries: Vec<_> = (0..COUNT)
-        .map(|i| {
-            serde_json::json!({"id": format!("acme/test-model-{i}"), "description": filler})
-        })
+        .map(|i| serde_json::json!({"id": format!("acme/test-model-{i}"), "description": filler}))
         .collect();
     let body = serde_json::json!({"data": entries}).to_string();
     assert!(
@@ -339,4 +339,3 @@ async fn a_catalog_body_over_the_cap_is_an_explicit_error_not_an_empty_list() {
         "still non-destructive — a huge catalog says nothing about the credential"
     );
 }
-
