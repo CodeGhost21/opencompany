@@ -635,6 +635,6 @@ pub(super) fn handoff(instruction: &str) -> Delegation {
 /// A scripted escalation. Records what it was asked so a test can prove the
 /// model was *not* consulted on messages the cheap layer already named.
 pub(super) struct ScriptedTriage {
-    verdict: crate::harness::triage::TriageVerdict,
-    asked: Mutex<Vec<String>>,
+    pub(super) verdict: crate::harness::triage::TriageVerdict,
+    pub(super) asked: Mutex<Vec<String>>,
 }
