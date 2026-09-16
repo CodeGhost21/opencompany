@@ -13,6 +13,8 @@ use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::{TaskRecord, TaskTitle};
 use crate::ports::types::{CompanyId, CompanyRecord, CompressedTrace, ContextChunk};
 use crate::runtime::RuntimeBuilder;
+use super::tests_mcp_add_probes_without::discussion_card;
+use super::tests_applying_a_proposal_with::upload_file;
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
 use crate::store::FsCompanyStore;
