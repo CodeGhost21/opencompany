@@ -1,6 +1,6 @@
 use super::super::*;
 
-fn agent(id: &str, tier: Option<&str>) -> ManifestAgent {
+pub(super) fn agent(id: &str, tier: Option<&str>) -> ManifestAgent {
     ManifestAgent {
         provider: None,
         global: false,
@@ -33,7 +33,7 @@ fn agent(id: &str, tier: Option<&str>) -> ManifestAgent {
 /// A company with a `strategy` desk led by a roster teammate, an
 /// `archive` desk nobody on the roster sits on, and a `writer` teammate who
 /// is *not* a desk — the exact shape issue #272 was observed on.
-fn desks_record(id: &CompanyId) -> CompanyRecord {
+pub(super) fn desks_record(id: &CompanyId) -> CompanyRecord {
     let manifest = toml::from_str(
         r#"
 [company]
@@ -66,7 +66,7 @@ members = ["nobody"]
     }
 }
 
-fn desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateToDeskTool {
+pub(super) fn desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateToDeskTool {
     let company = record.id.clone();
     DelegateToDeskTool::new(
         queue.clone(),
@@ -79,7 +79,7 @@ fn desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateToDeskTo
 
 /// A three-desk record where two desks have roster leads, so a member of one
 /// can be given an allowlist that admits one desk and not another.
-fn nested_desks_record(id: &CompanyId) -> CompanyRecord {
+pub(super) fn nested_desks_record(id: &CompanyId) -> CompanyRecord {
     let manifest = toml::from_str(
         r#"
 [company]
@@ -123,7 +123,7 @@ members = ["ceo"]
 }
 
 /// The `writer`'s copy of `delegate_to_desk`: allowed `research` only.
-fn member_desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateToDeskTool {
+pub(super) fn member_desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateToDeskTool {
     let company = record.id.clone();
     DelegateToDeskTool::for_member(
         queue.clone(),
@@ -138,20 +138,20 @@ fn member_desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateT
 
 /// A store that cannot answer, so the grounding read has nothing to check
 /// the target against.
-struct BrokenStore;
+pub(super) struct BrokenStore;
 
 #[async_trait::async_trait]
 impl CompanyStore for BrokenStore {
-    async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+    pub(super) async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
         Err(crate::OpenCompanyError::Store("store is down".to_string()))
     }
-    async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+    pub(super) async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
         Ok(())
     }
-    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+    pub(super) async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
         Ok(Vec::new())
     }
-    async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+    pub(super) async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
         Ok(())
     }
 }
@@ -161,7 +161,7 @@ impl CompanyStore for BrokenStore {
 /// A company whose `strategy` desk has THREE members, so its lead has peers
 /// to reach — the shape D1 was observed on — plus an `analyst` on a desk the
 /// lead's `delegates_to` permits and a `legal_counsel` on one it does not.
-fn peers_record(id: &CompanyId) -> CompanyRecord {
+pub(super) fn peers_record(id: &CompanyId) -> CompanyRecord {
     let manifest = toml::from_str(
         r#"
 [company]
@@ -214,7 +214,7 @@ members = ["legal_counsel"]
 
 /// `writer`'s copy of the teammate tool: a desk lead with one peer on its
 /// own desk and a `research` allowlist.
-fn member_teammate_tool(
+pub(super) fn member_teammate_tool(
     record: CompanyRecord,
     queue: &DelegationQueue,
 ) -> DelegateToTeammateTool {
@@ -236,12 +236,12 @@ fn member_teammate_tool(
 /// filesystem, mirroring `crate::server::ops::team`'s `add_member` write
 /// path (load → push overlay → save).
 #[derive(Default)]
-struct MemStore {
+pub(super) struct MemStore {
     record: StdMutex<Option<CompanyRecord>>,
 }
 
 impl MemStore {
-    fn seeded(record: CompanyRecord) -> Self {
+    pub(super) fn seeded(record: CompanyRecord) -> Self {
         Self {
             record: StdMutex::new(Some(record)),
         }
@@ -250,26 +250,26 @@ impl MemStore {
 
 #[async_trait::async_trait]
 impl CompanyStore for MemStore {
-    async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+    pub(super) async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
         Ok(self.record.lock().unwrap().clone())
     }
-    async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+    pub(super) async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
         *self.record.lock().unwrap() = Some(record.clone());
         Ok(())
     }
-    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+    pub(super) async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
         Ok(Vec::new())
     }
-    async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+    pub(super) async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
         Ok(())
     }
 }
 
-fn empty_manifest() -> crate::company::CompanyManifest {
+pub(super) fn empty_manifest() -> crate::company::CompanyManifest {
     toml::from_str("[company]\nname = \"Acme\"\n").expect("valid manifest")
 }
 
-fn seeded_record(id: &CompanyId) -> CompanyRecord {
+pub(super) fn seeded_record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
@@ -300,7 +300,7 @@ fn seeded_record(id: &CompanyId) -> CompanyRecord {
 /// `minter_tools` is the line it declares; `minter_grants` is that line
 /// already narrowed by the company `allow` — what `build_agent` hands the
 /// tool.
-fn scoped_add_agent(company: CompanyId, store: Arc<dyn CompanyStore>) -> AddAgentTool {
+pub(super) fn scoped_add_agent(company: CompanyId, store: Arc<dyn CompanyStore>) -> AddAgentTool {
     AddAgentTool::new(
         company,
         store,
@@ -313,7 +313,7 @@ fn scoped_add_agent(company: CompanyId, store: Arc<dyn CompanyStore>) -> AddAgen
 // ---- run_workflow (issue #67) ----
 
 /// A valid trigger → agent → output graph, mirroring the REST route's fixture.
-const DEMO_WF: &str = r#"
+pub(super) const DEMO_WF: &str = r#"
     id = "demo"
     name = "Demo flow"
     description = "A tiny trigger → agent → output graph."
@@ -340,20 +340,20 @@ const DEMO_WF: &str = r#"
 
 /// A [`WorkflowRunner`] test double: records the ids it was asked to run and
 /// returns a canned [`WorkflowRun`].
-struct StubRunner {
+pub(super) struct StubRunner {
     calls: Arc<Mutex<Vec<String>>>,
     run: WorkflowRun,
 }
 
 impl StubRunner {
-    fn new(run: WorkflowRun) -> Self {
+    pub(super) fn new(run: WorkflowRun) -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             run,
         }
     }
 
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         Self::new(WorkflowRun {
             output: Value::Null,
             pending_approvals: Vec::new(),
@@ -370,7 +370,7 @@ impl StubRunner {
 
 #[async_trait::async_trait]
 impl WorkflowRunner for StubRunner {
-    async fn run(
+    pub(super) async fn run(
         &self,
         _company: &CompanyId,
         workflow: &WorkflowFile,
@@ -388,11 +388,11 @@ impl WorkflowRunner for StubRunner {
 /// filed no `workflow_run_failed` notification, unlike the console run
 /// route, the cron scheduler, and the approval-resume path, which all
 /// file one through `WorkflowSpawn`.
-struct FailingRunner;
+pub(super) struct FailingRunner;
 
 #[async_trait::async_trait]
 impl WorkflowRunner for FailingRunner {
-    async fn run(
+    pub(super) async fn run(
         &self,
         _company: &CompanyId,
         _workflow: &WorkflowFile,
@@ -406,7 +406,7 @@ impl WorkflowRunner for FailingRunner {
 }
 
 /// Writes `DEMO_WF` to `<dir>/workflows/demo.toml`.
-fn seed_demo_workflow(dir: &std::path::Path) {
+pub(super) fn seed_demo_workflow(dir: &std::path::Path) {
     let wf = dir.join("workflows");
     std::fs::create_dir_all(&wf).unwrap();
     std::fs::write(wf.join("demo.toml"), DEMO_WF).unwrap();
@@ -416,7 +416,7 @@ fn seed_demo_workflow(dir: &std::path::Path) {
 
 /// A record with an `assistant` roster agent so an `agent`-node graph passes
 /// the roster cross-check inside the create core.
-fn record_with_assistant(company: &CompanyId) -> CompanyRecord {
+pub(super) fn record_with_assistant(company: &CompanyId) -> CompanyRecord {
     let manifest: crate::company::CompanyManifest = toml::from_str(
         "[company]\nname = \"Acme\"\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n",
     )
@@ -448,7 +448,7 @@ fn record_with_assistant(company: &CompanyId) -> CompanyRecord {
 }
 
 /// The canonical happy graph the create tool accepts (camelCase body).
-fn greeter_body() -> Value {
+pub(super) fn greeter_body() -> Value {
     json!({
         "id": "greeter",
         "name": "Greeter",
@@ -468,7 +468,7 @@ fn greeter_body() -> Value {
 /// Like [`record_with_assistant`], but the company `[tools].allow` grants the
 /// `web` namespace so a `web_fetch` `tool_call` clears the author-time grant
 /// gate under the `openhuman` build (issue #661).
-fn record_granting_web(company: &CompanyId) -> CompanyRecord {
+pub(super) fn record_granting_web(company: &CompanyId) -> CompanyRecord {
     let mut record = record_with_assistant(company);
     record.manifest = toml::from_str(
         "[company]\nname = \"Acme\"\n[tools]\nallow = [\"web\"]\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n",
@@ -485,7 +485,7 @@ fn record_granting_web(company: &CompanyId) -> CompanyRecord {
 /// Returns the tool **and** the runner `Arc` — the handle keeps only a weak
 /// reference, so the caller must hold the returned runner alive for the
 /// duration of the test or the run tool reports "no runner wired".
-fn run_tool_over(
+pub(super) fn run_tool_over(
     dir: &std::path::Path,
     run: WorkflowRun,
     refs: WorkflowRefQueue,
