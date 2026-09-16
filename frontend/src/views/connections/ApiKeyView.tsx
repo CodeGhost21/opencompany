@@ -424,7 +424,8 @@ export function ApiKeyView({ client, company }: Props) {
           : await setCompanyCredentialModel(client, company, model);
         const modelWriteFailed = result.slots?.some(
           (slot) =>
-            (slot.slot === "provider" || slot.slot === "default") && slot.outcome === "failed",
+            (slot.slot === "provider" || slot.slot === "default") &&
+            (slot.outcome === "failed" || slot.detail === "inferenceRejected"),
         );
         if (modelWriteFailed) {
           setKeyError("The key was saved, but its model could not be applied. Please try again.");

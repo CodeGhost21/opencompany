@@ -255,6 +255,40 @@ test("saving asks for a model when the host needs one, then reposts the key with
   await expect(message).toContainText("TinyHumans is set up for LLM");
 });
 
+test("a rejected model save keeps the model step open for retry", async ({ page }) => {
+  await stubStatus(page, status({ inferenceHasOwnKey: false, composioHasOwnKey: false }));
+  await stubSaves(page, [
+    mutation({
+      needsModel: true,
+      models: ["acme/test-model"],
+    }),
+    mutation({
+      slots: [
+        slotReport("composio", "kept", "alreadyCurrent"),
+        slotReport("inference", "kept", "alreadyCurrent"),
+        slotReport("provider", "skipped", "inferenceRejected"),
+        slotReport("default", "skipped", "inferenceRejected"),
+        slotReport("health", "failed", "auth"),
+      ],
+    }),
+  ]);
+
+  await openAccount(page);
+  await page.getByTestId("account-add-key").click();
+  await page.getByTestId("account-key-input").fill(KEY_A);
+  await page.getByTestId("account-key-save").click();
+  await expect(page.getByTestId("account-key-model-step")).toBeVisible();
+
+  const trigger = page.locator("#account-key-model");
+  await trigger.click();
+  await page.getByRole("listbox", { name: "Models" }).getByRole("option", { name: "acme/test-model" }).click();
+  await page.getByTestId("account-key-model-save").click();
+
+  await expect(page.getByTestId("account-key-model-step")).toBeVisible();
+  await expect(page.getByText("The key was saved, but its model could not be applied. Please try again.")).toBeVisible();
+  await expect(toasts(page)).toHaveCount(0);
+});
+
 test("rotation: an existing account key is replaced by a new one", async ({ page }) => {
   // `replacing` (`canRemoveKey`) is keyed on `source === "company"`, so the
   // header's Connect button is gone and the row's own menu carries Replace.
