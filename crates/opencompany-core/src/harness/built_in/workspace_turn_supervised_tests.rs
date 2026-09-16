@@ -4,6 +4,7 @@ use axum::Json;
 use axum::routing::post;
 use serde_json::{Value, json};
 
+use super::workspace_turn_helpers_tests::*;
 use crate::company::CompanyManifest;
 use crate::company::credentials::Credential;
 use crate::harness::mcp_probe::McpFailureQueue;
@@ -14,7 +15,6 @@ use crate::harness::{HarnessDeps, HarnessPool};
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 use crate::store::{FsCompanyStore, FsContextStore, FsOps};
-use super::workspace_turn_helpers_tests::*;
 
 // ---------------------------------------------------------------------------
 // The approval boundary, driven by a model (issues #443, #444)

@@ -40,7 +40,6 @@ use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
-
 /// What the scripted model does on each successive call.
 #[derive(Clone, Debug)]
 pub(crate) enum Turn {
@@ -394,4 +393,3 @@ pub(crate) fn tool_results(script: &Script) -> Vec<String> {
         .filter_map(|m| m.get("content").and_then(Value::as_str).map(str::to_string))
         .collect()
 }
-
