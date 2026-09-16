@@ -1,5 +1,7 @@
 use super::*;
 use super::tests_core::*;
+use super::tests_core2::*;
+use super::tests_core3::*;
 
 
 /// Two operators resolving two different tool calls at the same moment —

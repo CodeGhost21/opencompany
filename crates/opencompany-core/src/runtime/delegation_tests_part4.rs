@@ -1,5 +1,6 @@
 use super::*;
 use super::tests_core::*;
+use super::tests_core2::*;
 
 
 /// The same adoption when the handler's card landed in **Planning**

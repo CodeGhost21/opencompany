@@ -1,5 +1,6 @@
 use super::*;
 use super::tests_core::*;
+use super::tests_core2::*;
 
 
 /// **Issue #984, the second caller.** `open_work_card` has two callers, and

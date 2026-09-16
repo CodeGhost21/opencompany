@@ -1,5 +1,6 @@
 use super::*;
 use super::tests_core::*;
+use super::tests_core2::*;
 
 
 /// "By construction" means the card is on the board **while** the delegate

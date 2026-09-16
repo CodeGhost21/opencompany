@@ -1,5 +1,6 @@
 use super::*;
 use super::tests_core::*;
+use super::tests_core2::*;
 
 
 /// The whole point: the model is asked only about the residue. A message the

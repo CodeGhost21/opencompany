@@ -1,5 +1,5 @@
-use super::*;
 use super::run_turn_test_fixtures::*;
+use super::*;
 
 /// A runner with no desks declared — the shape every key assertion below
 /// except the alias one is about.
@@ -123,3 +123,4 @@ fn the_turn_slot_stays_per_teammate() {
         keyer.session_key(&acme, "ceo", Some("engineering")),
         keyer.session_key(&acme, "ceo", Some("growth")),
     );
+}
