@@ -7,7 +7,7 @@ Two surfaces sit behind one tool name:
 
 | Surface | Credential | Billed to | Capped by |
 | --- | --- | --- | --- |
-| **Managed** (default) | the company's copied TinyHumans key, then the instance identity | the credential's TinyHumans account | `[tools].search_daily_calls`, per company per UTC day |
+| **Managed** (default) | the company's copied TinyHumans key, then the instance identity | the company's TinyHumans account for its key; the account of whoever runs the server for the instance identity | `[tools].search_daily_calls`, per company per UTC day |
 | **Company provider** (BYO) | a key the company pasted into Settings → Search | that company's own provider account | whatever the company set where the key was issued |
 
 Whichever is live, the agent is offered one tool called `web_search`. A

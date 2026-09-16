@@ -6,12 +6,13 @@ than merely tidier.
 
 ## What exists
 
-Three flat secrets on the company, declared in `src/company/search.rs`:
+Four flat secrets on the company, declared in `src/company/search.rs`:
 
 ```
 search/provider   the chosen slug — one of SUPPORTED_PROVIDERS
 search/api_key    the BYO key                    (write-only, never echoed)
 search/endpoint   the instance URL, SearXNG only (not a secret)
+search/managed/key  the TinyHumans key copied by account-key fan-out
 ```
 
 `SUPPORTED_PROVIDERS = ["managed", "brave", "exa", "querit", "searxng"]`.

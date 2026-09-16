@@ -3321,7 +3321,11 @@ impl HarnessPool {
             hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
             hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
             hasher.write_u64(search_byo::TenantSearch::fingerprint(&tenant_search_config));
-            hasher.write_u8(managed_search_config.is_some() as u8);
+            hasher.write_u32(
+                managed_search_config
+                    .as_ref()
+                    .map_or(u32::MAX, |backend| backend.daily_call_cap),
+            );
             hasher.finish()
         };
 
@@ -3864,9 +3868,25 @@ impl HarnessPool {
             Err(err) => {
                 tracing::warn!(
                     company = %company.id,
-                    "[search] could not read the managed company credential; keeping the deployment fallback: {err}"
+                    "[search] could not read the managed company credential; keeping the last known configuration: {err}"
                 );
-                return deps.search.clone();
+                let cached = self
+                    .managed_search_backends
+                    .read()
+                    .await
+                    .get(&company.id)
+                    .cloned();
+                return cached.or_else(|| deps.search.clone()).map(|backend| {
+                    backend
+                        .with_daily_call_cap(
+                            company
+                                .manifest
+                                .tools
+                                .search_daily_calls
+                                .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
+                        )
+                        .with_company_credential(company.id.clone(), secrets.clone())
+                });
             }
         };
         let backend = match (&deps.search, company_key) {

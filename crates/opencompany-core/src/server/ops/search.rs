@@ -872,11 +872,6 @@ async fn replace_key(
     let slug = slug.trim().to_ascii_lowercase();
     let key = supplied(body.api_key.as_deref()).unwrap_or_default();
     if slug == MANAGED_PROVIDER {
-        if key.is_empty() {
-            return Err(invalid(
-                "Managed Search's company key can be replaced here, but is removed from the Account page.",
-            ));
-        }
         let _guard = crate::company::company_key::slot_guard(runtime.id()).await;
         runtime
             .secrets()
