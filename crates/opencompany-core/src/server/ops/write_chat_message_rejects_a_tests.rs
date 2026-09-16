@@ -211,7 +211,6 @@ async fn chat_attachment_oversized_note_attaches_without_extracted_text() {
     );
 }
 
-#[async_trait::async_trait]
 /// The ceiling on a prose attachment holds at read time, not after.
 ///
 /// The binary half of this path has never had to buffer what it will discard:
