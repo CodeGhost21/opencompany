@@ -72,7 +72,7 @@ pub(super) async fn state_with_builder(
 /// a suite driven off it could not tell `alwaysApprove` from
 /// `manifestAlwaysApprove`, nor either from a resolver that answered `[]`
 /// unconditionally. The values are the same pair the REST suite uses.
-fn policy_manifest() -> CompanyManifest {
+pub(super) fn policy_manifest() -> CompanyManifest {
     toml::from_str(
         "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
          always_approve = [\"payment.send\", \"filing.submit\"]\n",
@@ -155,7 +155,7 @@ pub(super) async fn state_with_rich_company(home: &std::path::Path) -> AppState 
 // ---------------------------------------------------------------------------
 
 /// Mints a real binary node in the store, the way an upload or a publish does.
-async fn given_a_binary_node(state: &AppState, name: &str, mime: &str, bytes: &[u8]) -> String {
+pub(super) async fn given_a_binary_node(state: &AppState, name: &str, mime: &str, bytes: &[u8]) -> String {
     let id = CompanyId::new("acme");
     let workspace = state.registry().get(&id).unwrap().workspace().clone();
     let node = crate::ports::workspace::WorkspaceNode {
@@ -180,7 +180,7 @@ async fn given_a_binary_node(state: &AppState, name: &str, mime: &str, bytes: &[
 // ---------------------------------------------------------------------------
 
 /// Seeds one workflow-node attempt with a two-step trace and a deep half.
-async fn given_a_workflow_node_attempt(state: &AppState) {
+pub(super) async fn given_a_workflow_node_attempt(state: &AppState) {
     use crate::ports::deep_trace::{RunStepDetailRecord, TurnStepDetail};
     use crate::ports::runs::{NewRun, RunStepRecord};
     use crate::ports::types::{TurnStep, TurnStepFailure, TurnStepKind, TurnStepStatus};
