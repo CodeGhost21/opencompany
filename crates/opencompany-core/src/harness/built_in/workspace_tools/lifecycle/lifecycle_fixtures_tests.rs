@@ -14,9 +14,9 @@ use crate::store::FsOps;
 
 /// The revision [`file`] stamps, and therefore the CAS token every note in
 /// these tests answers to.
-const NOTE_REV: u64 = 2_000;
+pub(crate) const NOTE_REV: u64 = 2_000;
 /// The revision [`folder`] stamps.
-const FOLDER_REV: u64 = 1_000;
+pub(crate) const FOLDER_REV: u64 = 1_000;
 
 /// A live workspace shaped like the one the lifecycle tools were written for:
 /// the boot scaffold, this agent's own home holding a note and an empty folder,
@@ -28,14 +28,14 @@ const FOLDER_REV: u64 = 1_000;
 /// whether a removal is recoverable. A fixture without one would exercise only
 /// the [`History::Unknown`] branch and quietly stop checking the sentence the
 /// agent actually reads.
-struct Home {
+pub(crate) struct Home {
     _dir: tempfile::TempDir,
     store: Arc<dyn WorkspaceStore>,
     artifacts: Arc<dyn ArtifactStore>,
     company: CompanyId,
 }
 
-async fn own_home(company: &str) -> Home {
+pub(crate) async fn own_home(company: &str) -> Home {
     let dir = tempfile::tempdir().expect("tempdir");
     let ops = Arc::new(FsOps::new(dir.path()));
     let store: Arc<dyn WorkspaceStore> = ops.clone();
@@ -108,27 +108,27 @@ async fn own_home(company: &str) -> Home {
 impl Home {
     /// The delete tool as the builder wires it: this agent, this company, the
     /// artifact store attached.
-    fn deleter(&self) -> WorkspaceDeleteTool {
+    pub(crate) fn deleter(&self) -> WorkspaceDeleteTool {
         WorkspaceDeleteTool::new(
             ws(self.store.clone(), self.company.clone())
                 .with_artifacts(Some(self.artifacts.clone())),
         )
     }
 
-    fn renamer(&self) -> WorkspaceRenameTool {
+    pub(crate) fn renamer(&self) -> WorkspaceRenameTool {
         WorkspaceRenameTool::new(ws(self.store.clone(), self.company.clone()))
     }
 
-    async fn tree(&self) -> Vec<WorkspaceNode> {
+    pub(crate) async fn tree(&self) -> Vec<WorkspaceNode> {
         self.store.tree(&self.company).await.unwrap()
     }
 
     /// Whether a node id is still in the tree.
-    async fn has(&self, id: &str) -> bool {
+    pub(crate) async fn has(&self, id: &str) -> bool {
         self.tree().await.iter().any(|node| node.id == id)
     }
 
-    async fn read(&self, id: &str) -> (WorkspaceNode, String) {
+    pub(crate) async fn read(&self, id: &str) -> (WorkspaceNode, String) {
         self.store
             .read(&self.company, id)
             .await
@@ -136,12 +136,12 @@ impl Home {
             .expect("the node is still there")
     }
 
-    async fn node(&self, id: &str) -> WorkspaceNode {
+    pub(crate) async fn node(&self, id: &str) -> WorkspaceNode {
         self.read(id).await.0
     }
 
     /// This agent's home folder id, read live.
-    async fn home_id(&self) -> String {
+    pub(crate) async fn home_id(&self) -> String {
         self.tree()
             .await
             .iter()
@@ -152,7 +152,7 @@ impl Home {
     }
 
     /// Add a note directly inside this agent's own folder.
-    async fn add_own(&self, node: WorkspaceNode, content: &str) {
+    pub(crate) async fn add_own(&self, node: WorkspaceNode, content: &str) {
         let parent = self.home_id().await;
         self.store
             .create(
@@ -168,7 +168,7 @@ impl Home {
     }
 
     /// Add a binary node directly inside this agent's own folder.
-    async fn add_own_binary(&self, id: &str, name: &str, bytes: &[u8]) {
+    pub(crate) async fn add_own_binary(&self, id: &str, name: &str, bytes: &[u8]) {
         let parent = self.home_id().await;
         let node = WorkspaceNode {
             mime: Some("image/png".to_string()),
@@ -182,7 +182,7 @@ impl Home {
 
     /// Record `node_id` as a published deliverable, so deleting it is the
     /// recoverable case.
-    async fn publish(&self, artifact_id: &str, node_id: &str, body: &str) {
+    pub(crate) async fn publish(&self, artifact_id: &str, node_id: &str, body: &str) {
         let mut record = ArtifactRecord::new(
             artifact_id,
             "t-1",
@@ -199,7 +199,7 @@ impl Home {
 
 /// An artifact store whose `list` always errors, so `history_of`'s
 /// `published_record_for_node` call fails on every delete.
-struct FailingArtifacts;
+pub(crate) struct FailingArtifacts;
 
 #[async_trait::async_trait]
 impl ArtifactStore for FailingArtifacts {
