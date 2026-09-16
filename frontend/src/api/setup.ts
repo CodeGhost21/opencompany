@@ -251,6 +251,31 @@ export interface SetupInput {
    * level of this request is read field-for-field by the host.
    */
   admin_email?: string | null;
+  /**
+   * The TinyHumans account key the managed branch collected, stored against
+   * the company this call seeds and fanned out from there.
+   *
+   * The **company's** credential — what `setCompanyCredential` writes from the
+   * Connections Account page — not the instance-wide `tinyhumans_api_key`
+   * config field, which is why it does not travel in {@link SetupInput.fields}.
+   * Sent here rather than written by a second request because
+   * `PUT …/credential` is admin-scoped to an existing company and first run
+   * has neither: this call is what creates the company, and nobody has signed
+   * in yet to be its admin.
+   *
+   * Top level, so it survives the template path too — a managed operator who
+   * kept an untouched preset roster sends a slug and no designed company.
+   */
+  tinyhumans_key?: string | null;
+  /**
+   * The model to finish the TinyHumans row with — the one the setup probe
+   * actually reached.
+   *
+   * Omitted when the probe named none, which the fan-out reports back through
+   * {@link SetupApplied.credential_note} rather than leaving the row silently
+   * unmade.
+   */
+  tinyhumans_model?: string | null;
 }
 
 /** The company the wizard designed, as the review step hands it over. */
@@ -408,6 +433,16 @@ export interface SetupApplied {
   restart_required: string[];
   /** The company seeded by this call, if any. */
   seeded_company: string | null;
+  /**
+   * What the account-key fan-out did, in the host's own words — the same
+   * sentence the Account page's save toast carries.
+   *
+   * Absent when no key was sent, and absent on a host predating the field.
+   * Rendered verbatim rather than summarised: the fan-out honestly reports
+   * the slots it left alone, and a wizard that answered "all set" over that
+   * would be the one thing this step exists to stop doing.
+   */
+  credential_note?: string | null;
 }
 
 /** Read this instance's setup state. */

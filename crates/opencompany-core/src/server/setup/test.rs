@@ -448,6 +448,8 @@ async fn a_write_to_an_env_owned_field_is_refused() {
             company: None,
             name: None,
             admin_email: None,
+            tinyhumans_key: None,
+            tinyhumans_model: None,
         },
         &env,
     )
@@ -2276,4 +2278,147 @@ async fn the_answers_are_stored_on_the_company_the_wizard_built() {
     let answers = record.setup.expect("the answers were stored");
     assert_eq!(answers.industry, "E-commerce — I sell homeware online");
     assert_eq!(answers.automate, "Meta ads, order dispatch");
+}
+
+// ---------------------------------------------------------------------------
+// The managed branch's account key (onboarding redesign, slice 4a)
+// ---------------------------------------------------------------------------
+
+/// A key shaped like a real one and worth nothing.
+const ACCOUNT_KEY: &str = "th-not-a-real-key";
+
+/// Reads one of a company's secrets, or `None` when it holds nothing.
+async fn secret(runtime: &CompanyRuntime, key: &str) -> Option<String> {
+    runtime
+        .secrets()
+        .get(runtime.id(), key)
+        .await
+        .unwrap()
+        .map(|SecretValue(value)| value)
+}
+
+/// The wizard's managed branch collects the **company's** TinyHumans account
+/// key, and the apply runs it through the same fan-out `PUT …/credential`
+/// does.
+///
+/// This used to be two features wearing one name. Connecting TinyHumans on the
+/// Account page wrote the account key and fanned it out — the Composio copy,
+/// the LLM copy, the `tinyhumans` row, the default. Connecting TinyHumans in
+/// onboarding wrote the instance-wide `tinyhumans_api_key` setting, which
+/// fills none of those and is read once at boot. The console cannot make the
+/// real call itself (`PUT …/credential` is admin-scoped to a company, and
+/// during first run there is neither a company nor anyone signed in), so the
+/// key rides the apply and the fan-out runs here, right after the company
+/// exists.
+///
+/// The rebuild-in-place half is not asserted here and cannot be: this build
+/// has no harness compiled in, so `harness_reachable` is false and there is
+/// genuinely nothing to rebuild a company onto. It is reached through the same
+/// `rebuild_if_pending` the Account page's save calls, which
+/// `put_credential_that_configures_inference_rebuilds_the_runtime_in_place`
+/// covers on a fixture
+/// that does have a pool.
+#[tokio::test]
+async fn the_wizards_account_key_fans_out_onto_the_company_it_seeds() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+    // Keeps the fan-out's health probe off `api.tinyhumans.ai`. Keyed on the
+    // id the chosen name mints, which is the one this apply is about to seed.
+    crate::server::ops::company_key::prober_override::set(
+        "acme",
+        Ok(vec!["acme/test-model".to_string()]),
+    );
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "law_firm",
+            "name": "Acme",
+            "tinyhumans_key": ACCOUNT_KEY,
+            "tinyhumans_model": "acme/test-model",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["seeded_company"], "acme", "{body}");
+    assert!(
+        !body.to_string().contains(ACCOUNT_KEY),
+        "the apply response must never echo the key: {body}"
+    );
+
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("the seeded company is registered");
+
+    assert_eq!(
+        secret(&runtime, crate::company::company_key::KEY_KEY).await,
+        Some(ACCOUNT_KEY.to_string()),
+        "the key belongs to the company, in the slot the Account page writes"
+    );
+    // The load-bearing one: only the fan-out writes this. A wizard that stored
+    // the key and stopped there leaves it empty, which is the state where
+    // "connected to TinyHumans" buys the operator no integrations at all.
+    assert_eq!(
+        secret(&runtime, crate::company::composio::TINYHUMANS_KEY_KEY).await,
+        Some(ACCOUNT_KEY.to_string()),
+        "the Composio copy must have been filled from it"
+    );
+    assert_eq!(
+        secret(
+            &runtime,
+            &crate::company::inference::store::provider_key_key(
+                crate::company::inference::MANAGED_SLUG
+            )
+        )
+        .await,
+        Some(ACCOUNT_KEY.to_string()),
+        "and the LLM copy with it"
+    );
+
+    // The note is the host's own account of all of that, for the completion
+    // screen to show verbatim rather than flatten into "you're set up".
+    let note = body["credential_note"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the fan-out's own words must come back: {body}"));
+    assert!(note.contains("acme/test-model"), "{note}");
+}
+
+/// A key sent with nothing to attach it to is dropped, not guessed at.
+///
+/// A host that already has companies seeds none, and there is no one of its
+/// existing companies this wizard can claim the operator meant — writing the
+/// key onto whichever happened to be first would hand one company another's
+/// wallet.
+#[tokio::test]
+async fn an_account_key_with_no_company_to_own_it_is_not_written_anywhere() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+    let existing = with_company(&state, home_dir.path()).await;
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "law_firm",
+            "tinyhumans_key": ACCOUNT_KEY,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["seeded_company"].is_null(), "{body}");
+    assert!(
+        body["credential_note"].is_null(),
+        "nothing happened, so nothing is claimed: {body}"
+    );
+
+    let runtime = state.registry().get(&existing).expect("still registered");
+    assert_eq!(
+        secret(&runtime, crate::company::company_key::KEY_KEY).await,
+        None,
+        "a company this wizard did not create must not be given a wallet"
+    );
 }

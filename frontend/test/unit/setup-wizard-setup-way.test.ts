@@ -185,7 +185,10 @@ describe("the setup-way choice", () => {
     ]);
 
     await next();
-    expect(find("setup-provider-select"), "the press should have reached step 1").toBeTruthy();
+    // The managed step-1 is the Connect-to-TinyHumans screen, which has no
+    // provider to pick — taking the managed way already picked it.
+    expect(find("setup-key-get-link"), "the press should have reached step 1").toBeTruthy();
+    expect(find("setup-provider-select"), "and managed has no provider choice").toBeNull();
   });
 
   it("follows Set it up yourself with the self-managed step-1 only", async () => {

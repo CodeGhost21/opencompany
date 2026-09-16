@@ -104,7 +104,7 @@ import { HOST_SETTINGS_HIDDEN } from "@/product-scope";
  */
 const STEPS: readonly (Step & { fields: readonly string[] })[] = [
   { id: "setup-way", label: "Setup", fields: [] },
-  { id: "managed-login", label: "Model", fields: ["tinyhumans_api_key"] },
+  { id: "managed-login", label: "Connect", fields: ["tinyhumans_api_key"] },
   { id: "self-managed-connect", label: "Model", fields: ["tinyhumans_api_key"] },
   { id: "business", label: "Business", fields: [] },
   { id: "signin", label: "Sign-in", fields: ["auth_mode"] },
@@ -124,6 +124,15 @@ const STEP_ONE_FOR: Record<SetupWay, string> = {
 
 /** The branch: step 0 and the two step-1 screens it chooses between. */
 const BRANCH_STEP_IDS: readonly string[] = ["setup-way", ...Object.values(STEP_ONE_FOR)];
+
+/**
+ * The route a TinyHumans account key serves — the managed branch's only one.
+ *
+ * Not a provider the company declares. A key tested against this is stored as
+ * the company's own credential and fanned out from there, where every other
+ * route's key is written onto the manifest as that company's provider.
+ */
+const MANAGED_PROVIDER = "managed";
 
 /** Whether a step id is one of the two step-1 screens. */
 function isStepOne(id: string): boolean {
@@ -677,12 +686,16 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   // goes only when the operator typed one.
   const changed = useMemo(() => {
     const fields = status ? changedFields(status, values) : {};
-    // BYOK/local credentials belong to the new company's write-only inference
-    // store. Writing the same bytes into the host-wide TinyHumans key would
-    // both duplicate the secret and falsely report a process restart.
-    if (provider !== "managed") delete fields.tinyhumans_api_key;
+    // A key typed here is never a host-wide config write. A BYOK/local
+    // credential belongs to the new company's write-only inference store, and
+    // a TinyHumans one is that company's own account key — fanned out to
+    // Composio and the LLM row the moment it lands. `tinyhumans_api_key` is
+    // the instance's identity for companies that have none of their own, it
+    // is read once at boot, and writing the same bytes there would duplicate
+    // the secret and report a restart nobody needs.
+    delete fields.tinyhumans_api_key;
     return fields;
-  }, [status, values, provider]);
+  }, [status, values]);
 
   /**
    * Whether the managed way can actually be completed on this host.
@@ -728,6 +741,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       set("tinyhumans_api_key", "");
       setTested({ kind: "untested" });
       setRoster(null);
+    }
+    // Managed is TinyHumans, so its step 1 has no provider to pick — and the
+    // probe it runs has to reach the managed endpoint rather than whichever
+    // route the host happened to seed.
+    if (way === "managed") {
+      setProvider(MANAGED_PROVIDER);
+      setBaseUrl("");
     }
     setChosenWay(way);
   };
@@ -812,7 +832,23 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * never written, so it has to be asking the same question the payload answers.
    */
   const writesInference =
-    tested.kind === "ok" && provider !== "managed" && operatorConfiguredInference;
+    tested.kind === "ok" && provider !== MANAGED_PROVIDER && operatorConfiguredInference;
+  /**
+   * Whether finishing will store this key as the new company's own TinyHumans
+   * credential, for the host to fan out.
+   *
+   * The other half of {@link writesInference}: every tested key goes to
+   * exactly one of the two, because a TinyHumans key is an account identity
+   * that fills the model, Composio and search slots at once, where every other
+   * route's key is a single provider's and belongs on the manifest. Asked as
+   * "which route passed the probe" rather than "which branch was chosen", so
+   * an operator who took the self-managed way and left the picker on
+   * TinyHumans still gets the account-key treatment their key actually needs.
+   */
+  const writesAccountKey =
+    tested.kind === "ok" &&
+    provider === MANAGED_PROVIDER &&
+    !!values.tinyhumans_api_key?.trim();
 
   /**
    * Ask the host to design a team, on the way into Review.
@@ -910,6 +946,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         // a sign-in finishes setup into a company the operator cannot
         // administer.
         admin_email: email.trim() || null,
+        // Deferred to here rather than sent from the step that collected it:
+        // the fan-out writes a company's slots, and the company is what this
+        // request creates. Carried past the template/designed fork because the
+        // key belongs to whichever company comes out of it.
+        tinyhumans_key: writesAccountKey ? (values.tinyhumans_api_key?.trim() ?? null) : null,
+        tinyhumans_model:
+          writesAccountKey && tested.kind === "ok" ? (tested.model ?? null) : null,
         template: seedTemplate ? template : null,
         company:
           status.companies.length === 0 && roster && !seedTemplate
@@ -1012,6 +1055,15 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
               Built <strong>{applied.seeded_company}</strong> with{" "}
               {roster?.agents.length ?? 0}{" "}
               {roster?.agents.length === 1 ? "agent" : "agents"}.
+            </p>
+          )}
+          {/* The host's own words about what the key actually reached, verbatim.
+              The fan-out reports the slots it left alone — a model it was never
+              given, a surface that already had a key of its own — and those are
+              exactly the parts a cheerful "all set" would bury. */}
+          {applied.credential_note && (
+            <p className="text-sm text-muted-foreground" data-testid="setup-credential-note">
+              {applied.credential_note}
             </p>
           )}
           {/* The button below cannot restart the host — it only re-enters the
@@ -1316,7 +1368,20 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
           />
         )}
 
-        {isStepOne(current.id) && (
+        {current.id === STEP_ONE_FOR.managed && (
+          <ManagedLoginStep
+            client={client}
+            value={values.tinyhumans_api_key ?? ""}
+            onChange={(v) => {
+              set("tinyhumans_api_key", v);
+              setTested({ kind: "untested" });
+            }}
+            tested={tested}
+            onTested={setTested}
+          />
+        )}
+
+        {current.id === STEP_ONE_FOR["self-managed"] && (
           <PowerStep
             status={status}
             client={client}
@@ -1709,6 +1774,212 @@ function SetupWayStep({
   );
 }
 
+/** What a connection test was asked with — the answers its verdict is true of. */
+interface ProbeAnswers {
+  provider: string;
+  key: string;
+  baseUrl: string;
+}
+
+/**
+ * Run one connection test and settle the verdict — unless the answers moved
+ * under it.
+ *
+ * The staleness rule is why this is shared rather than written per step. Both
+ * step-1 screens leave their inputs live while a test is in flight, so an
+ * answer can arrive after the operator has changed the thing it was asked
+ * about, and a verdict is only ever true of the answers it was asked with. A
+ * late `ok` overwriting a settled `skipped` submits a passing tick for a
+ * credential nobody is using.
+ */
+async function runConnectionTest(
+  client: OpenCompanyClient,
+  asked: ProbeAnswers,
+  live: () => ProbeAnswers,
+  onTested: (t: TestState) => void,
+): Promise<void> {
+  const stale = () => {
+    const now = live();
+    return (
+      asked.provider !== now.provider || asked.key !== now.key || asked.baseUrl !== now.baseUrl
+    );
+  };
+
+  onTested({ kind: "testing" });
+  try {
+    const result = await testInference(client, {
+      provider: asked.provider,
+      key: asked.key || null,
+      baseUrl: asked.baseUrl || null,
+    });
+    if (stale()) return;
+    onTested(
+      result.ok
+        ? { kind: "ok", baseUrl: result.baseUrl, model: result.model }
+        : { kind: "failed", error: result.error ?? "Could not reach the provider." },
+    );
+  } catch (err: unknown) {
+    if (stale()) return;
+    onTested({
+      kind: "failed",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Managed step 1: the Account page's "Connect to TinyHumans" dialog, asked as
+ * a wizard step.
+ *
+ * Same ask, same link out, same one key. What it is *not* is the model step:
+ * there is no provider to pick, because taking the managed way already picked
+ * one, and there is no BYOK endpoint to name.
+ *
+ * ## Where the key goes
+ *
+ * Not into `config.toml`, and not through the wizard's own one-secret
+ * inference write. It is the **company's** TinyHumans account key, and the
+ * host fans it out from there the way `PUT …/credential` does for the Account
+ * page: the Composio copy, the LLM copy, the `tinyhumans` row with the model
+ * this step's probe reached, and the company default — each only where nothing
+ * of its own is already set.
+ *
+ * The write is deferred to the finish rather than made here, because the
+ * fan-out fills a company's slots and the company does not exist yet — the
+ * apply is what creates it. So this step collects and proves; the host reports
+ * back what the fan-out actually did, slot by slot, on the completion screen.
+ *
+ * No one-click grant button (`link/start`): that flow is company-scoped too,
+ * and adding an entry point for it is explicitly out of scope here. A link out
+ * to mint a key by hand is the whole of the alternative, exactly as the
+ * Account dialog offers it.
+ */
+function ManagedLoginStep({
+  client,
+  value,
+  onChange,
+  tested,
+  onTested,
+}: {
+  client: OpenCompanyClient;
+  value: string;
+  onChange: (v: string) => void;
+  tested: TestState;
+  onTested: (t: TestState) => void;
+}) {
+  const key = value.trim();
+  // Read from inside a call that started before it — see `runConnectionTest`.
+  const live = useRef<ProbeAnswers>({ provider: MANAGED_PROVIDER, key, baseUrl: "" });
+  live.current = { provider: MANAGED_PROVIDER, key, baseUrl: "" };
+
+  const run = async () => {
+    // Guards the Enter shortcut as well as the button: an empty box would
+    // probe the host's own credential and report a pass for a key this
+    // operator never gave.
+    if (!key) return;
+    await runConnectionTest(
+      client,
+      { provider: MANAGED_PROVIDER, key, baseUrl: "" },
+      () => live.current,
+      onTested,
+    );
+  };
+
+  return (
+    <div className="space-y-7">
+      <div>
+        <Label
+          htmlFor="setup-key"
+          className="text-base font-medium leading-snug"
+          data-testid="setup-question"
+        >
+          Connect to TinyHumans
+        </Label>
+        <p className="text-xs leading-snug text-muted-foreground" data-testid="setup-model-prompt">
+          Paste your account key. We&apos;ll check it reaches before going any further.
+        </p>
+
+        <div className="mt-2.5 flex items-center gap-2">
+          <Input
+            id="setup-key"
+            autoFocus
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            value={value}
+            placeholder="th-…"
+            data-testid="setup-field-key"
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void run();
+            }}
+          />
+          <Button
+            type="button"
+            variant={tested.kind === "ok" ? "outline" : "default"}
+            disabled={tested.kind === "testing" || !key}
+            onClick={() => void run()}
+            data-testid="setup-test-connection"
+            className="shrink-0"
+          >
+            {tested.kind === "testing" ? (
+              <>
+                <Loader2 className="size-4 animate-spin" />
+                Testing…
+              </>
+            ) : tested.kind === "ok" ? (
+              "Test again"
+            ) : (
+              "Test connection"
+            )}
+          </Button>
+        </div>
+
+        {/* What one key actually buys, said before it is asked for rather than
+            discovered afterwards. Named in surfaces rather than in slots: the
+            operator has not seen the Connections pages yet. */}
+        <p className="mt-2 text-xs leading-snug text-muted-foreground" data-testid="setup-key-fills">
+          One key: your team&apos;s model, and the account it connects tools like Gmail and
+          Slack through. Anything you set up yourself later keeps its own key.
+        </p>
+
+        {/* A link out, not a grant. The key is minted on their own dashboard
+            and pasted back, which works with no company in existence — the
+            whole of when this step runs. */}
+        <p className="mt-2 text-xs leading-snug text-muted-foreground">
+          Don&apos;t have one yet?{" "}
+          <a
+            href={TINYHUMANS_API_KEYS_URL}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="setup-key-get-link"
+            className="inline-flex items-center gap-1 font-medium text-foreground underline underline-offset-4"
+          >
+            Get an API key
+            <ExternalLink className="size-3" />
+          </a>
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {tested.kind === "ok" && (
+          <p className="text-sm leading-snug text-status-done-text" data-testid="setup-test-ok">
+            Reached {tested.baseUrl}
+            {tested.model ? ` using ${tested.model}` : ""} and got a reply.
+          </p>
+        )}
+        {tested.kind === "failed" && (
+          <Alert variant="destructive" data-testid="setup-test-failed">
+            <AlertTriangle />
+            <AlertTitle>That didn&apos;t connect</AlertTitle>
+            <AlertDescription>{tested.error}</AlertDescription>
+          </Alert>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /**
  * The credential, framed as what it buys rather than as what it is.
  *
@@ -1830,7 +2101,11 @@ function PowerStep({
    * the render that created it, which are exactly the values it must not use
    * to decide whether it is still current.
    */
-  const providerRef = useRef({ provider, key: value.trim(), baseUrl: baseUrl.trim() });
+  const providerRef = useRef<ProbeAnswers>({
+    provider,
+    key: value.trim(),
+    baseUrl: baseUrl.trim(),
+  });
   providerRef.current = { provider, key: value.trim(), baseUrl: baseUrl.trim() };
 
   const run = async () => {
@@ -1838,39 +2113,12 @@ function PowerStep({
     // alone would still leave that route to a request the provider cannot
     // answer usefully.
     if (!canTest) return;
-
-    // What this call is a verdict *about*. The picker stays live while a test
-    // is in flight, so an answer can arrive after the operator has moved on —
-    // and a verdict is only ever true of the answers it was asked with. The
-    // worst of it: selecting "No model" mid-test, and having the settled
-    // `skipped` overwritten by an `ok` that would then be submitted as
-    // inference for the pseudo-provider `none`, which the host does not know.
-    const asked = { provider, key: value.trim(), baseUrl: baseUrl.trim() };
-    const stale = () =>
-      asked.provider !== providerRef.current.provider ||
-      asked.key !== providerRef.current.key ||
-      asked.baseUrl !== providerRef.current.baseUrl;
-
-    onTested({ kind: "testing" });
-    try {
-      const result = await testInference(client, {
-        provider: asked.provider,
-        key: asked.key || null,
-        baseUrl: asked.baseUrl || null,
-      });
-      if (stale()) return;
-      onTested(
-        result.ok
-          ? { kind: "ok", baseUrl: result.baseUrl, model: result.model }
-          : { kind: "failed", error: result.error ?? "Could not reach the provider." },
-      );
-    } catch (err: unknown) {
-      if (stale()) return;
-      onTested({
-        kind: "failed",
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    await runConnectionTest(
+      client,
+      { provider, key: value.trim(), baseUrl: baseUrl.trim() },
+      () => providerRef.current,
+      onTested,
+    );
   };
 
   const testButton = (
