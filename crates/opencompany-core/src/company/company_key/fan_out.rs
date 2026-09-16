@@ -21,7 +21,7 @@ use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
 use super::KEY_KEY;
-use super::types::{FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport};
+use super::types::{FanOutKey, FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport};
 
 // ---------------------------------------------------------------------------
 // The per-company lock
