@@ -2303,4 +2303,33 @@ fn not_automatable_reason(end: &TurnEnd, diag: &[String]) -> String {
 }
 
 #[cfg(test)]
+#[path = "workflow_build/workflow_build_copilot_fix_tests.rs"]
+mod tests_copilot_fix;
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_copilot_pass_tests.rs"]
+mod tests_copilot_pass;
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_copilot_unit_tests.rs"]
+mod tests_copilot_unit;
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_grounding_tests.rs"]
+mod tests_grounding;
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_pass_tests_1.rs"]
+mod tests_pass_1;
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_pass_tests_2.rs"]
+mod tests_pass_2;
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_unit_tests.rs"]
+mod tests_unit;
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_fixtures_tests.rs"]
+pub(crate) mod workflow_build_fixtures_tests;
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_shared_tests.rs"]
+pub(crate) mod workflow_build_shared_tests;
+
+#[cfg(test)]
+#[path = "workflow_build/workflow_build_compat_tests.rs"]
 pub(crate) mod test;

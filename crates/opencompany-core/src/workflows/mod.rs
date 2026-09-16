@@ -18,7 +18,7 @@
 /// Issue #782: end-to-end proof that an upstream node's output reaches a
 /// downstream agent node's turn (an `agent -> agent` pipeline passes data).
 #[cfg(test)]
-mod agent_upstream_input_test;
+mod agent_upstream_input_tests;
 /// Issue #899 (Stage 1): end-to-end proof that approving a call gated inside an
 /// agent node's own tool loop AUTO-CONTINUES the blocked run — one continuation,
 /// after the last decision, and none for a wholly refused block.
@@ -26,11 +26,15 @@ mod agent_upstream_input_test;
 /// parked for approval reports `blocked`, stops its branch instead of handing
 /// its apology downstream, and that the run says what it parked.
 #[cfg(test)]
-mod blocked_node_test;
+#[path = "blocked_node_pipeline_tests.rs"]
+mod blocked_node_pipeline_tests;
+#[cfg(test)]
+#[path = "blocked_node_pure_tests.rs"]
+mod blocked_node_pure_tests;
 /// Issue #661 (M5): end-to-end proof that a workflow node can open and re-own a
 /// board card, and that everything it may not do stays refused.
 #[cfg(test)]
-mod board_turn_test;
+mod board_turn_tests;
 pub mod caps;
 pub mod checkpoint_store;
 pub mod delivery;
@@ -40,11 +44,11 @@ pub mod gate;
 /// Issue #460: end-to-end proof that a `tool_call` node the company's policy
 /// stops does not execute, and leaves a decidable card.
 #[cfg(test)]
-mod gated_tool_call_test;
+mod gated_tool_call_tests;
 /// Issue #395: end-to-end proof that a tool call gated inside a workflow agent
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
-mod gated_tool_turn_test;
+mod gated_tool_turn_tests;
 /// Issue #1866: one tool-less semantic sufficiency pass after deterministic checks.
 pub mod judge;
 /// Issue #978: a run that fans out to N gated nodes is cleared by approving,
@@ -54,7 +58,7 @@ pub mod judge;
 /// destination says so on the run, instead of the refusal reaching the operator
 /// only as whatever prose the model wrote about it.
 #[cfg(test)]
-mod publish_refusal_notice_test;
+mod publish_refusal_notice_tests;
 /// Issue #846: a continuation replays the outward calls its lineage already
 /// made, instead of making them a second time.
 pub mod replay;
@@ -79,12 +83,5 @@ pub fn tinyflows_engine_name() -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The tinyflows engine is linked and its API answers — the P0 link proof.
-    #[test]
-    fn tinyflows_engine_is_linked() {
-        assert_eq!(tinyflows_engine_name(), "tinyflows");
-    }
-}
+#[path = "workflows_tests.rs"]
+mod tests;

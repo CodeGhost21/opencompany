@@ -429,4 +429,5 @@ fn replace_whole_words(haystack: &str, needle: &str, replacement: &str) -> Strin
 }
 
 #[cfg(test)]
-mod test;
+#[path = "naming/naming_tests.rs"]
+mod tests;

@@ -668,4 +668,5 @@ fn take_string(obj: &mut serde_json::Map<String, Value>, key: &str) -> Result<St
 }
 
 #[cfg(test)]
-mod test;
+#[path = "wire_tests.rs"]
+mod tests;

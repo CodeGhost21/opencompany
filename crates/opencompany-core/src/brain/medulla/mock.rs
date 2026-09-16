@@ -150,4 +150,5 @@ impl MedullaTransport for MockTransport {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "mock_tests.rs"]
+mod tests;

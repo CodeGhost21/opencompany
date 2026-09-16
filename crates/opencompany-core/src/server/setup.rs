@@ -1368,7 +1368,26 @@ fn parse_value(spec: &FieldSpec, raw: Option<&str>) -> Result<ConfigValue, OpenC
 }
 
 #[cfg(test)]
-mod test;
+#[path = "setup/setup_test_group_1.rs"]
+mod setup_test_group_1;
+#[cfg(test)]
+#[path = "setup/setup_test_group_2.rs"]
+mod setup_test_group_2;
+#[cfg(test)]
+#[path = "setup/setup_test_group_3.rs"]
+mod setup_test_group_3;
+#[cfg(test)]
+#[path = "setup/setup_test_group_4.rs"]
+mod setup_test_group_4;
+#[cfg(test)]
+#[path = "setup/setup_test_group_5.rs"]
+mod setup_test_group_5;
+#[cfg(test)]
+#[path = "setup/setup_test_group_6.rs"]
+mod setup_test_group_6;
+#[cfg(test)]
+#[path = "setup/setup_test_support_1.rs"]
+mod setup_test_support_1;
 
 // ---------------------------------------------------------------------------
 // The roster proposal, before any company exists
@@ -1486,15 +1505,24 @@ const MODEL_DISCOVERY_FAILURE: &str = "Could not list models from this provider.
 #[cfg(feature = "openhuman")]
 const MODEL_PROBE_CANDIDATE_LIMIT: usize = 5;
 
+/// The model a first company thinks with when its provider offers it.
+///
+/// Without this the default is whichever model the provider happens to list
+/// first, which is a position in someone else's catalogue rather than a choice.
+#[cfg(feature = "openhuman")]
+const PREFERRED_SETUP_MODEL: &str = "z-ai/glm-5.3-flash";
+
 #[cfg(feature = "openhuman")]
 fn probe_model_candidates(
     mut models: Vec<crate::server::inference_models::InferenceModel>,
 ) -> Vec<crate::server::inference_models::InferenceModel> {
     models.sort_by_key(|model| {
         let id = model.id.to_ascii_lowercase();
-        ["embed", "rerank", "moderation"]
+        let unusable = ["embed", "rerank", "moderation"]
             .iter()
-            .any(|marker| id.contains(marker))
+            .any(|marker| id.contains(marker));
+        let preferred = id == PREFERRED_SETUP_MODEL;
+        (unusable, !preferred)
     });
     models
         .into_iter()

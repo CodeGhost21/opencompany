@@ -282,4 +282,5 @@ pub(crate) fn embedded_ledger_names(files: &[(&str, &str)]) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "ledger_file_tests.rs"]
+mod tests;
