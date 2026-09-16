@@ -245,7 +245,7 @@ pub(super) struct FailOnceJournalStore {
 }
 
 impl FailOnceJournalStore {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             inner: crate::ports::journal::MemoryJournalStore::default(),
             failed: std::sync::atomic::AtomicBool::new(false),
