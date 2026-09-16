@@ -586,21 +586,32 @@ pub struct CompanyManifest {
 /// desk and by return text on another inside one unbroken session — which is
 /// exactly the incoherence the continuous session exists to remove.
 ///
-/// # Off by default, and never silencing
+/// # On by default, explicitly opt-out, and never silencing
 ///
-/// A company that does not set this behaves byte-for-byte as it did. A company
-/// that does still has the old path underneath it: an agent that answers
+/// Every company gets the speech tools unless it explicitly sets
+/// `[speech] enabled = false`. A company that opts out keeps the old return-text
+/// path. A company that uses speech still has that path underneath it: an agent that answers
 /// without calling a speech tool has its return text journaled as before, and
 /// the omission is counted rather than dropped. Going quiet because a model
 /// forgot to call a tool is not an acceptable failure mode, so it is not one
 /// this knob can produce.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Speech {
     /// Whether `desk_post` / `desk_dm` / `desk_close` / `desk_read` are
     /// registered on every agent's belt.
-    #[serde(default)]
+    #[serde(default = "default_speech_enabled")]
     pub enabled: bool,
+}
+
+impl Default for Speech {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+const fn default_speech_enabled() -> bool {
+    true
 }
 
 /// `[globals]` — this company's relationship to the global baseline.
