@@ -111,7 +111,6 @@ async fn stored(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
         .expect("card exists")
 }
 
-
 /// Journals an operator line in the teammate's DM and hands back its
 /// sequence, the root a reply in that DM threads off.
 async fn asked_in_dm(runtime: &Arc<CompanyRuntime>) -> crate::ports::types::EventSeq {
