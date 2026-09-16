@@ -3731,5 +3731,32 @@ impl CodeRunner for UnwiredCode {
 }
 
 #[cfg(test)]
-#[path = "caps_tests.rs"]
-mod tests;
+#[path = "caps_turn_dispatch_tests.rs"]
+mod tests_turn_dispatch;
+#[cfg(test)]
+#[path = "caps_recovery_evidence_tests.rs"]
+mod tests_recovery_evidence;
+#[cfg(test)]
+#[path = "caps_budget_postcondition_tests.rs"]
+mod tests_budget_postcondition;
+#[cfg(test)]
+#[path = "caps_field_present_tests.rs"]
+mod tests_field_present;
+#[cfg(test)]
+#[path = "caps_notices_parking_tests.rs"]
+mod tests_notices_parking;
+#[cfg(test)]
+#[path = "caps_multi_call_notices_tests.rs"]
+mod tests_multi_call_notices;
+#[cfg(test)]
+#[path = "caps_fan_in_truncation_tests.rs"]
+mod tests_fan_in_truncation;
+#[cfg(test)]
+#[path = "caps_node_failure_tests.rs"]
+mod tests_node_failure;
+#[cfg(test)]
+#[path = "caps_peer_record_tests.rs"]
+mod tests_peer_record;
+#[cfg(test)]
+#[path = "caps_peer_ladder_tests.rs"]
+mod tests_peer_ladder;

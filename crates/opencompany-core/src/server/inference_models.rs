@@ -735,5 +735,11 @@ enum FetchError {
 }
 
 #[cfg(test)]
-#[path = "inference_models_tests.rs"]
-mod tests;
+#[path = "inference_models_test_support.rs"]
+mod test_support;
+#[cfg(test)]
+#[path = "inference_models_fetch_tests.rs"]
+mod fetch_tests;
+#[cfg(test)]
+#[path = "inference_models_cache_tests.rs"]
+mod cache_tests;
