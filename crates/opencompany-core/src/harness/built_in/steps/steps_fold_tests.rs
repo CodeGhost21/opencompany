@@ -1,6 +1,6 @@
+use super::steps_fixtures_tests::*;
 use super::*;
 use oh::tools::status::FailureCategory;
-use super::steps_fixtures_tests::*;
 
 // Shape of the fold (unchanged by #411)
 // -----------------------------------------------------------------------
@@ -33,10 +33,7 @@ struct LabelledTool {
 }
 
 impl LabelledTool {
-    fn boxed(
-        name: &'static str,
-        label: Option<&'static str>,
-    ) -> Box<dyn oh::tools::traits::Tool> {
+    fn boxed(name: &'static str, label: Option<&'static str>) -> Box<dyn oh::tools::traits::Tool> {
         Box::new(Self { name, label })
     }
 }
@@ -139,8 +136,7 @@ fn each_provider_s_own_label_reaches_the_timeline_under_one_tool_name() {
         "Querit web search",
         "SearXNG web search",
     ] {
-        let labels =
-            StepLabels::from_tools(&[LabelledTool::boxed("web_search", Some(provider))]);
+        let labels = StepLabels::from_tools(&[LabelledTool::boxed("web_search", Some(provider))]);
         let steps = fold_steps(
             vec![
                 started("c1", "web_search", Some("Web Search")),
@@ -331,9 +327,7 @@ fn only_our_own_policys_park_claims_awaiting_approval() {
         "another policy's approval block is not our park"
     );
     assert!(
-        !is_awaiting_approval(
-            "Blocked: Tool 'shell' was denied by policy 'opencompany-approval'."
-        ),
+        !is_awaiting_approval("Blocked: Tool 'shell' was denied by policy 'opencompany-approval'."),
         "a hard deny from our policy is a failure, not a park"
     );
 }
@@ -344,9 +338,8 @@ fn only_our_own_policys_park_claims_awaiting_approval() {
 /// returning every parked call to reading as a crash.
 #[test]
 fn approval_needle_still_appears_in_the_vendored_denial_render() {
-    let source = vendored(
-        "vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/policy_denial.rs",
-    );
+    let source =
+        vendored("vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/policy_denial.rs");
     assert!(
         source.contains(APPROVAL_REQUIRED_NEEDLE),
         "'{APPROVAL_REQUIRED_NEEDLE}' is gone from PolicyDenial::render — \
@@ -405,4 +398,3 @@ fn each_failure_class_maps_to_its_own_operator_facing_kind() {
         assert_eq!(failure_of(class), expected, "class {class:?}");
     }
 }
-

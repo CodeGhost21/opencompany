@@ -1,6 +1,6 @@
+use super::steps_fixtures_tests::*;
 use super::*;
 use oh::tools::status::FailureCategory;
-use super::steps_fixtures_tests::*;
 
 // The incremental trace stays identical to the fold
 // -----------------------------------------------------------------------
@@ -236,10 +236,7 @@ mod deep {
     use super::*;
 
     /// Drains a trace over `events`, returning every (ordinal, step, detail).
-    fn run(
-        deep: bool,
-        events: &[AgentProgress],
-    ) -> Vec<(u32, TurnStep, Option<TurnStepDetail>)> {
+    fn run(deep: bool, events: &[AgentProgress]) -> Vec<(u32, TurnStep, Option<TurnStepDetail>)> {
         let mut trace = if deep {
             StepTrace::deep()
         } else {
@@ -345,9 +342,7 @@ mod deep {
     fn deep_off_changes_nothing_about_the_steps() {
         /// The rows a store would hold: last write per ordinal wins, exactly
         /// as `append_run_step` replaces on `(run_id, step_seq)`.
-        fn settled(
-            emitted: &[(u32, TurnStep, Option<TurnStepDetail>)],
-        ) -> Vec<(u32, TurnStep)> {
+        fn settled(emitted: &[(u32, TurnStep, Option<TurnStepDetail>)]) -> Vec<(u32, TurnStep)> {
             let mut rows: Vec<(u32, TurnStep)> = Vec::new();
             for (seq, step, _) in emitted {
                 match rows.iter_mut().find(|(s, _)| s == seq) {

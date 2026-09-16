@@ -1,6 +1,6 @@
+use super::steps_fixtures_tests::*;
 use super::*;
 use oh::tools::status::FailureCategory;
-use super::steps_fixtures_tests::*;
 
 // #411: what came back
 // -----------------------------------------------------------------------
@@ -76,8 +76,12 @@ fn a_complete_result_is_not_flagged() {
 #[test]
 fn truncation_markers_still_appear_in_the_vendored_tool_pipeline() {
     let sources = [
-        vendored("vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/middleware/tool_output.rs"),
-        vendored("vendor/openhuman/crates/openhuman-core/src/agent/harness/tool_result_artifacts/mod.rs"),
+        vendored(
+            "vendor/openhuman/crates/openhuman-core/src/agent/tinyagents/middleware/tool_output.rs",
+        ),
+        vendored(
+            "vendor/openhuman/crates/openhuman-core/src/agent/harness/tool_result_artifacts/mod.rs",
+        ),
     ]
     .concat();
     for marker in TRUNCATION_MARKERS {
@@ -207,4 +211,3 @@ fn remote_tool_failure_stays_scrubbed() {
         "remote output must never surface: {rendered}"
     );
 }
-

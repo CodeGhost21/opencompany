@@ -232,4 +232,3 @@ pub(crate) fn one(tool: &str, success: bool, output: &str, arguments: Option<Val
     assert_eq!(steps.len(), 1, "expected exactly one step: {steps:?}");
     steps.into_iter().next().expect("a step")
 }
-

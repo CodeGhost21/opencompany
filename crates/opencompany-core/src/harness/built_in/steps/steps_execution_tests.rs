@@ -1,6 +1,6 @@
+use super::steps_fixtures_tests::*;
 use super::*;
 use oh::tools::status::FailureCategory;
-use super::steps_fixtures_tests::*;
 
 // #924: a missing path is not a missing app
 // -----------------------------------------------------------------------
@@ -347,4 +347,3 @@ fn deeply_nested_arguments_render_as_a_count_not_a_dump() {
     );
     assert_eq!(step.detail.as_deref(), Some("outer=1 field"));
 }
-

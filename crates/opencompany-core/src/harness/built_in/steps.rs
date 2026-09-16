@@ -1299,14 +1299,14 @@ fn truncate(s: &str, max: usize) -> String {
 #[path = "steps/steps_fixtures_tests.rs"]
 mod steps_fixtures_tests;
 #[cfg(test)]
-#[path = "steps/steps_fold_tests.rs"]
-mod tests_fold;
+#[path = "steps/steps_bus_deep_trace_tests.rs"]
+mod tests_bus_deep_trace;
 #[cfg(test)]
 #[path = "steps/steps_execution_tests.rs"]
 mod tests_execution;
 #[cfg(test)]
+#[path = "steps/steps_fold_tests.rs"]
+mod tests_fold;
+#[cfg(test)]
 #[path = "steps/steps_trace_security_tests.rs"]
 mod tests_trace_security;
-#[cfg(test)]
-#[path = "steps/steps_bus_deep_trace_tests.rs"]
-mod tests_bus_deep_trace;
