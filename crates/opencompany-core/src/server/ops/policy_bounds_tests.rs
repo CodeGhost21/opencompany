@@ -69,56 +69,6 @@ async fn state(home: &std::path::Path) -> AppState {
     state
 }
 
-/// Same fixture as [`state`], but with an injected gate that has NOT been
-/// built through the production path's `.with_policy_hitl_disabled()` —
-/// the only way this suite can exercise `PolicyDto.policyHitlEnabled: true`
-/// before any code path sets it live.
-async fn state_with_policy_hitl_enabled(home: &std::path::Path) -> AppState {
-    let manifest: CompanyManifest = toml::from_str(MANIFEST).unwrap();
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest.clone(),
-            ledger: Vec::new(),
-            lifecycle: "running".to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            overlay_desk_hive: Vec::new(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let gate = std::sync::Arc::new(crate::policy::gate::ManifestApprovalGate::new(
-        manifest.policy.clone(),
-    ));
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
-        .with_id(id.clone())
-        .with_approvals(gate)
-        .build()
-        .await
-        .unwrap();
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
-
 async fn call(state: &AppState, method: &str, body: Option<Value>) -> (StatusCode, Value) {
     call_as(
         state,
