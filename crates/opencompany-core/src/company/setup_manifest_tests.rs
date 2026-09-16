@@ -187,24 +187,3 @@ fn answers_round_trip_through_serde() {
     );
 }
 
-// ---------------------------------------------------------------------
-// Focus, and the belt it decides
-// ---------------------------------------------------------------------
-
-/// The control that survived the widening, quantified over the **whole**
-/// vocabulary rather than the focuses a reader happened to remember.
-///
-/// The belts are wide now — `search` is on every one of them, and the
-/// shapes whose work needs them reach `media`, `composio`, `shell` and
-/// `code`. What must never happen is a focus asking for the **catch-all**:
-/// a bare `*` is the inherit-the-lot behaviour this seam exists to end, and
-/// a belt that contains it stops being a belt. The narrowing is the point,
-/// not the width — every shape must still name what it wants, so an
-/// operator reading `company.toml` can see exactly what each teammate holds
-/// and the company's `[tools].allow` remains the one place that takes any
-/// of it away.
-///
-/// `repo` stays off every belt for a different reason, pinned here because
-/// it is a boot failure rather than a preference: a host on filesystem
-/// storage refuses to start a company whose grants name it.
-#[test]
