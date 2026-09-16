@@ -1806,6 +1806,55 @@ fn project_event_for_viewer(
         // the projection — the one place that can guarantee no later reader
         // reintroduces the duplicate. Nothing in the console read it. `desk`
         // stays for wire compatibility.
+        // **A crossing happened; the thread it belongs to must be re-read.**
+        //
+        // A crossing renders as a collapsed `referralConversation` folded onto
+        // the asking row, and `attach_referral_origins` — which builds it — runs
+        // in `history_for_desk` and nowhere else. So a crossing was invisible
+        // live and appeared only once something re-read the thread, which for a
+        // desk crossing meant waiting for the turn to settle and for a pair DM
+        // meant never: its rows are journaled in the pair's own `dm:<a>+<b>`
+        // conversation, which no desk view is watching.
+        //
+        // This frame carries no crossing content, on purpose. Rebuilding the
+        // fold here would be a second implementation of a rule this subsystem
+        // has already had to fix in two places four separate times; the reload
+        // projection is the authority and this only tells the console to ask it
+        // again. Same shape as #2329's remedy for the grammar split: add to the
+        // stream rather than teach it to recompute.
+        CompanyEvent::ReferralEnqueued {
+            from_desk,
+            trigger_sequence,
+            to_desk,
+            returning,
+            ..
+        } => {
+            let mut o = envelope("referral");
+            // **The desk whose transcript gains the fold, which is not the same
+            // field on both legs.**
+            //
+            // The fold lands on the ASKING row, and a return leg is addressed
+            // the other way round: `mark` builds it from the answering desk, so
+            // its `from_desk` is the far desk and `to_desk` is the desk that
+            // asked. Emitting `from_desk` unconditionally pointed the console at
+            // the far desk exactly on the leg that carries the answer — and
+            // since the forward frame goes out before an answer exists, a
+            // cross-desk crossing was never refreshed on the desk waiting for it
+            // (Codex, #2341).
+            o["chatId"] = json!(match returning {
+                true => to_desk,
+                false => from_desk,
+            });
+            // The row it folds onto, so a console need not re-read a whole desk
+            // to find what changed.
+            o["sequence"] = json!(trigger_sequence);
+            o["toDesk"] = json!(to_desk);
+            // Which leg this is, read the same way `ReferredFrom::returning`
+            // is: a return is the one that completes the exchange, so a console
+            // that only wants to re-read once can wait for it.
+            o["returning"] = json!(returning);
+            o
+        }
         CompanyEvent::DeskTaskCompleted {
             task_id,
             desk,
@@ -6104,6 +6153,9 @@ mod operator_test_group_16;
 #[cfg(test)]
 #[path = "operator_test_group_17.rs"]
 mod operator_test_group_17;
+#[cfg(test)]
+#[path = "operator_test_group_18.rs"]
+mod operator_test_group_18;
 #[cfg(test)]
 #[path = "operator_test_group_2.rs"]
 mod operator_test_group_2;

@@ -702,10 +702,10 @@ pub struct RuntimeBuilder {
     /// consumed when a company **explicitly** grants the `media` namespace.
     #[cfg(feature = "openhuman")]
     media_backend: Option<crate::harness::toolbelt::MediaBackend>,
-    /// Issue #238: the MANAGED web-search backend (env-resolved platform
-    /// credential + URL). `None` fails closed — no `web_search` tool is wired.
-    /// Threaded onto every harness-built agent's [`HarnessDeps`], but only
-    /// consumed when a company **explicitly** grants the `search` namespace.
+    /// Issue #238: the MANAGED web-search deployment fallback (env-resolved
+    /// platform credential + URL). The harness prepends the company's copied
+    /// TinyHumans key at request time. With neither credential, `web_search`
+    /// fails closed. Only consumed when a company explicitly grants `search`.
     #[cfg(feature = "openhuman")]
     search_backend: Option<crate::harness::search::SearchBackend>,
     /// Issue #1245: builds the engine for a `transport = "local"` `acp`
@@ -1401,13 +1401,12 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Issue #238: sets the MANAGED web-search backend (platform credential +
-    /// URL, resolved from the environment via
+    /// Issue #238: sets the MANAGED web-search deployment fallback (platform
+    /// credential + URL, resolved from the environment via
     /// [`search_backend_from_env`](crate::harness::provider::search_backend_from_env)).
-    /// This is the ONLY path search is ever fed a credential — never a tenant
-    /// secret — so a company can only ever search on the managed platform
-    /// account. Absent (the default), `web_search` is never wired even for a
-    /// company that grants `search`. Feature-gated.
+    /// The harness adds a company's copied `search/managed/key` ahead of this
+    /// fallback at request time. With neither credential, `web_search` is not
+    /// wired even for a company that grants `search`. Feature-gated.
     #[cfg(feature = "openhuman")]
     pub fn with_search_backend(
         mut self,
@@ -1584,6 +1583,20 @@ impl RuntimeBuilder {
         // boot-only side effects are skipped. Absent ⇒ an ordinary boot, byte for
         // byte as before.
         let handover = self.handover.take();
+        // `attach_harness` runs for every build and therefore supplies a fresh
+        // Search handle. A rebuild must keep the outgoing handle instead: its
+        // clones own the process-lifetime daily-call ledger shared by roster
+        // agents and workflows. Replacing it here would reset the company's
+        // allowance every time an unrelated runtime setting changed.
+        #[cfg(feature = "openhuman")]
+        if let (Some(current), Some(previous)) = (
+            self.search_backend.take(),
+            handover
+                .as_ref()
+                .and_then(|handover| handover.search_backend.as_ref()),
+        ) {
+            self.search_backend = Some(current.with_ledger_from(previous));
+        }
         // On a rebuild the *brain* must be built over the inherited harness pool,
         // not a freshly minted one. The boot path mints a pool per build, so
         // without this the successor's brain would talk to a new pool while the

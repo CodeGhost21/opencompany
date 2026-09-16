@@ -29,9 +29,10 @@ async fn matrix_m8() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -110,9 +111,10 @@ async fn matrix_m9() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -153,9 +155,10 @@ async fn matrix_m10() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -214,9 +217,10 @@ async fn matrix_m11() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -227,9 +231,10 @@ async fn matrix_m11() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -279,9 +284,10 @@ async fn matrix_m12() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -314,9 +320,10 @@ async fn matrix_m13() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -362,9 +369,10 @@ async fn matrix_m14() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -407,9 +415,10 @@ async fn matrix_c1() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -467,9 +476,10 @@ async fn matrix_c2() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -501,9 +511,10 @@ async fn matrix_c3() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )

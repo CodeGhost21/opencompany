@@ -144,6 +144,43 @@ async fn openrouter_never_receives_the_company_identity_or_the_instance_one() {
 }
 
 #[tokio::test]
+async fn managed_runtime_override_never_sends_the_managed_key_to_its_endpoint() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    write(
+        &secrets,
+        &store::provider_key_key(MANAGED_SLUG),
+        "th-write-only-account-key",
+    )
+    .await;
+    save_runtime_config(
+        &company,
+        &secrets,
+        &RuntimeInference {
+            provider: "managed".into(),
+            base_url: Some("https://gateway.example/v1".into()),
+            models: BTreeMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let decl = resolve_effective(
+        &company,
+        &Inference::default(),
+        Some(&managed_env()),
+        &secrets,
+    )
+    .await
+    .unwrap()
+    .expect("an explicit endpoint resolves");
+
+    assert_eq!(decl.base_url, "https://gateway.example/v1");
+    assert!(!decl.is_proxied());
+    assert_eq!(bearer(&decl).await, None);
+}
+
+#[tokio::test]
 async fn a_legacy_company_reads_the_flat_slot_and_one_save_moves_it() {
     let company = CompanyId::new("acme");
     let secrets = MemSecrets::default();

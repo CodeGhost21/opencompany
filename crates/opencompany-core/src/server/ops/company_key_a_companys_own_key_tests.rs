@@ -265,6 +265,7 @@ fn minimal_status() -> super::CredentialStatusDto {
         hub_link: false,
         inference_has_own_key: false,
         composio_has_own_key: false,
+        search_has_own_key: false,
         default_set: false,
         inference_has_model: false,
         used_by: None,

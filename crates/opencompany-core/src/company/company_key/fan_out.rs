@@ -1,5 +1,6 @@
 //! The account-key fan-out (keys rework, issue #2306, slice 4a): one
-//! `PUT …/credential` copies [`super::KEY_KEY`] into the Composio and LLM
+//! `PUT …/credential` copies [`super::KEY_KEY`] into the Composio, LLM, and
+//! managed Search
 //! TinyHumans slots (Q7), adds the `tinyhumans` provider row when a model is
 //! known, sets the company default only when none is set, and checks health —
 //! all under a per-company lock so two concurrent saves cannot leave one slot
@@ -16,12 +17,15 @@ use async_trait::async_trait;
 use crate::Result;
 use crate::company::composio;
 use crate::company::inference::{self, catalogue, probe, store as inference_store};
+use crate::company::search;
 use crate::error::{OpenCompanyError, UsedBy, UsedBySurface};
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
 use super::KEY_KEY;
-use super::types::{FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport};
+use super::types::{
+    FanOutKey, FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport,
+};
 
 // ---------------------------------------------------------------------------
 // The per-company lock
@@ -161,6 +165,9 @@ pub async fn account_key_used_by(
         .await?
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
+    let search_now = search::load_managed_key(company, secrets)
+        .await?
+        .unwrap_or_default();
     let inference_now =
         inference::load_managed_key(company, secrets, &inference::HarnessScope::default())
             .await?
@@ -191,6 +198,15 @@ pub async fn account_key_used_by(
     }
     if clears(&composio_now) && composio_mode == composio::ComposioMode::Managed {
         surfaces.push(UsedBySurface::Composio);
+    }
+    // Managed is Search's fallback whenever no complete BYO provider is
+    // active. Only then would clearing this copied key strand Search.
+    let search_candidates = search::candidates(company, secrets).await?;
+    let search_default = search::store::load_default_slug(company, secrets).await?;
+    let search_uses_managed =
+        search::resolve::active(&search_candidates, search_default.as_deref()).is_none();
+    if clears(&search_now) && search_uses_managed {
+        surfaces.push(UsedBySurface::Search);
     }
 
     if surfaces.is_empty() {
@@ -355,6 +371,8 @@ pub struct SlotFacts {
     pub inference_has_own_key: bool,
     /// The same for `composio/tinyhumans/key` (with 1a's legacy read).
     pub composio_has_own_key: bool,
+    /// The same for the company-owned managed Search credential.
+    pub search_has_own_key: bool,
     /// `inference/default` is set (`ProviderOnly` or `Full`).
     pub default_set: bool,
 }
@@ -377,12 +395,16 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
             .await?
             .trim()
             .to_string();
+    let search_now = crate::company::search::load_managed_key(company, secrets)
+        .await?
+        .unwrap_or_default();
     let default_now = inference_store::load_default(company, secrets).await?;
 
     let has_own_key = |current: &str| !current.is_empty() && current != account_key;
     Ok(SlotFacts {
         inference_has_own_key: has_own_key(&inference_now),
         composio_has_own_key: has_own_key(&composio_now),
+        search_has_own_key: has_own_key(&search_now),
         default_set: !matches!(default_now, inference_store::DefaultChoice::Unset),
     })
 }
@@ -392,20 +414,23 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
 // value (P2-1, keys rework #2306 review)
 // ---------------------------------------------------------------------------
 
-/// Everything [`fan_out`] needs to decide the Composio/LLM/provider/health
+/// Everything [`fan_out`] needs to decide the Composio/LLM/Search/provider/health
 /// slots, read as one batch — always AFTER the account key itself is already
 /// safely stored, never before (see [`fan_out`]'s own step 3/4).
 ///
-/// Carries no default-marker read: unlike `row`, which step 8's health probe
-/// needs *before* the network round trip (for the provider's `base_url`),
-/// nothing here needs the default before the probe, and reading it this early
-/// only invited a second, later re-read to stay accurate. [`fan_out`] now
-/// reads `inference/default` exactly once, under `index_lock`, in step 9b
-/// (KR review comment 4012261302) — see [`RelockedReads`].
+/// Carries no default-marker read, and no provider row: step 8's health probe
+/// used to need the row's `base_url` here, before the network round trip, but
+/// now always probes the freshly derived `proxy_base_url` instead (Codex
+/// review — an existing row's stored endpoint can be stale, and probing it
+/// rather than the endpoint the row is about to be migrated to defeated the
+/// migration on the very call that performs it). The row itself is read once,
+/// fresh, under `index_lock` in step 9b — see [`RelockedReads`] — which is
+/// also why reading it this early only ever invited a second, later re-read
+/// to stay accurate.
 struct ReadSlots {
     composio_now: String,
+    search_now: String,
     legacy_managed: bool,
-    row: Option<inference_store::Provider>,
     inference_key_key: String,
     inference_raw_new: Option<String>,
     legacy_owned: bool,
@@ -422,12 +447,12 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
         .await?
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
+    let search_now = search::load_managed_key(company, secrets)
+        .await?
+        .unwrap_or_default();
     let providers = inference_store::list_providers(company, secrets).await?;
     let legacy_managed = providers.iter().any(|p| {
         p.origin == inference_store::ProviderOrigin::EntryZero && p.slug == inference::MANAGED_SLUG
-    });
-    let row = providers.into_iter().find(|p| {
-        p.origin == inference_store::ProviderOrigin::Indexed && p.slug == inference::MANAGED_SLUG
     });
     let inference_key_key = inference_store::provider_key_key(inference::MANAGED_SLUG);
     let inference_raw_new = secrets
@@ -451,8 +476,8 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
 
     Ok(ReadSlots {
         composio_now,
+        search_now,
         legacy_managed,
-        row,
         inference_key_key,
         inference_raw_new,
         legacy_owned,
@@ -523,8 +548,35 @@ pub async fn fan_out(
 ) -> Result<FanOutReport> {
     let _guard = slot_guard(company).await;
 
+    // The proxy base every TinyHumans write below carries. From the caller's
+    // configured platform when it says so; the catalogue's production endpoint
+    // otherwise.
+    let proxy_base_url = request
+        .proxy_base_url
+        .map(catalogue::tinyhumans_proxy_url)
+        .or_else(|| {
+            catalogue::cloud_provider(inference::MANAGED_SLUG).map(|c| c.endpoint.to_string())
+        })
+        .unwrap_or_default();
+
     // 1. Validate. Nothing is written yet.
-    let new = request.key.trim().to_string();
+    //
+    // `FanOutKey::Stored` is resolved here, under the lock, rather than by a
+    // caller reading `KEY_KEY` beforehand and handing in the snapshot: that
+    // snapshot could go stale between the caller's read and this lock being
+    // taken if a concurrent rotation or clear won the race, and `fan_out`
+    // would then write the stale value back as though it were the intended
+    // new one (Codex P1 review). Resolving it here means the value this
+    // function treats as "new" is always read at the one point nothing else
+    // can be changing it.
+    let new = match request.key {
+        FanOutKey::Explicit(key) => key.trim().to_string(),
+        FanOutKey::Stored => secrets
+            .get(company, KEY_KEY)
+            .await?
+            .map(|SecretValue(v)| v.trim().to_string())
+            .unwrap_or_default(),
+    };
     let clearing = new.is_empty();
     let model: Option<String> = match request.model.map(str::trim).filter(|m| !m.is_empty()) {
         Some(_) if clearing => {
@@ -593,8 +645,8 @@ pub async fn fan_out(
     // bubbled `Err`.
     let ReadSlots {
         composio_now,
+        search_now,
         legacy_managed,
-        row,
         inference_key_key,
         inference_raw_new,
         legacy_owned,
@@ -606,7 +658,7 @@ pub async fn fan_out(
             tracing::error!(
                 company = %company,
                 error = %err,
-                "keys rework: fan_out could not read Composio/LLM/provider state after \
+                "keys rework: fan_out could not read Composio/LLM/Search/provider state after \
                  storing the account key; every derived slot is reported as failed",
             );
             return Ok(FanOutReport {
@@ -617,6 +669,10 @@ pub async fn fan_out(
                     },
                     SlotReport {
                         slot: Slot::Inference,
+                        outcome: SlotOutcome::Failed,
+                    },
+                    SlotReport {
+                        slot: Slot::Search,
                         outcome: SlotOutcome::Failed,
                     },
                     SlotReport {
@@ -655,6 +711,38 @@ pub async fn fan_out(
             Err(_) => SlotOutcome::Failed,
         },
         CopyDecision::Clear => match write_composio_slot(company, secrets, "").await {
+            Ok(()) => SlotOutcome::Cleared,
+            Err(_) => SlotOutcome::Failed,
+        },
+        CopyDecision::Keep(reason) => SlotOutcome::Kept(reason),
+        CopyDecision::Skip(reason) => SlotOutcome::Skipped(reason),
+    };
+
+    // 5b. Managed Search. This is a bare secret-store write under the existing
+    // slot guard: it is not a provider record, so no search index lock applies.
+    // Search deliberately has no save-time health marker; reachability is
+    // learnt on first use, and the endpoint remains the fixed managed backend.
+    let search_outcome = match decide_copy(&search_now, &old_account, &new) {
+        CopyDecision::Write => match secrets
+            .set(
+                company,
+                search::MANAGED_KEY_SECRET,
+                SecretValue(new.clone()),
+            )
+            .await
+        {
+            Ok(()) if search_now.is_empty() => SlotOutcome::Filled,
+            Ok(()) => SlotOutcome::Rotated,
+            Err(_) => SlotOutcome::Failed,
+        },
+        CopyDecision::Clear => match secrets
+            .set(
+                company,
+                search::MANAGED_KEY_SECRET,
+                SecretValue(String::new()),
+            )
+            .await
+        {
             Ok(()) => SlotOutcome::Cleared,
             Err(_) => SlotOutcome::Failed,
         },
@@ -751,6 +839,10 @@ pub async fn fan_out(
                     outcome: inference_outcome,
                 },
                 SlotReport {
+                    slot: Slot::Search,
+                    outcome: search_outcome,
+                },
+                SlotReport {
                     slot: Slot::Provider,
                     outcome: SlotOutcome::Skipped(SkipReason::KeyCleared),
                 },
@@ -773,7 +865,7 @@ pub async fn fan_out(
 
     // 8. Health, before any row or default write (Q6 by construction).
     let mut probe_ids: Option<Vec<String>> = None;
-    let health_outcome = if legacy_managed {
+    let mut health_outcome = if legacy_managed {
         SlotOutcome::Skipped(SkipReason::LegacyManagedConfig)
     } else if !holds_new {
         match inference_outcome {
@@ -781,13 +873,17 @@ pub async fn fan_out(
             _ => SlotOutcome::Skipped(SkipReason::InferenceNotWritten),
         }
     } else {
-        let base = row
-            .as_ref()
-            .map(|r| r.base_url.clone())
-            .or_else(|| {
-                catalogue::cloud_provider(inference::MANAGED_SLUG).map(|c| c.endpoint.to_string())
-            })
-            .unwrap_or_default();
+        // Always the freshly derived proxy, never `row.base_url` — the
+        // `tinyhumans` row's slug is reserved (no add-provider path can point
+        // a second row at it), so an existing row's endpoint is either this
+        // same value already or a stale one an earlier boot minted under a
+        // different `TINYHUMANS_API_URL`. Step 10 below is about to rewrite a
+        // stale row to this value anyway; probing it first is what makes the
+        // probe (and the row it corrects) agree, instead of health-checking
+        // an endpoint the save is already in the middle of migrating away
+        // from (Codex review: "migrate existing TinyHumans rows to the
+        // configured platform").
+        let base = proxy_base_url.clone();
         match prober.probe(&base, &new).await {
             Ok(ids) => {
                 if let Err(err) = inference_store::record_health(
@@ -906,6 +1002,10 @@ pub async fn fan_out(
                         outcome: inference_outcome,
                     },
                     SlotReport {
+                        slot: Slot::Search,
+                        outcome: search_outcome,
+                    },
+                    SlotReport {
                         slot: Slot::Provider,
                         outcome: SlotOutcome::Failed,
                     },
@@ -938,6 +1038,80 @@ pub async fn fan_out(
             SlotOutcome::Kept(SkipReason::CustomKey) => SlotOutcome::Skipped(SkipReason::CustomKey),
             _ => SlotOutcome::Skipped(SkipReason::InferenceNotWritten),
         }
+    } else if let Some(existing) = row.as_ref().filter(|existing| {
+        existing.base_url != proxy_base_url
+            || model.as_ref().is_some_and(|chosen| {
+                existing.model() != inference_store::ModelOnRow::One(chosen.trim().to_string())
+            })
+    }) {
+        // The row already exists, but its stored endpoint predates (or was
+        // minted under) a different `TINYHUMANS_API_URL` than the one this
+        // instance is configured for now — a non-production deployment that
+        // already had a `tinyhumans` row before this instance started
+        // following its own platform, say. Left alone, every future save and
+        // health probe keeps reading and writing through the stale endpoint
+        // (Codex review). Refresh only `base_url`; every other field (model,
+        // enabled state, label) is the operator's and this save never
+        // touched it, so it is carried over from the existing row rather than
+        // reset to this call's own (often absent) `model`/`enabled` inputs.
+        match inference_store::put_provider(
+            company,
+            secrets,
+            inference_store::ProviderDraft {
+                slug: existing.slug.clone(),
+                label: existing.label.clone(),
+                kind: existing.kind.clone(),
+                base_url: proxy_base_url.clone(),
+                // `PUT …/credential/model` is the completion path for an
+                // existing legacy row with no unique model.  Persist its
+                // selection before making it the default; otherwise the
+                // default can name a model the row cannot route to.
+                models: model
+                    .as_deref()
+                    .map(tier_overrides)
+                    .unwrap_or_else(|| existing.models.clone()),
+                enabled: existing.enabled,
+            },
+        )
+        .await
+        {
+            // This is a stored mutation, not merely an existing row being
+            // observed.  Report it as a rotation so cache eviction and the
+            // audit fan-out record that the provider destination changed.
+            Ok(_) => SlotOutcome::Rotated,
+            // Unlike a successful migration, a failed one must not read as
+            // `Kept` — the account/inference keys are already updated and the
+            // health probe already checked the *new* endpoint, so a `Kept`
+            // here would report a clean save while the stored row keeps
+            // routing turns to the old one, with nothing on the response or
+            // in the journal saying the migration didn't land (Codex P1 /
+            // CodeRabbit review).
+            Err(err) => {
+                tracing::warn!(
+                    company = %company,
+                    error = %err,
+                    "keys rework: could not migrate tinyhumans provider endpoint",
+                );
+                // The probe above recorded health `ok` for `proxy_base_url` —
+                // the endpoint this row was *supposed* to end up on. That
+                // record is now a lie: the row still points at its old
+                // endpoint, so a reader trusting the health marker would
+                // think turns are reaching a platform they are not. Forget
+                // it rather than leave a stale "ok" behind (CodeRabbit
+                // review).
+                if let Err(forget_err) =
+                    inference_store::forget_health(company, secrets, inference::MANAGED_SLUG).await
+                {
+                    tracing::warn!(
+                        company = %company,
+                        error = %forget_err,
+                        "keys rework: could not clear tinyhumans health after a failed endpoint migration",
+                    );
+                }
+                health_outcome = SlotOutcome::Failed;
+                SlotOutcome::Failed
+            }
+        }
     } else if row.is_some() {
         SlotOutcome::Kept(SkipReason::RowExists)
     } else if let Some(chosen) = model.as_deref() {
@@ -950,7 +1124,7 @@ pub async fn fan_out(
                 slug: inference::MANAGED_SLUG.to_string(),
                 label: cat.label.to_string(),
                 kind: inference::MANAGED_SLUG.to_string(),
-                base_url: cat.endpoint.to_string(),
+                base_url: proxy_base_url.clone(),
                 models: tier_overrides(chosen),
                 enabled: true,
             },
@@ -990,7 +1164,7 @@ pub async fn fan_out(
                     Err(_) => SlotOutcome::Failed,
                 }
             }
-            SlotOutcome::Kept(SkipReason::RowExists) => {
+            SlotOutcome::Kept(SkipReason::RowExists) | SlotOutcome::Rotated => {
                 // P3-8 (keys rework #2306 review): a disabled row cannot
                 // currently serve anything, so it must not become the new
                 // default — that would point the company's default at a
@@ -1052,6 +1226,10 @@ pub async fn fan_out(
                 outcome: inference_outcome,
             },
             SlotReport {
+                slot: Slot::Search,
+                outcome: search_outcome,
+            },
+            SlotReport {
                 slot: Slot::Provider,
                 outcome: provider_outcome,
             },
@@ -1085,6 +1263,7 @@ pub fn fan_out_note(clearing: bool, report: &FanOutReport, model: Option<&str>) 
     let slot = |s: Slot| report.slots.iter().find(|r| r.slot == s).map(|r| r.outcome);
     let composio = slot(Slot::Composio);
     let inference = slot(Slot::Inference);
+    let search = slot(Slot::Search);
     let provider = slot(Slot::Provider);
     let default = slot(Slot::Default);
     let health = slot(Slot::Health);
@@ -1114,6 +1293,12 @@ pub fn fan_out_note(clearing: bool, report: &FanOutReport, model: Option<&str>) 
     }
     if matches!(inference, Some(SlotOutcome::Kept(SkipReason::CustomKey))) {
         sentences.push("LLM keeps the TinyHumans key set on its own page.".to_string());
+    }
+    if matches!(search, Some(SlotOutcome::Kept(SkipReason::CustomKey))) {
+        sentences.push("Search keeps the TinyHumans key set on its own page.".to_string());
+    }
+    if matches!(search, Some(SlotOutcome::Cleared)) {
+        sentences.push("Search's copy was removed too.".to_string());
     }
     if let (Some(SlotOutcome::Filled), Some(m)) = (provider, model) {
         sentences.push(format!("TinyHumans is set up for LLM with {m}."));
@@ -1169,8 +1354,10 @@ pub fn fan_out_note(clearing: bool, report: &FanOutReport, model: Option<&str>) 
         .iter()
         .any(|s| matches!(s.outcome, SlotOutcome::Failed))
     {
-        sentences
-            .push("Some copies could not be saved — check the LLM and Composio pages.".to_string());
+        sentences.push(
+            "Some copies could not be saved — check the LLM, Composio, and Search pages."
+                .to_string(),
+        );
     }
 
     sentences.join(" ")
@@ -1306,3 +1493,6 @@ mod tests_matrix_a;
 #[cfg(test)]
 #[path = "fan_out_tests_matrix_b.rs"]
 mod tests_matrix_b;
+#[cfg(test)]
+#[path = "fan_out_tests_proxy_url.rs"]
+mod tests_proxy_url;

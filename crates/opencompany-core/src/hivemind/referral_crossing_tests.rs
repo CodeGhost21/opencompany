@@ -90,6 +90,80 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
     );
 }
 
+/// **A pair may keep talking, the way a desk keeps deliberating.**
+///
+/// A crossing to a DESK convenes it and it runs until it settles. A crossing to
+/// a PERSON ran exactly one turn, so two seats working something out got one
+/// question and one reply and no way to clarify — the same asymmetry
+/// `deliberates` removed for desks, left standing on the other target. Every
+/// pair exchange in eight live episodes was exactly two rows, which was the
+/// mechanism and not the agents' choice.
+///
+/// `pair_messages` bounds it. The default of 2 IS that single exchange, so this
+/// pins both: raised, the pair alternates; unset, nothing changes.
+#[tokio::test]
+async fn a_pair_may_keep_talking_up_to_its_bound() {
+    const CHATTY: &str = "hive = { turn_budget = 8, quorum = 2, blind_round = false, \
+                          referral = { enabled = true, pair_messages = 4 } }";
+    let far = FarDesk::answering("The replica lag budget is 400ms.");
+    let (log, _) = run(
+        CHATTY,
+        &[
+            (
+                "planner",
+                "!question #lag What is the replica lag budget? @sre",
+            ),
+            ("scout", "!propose #stage Stage the rollout behind a flag."),
+            ("critic", "!support #stage ^1 Staging fits the lag budget."),
+            ("planner", "!commit #stage ^3 Recorded."),
+        ],
+        Some(&far),
+    )
+    .await;
+
+    let said = log.replies(&super::referral::pair_conversation("planner", "sre"));
+    assert_eq!(
+        said.len(),
+        4,
+        "the pair runs to its bound rather than stopping at one reply: {said:?}"
+    );
+    // Alternating, because a pair is two people: whoever did not just speak
+    // goes next.
+    let voices: Vec<&str> = said.iter().map(|(who, _)| who.as_str()).collect();
+    assert_eq!(
+        voices,
+        vec!["planner", "sre", "planner", "sre"],
+        "they take it in turns: {said:?}"
+    );
+}
+
+/// The same desk with `pair_messages` unset: one question, one reply, as before.
+#[tokio::test]
+async fn a_pair_bound_left_unset_is_the_single_exchange_it_always_was() {
+    let far = FarDesk::answering("The replica lag budget is 400ms.");
+    let (log, _) = run(
+        REFERRING,
+        &[
+            (
+                "planner",
+                "!question #lag What is the replica lag budget? @sre",
+            ),
+            ("scout", "!propose #stage Stage the rollout behind a flag."),
+            ("critic", "!support #stage ^1 Staging fits the lag budget."),
+            ("planner", "!commit #stage ^3 Recorded."),
+        ],
+        Some(&far),
+    )
+    .await;
+
+    assert_eq!(
+        log.replies(&super::referral::pair_conversation("planner", "sre"))
+            .len(),
+        2,
+        "a company that says nothing behaves exactly as it did"
+    );
+}
+
 /// **Naming a PERSON puts the exchange in their pair thread, not on a desk.**
 ///
 /// A crossing addressed to somebody by name is a conversation between the two
@@ -245,6 +319,8 @@ pub(super) fn the_close_tells_a_local_question_from_a_crossing_one() {
         asker: "route_planner".to_owned(),
         target: target.to_owned(),
         desk: desk.to_owned(),
+        // These fixtures describe crossings that ran on a desk, not in a pair.
+        conversation: None,
         returned: false,
         crossed,
     };
@@ -308,6 +384,7 @@ pub(super) fn the_close_reads_as_english_for_every_combination_of_referral_facts
             asker: "route_planner".to_owned(),
             target: "account_manager".to_owned(),
             desk: "commercial".to_owned(),
+            conversation: None,
             returned: false,
             crossed: true,
         }]

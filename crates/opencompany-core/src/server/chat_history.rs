@@ -1813,8 +1813,34 @@ async fn attach_referral_origins(
         // `conversation.is_some()` below), which is what makes the console
         // label it `@name` rather than `#desk`.
         if let Some(pair) = conversation.as_deref() {
+            // **This crossing's exchange, not every exchange this pair ever
+            // had.**
+            //
+            // `pair_conversation` is deterministic — the same two agents always
+            // produce the same `dm:<a>+<b>` key — so collecting to the end of
+            // the page gave the FIRST crossing every row the pair went on to
+            // exchange, the second all but the first, and so on. One live
+            // episode rendered the same conversation five times in one thread,
+            // labelled 20, 16, 12, 8 and 4 messages; only the last was true
+            // (Codex, #2332).
+            //
+            // Bounded at the next crossing into the SAME pair thread, which is
+            // where this one's exchange ends by construction: the rows between
+            // two markers are the rows that marker caused.
+            let next_for_pair = page[index + 1..]
+                .iter()
+                .position(|later| {
+                    matches!(
+                        &later.event,
+                        CompanyEvent::ReferralEnqueued {
+                            conversation: Some(next),
+                            ..
+                        } if next == pair
+                    )
+                })
+                .map_or(page.len(), |at| index + 1 + at);
             let mut lines = Vec::new();
-            for later in &page[index + 1..] {
+            for later in &page[index + 1..next_for_pair] {
                 let CompanyEvent::AgentReply {
                     chat_id, agent_id, ..
                 } = &later.event

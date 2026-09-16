@@ -1011,14 +1011,13 @@ async fn effective_status_with(
         Some(platform) => resolve_effective(runtime.id(), &manifest, Some(platform), secrets)
             .await
             .map_err(ApiError)?
-            .map_or_else(|| inference::PLATFORM_BASE_URL.to_string(), |d| d.base_url),
+            .map_or_else(|| platform.base_url.clone(), |d| d.base_url),
         // No platform endpoint on this deployment: nothing to inherit, so the
         // tenant resolve already holds the whole answer and the second read is
         // skipped.
-        None => decl.as_ref().map_or_else(
-            || inference::PLATFORM_BASE_URL.to_string(),
-            |d| d.base_url.clone(),
-        ),
+        None => decl
+            .as_ref()
+            .map_or_else(inference::platform_base_url, |d| d.base_url.clone()),
     };
     // This route is `ScopedCompany`, not admin — every console reader gets this
     // field on every page load. A credential embedded in the endpoint is
@@ -1169,7 +1168,7 @@ async fn managed_state(
         base_url: catalogue::redact_endpoint(
             &platform
                 .map(|p| p.base_url.clone())
-                .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+                .unwrap_or_else(inference::platform_base_url),
         ),
         enabled: store::managed_enabled(runtime.id(), secrets)
             .await

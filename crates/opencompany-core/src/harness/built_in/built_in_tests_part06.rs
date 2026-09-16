@@ -387,6 +387,40 @@ async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
     assert_eq!(pool.mcp_fingerprint_of(&rec.id).await, Some(after));
 }
 
+/// A company-only managed backend has no deployment handle to clone. The
+/// pool must therefore retain its base handle so roster rebuilds keep the
+/// same daily-call ledger instead of reopening the cap.
+#[tokio::test]
+async fn company_only_managed_search_keeps_its_ledger_across_resolution() {
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    let dir = tempfile::tempdir().unwrap();
+    let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+    deps.secrets = Some(secrets.clone());
+    let mut rec = record();
+    rec.manifest.tools.allow = vec!["search".to_string()];
+    secrets
+        .set(
+            &rec.id,
+            crate::company::search::MANAGED_KEY_SECRET,
+            crate::ports::types::SecretValue("company-key".to_string()),
+        )
+        .await
+        .unwrap();
+
+    let pool = HarnessPool::new();
+    let first = pool
+        .resolve_managed_search(&rec, &deps, None)
+        .await
+        .expect("company key creates a managed backend");
+    first.ledger().try_reserve(&rec.id, 10, 1).unwrap();
+
+    let second = pool
+        .resolve_managed_search(&rec, &deps, None)
+        .await
+        .expect("same backend resolves again");
+    assert_eq!(second.ledger().used_today(&rec.id, 1), 1);
+}
+
 /// Saving or rotating a key in Settings → Billing must reach the agent on
 /// its next turn.
 ///

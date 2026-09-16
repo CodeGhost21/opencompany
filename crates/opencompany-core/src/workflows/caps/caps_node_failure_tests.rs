@@ -161,6 +161,7 @@ mod transcript_fold {
             (TurnStepFailure::MissingPermission, "missing_permission"),
             (TurnStepFailure::MissingApp, "missing_app"),
             (TurnStepFailure::NotFound, "not_found"),
+            (TurnStepFailure::Unsupported, "unsupported"),
             (TurnStepFailure::Timeout, "timeout"),
             (TurnStepFailure::Unavailable, "unavailable"),
             (TurnStepFailure::Failed, "failed"),

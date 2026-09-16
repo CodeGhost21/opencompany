@@ -50,9 +50,10 @@ use crate::ports::SecretStore;
 use crate::ports::types::CompanyId;
 
 /// Default hosted inference endpoint when only a bare `TINYHUMANS_API_KEY` is
-/// supplied — the OpenAI-compatible surface a company agent's `chat-v1` /
-/// `reasoning-v1` / … workloads resolve against.
-pub const DEFAULT_TINYHUMANS_INFERENCE_URL: &str = "https://api.tinyhumans.ai/openai/v1";
+/// supplied: the TinyHumans OpenRouter proxy, the same endpoint as
+/// [`inference::PLATFORM_BASE_URL`]. Production value; fallbacks use
+/// [`inference::platform_base_url`] so a configured `TINYHUMANS_API_URL` wins.
+pub const DEFAULT_TINYHUMANS_INFERENCE_URL: &str = inference::PLATFORM_BASE_URL;
 
 /// Default hosted model/tier when none is configured.
 pub const DEFAULT_HOSTED_MODEL: &str = "chat-v1";
@@ -162,7 +163,8 @@ pub trait HarnessModel: ChatModel<()> {
 ///   source ([`TinyhumansTokenSource::from_env`]: a projected `TINYHUMANS_TOKEN_FILE`
 ///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`**, and
 ///   the runtime keeps its offline echo brain.
-/// * url — `OPENCOMPANY_INFERENCE_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
+/// * url — `OPENCOMPANY_INFERENCE_URL`, else the TinyHumans proxy derived from
+///   `TINYHUMANS_API_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
 /// * model — `OPENCOMPANY_INFERENCE_MODEL`, else [`DEFAULT_HOSTED_MODEL`].
 ///
 /// `OPENCOMPANY_INFERENCE_KEY` is checked first because it is a *different*
@@ -172,7 +174,17 @@ pub trait HarnessModel: ChatModel<()> {
 pub fn harness_inference_from_env(
     env: &dyn EnvSource,
 ) -> Option<(HostedProviderConfig, Option<String>)> {
-    let (credential, base_url) = hosted_endpoint_from_env(env)?;
+    harness_inference_from_env_at(env, None)
+}
+
+/// As [`harness_inference_from_env`], but uses the host's already-resolved API
+/// URL when an explicit inference URL is absent.  This matters for a URL set in
+/// `config.toml`: it is configuration, not a process environment variable.
+pub fn harness_inference_from_env_at(
+    env: &dyn EnvSource,
+    api_url: Option<&str>,
+) -> Option<(HostedProviderConfig, Option<String>)> {
+    let (credential, base_url) = hosted_endpoint_from_env_at(env, api_url)?;
     // The model is a per-roster **override** now: only an explicit
     // `OPENCOMPANY_INFERENCE_MODEL` flattens every agent to one workload. When
     // unset, each agent keeps its tier-derived model, which the tenant
@@ -205,22 +217,13 @@ pub fn harness_inference_from_env(
     ))
 }
 
-/// Resolve the shared hosted-endpoint `(credential, base_url)` pair that managed
-/// TinyHumans chat inference addresses — the **one** credential path both
-/// [`harness_inference_from_env`] and [`PlatformCredentialStatus::resolve`] read,
-/// so a rotation or a per-tenant key reaches both without a second, drifting
-/// resolution.
-///
-/// Precedence mirrors the documented inference order, most specific first:
-///
-/// * credential — `OPENCOMPANY_INFERENCE_KEY` if set, else the platform token
-///   source ([`TinyhumansTokenSource::from_env`]: a projected `TINYHUMANS_TOKEN_FILE`
-///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`.**
-/// * url — `OPENCOMPANY_INFERENCE_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
-///
-/// The chat client POSTs to `{base_url}/chat/completions`, an OpenAI-compatible
-/// surface.
-pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credential, String)> {
+/// Resolves the managed endpoint with an optional, already-normalized host API
+/// URL.  An environment endpoint remains the explicit highest-precedence
+/// override; the host URL is only the fallback proxy origin.
+pub(crate) fn hosted_endpoint_from_env_at(
+    env: &dyn EnvSource,
+    api_url: Option<&str>,
+) -> Option<(Credential, String)> {
     let credential = match env
         .get("OPENCOMPANY_INFERENCE_KEY")
         .map(|key| key.trim().to_string())
@@ -229,9 +232,18 @@ pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credentia
         Some(key) => Credential::from_value(key),
         None => Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?)),
     };
-    let base_url = env
-        .get("OPENCOMPANY_INFERENCE_URL")
-        .unwrap_or_else(|| DEFAULT_TINYHUMANS_INFERENCE_URL.to_string());
+    let base_url = env.get("OPENCOMPANY_INFERENCE_URL").unwrap_or_else(|| {
+        let platform_url = api_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                crate::company::composio::backend_url_or_default(
+                    env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
+                )
+            });
+        crate::company::inference::catalogue::tinyhumans_proxy_url(&platform_url)
+    });
     Some((credential, base_url))
 }
 
@@ -299,18 +311,40 @@ pub const DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL: &str = "https://api.tinyhumans.
 ///    no roster rebuild. Media flattens to a `String` at build time; that is a
 ///    known rough edge there, not a pattern worth copying.
 ///
-/// **Security**: consults ONLY the environment — never a tenant secret store —
-/// so a company can never point search at a key it controls.
+/// This function still consults only the environment. The request-time Search
+/// backend may prepend the company's own `search/managed/key`; that credential
+/// is billed to the same company and therefore does not create the ambient-
+/// credential problem the environment-only boundary was written to prevent.
 pub fn search_backend_from_env(env: &dyn EnvSource) -> Option<super::search::SearchBackend> {
     let credential = Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?));
-    let backend_url = env
-        .get("OPENCOMPANY_SEARCH_BACKEND_URL")
-        .unwrap_or_else(|| DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL.to_string());
     Some(super::search::SearchBackend::new(
-        backend_url,
+        search_backend_url_from_env(env),
         credential,
         crate::company::DEFAULT_SEARCH_DAILY_CALLS,
     ))
+}
+
+/// A process-wide managed-search handle, even when the deployment credential
+/// is absent. The empty credential keeps requests fail-closed, while the shared
+/// handle lets company credentials use one ledger across workflow and harness
+/// lanes.
+pub fn search_backend_handle_from_env(env: &dyn EnvSource) -> super::search::SearchBackend {
+    let credential = TinyhumansTokenSource::from_env(env)
+        .map(|source| Credential::from_source(Arc::new(source)))
+        .unwrap_or(Credential::None);
+    super::search::SearchBackend::new(
+        search_backend_url_from_env(env),
+        credential,
+        crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+    )
+}
+
+/// The managed-search endpoint, independent of whether the deployment has a
+/// credential. Company-scoped credentials use the same proxy and need this
+/// answer even on a host with no platform identity.
+pub fn search_backend_url_from_env(env: &dyn EnvSource) -> String {
+    env.get("OPENCOMPANY_SEARCH_BACKEND_URL")
+        .unwrap_or_else(|| DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL.to_string())
 }
 
 /// Which managed-platform surfaces resolved a credential at boot (issue #879).
@@ -333,7 +367,7 @@ pub struct PlatformCredentialStatus {
     /// That identity is the **projected-file** tier rather than a static key.
     pub projected_tier: bool,
     /// Managed chat inference resolved
-    /// ([`hosted_endpoint_from_env`]).
+    /// ([`hosted_endpoint_from_env_at`]).
     pub inference: bool,
     /// Managed web search resolved ([`search_backend_from_env`]).
     pub search: bool,
@@ -344,6 +378,12 @@ pub struct PlatformCredentialStatus {
 impl PlatformCredentialStatus {
     /// Resolves every managed surface against one environment read.
     pub fn resolve(env: &dyn EnvSource) -> Self {
+        Self::resolve_at(env, None)
+    }
+
+    /// Resolves managed surfaces using the host configuration for inference's
+    /// fallback endpoint.
+    pub fn resolve_at(env: &dyn EnvSource, api_url: Option<&str>) -> Self {
         let source = TinyhumansTokenSource::from_env(env);
         let projected_tier = source
             .as_ref()
@@ -351,7 +391,7 @@ impl PlatformCredentialStatus {
         Self {
             platform_identity: source.is_some(),
             projected_tier,
-            inference: hosted_endpoint_from_env(env).is_some(),
+            inference: hosted_endpoint_from_env_at(env, api_url).is_some(),
             search: search_backend_from_env(env).is_some(),
             media: media_backend_from_env(env).is_some(),
         }

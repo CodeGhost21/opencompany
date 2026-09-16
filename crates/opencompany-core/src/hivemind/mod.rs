@@ -95,6 +95,8 @@ mod referral_crossing_tests;
 #[cfg(test)]
 mod referral_fixtures_tests;
 #[cfg(test)]
+mod referral_manifest_tests;
+#[cfg(test)]
 mod referral_prompt_tests;
 #[cfg(test)]
 mod round_tests;

@@ -1,4 +1,38 @@
 use super::*;
+use crate::ports::SecretStore;
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+#[derive(Default)]
+struct MemSecrets(Mutex<HashMap<String, String>>);
+
+#[async_trait]
+impl crate::ports::SecretStore for MemSecrets {
+    async fn get(
+        &self,
+        _company: &CompanyId,
+        key: &str,
+    ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .map(crate::ports::types::SecretValue))
+    }
+
+    async fn set(
+        &self,
+        _company: &CompanyId,
+        key: &str,
+        value: crate::ports::types::SecretValue,
+    ) -> crate::Result<()> {
+        self.0.lock().unwrap().insert(key.to_string(), value.0);
+        Ok(())
+    }
+}
 
 fn item(
     title: &str,
@@ -12,6 +46,35 @@ fn item(
         publish_date: published.map(str::to_string),
         excerpts: excerpt.map(str::to_string).into_iter().collect(),
     }
+}
+
+#[tokio::test]
+async fn company_managed_key_is_read_live_before_the_deployment_fallback() {
+    let company = CompanyId::new("acme");
+    let secrets = Arc::new(MemSecrets::default());
+    let backend = SearchBackend::new(
+        "https://api.tinyhumans.ai".to_string(),
+        Credential::from_value("deployment-key"),
+        10,
+    )
+    .with_company_credential(company.clone(), secrets.clone());
+
+    assert_eq!(
+        backend.current_credential().await.unwrap().as_deref(),
+        Some("deployment-key")
+    );
+    secrets
+        .set(
+            &company,
+            crate::company::search::MANAGED_KEY_SECRET,
+            crate::ports::types::SecretValue("company-key".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.current_credential().await.unwrap().as_deref(),
+        Some("company-key")
+    );
 }
 
 // --- the daily cap -----------------------------------------------------

@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::error::UsedBy;
 
-/// One of the five things a single `PUT …/credential` can touch.
+/// One of the six things a single `PUT …/credential` can touch.
 ///
 /// Always reported in this order — see [`FanOutReport::slots`] — because that
 /// is also roughly the causal order: the account key lands first, its copies
@@ -22,6 +22,7 @@ use crate::error::UsedBy;
 pub enum Slot {
     Composio,
     Inference,
+    Search,
     Provider,
     Default,
     Health,
@@ -105,6 +106,24 @@ pub struct SlotReport {
     pub outcome: SlotOutcome,
 }
 
+/// The account key a [`fan_out`](super::fan_out) call should treat as "new".
+///
+/// `Explicit` is an operator-typed value — `PUT …/credential`'s body, or the
+/// hub-minted key `finish_link` just stored. `Stored` asks `fan_out` to read
+/// whatever `tinyhumans/key` currently holds **after** it has taken
+/// [`slot_guard`](super::slot_guard), rather than a caller reading it first
+/// and handing the snapshot in: `PUT …/credential/model` (`set_model`) only
+/// ever means "finish with the key already saved", and a pre-lock read that
+/// snapshot could go stale between the read and the lock if a concurrent
+/// rotation or clear lands first — `fan_out` would then treat the stale
+/// snapshot as the *intended* new value and write it back, silently undoing
+/// the rotation or resurrecting the removed credential (Codex P1 review, this
+/// PR). Resolving inside the lock instead means there is no window at all.
+pub enum FanOutKey<'a> {
+    Explicit(&'a str),
+    Stored,
+}
+
 /// What a `PUT …/credential` asks [`fan_out`](super::fan_out) to do.
 ///
 /// `model` is `None` on a bare key save (or a clear); `Some` names the model a
@@ -112,7 +131,7 @@ pub struct SlotReport {
 /// owned: the caller (a deserialized request body) already owns the strings,
 /// and `fan_out` never needs to hold either past its own call.
 pub struct FanOutRequest<'a> {
-    pub key: &'a str,
+    pub key: FanOutKey<'a>,
     pub model: Option<&'a str>,
     /// Confirms a clear the in-use guard would otherwise refuse
     /// (`docs/key-reworks/in-use-guards.md` §2). Ignored on a set/rotate,
@@ -120,6 +139,13 @@ pub struct FanOutRequest<'a> {
     /// flow passes `true` unconditionally — a grant never clears (Q10), so
     /// the flag never gates anything there.
     pub confirm_in_use: bool,
+    /// The TinyHumans OpenRouter proxy base a minted `tinyhumans` row carries
+    /// and the health probe reads — `catalogue::tinyhumans_proxy_url(api_url)`
+    /// from the caller's `AppConfig`, so the row follows the platform this
+    /// instance is configured for (`TINYHUMANS_API_URL`) rather than always
+    /// production. `None` means the catalogue's production endpoint, which is
+    /// what every existing test asks for.
+    pub proxy_base_url: Option<&'a str>,
 }
 
 /// Everything a `PUT …/credential` needs to answer with, once the fan-out
@@ -131,7 +157,7 @@ pub struct FanOutRequest<'a> {
 /// true by construction rather than by discipline.
 #[derive(Clone, Debug, Default)]
 pub struct FanOutReport {
-    /// Always in order: composio, inference, provider, default, health.
+    /// Always in order: composio, inference, search, provider, default, health.
     pub slots: Vec<SlotReport>,
     /// Whether a `tinyhumans` row could not be created or defaulted for want
     /// of a model — the console's cue to ask for one.

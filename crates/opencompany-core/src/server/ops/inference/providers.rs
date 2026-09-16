@@ -503,6 +503,7 @@ async fn add_provider(
             .as_deref()
             .map(str::trim)
             .is_some_and(|k| !k.is_empty()),
+        &state.config().api_url,
     )?;
     // Keys rework (#2306), slice 4a: the account-key fan-out
     // (`company_key::fan_out`) reads and writes this exact slug's row and key
@@ -1005,11 +1006,19 @@ struct AddPlan {
 /// the catalogue; a local runtime's endpoint is the thing being chosen and is
 /// normalised and scheme-checked here; a CLI login supplies neither and skips
 /// the probe because there is nothing to present.
+///
+/// `api_url` is this instance's configured TinyHumans platform
+/// (`AppConfig::api_url`, from `TINYHUMANS_API_URL`): the `tinyhumans` row's
+/// endpoint is derived from it rather than read off the catalogue, so a
+/// staging or local platform gets a row that points at itself — see
+/// [`catalogue::tinyhumans_proxy_url`]. Every other cloud row keeps its
+/// catalogue endpoint.
 fn plan_add(
     kind: &str,
     label: Option<&str>,
     base_url: Option<&str>,
     has_key: bool,
+    api_url: &str,
 ) -> Result<AddPlan, ApiError> {
     let invalid = |msg: String| ApiError(OpenCompanyError::InvalidRequest(msg));
 
@@ -1024,11 +1033,16 @@ fn plan_add(
         if cloud.slug == crate::company::inference::MANAGED_SLUG && !has_key {
             return Err(invalid("TinyHumans needs an API key.".to_string()));
         }
+        let base_url = if cloud.slug == crate::company::inference::MANAGED_SLUG {
+            catalogue::tinyhumans_proxy_url(api_url)
+        } else {
+            cloud.endpoint.to_string()
+        };
         return Ok(AddPlan {
             slug: cloud.slug.to_string(),
             label: cloud.label.to_string(),
             kind: cloud.slug.to_string(),
-            base_url: cloud.endpoint.to_string(),
+            base_url,
             custom: false,
             probes: true,
         });
@@ -2092,7 +2106,7 @@ async fn test_managed(
     let base_url = platform
         .as_ref()
         .map(|p| p.base_url.clone())
-        .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string());
+        .unwrap_or_else(inference::platform_base_url);
     let subject = catalogue::endpoint_host(&base_url).unwrap_or_else(|| "the managed brain".into());
 
     match probe::probe_models(

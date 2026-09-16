@@ -29,9 +29,10 @@ async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
             &c1,
             s1.as_ref(),
             FanOutRequest {
-                key: NEW,
+                key: FanOutKey::Explicit(NEW),
                 model: None,
                 confirm_in_use: true,
+                proxy_base_url: None,
             },
             &prober_a,
         );
@@ -39,9 +40,10 @@ async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
             &c2,
             s2.as_ref(),
             FanOutRequest {
-                key: OTHER,
+                key: FanOutKey::Explicit(OTHER),
                 model: None,
                 confirm_in_use: true,
+                proxy_base_url: None,
             },
             &prober_b,
         );
@@ -87,9 +89,10 @@ async fn no_report_or_note_contains_a_key() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -102,6 +105,20 @@ async fn no_report_or_note_contains_a_key() {
     assert!(!rendered.contains(NEW), "{rendered}");
     assert!(!note.contains(OLD), "{note}");
     assert!(!note.contains(NEW), "{note}");
+}
+
+#[test]
+fn a_failed_search_copy_points_the_operator_to_search_settings() {
+    let report = FanOutReport {
+        slots: vec![SlotReport {
+            slot: Slot::Search,
+            outcome: SlotOutcome::Failed,
+        }],
+        ..FanOutReport::default()
+    };
+
+    let note = fan_out_note(false, &report, None);
+    assert!(note.contains("Search pages"), "{note}");
 }
 
 // ---------------------------------------------------------------------------
@@ -269,9 +286,10 @@ async fn a_fan_out_racing_a_provider_add_loses_neither_row() {
         &c1,
         s1.as_ref(),
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     );
@@ -351,9 +369,10 @@ async fn a_fan_out_racing_a_default_change_backs_off_or_wins_but_never_corrupts(
         &c1,
         s1.as_ref(),
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     );

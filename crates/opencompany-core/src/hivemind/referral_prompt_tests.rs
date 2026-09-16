@@ -63,6 +63,25 @@ async fn a_referring_desk_is_shown_its_peers_and_told_to_ask_early() {
         prompt.contains("it is not a vote"),
         "and told what an answer is worth:\n{prompt}"
     );
+    // **And how to ask a PERSON, which only a room that can dispatch is told.**
+    //
+    // Naming a teammate with `@` is read as a question put to them: their turn
+    // runs at once and the exchange is held privately. Two live failures come
+    // from a seat not knowing that. Told only to "address them by the ids
+    // above", one wrote `@amendments should handle it` while proposing to the
+    // desk and opened a private exchange it never asked for. Told instead what
+    // the `@` COSTS, with dropping it offered as the alternative, a room wrote
+    // "we still need the order details from amendments" without the `@` and
+    // spent six turns waiting on a question nobody had been asked — twice in
+    // one episode, both rooms exhausting their budget.
+    assert!(
+        prompt.contains("To get an ANSWER") && prompt.contains("it is the only way to ask them"),
+        "a seat that CAN dispatch is told the @handle is how it gets an answer:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("asks nobody and reaches nobody"),
+        "and that dropping it reaches nobody, so it never waits on a question it did not send:\n{prompt}"
+    );
 }
 
 #[tokio::test]
@@ -635,69 +654,4 @@ pub(super) fn the_referral_prompt_frames_a_colleagues_question_not_a_deliberatio
         "the far teammate is answering a colleague, not depositing a move on its own \
          desk's board:\n{prompt}"
     );
-}
-
-// ---------------------------------------------------------------------------
-// The manifest
-// ---------------------------------------------------------------------------
-
-/// The referral block is parsed off `[[group_chat]].hive`, not invented here.
-#[test]
-pub(super) fn the_manifest_parses_a_referral_block() {
-    let manifest = two_desks(
-        "hive = { referral = { enabled = true, max_hops = 3, reach = \"channels\", \
-         returns = false, peer_cap = 4 } }",
-    );
-    let desk = desk_of(&manifest, "eng").expect("a room");
-    let referral = &desk.config.referral;
-    assert!(referral.enabled());
-    assert_eq!(referral.peer_cap(), 4);
-    let policy = referral.policy();
-    assert_eq!(policy.max_hops, 3);
-    assert!(!policy.returns);
-    assert!(policy.reach.crosses());
-    assert!(
-        !policy.reach.addresses_desks(),
-        "`channels` lets a turn run elsewhere without making `@#desk` mean anything"
-    );
-}
-
-/// Every check here catches a policy that would be *silently* inert. A desk
-/// that asks nothing looks exactly like a desk whose members had nothing to
-/// ask, so a typo has to be a validation error rather than a quiet no-op.
-#[test]
-pub(super) fn the_manifest_refuses_a_referral_policy_that_could_never_fire() {
-    let problems = |hive: &str| record(&two_desks(hive)).manifest.validate();
-
-    let found = problems("hive = { referral = { enabled = true, reach = \"everywhere\" } }");
-    assert!(
-        found.iter().any(|p| p.contains("hive.referral.reach")),
-        "{found:?}"
-    );
-
-    for key in ["max_hops", "peer_cap"] {
-        let found = problems(&format!(
-            "hive = {{ referral = {{ enabled = true, {key} = 0 }} }}"
-        ));
-        assert!(
-            found
-                .iter()
-                .any(|p| p.contains(&format!("hive.referral.{key} = 0"))),
-            "{key}: {found:?}"
-        );
-    }
-
-    // A round trip is two hops. One hop plus `returns` describes a question
-    // whose answer is thrown away, which is worse than refusing it.
-    let found = problems("hive = { referral = { enabled = true, max_hops = 1 } }");
-    assert!(
-        found.iter().any(|p| p.contains("a round trip is two hops")),
-        "{found:?}"
-    );
-    // Declared one-way, it is a policy somebody meant.
-    let found = problems("hive = { referral = { enabled = true, max_hops = 1, returns = false } }");
-    assert!(!found.iter().any(|p| p.contains("round trip")), "{found:?}");
-
-    // And the ordinary opted-in block is accepted.
-    assert!(problems(REFERRING).is_empty(), "{:?}", problems(REFERRING));
 }

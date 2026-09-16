@@ -6,12 +6,13 @@ than merely tidier.
 
 ## What exists
 
-Three flat secrets on the company, declared in `src/company/search.rs`:
+Four flat secrets on the company, declared in `src/company/search.rs`:
 
 ```
 search/provider   the chosen slug — one of SUPPORTED_PROVIDERS
 search/api_key    the BYO key                    (write-only, never echoed)
 search/endpoint   the instance URL, SearXNG only (not a secret)
+search/managed/key  the TinyHumans key copied by account-key fan-out
 ```
 
 `SUPPORTED_PROVIDERS = ["managed", "brave", "exa", "querit", "searxng"]`.
@@ -38,11 +39,13 @@ the single alias `web_search`.
 Both are already written down in the code, and both constrain the rework more
 than the UI does.
 
-**The key is per company and never from the environment.** The module header on
-`src/company/search.rs` states it: a BYO search key is billed to whoever pasted
-it, so an environment fallback would let one company's searches ride on a
-credential somebody else pays for. With nothing stored the company falls back to
-`managed`, which is metered and daily-capped against the platform.
+**Credentials are company-scoped before the environment fallback.** BYO keys
+remain per company and provider. Managed search may use the company's own
+TinyHumans account key from `search/managed/key` before the deployment identity;
+because that key belongs to the same company, this does not let one tenant spend
+through another tenant's ambient credential.
+When the company key is absent, the instance identity pays instead; the same
+per-company daily call cap still applies to that fallback.
 
 **The configuration surface is not feature-gated; the harness is.** `search_byo`
 is behind `openhuman`; `src/company/search.rs` and `src/server/ops/search.rs`

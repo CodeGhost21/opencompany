@@ -577,6 +577,7 @@ export function SearchView({ client, company }: Props) {
               providers={providers}
               inBuild={status.inBuild}
               managedConfigured={status.managedConfigured ?? false}
+              managedKeyConfigured={status.managedKeyConfigured ?? false}
               managedDailyCallCap={status.managedDailyCallCap ?? 0}
               canManage={canManage}
               busySlug={busySlug}
@@ -599,6 +600,16 @@ export function SearchView({ client, company }: Props) {
               onTest={(provider) => void onTest(provider)}
               onReplaceKey={(provider) =>
                 setIntent({ kind: "replace-key", slug: provider.slug })
+              }
+              onManagedReplaceKey={() =>
+                setIntent({ kind: "replace-key", slug: "managed" })
+              }
+              onManagedRemoveKey={() =>
+                openConfirm({
+                  kind: "remove-key",
+                  slug: "managed",
+                  label: "Managed",
+                })
               }
               // Destructive, so it asks first. Both of these are irreversible in
               // the only sense that matters here: the key is write-only and is

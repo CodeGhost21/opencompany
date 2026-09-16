@@ -32,9 +32,10 @@ async fn an_auth_probe_restores_the_llm_slots_exactly() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -69,9 +70,10 @@ async fn a_non_auth_probe_failure_keeps_everything() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -107,9 +109,10 @@ async fn an_invalid_model_writes_nothing() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some("chat-v1"),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -133,9 +136,10 @@ async fn a_model_with_a_clear_is_refused() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -172,9 +176,10 @@ async fn a_read_failure_after_the_account_key_is_stored_still_keeps_the_key() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -236,9 +241,10 @@ async fn failing_account_key_write_writes_nothing_else() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -263,9 +269,10 @@ async fn failing_composio_write_still_sets_up_llm() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -300,9 +307,10 @@ async fn failing_inference_write_skips_row_default_and_probe() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -338,9 +346,10 @@ async fn failing_row_write_keeps_the_key_copy() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -368,9 +377,10 @@ async fn failing_default_write_keeps_the_row() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -401,9 +411,10 @@ async fn failing_health_record_does_not_change_outcomes() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )

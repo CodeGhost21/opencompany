@@ -244,6 +244,131 @@ fn both_spellings_of_the_managed_route_canonicalize() {
     );
 }
 
+/// The first-run wizard's TinyHumans card writes `provider = "managed"`
+/// with no `base_url` into the manifest and the typed key into the store.
+/// That company must resolve to the platform proxy with that key — not to
+/// `openrouter.ai`, which is where the normalized kind sent it (and the
+/// key with it) until the umbrella e2e caught a wizard-built company
+/// answering every turn with OpenRouter's 401.
+#[tokio::test]
+async fn a_managed_manifest_with_a_stored_key_stays_on_the_platform() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    store_key(&company, &secrets, "th-not-a-real-key")
+        .await
+        .unwrap();
+    let decl = resolve_effective(&company, &inference(LEGACY_MANAGED), None, &secrets)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decl.source, InferenceSource::Manifest);
+    assert_eq!(decl.base_url, platform_base_url());
+    assert!(decl.is_proxied());
+    assert_eq!(bearer(&decl).await.as_deref(), Some("th-not-a-real-key"));
+
+    // A manifest that ALSO names an endpoint is a gateway the operator
+    // chose on purpose, and keeps resolving to it as a vendor.
+    let mut gateway = inference(LEGACY_MANAGED);
+    gateway.base_url = Some("https://gateway.example/v1".into());
+    let decl = resolve_effective(&company, &gateway, None, &secrets)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decl.base_url, "https://gateway.example/v1");
+    assert!(!decl.is_proxied());
+}
+
+/// The runtime-override arm makes the identical "named a gateway or not"
+/// choice the manifest arm above does, and for the same reason:
+/// `validate_runtime` accepts `provider: "managed"` with a valid non-blank
+/// `base_url`, so a console `PUT` naming a gateway is exactly as valid a
+/// runtime config as a manifest one — `resolve_endpoint`'s managed branch
+/// must not silently discard it for the platform's own endpoint
+/// (CodeRabbit review).
+#[tokio::test]
+async fn a_managed_runtime_override_with_a_gateway_keeps_it() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    store_key(&company, &secrets, "th-not-a-real-key")
+        .await
+        .unwrap();
+
+    // No endpoint named: stays on the platform proxy, same as the
+    // manifest arm.
+    save_runtime_config(
+        &company,
+        &secrets,
+        &RuntimeInference {
+            provider: LEGACY_MANAGED.into(),
+            base_url: None,
+            models: BTreeMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decl.source, InferenceSource::Runtime);
+    assert_eq!(decl.base_url, platform_base_url());
+    assert!(decl.is_proxied());
+
+    // A runtime config that ALSO names an endpoint is a gateway the
+    // operator chose on purpose, and keeps resolving to it as a vendor —
+    // not the platform's own endpoint with the gateway silently dropped.
+    save_runtime_config(
+        &company,
+        &secrets,
+        &RuntimeInference {
+            provider: LEGACY_MANAGED.into(),
+            base_url: Some("https://gateway.example/v1".into()),
+            models: BTreeMap::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decl.base_url, "https://gateway.example/v1");
+    assert!(!decl.is_proxied());
+}
+
+/// A blank or whitespace-only `base_url` is not "the operator named a
+/// gateway" — it must resolve exactly like naming none at all, staying on
+/// the platform proxy with the stored key (tinysweeper/CodeRabbit review:
+/// `manifest.base_url.is_some()` used to read a blank string as an
+/// explicit endpoint, which sent a `managed` company with a blank
+/// `base_url` and a stored key straight to `openrouter.ai` — the same 401
+/// `a_managed_manifest_with_a_stored_key_stays_on_the_platform` exists to
+/// prevent for the no-`base_url` case).
+#[tokio::test]
+async fn a_blank_manifest_base_url_is_treated_as_absent() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    store_key(&company, &secrets, "th-not-a-real-key")
+        .await
+        .unwrap();
+
+    for blank in ["", "   ", "\t\n"] {
+        let mut manifest = inference(LEGACY_MANAGED);
+        manifest.base_url = Some(blank.to_string());
+        let decl = resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, platform_base_url(), "blank: {blank:?}");
+        assert!(decl.is_proxied(), "blank: {blank:?}");
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("th-not-a-real-key"),
+            "blank: {blank:?}"
+        );
+    }
+}
+
 /// A committed manifest still saying `provider = "managed"` resolves as
 /// proxied OpenRouter rather than failing. It was valid when written, and the
 /// intent — "the platform's brain" — is exactly what proxied OpenRouter is.

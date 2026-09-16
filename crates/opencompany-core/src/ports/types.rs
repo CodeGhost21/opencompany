@@ -3446,14 +3446,25 @@ pub enum TurnStepFailure {
     /// install, so its "not there" is [`NotFound`](Self::NotFound) — see
     /// [`crate::harness::steps`] (issue #924).
     MissingApp,
-    /// The file, folder, or bundled resource the call named does not exist.
+    /// The file, folder, bundled resource, tool or catalog entry the call
+    /// named does not exist or is not available to this agent.
     ///
     /// Distinct from [`MissingApp`](Self::MissingApp) because the remedy is
     /// different in kind: a missing path is fixed by naming a different path,
     /// not by installing software. Both arrive as one `ENOENT` from the
     /// operating system, and telling a server operator to "install or open the
-    /// app" when a note is simply absent is unactionable (issue #924).
+    /// app" when a note is simply absent is unactionable (issue #924). Since
+    /// the 2026-09-16 OpenHuman pin the vendored classifier also emits this for
+    /// a call that names a tool the agent does not have or a catalog entry that
+    /// is not there (`ToolFailureClass::NotFound`, openhuman#6277) — the same
+    /// remedy, name something that exists.
     NotFound,
+    /// The operation is not supported for this target, permanently — a catalog
+    /// skill with no direct download cannot be installed automatically, say
+    /// (`ToolFailureClass::Unsupported`, openhuman#6277). Never retried on its
+    /// own: the identical call fails the same way every time, and the remedy
+    /// is a different approach, not a different moment.
+    Unsupported,
     /// The call ran past its deadline and was stopped.
     Timeout,
     /// A service the call depends on — an upstream API, or the model provider —
@@ -3475,6 +3486,7 @@ impl TurnStepFailure {
             Self::MissingPermission => "missing_permission",
             Self::MissingApp => "missing_app",
             Self::NotFound => "not_found",
+            Self::Unsupported => "unsupported",
             Self::Timeout => "timeout",
             Self::Unavailable => "unavailable",
             Self::Failed => "failed",

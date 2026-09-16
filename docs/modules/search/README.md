@@ -29,12 +29,12 @@ read fallback and still written for one release. See
 
 Both are already in the code and neither is negotiable.
 
-**The key is per company and never from the environment.** A BYO search key is
-billed to whoever pasted it, so an environment fallback would let one company's
-searches ride on a credential somebody else pays for. With nothing stored the
-company falls back to `managed`, which is metered and daily-capped against the
-platform. The module header on `src/company/search.rs` is the canonical statement
-and it survives this change unedited.
+**Credentials are company-scoped before the deployment fallback.** BYO provider
+keys remain isolated per company and per provider. Managed search first reads
+`search/managed/key`, a copy of that company's own TinyHumans account key, then
+falls through to the deployment identity. The company tier is billed to the
+same company whose agents present it, so it does not create the ambient-
+credential problem the original environment-only boundary prevented.
 
 **The configuration surface is not feature-gated; the harness is.**
 `src/harness/built_in/search_byo.rs` is behind `openhuman`;

@@ -57,6 +57,32 @@ async fn manifest_api_key_secret_is_the_fallback_key() {
     assert_eq!(bearer(&decl).await.as_deref(), Some("named-secret"));
 }
 
+#[tokio::test]
+async fn managed_gateway_uses_its_explicitly_named_secret() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+    secrets
+        .set(
+            &company,
+            "byo/gateway",
+            SecretValue("gateway-secret".into()),
+        )
+        .await
+        .unwrap();
+    let mut manifest = inference(LEGACY_MANAGED);
+    manifest.base_url = Some("https://gateway.example/v1".into());
+    manifest.api_key_secret = Some("byo/gateway".into());
+
+    let decl = resolve_effective(&company, &manifest, None, &secrets)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(decl.base_url, "https://gateway.example/v1");
+    assert!(!decl.is_proxied());
+    assert_eq!(bearer(&decl).await.as_deref(), Some("gateway-secret"));
+}
+
 // ---- validation --------------------------------------------------------
 
 #[test]

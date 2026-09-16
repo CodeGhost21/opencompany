@@ -16,21 +16,21 @@ use super::tests_p1_1_legacy_managed::{GRANTED_KEY, state_param, state_with_hub}
 use super::tests_the_key_round_trips::slot_outcome;
 
 /// A value long and opaque enough that a leak would be unmistakable in a body.
-const KEY: &str = "th_company_credential_SECRET_do_not_echo_me";
+pub(super) const KEY: &str = "th_company_credential_SECRET_do_not_echo_me";
 
 /// A company that grants Composio, so the status route has something to report
 /// a credential tier *for*.
-const GRANTED: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+pub(super) const GRANTED: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
      [tools]\nallow = [\"composio\"]\n[tools.composio]\ntoolkits = [\"gmail\"]\n";
 
-fn home() -> tempfile::TempDir {
+pub(super) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("oc-company-key-")
         .tempdir()
         .expect("tempdir")
 }
 
-async fn state_with_manifest(
+pub(super) async fn state_with_manifest(
     home: &std::path::Path,
     company: &str,
     manifest_toml: &str,
@@ -84,7 +84,7 @@ async fn state_with_manifest(
     state
 }
 
-async fn send_as(
+pub(super) async fn send_as(
     state: &AppState,
     method: &str,
     uri: &str,
@@ -114,7 +114,7 @@ async fn send_as(
     (status, value, raw)
 }
 
-async fn send(
+pub(super) async fn send(
     state: &AppState,
     company: &str,
     method: &str,
@@ -129,6 +129,22 @@ async fn send(
         crate::server::test_support::fixed_cookie(company),
     )
     .await
+}
+
+async fn set_custom_search_key(state: &AppState, company: &str) {
+    let id = CompanyId::new(company);
+    state
+        .registry()
+        .get(&id)
+        .expect("registered")
+        .secrets()
+        .set(
+            &id,
+            crate::company::search::MANAGED_KEY_SECRET,
+            crate::ports::types::SecretValue("custom-search-key".to_string()),
+        )
+        .await
+        .unwrap();
 }
 
 /// M2 by route: sending a model with the same save adds the row and, since
@@ -450,6 +466,7 @@ async fn clearing_when_nothing_depends_on_it_needs_no_confirmation() {
         Some(json!({ "key": KEY })),
     )
     .await;
+    set_custom_search_key(&state, "fanclean").await;
     // A custom key pasted directly on both the Composio and LLM pages, which
     // the fan-out never overwrites (Q7) and which the guard must not treat as
     // still depending on the account key.
@@ -519,6 +536,7 @@ async fn status_reports_used_by_when_a_clear_would_strand_dependents() {
         .collect();
     assert!(surfaces.contains(&"llm"), "{raw}");
     assert!(surfaces.contains(&"composio"), "{raw}");
+    assert!(surfaces.contains(&"search"), "{raw}");
 }
 
 /// The other half: nothing set, or nothing left depending on the account key
@@ -547,6 +565,7 @@ async fn status_reports_no_used_by_when_nothing_depends_on_it() {
         Some(json!({ "key": KEY })),
     )
     .await;
+    set_custom_search_key(&state, "statusnousedby").await;
     send(
         &state,
         "statusnousedby",
@@ -574,7 +593,7 @@ async fn status_reports_no_used_by_when_nothing_depends_on_it() {
     .await;
     assert!(
         dto.get("usedBy").is_none(),
-        "both slots hold their own key, not the account key's copy: {raw}"
+        "all derived slots hold their own key, not the account key's copy: {raw}"
     );
 }
 
@@ -619,6 +638,7 @@ async fn p1_1_byok_mode_with_a_matching_composio_copy_needs_no_confirmation() {
         )
         .await
         .unwrap();
+    set_custom_search_key(&state, "p11byok").await;
 
     let (status, resp, raw) = send(
         &state,
@@ -650,6 +670,7 @@ async fn p1_1_managed_mode_with_a_matching_composio_copy_is_refused() {
         Some(json!({ "key": KEY })),
     )
     .await;
+    set_custom_search_key(&state, "p11managed").await;
 
     let (status, body, raw) = send(
         &state,

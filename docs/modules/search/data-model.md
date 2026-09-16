@@ -210,20 +210,22 @@ key.
 
 ## Managed is a row, and it says what is true
 
-Managed is not a record and cannot be one — it has no company credential, it is
-the platform's metered surface. It is rendered as a row keyed on **whether it
-resolves**, the same rule the inference Managed row uses, answered from facts the
-host already computes:
+Managed is not a provider record and cannot be one — it has no company-owned
+endpoint or index entry. It can hold the bare company credential at
+`search/managed/key`: the account-key fan-out fills that address without taking
+the provider-index lock, and request-time resolution reads it before the
+deployment identity. It is rendered as a row keyed on **whether either tier
+resolves**:
 
 | State | Badge | Sub-line |
 |---|---|---|
-| harness in build, platform credential resolves from env | `On` | `Metered — up to N searches a day` |
-| harness in build, no platform credential on this deployment | *(none)* | `No managed credential on this deployment` |
+| harness in build, company or platform credential resolves | `On` | `Metered — up to N searches a day` |
+| harness in build, neither credential resolves | *(none)* | `No managed credential on this deployment` |
 | build has no agent harness | *(none)* | `This build has no search tools` |
 
-`search_credential_configured()` in `src/server/ops/capabilities.rs` is the
-existing derivation (`search_backend_from_env`, `false` when the `openhuman`
-feature is off) and the status route calls it rather than restating it.
+The status route reports the union of the company secret and the existing
+`search_backend_from_env` deployment derivation; the build flag remains a
+separate fact.
 
 **No "Always on" badge.** Managed search is always the *fallback*, which is a
 different claim from always *working*: a self-hosted deployment with no platform

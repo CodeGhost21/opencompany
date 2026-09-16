@@ -118,6 +118,7 @@ import {
   type ChatMessage,
   dispatchMarkerPlacement,
   fromHistory,
+  reconcileTranscript,
   hostMessageId,
   liveFrameThreadKey,
   liveReplyIdentity,
@@ -1984,11 +1985,13 @@ export function AppShell({
             return;
           }
           setTranscripts((t) => {
-            const known = new Set((t[channelId] ?? []).map((m) => m.id));
-            const fresh = hydrated.filter((m) => !known.has(m.id));
-            return fresh.length === 0
-              ? t
-              : { ...t, [channelId]: [...(t[channelId] ?? []), ...fresh] };
+            // Reconciled, not merely appended: a referral folds its exchange
+            // onto a row this transcript ALREADY holds, so an id filter drops
+            // exactly the update it exists to deliver. See
+            // `reconcileTranscript` for the whole reasoning.
+            const existing = t[channelId] ?? [];
+            const merged = reconcileTranscript(existing, hydrated);
+            return merged === existing ? t : { ...t, [channelId]: merged };
           });
         })
         .catch(() => {
@@ -3353,6 +3356,21 @@ export function AppShell({
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
     onRunEvent: useCallback(() => setAttemptEventTick((n) => n + 1), []),
+    // **A crossing changes a thread this console is already showing.**
+    //
+    // The fold that renders a crossing — `referralConversation` on the asking
+    // row — is built by `chat/history` and by nothing else, so a crossing was
+    // invisible until something re-read the thread. A desk crossing waited for
+    // settle; a pair DM waited forever, because its rows live in the pair's own
+    // `dm:<a>+<b>` conversation that no desk view subscribes to.
+    //
+    // Re-reading rather than rendering the frame: the frame deliberately
+    // carries no crossing content, and `reReadSettledThread` is idempotent, so
+    // a second call for a thread already holding the fold adds nothing.
+    onReferral: useCallback(
+      (event: { chatId: string }) => reReadSettledThread(event.chatId),
+      [reReadSettledThread],
+    ),
     // Issue #377. Beside the board tick above, not instead of it: a settle both
     // moves a card between columns and needs saying in the conversation the
     // card came from.

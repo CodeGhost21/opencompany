@@ -86,6 +86,34 @@ async fn env_config_falls_back_to_tinyhumans_key_and_honors_overrides() {
     assert_eq!(model.as_deref(), Some("reasoning-v1"));
 }
 
+#[tokio::test]
+async fn env_config_derives_the_inference_proxy_from_the_platform_api_url() {
+    let env = MapEnv::new([
+        ("TINYHUMANS_API_KEY", "sk-platform"),
+        (
+            crate::company::composio::TINYHUMANS_API_URL_ENV,
+            "https://staging-api.tinyhumans.ai/",
+        ),
+    ]);
+    let (cfg, _) = harness_inference_from_env(&env).expect("configured");
+    assert_eq!(
+        cfg.base_url,
+        "https://staging-api.tinyhumans.ai/agent-integrations/openrouter"
+    );
+}
+
+#[tokio::test]
+async fn env_config_uses_resolved_host_api_url_when_environment_omits_it() {
+    let env = MapEnv::new([("TINYHUMANS_API_KEY", "sk-platform")]);
+    let (cfg, _) =
+        harness_inference_from_env_at(&env, Some("https://config-api.tinyhumans.example/"))
+            .expect("configured");
+    assert_eq!(
+        cfg.base_url,
+        "https://config-api.tinyhumans.example/agent-integrations/openrouter"
+    );
+}
+
 #[test]
 fn env_config_is_none_without_any_key() {
     let env = MapEnv::new([("OPENCOMPANY_INFERENCE_URL", "https://x/v1")]);
@@ -206,4 +234,16 @@ fn search_backend_has_no_credential_of_its_own_and_fails_closed() {
         ("OPENCOMPANY_SEARCH_KEY", "search-specific"),
     ]);
     assert!(search_backend_from_env(&env).is_none());
+}
+
+/// Company-only Search still needs one process-wide handle so every lane
+/// shares its ledger; its empty fallback credential must remain unusable.
+#[tokio::test]
+async fn search_backend_handle_is_uncredentialed_without_platform_identity() {
+    let backend = search_backend_handle_from_env(&MapEnv::new([(
+        "OPENCOMPANY_SEARCH_BACKEND_URL",
+        "https://staging-api.tinyhumans.ai",
+    )]));
+    assert_eq!(backend.backend_url, "https://staging-api.tinyhumans.ai");
+    assert_eq!(backend.credential.current().await.unwrap(), None);
 }

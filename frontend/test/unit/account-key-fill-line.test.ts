@@ -16,6 +16,7 @@ import type { CompanyCredentialStatus } from "@/api/credential";
 import {
   COMPOSIO_PAGE_HREF,
   LLM_PAGE_HREF,
+  SEARCH_PAGE_HREF,
   accountFillLine,
   accountFills,
   modelStepTitle,
@@ -27,6 +28,7 @@ function status(overrides: Partial<CompanyCredentialStatus> = {}): CompanyCreden
     source: "company",
     notice: "notice",
     hubLink: false,
+    searchHasOwnKey: false,
     ...overrides,
   };
 }
@@ -35,32 +37,46 @@ describe("accountFills", () => {
   it("reads false HasOwnKey as a slot this save would fill", () => {
     expect(
       accountFills(status({ inferenceHasOwnKey: false, composioHasOwnKey: false })),
-    ).toEqual({ llm: true, composio: true, llmHasModel: false });
+    ).toEqual({ llm: true, composio: true, search: true, llmHasModel: false });
   });
 
   it("reads true HasOwnKey as a slot this save would leave alone", () => {
-    expect(accountFills(status({ inferenceHasOwnKey: true, composioHasOwnKey: true }))).toEqual({
-      llm: false,
-      composio: false,
-      llmHasModel: false,
-    });
+    expect(
+      accountFills(
+        status({
+          inferenceHasOwnKey: true,
+          composioHasOwnKey: true,
+          searchHasOwnKey: true,
+        }),
+      ),
+    ).toEqual({ llm: false, composio: false, search: false, llmHasModel: false });
   });
 
   it("mixes the two independently", () => {
     expect(accountFills(status({ inferenceHasOwnKey: true, composioHasOwnKey: false }))).toEqual({
       llm: false,
       composio: true,
+      search: true,
       llmHasModel: false,
     });
   });
 
-  it("is null when either field is missing (an older host)", () => {
+  it("is null when any field is missing (an older host)", () => {
     expect(accountFills(status({ inferenceHasOwnKey: true, composioHasOwnKey: undefined }))).toBe(
       null,
     );
     expect(accountFills(status({ inferenceHasOwnKey: undefined, composioHasOwnKey: true }))).toBe(
       null,
     );
+    expect(
+      accountFills(
+        status({
+          inferenceHasOwnKey: true,
+          composioHasOwnKey: true,
+          searchHasOwnKey: undefined,
+        }),
+      ),
+    ).toBe(null);
     expect(accountFills(null)).toBe(null);
   });
 
@@ -81,13 +97,13 @@ describe("accountFills", () => {
       accountFills(
         status({ inferenceHasOwnKey: false, composioHasOwnKey: false, inferenceHasModel: true }),
       ),
-    ).toEqual({ llm: true, composio: true, llmHasModel: true });
+    ).toEqual({ llm: true, composio: true, search: true, llmHasModel: true });
   });
 });
 
 describe("accountFillLine", () => {
   it("names both slots without claiming LLM is connected", () => {
-    const line = accountFillLine({ llm: true, composio: true, llmHasModel: false });
+    const line = accountFillLine({ llm: true, composio: true, search: false, llmHasModel: false });
     expect(line).toBe(
       "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and connects it for Composio.",
     );
@@ -96,7 +112,7 @@ describe("accountFillLine", () => {
   });
 
   it("names only the LLM slot, and says a model is still needed", () => {
-    const line = accountFillLine({ llm: true, composio: false, llmHasModel: false });
+    const line = accountFillLine({ llm: true, composio: false, search: false, llmHasModel: false });
     expect(line).toBe(
       "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next.",
     );
@@ -104,13 +120,15 @@ describe("accountFillLine", () => {
   });
 
   it("names only the Composio slot — unaffected by the LLM wording override", () => {
-    expect(accountFillLine({ llm: false, composio: true, llmHasModel: false })).toBe(
+    expect(accountFillLine({ llm: false, composio: true, search: false, llmHasModel: false })).toBe(
       "Saving also connects TinyHumans for Composio.",
     );
   });
 
   it("is null when saving would fill neither slot", () => {
-    expect(accountFillLine({ llm: false, composio: false, llmHasModel: false })).toBe(null);
+    expect(
+      accountFillLine({ llm: false, composio: false, search: false, llmHasModel: false }),
+    ).toBe(null);
   });
 
   it("is null when the host did not say (accountFills returned null)", () => {
@@ -121,12 +139,20 @@ describe("accountFillLine", () => {
   // no LLM clause at all, not just softer wording — there is no "next" step
   // left to promise.
   it("drops the LLM clause entirely once the row already has a model", () => {
-    expect(accountFillLine({ llm: true, composio: false, llmHasModel: true })).toBe(null);
+    expect(
+      accountFillLine({ llm: true, composio: false, search: false, llmHasModel: true }),
+    ).toBe(null);
   });
 
   it("keeps only the Composio clause when LLM already has a model but Composio would still be filled", () => {
-    expect(accountFillLine({ llm: true, composio: true, llmHasModel: true })).toBe(
+    expect(accountFillLine({ llm: true, composio: true, search: false, llmHasModel: true })).toBe(
       "Saving also connects TinyHumans for Composio.",
+    );
+  });
+
+  it("names the company-controlled managed Search credential", () => {
+    expect(accountFillLine({ llm: false, composio: false, search: true, llmHasModel: false })).toBe(
+      "Saving also uses this key as the company's managed Search credential.",
     );
   });
 });
@@ -141,9 +167,10 @@ describe("modelStepTitle", () => {
   });
 });
 
-describe("the dialog's two links", () => {
-  it("point at the LLM and Composio connection pages", () => {
+describe("the dialog's three links", () => {
+  it("point at the LLM, Composio, and Search connection pages", () => {
     expect(LLM_PAGE_HREF).toBe("#/connections/inference");
     expect(COMPOSIO_PAGE_HREF).toBe("#/connections/composio");
+    expect(SEARCH_PAGE_HREF).toBe("#/connections/search");
   });
 });

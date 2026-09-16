@@ -52,9 +52,10 @@ async fn matrix_m1() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -104,9 +105,10 @@ async fn matrix_m2() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -136,6 +138,78 @@ async fn matrix_m2() {
     assert_eq!(outcome(&report, Slot::Default), SlotOutcome::Filled);
     assert_eq!(outcome(&report, Slot::Health), SlotOutcome::HealthOk);
     assert!(!report.needs_model);
+}
+
+#[tokio::test]
+async fn search_copy_uses_the_same_custom_key_guard_as_the_other_slots() {
+    let cid = company("search-custom");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, OLD).await;
+    raw_set(
+        &secrets,
+        &cid,
+        crate::company::search::MANAGED_KEY_SECRET,
+        CUSTOM,
+    )
+    .await;
+
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: FanOutKey::Explicit(NEW),
+            model: None,
+            confirm_in_use: true,
+            proxy_base_url: None,
+        },
+        &FakeProber::ok(&[MODEL]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        raw_get(&secrets, &cid, crate::company::search::MANAGED_KEY_SECRET).await,
+        CUSTOM
+    );
+    assert_eq!(
+        outcome(&report, Slot::Search),
+        SlotOutcome::Kept(SkipReason::CustomKey)
+    );
+}
+
+#[tokio::test]
+async fn clearing_refuses_when_managed_search_uses_the_account_key_copy() {
+    let cid = company("search-in-use");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, OLD).await;
+    raw_set(
+        &secrets,
+        &cid,
+        crate::company::search::MANAGED_KEY_SECRET,
+        OLD,
+    )
+    .await;
+
+    let err = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: FanOutKey::Explicit(""),
+            model: None,
+            confirm_in_use: false,
+            proxy_base_url: None,
+        },
+        &FakeProber::ok(&[]),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        OpenCompanyError::InUse { ref used_by, .. }
+            if used_by.surfaces == vec![crate::error::UsedBySurface::Search]
+    ));
+    assert_eq!(raw_get(&secrets, &cid, ACCOUNT_KEY_KEY).await, OLD);
 }
 
 #[tokio::test]
@@ -172,9 +246,10 @@ async fn matrix_m3() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -215,9 +290,10 @@ async fn matrix_m4() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -279,9 +355,10 @@ async fn matrix_m5() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -349,9 +426,10 @@ async fn matrix_m5_plus_auth() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -415,9 +493,10 @@ async fn matrix_m5_plus_auth() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober2,
     )
@@ -448,9 +527,10 @@ async fn matrix_m6() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -521,9 +601,10 @@ async fn matrix_m7() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )

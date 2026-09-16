@@ -85,6 +85,8 @@ export interface CompanyCredentialStatus {
   inferenceHasOwnKey?: boolean;
   /** The same for `composio/tinyhumans/key` (with 1a's legacy read). */
   composioHasOwnKey?: boolean;
+  /** The same for the company-owned managed Search credential. */
+  searchHasOwnKey?: boolean;
   /**
    * Whether the `tinyhumans` row saving would fill already carries a model —
    * so saving here would not leave anything for step two to ask, and the
@@ -221,6 +223,23 @@ export function setCompanyCredential(
     key,
     ...(model ? { model } : {}),
     ...(confirmInUse ? { confirmInUse: true } : {}),
+  });
+}
+
+/**
+ * Finish setting up TinyHumans for LLM with the account key the host already
+ * holds — `PUT …/credential/model`. For a key the console cannot resend: a
+ * key-grant (`finishCredentialLink`) stores one the page never saw and can
+ * answer `needsModel`, and step two must then complete the row off the stored
+ * key rather than off a `pendingKey` this page never had.
+ */
+export function setCompanyCredentialModel(
+  client: OpenCompanyClient,
+  company: string | null,
+  model: string,
+): Promise<CompanyCredentialMutation> {
+  return client.put<CompanyCredentialMutation>(`${client.scopeFor(company)}/credential/model`, {
+    model,
   });
 }
 

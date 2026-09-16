@@ -322,6 +322,83 @@ fn projects_agent_reply_with_chat_fields_and_steps() {
 /// does exactly that (`moveOf(m.text)`), which is why rewriting `text` here
 /// costs the deliberation panel rather than merely tidying a bubble.
 ///
+/// **A crossing tells the live stream which thread to re-read.**
+///
+/// The fold that renders a crossing is built by `attach_referral_origins`,
+/// which runs in `history_for_desk` and nowhere else — so a crossing was
+/// invisible live and appeared only once something re-read the thread. For
+/// a desk crossing that meant waiting for settle; for a pair DM it meant
+/// never, since its rows are journaled in the pair's own `dm:<a>+<b>`
+/// conversation that no desk view subscribes to.
+///
+/// The frame carries no crossing content on purpose. Rebuilding the fold on
+/// this path would be a second implementation of a rule this subsystem has
+/// already had to fix in two places, four separate times.
+#[test]
+fn a_crossing_names_the_thread_whose_fold_changed() {
+    let v = super::project_event(&stored(CompanyEvent::ReferralEnqueued {
+        conversation: None,
+        answers: None,
+        from_desk: "engineering".into(),
+        from_desk_name: "Engineering".into(),
+        asker: "software_engineer".into(),
+        asker_label: "software_engineer".into(),
+        trigger_sequence: 41,
+        to_desk: "design".into(),
+        target: "product_designer".into(),
+        returning: false,
+    }))
+    .expect("a crossing is projected at all");
+
+    assert_eq!(v["type"], "referral");
+    assert_eq!(
+        v["chatId"], "engineering",
+        "the desk that ASKED is the one whose transcript gains the fold"
+    );
+    assert_eq!(v["sequence"], 41, "and the row it folds onto");
+    assert_eq!(v["toDesk"], "design");
+    assert_eq!(
+        v["returning"], false,
+        "which leg, read as `ReferredFrom` is"
+    );
+    assert!(
+        v.get("lines").is_none() && v.get("referralConversation").is_none(),
+        "no crossing content travels on this frame: {v}"
+    );
+}
+
+/// A return leg is addressed the other way round, and the frame must follow
+/// the fold rather than the field name.
+///
+/// `mark` builds a return from the ANSWERING desk, so `from_desk` is the far
+/// desk and `to_desk` is the desk that asked and is still waiting. Reading
+/// `from_desk` on both legs sent the console to re-read the far desk exactly
+/// on the leg that carries the answer — and because the forward frame goes
+/// out before any answer exists, the asking desk was never refreshed at all
+/// (Codex, #2341).
+#[test]
+fn a_returning_crossing_names_the_desk_that_asked() {
+    let v = super::project_event(&stored(CompanyEvent::ReferralEnqueued {
+        conversation: None,
+        answers: Some(41),
+        from_desk: "design".into(),
+        from_desk_name: "Design".into(),
+        asker: "product_designer".into(),
+        asker_label: "product_designer".into(),
+        trigger_sequence: 58,
+        to_desk: "engineering".into(),
+        target: "software_engineer".into(),
+        returning: true,
+    }))
+    .expect("a return is projected at all");
+
+    assert_eq!(
+        v["chatId"], "engineering",
+        "the answer folds onto the asking desk, which a return names as `to_desk`"
+    );
+    assert_eq!(v["returning"], true);
+}
+
 /// Pinned now, while the two are equal, so the step that rewrites `text`
 /// cannot quietly take `cueText` with it.
 #[test]
@@ -639,44 +716,4 @@ fn projects_approval_parked_with_a_channel_and_no_payload() {
         6,
         "type, seq, atMillis, approvalId, kind, chatId — and nothing more: {v}",
     );
-}
-
-/// A park with no conversation behind it omits the channel entirely, so a
-/// console filtering by thread matches it nowhere and it stays on the
-/// Approvals page (#379).
-#[test]
-fn projects_approval_parked_without_a_channel_when_no_thread_produced_it() {
-    let v = super::project_event(&stored(CompanyEvent::ApprovalParked {
-        approval_id: ApprovalId::new("appr-cron"),
-        effect_kind: "email.send".into(),
-        thread: None,
-    }))
-    .expect("a parked approval is an attention signal");
-    assert_eq!(v["type"], "approval_parked");
-    assert!(
-        v.get("chatId").is_none(),
-        "a page-only approval must carry no channel: {v}",
-    );
-}
-
-#[test]
-fn projects_agent_reply_omits_empty_steps() {
-    let v = super::project_event(&stored(CompanyEvent::AgentReply {
-        audience: Vec::new(),
-        mentions: Vec::new(),
-        mention_depth: 0,
-        parent: None,
-        task_id: None,
-        outputs: Vec::new(),
-        chat_id: "General".into(),
-        agent_id: "ceo".into(),
-        text: "hi".into(),
-        steps: Vec::new(),
-    }))
-    .expect("agent_reply is an attention signal");
-    // A tool-less reply keeps the legacy wire shape — no `steps` key.
-    assert!(v.get("steps").is_none());
-    // …and an uncorrelated reply carries no `taskId` either, so the
-    // pre-#185 wire shape is byte-for-byte what it was.
-    assert!(v.get("taskId").is_none());
 }

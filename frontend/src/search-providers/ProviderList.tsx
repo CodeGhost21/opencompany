@@ -125,6 +125,7 @@ export function ProviderList({
   providers,
   inBuild,
   managedConfigured,
+  managedKeyConfigured,
   managedDailyCallCap,
   canManage,
   busySlug,
@@ -133,6 +134,8 @@ export function ProviderList({
   onToggle,
   onTest,
   onReplaceKey,
+  onManagedReplaceKey,
+  onManagedRemoveKey,
   onRemoveKey,
   onEditEndpoint,
   onMakeDefault,
@@ -142,6 +145,7 @@ export function ProviderList({
   providers: readonly SearchProvider[];
   inBuild: boolean;
   managedConfigured: boolean;
+  managedKeyConfigured: boolean;
   managedDailyCallCap: number;
   canManage: boolean;
   /** The slug currently mid-request, so its own controls settle rather than the whole list. */
@@ -152,6 +156,8 @@ export function ProviderList({
   onToggle: (provider: SearchProvider, enabled: boolean) => void;
   onTest: (provider: SearchProvider) => void;
   onReplaceKey: (provider: SearchProvider) => void;
+  onManagedReplaceKey: () => void;
+  onManagedRemoveKey: () => void;
   onRemoveKey: (provider: SearchProvider) => void;
   onEditEndpoint: (provider: SearchProvider) => void;
   onMakeDefault: (provider: SearchProvider) => void;
@@ -200,6 +206,29 @@ export function ProviderList({
           <Badge variant="secondary" data-testid="search-provider-managed-on">
             On
           </Badge>
+        )}
+        {managedKeyConfigured && (
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  disabled={!canManage || busySlug === MANAGED_SLUG}
+                  aria-label="Managed actions"
+                  data-testid="search-provider-managed-menu"
+                >
+                  <EllipsisVertical className="size-4" />
+                </Button>
+              }
+            />
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={onManagedReplaceKey}>
+                Replace key
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onManagedRemoveKey}>Remove key</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
       </li>
 

@@ -62,8 +62,20 @@ export const CATALOGUE: readonly CatalogueEntry[] = [
   },
 ] as const;
 
+const MANAGED_SLUG = "managed";
+
 /** The catalogue entry for `slug`, if there is one. */
 export function entry(slug: string): CatalogueEntry | undefined {
+  if (slug === MANAGED_SLUG) {
+    return {
+      slug: MANAGED_SLUG,
+      label: "Managed",
+      category: "account",
+      endpoint: "api.tinyhumans.ai",
+      keySource: null,
+      keyHint: "Your TinyHumans account key",
+    };
+  }
   return CATALOGUE.find((item) => item.slug === slug);
 }
 

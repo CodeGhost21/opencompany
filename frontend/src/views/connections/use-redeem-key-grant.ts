@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { finishCredentialLink } from "@/api/credential";
+import { type CompanyCredentialMutation, finishCredentialLink } from "@/api/credential";
 import { ApiError } from "@/api/types";
 import { takeKeyLink, takeKeyLinkRefusal } from "@/lib/pending-key-link";
 
@@ -23,34 +23,83 @@ import { takeKeyLink, takeKeyLinkRefusal } from "@/lib/pending-key-link";
 export function useRedeemKeyGrant(
   client: OpenCompanyClient,
   company: string | null,
-  onConnected?: () => void,
+  onConnected?: (result: CompanyCredentialMutation) => void,
 ): boolean {
   const [busy, setBusy] = useState(false);
   // StrictMode double-invokes effects, and the code is single-use: a second
   // call would spend nothing and report the host's "expired" refusal over a
   // connection that in fact succeeded.
   const redeeming = useRef(false);
+  // The latest `client`/`company`/`onConnected` this hook was rendered with —
+  // read at redemption *completion*, not closed over at redemption *start*.
+  // `ConnectionsSection` remounts `ApiKeyView` on a company change, so that
+  // transition already gets a fresh hook instance; a host switch that keeps
+  // the same company selected does not remount anything and instead re-renders
+  // this hook with a new `client`. Without this, the in-flight redemption's
+  // closure kept the *old* `client`/`company`/`onConnected` for its whole
+  // `await`, and reported success — and ran the (also stale) `onConnected`,
+  // which the mounted view treats as "the current scope connected" — against
+  // whichever scope happened to be selected when the promise resolved
+  // (CodeRabbit review).
+  const latest = useRef({ client, company, onConnected });
+  latest.current = { client, company, onConnected };
+  // Whether `ApiKeyView` is still mounted — a company change remounts it, but
+  // navigating away from the Account page entirely just unmounts it with
+  // nothing left to remount into. `latest.current` alone does not catch that:
+  // it still holds whatever `client`/`company` this hook last rendered with,
+  // which still equals `startClient`/`startCompany` after unmount, so a
+  // response that settles post-unmount would otherwise still pass the scope
+  // check below and pop a toast (and, on success, run `onConnected`) for a
+  // view nobody can see (CodeRabbit review).
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
-  const finish = useCallback(
-    async (state: string, code: string) => {
-      setBusy(true);
-      try {
-        const result = await finishCredentialLink(client, company, state, code);
-        toast.success("Connected to TinyHumans.", { description: result.note });
-        onConnected?.();
-      } catch (err) {
-        // The host's own words where it sent them: "that connection attempt has
-        // expired" tells an operator to click again, which a generic failure
-        // does not.
-        toast.error(
-          err instanceof ApiError ? err.message : "Couldn't finish connecting to TinyHumans.",
-        );
-      } finally {
-        setBusy(false);
+  const finish = useCallback(async (state: string, code: string) => {
+    const { client: startClient, company: startCompany } = latest.current;
+    setBusy(true);
+    try {
+      const result = await finishCredentialLink(startClient, startCompany, state, code);
+      // The redemption itself always ran against `startClient`/`startCompany`
+      // — that part is correct no matter what changes underneath it. What
+      // must not happen is announcing that result, or handing it to
+      // `onConnected`, against a *different* scope than the one that earned
+      // it, or once nothing is mounted to show it to: discard rather than let
+      // a stale grant surface as "connected" on whatever host/company is
+      // current by the time the request returns, or after the view is gone.
+      if (
+        !mounted.current ||
+        latest.current.client !== startClient ||
+        latest.current.company !== startCompany
+      ) {
+        return;
       }
-    },
-    [client, company, onConnected],
-  );
+      toast.success("Connected to TinyHumans.", { description: result.note });
+      latest.current.onConnected?.(result);
+    } catch (err) {
+      // Same guard as the success path: an unmounted or rescoped view must
+      // not surface a stale failure toast either.
+      if (
+        !mounted.current ||
+        latest.current.client !== startClient ||
+        latest.current.company !== startCompany
+      ) {
+        return;
+      }
+      // The host's own words where it sent them: "that connection attempt has
+      // expired" tells an operator to click again, which a generic failure
+      // does not.
+      toast.error(
+        err instanceof ApiError ? err.message : "Couldn't finish connecting to TinyHumans.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (redeeming.current) return;

@@ -813,6 +813,32 @@ impl CompanyRuntime {
             )
             .await;
         }
+        // `attach_harness` deliberately keeps an uncredentialed base Search
+        // handle alive so a company key added later can share its ledger. The
+        // handle's presence alone is therefore not proof that `web_search` is
+        // usable. Resolve the effective company-or-deployment credential before
+        // advertising workflow wiring.
+        if resolved
+            .search
+            .as_ref()
+            .is_some_and(|backend| !backend.credential.configured())
+        {
+            match crate::company::search::load_managed_key(&company.id, self.secrets().as_ref())
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => resolved.search = None,
+                Err(err) => {
+                    tracing::warn!(
+                        company = %company.id,
+                        "[search] could not read the managed company credential while resolving workflow wiring: {err}"
+                    );
+                    // Unknown is not unconfigured. Keep the base handle in the
+                    // wiring verdict so callers do not misreport a transient
+                    // secret-store outage as missing configuration.
+                }
+            }
+        }
         Some(crate::workflows::caps::workflow_tool_wiring(&resolved))
     }
 

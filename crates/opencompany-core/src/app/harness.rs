@@ -15,7 +15,7 @@
 //! Without the `openhuman` feature this is the identity function, so a default
 //! build is byte-for-byte unaffected.
 
-use crate::runtime::RuntimeBuilder;
+use crate::{app::types::AppConfig, runtime::RuntimeBuilder};
 
 /// Attaches the harness pool and every managed backend the environment offers.
 ///
@@ -29,19 +29,19 @@ use crate::runtime::RuntimeBuilder;
 ///
 /// Call this on any builder whose companies should be able to think.
 #[cfg(not(feature = "openhuman"))]
-pub fn attach(builder: RuntimeBuilder) -> RuntimeBuilder {
+pub fn attach(builder: RuntimeBuilder, _config: &AppConfig) -> RuntimeBuilder {
     builder
 }
 
 #[cfg(feature = "openhuman")]
-pub fn attach(builder: RuntimeBuilder) -> RuntimeBuilder {
+pub fn attach(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
     use std::sync::Arc;
 
     use crate::app::config::ProcessEnv;
     use crate::harness::HarnessPool;
     use crate::harness::provider::{
-        PlatformCredentialStatus, harness_inference_from_env, media_backend_from_env,
-        search_backend_from_env,
+        PlatformCredentialStatus, harness_inference_from_env_at, media_backend_from_env,
+        search_backend_handle_from_env,
     };
 
     // Issue #879: every managed surface below fails closed and says nothing at
@@ -49,7 +49,9 @@ pub fn attach(builder: RuntimeBuilder) -> RuntimeBuilder {
     // healthy and only reveals the gap when an agent is built or a workflow node
     // 500s. Say it once, here, where an operator reading the first lines of the
     // log will see it.
-    if let Some(warning) = PlatformCredentialStatus::resolve(&ProcessEnv).boot_warning() {
+    if let Some(warning) =
+        PlatformCredentialStatus::resolve_at(&ProcessEnv, Some(&config.api_url)).boot_warning()
+    {
         tracing::warn!("[boot] {warning}");
     }
 
@@ -61,17 +63,16 @@ pub fn attach(builder: RuntimeBuilder) -> RuntimeBuilder {
         Some(media_backend) => builder.with_media_backend(media_backend),
         None => builder,
     };
-    // Issue #238: the MANAGED web-search backend, on the same platform identity
-    // as managed inference and resolved from the environment only. Absent ⇒
-    // `web_search` stays unwired even for a company that grants `search`.
-    let builder = match search_backend_from_env(&ProcessEnv) {
-        Some(search_backend) => builder.with_search_backend(search_backend),
-        None => builder,
-    };
+    // Issue #238/#2342: one process-wide MANAGED web-search handle. It may have
+    // no deployment credential: company credentials decorate clones at runtime,
+    // while neither credential still leaves `web_search` unwired. Keeping the
+    // base handle here makes its ledger shared by every harness lane and by
+    // workflow tool calls.
+    let builder = builder.with_search_backend(search_backend_handle_from_env(&ProcessEnv));
     // The managed env default is an *optional*, lowest-precedence source; a
     // BYOK-only tenant supplies none and still gets a harness brain from its
     // manifest/runtime config.
-    match harness_inference_from_env(&ProcessEnv) {
+    match harness_inference_from_env_at(&ProcessEnv, Some(&config.api_url)) {
         Some((config, model_override)) => builder.with_harness_inference(config, model_override),
         None => builder,
     }

@@ -186,6 +186,30 @@ fn reserved_slugs_cover_cloud_local_and_stored_cli_names() {
 }
 
 #[test]
+fn the_proxy_url_follows_api_url_and_defaults_to_the_catalogue_endpoint() {
+    let row = cloud_provider("tinyhumans").expect("tinyhumans is in the catalogue");
+    assert_eq!(
+        tinyhumans_proxy_url(crate::app::config::DEFAULT_API_URL),
+        row.endpoint
+    );
+    assert_eq!(
+        tinyhumans_proxy_url("http://localhost:5005/"),
+        "http://localhost:5005/agent-integrations/openrouter"
+    );
+    assert_eq!(
+        tinyhumans_proxy_url("https://staging-api.tinyhumans.ai"),
+        "https://staging-api.tinyhumans.ai/agent-integrations/openrouter"
+    );
+    // Blank falls back to the row rather than minting a bare path.
+    assert_eq!(tinyhumans_proxy_url("  "), row.endpoint);
+    // Whatever it is, the shape reads as paged.
+    assert_eq!(
+        catalog_shape_for("openrouter", &tinyhumans_proxy_url("http://localhost:5005")),
+        CatalogShape::PagedEnvelope
+    );
+}
+
+#[test]
 fn tinyhumans_owns_its_slug_and_is_a_catalogue_row() {
     // `provider/tinyhumans/key` is where the managed credential lives, and
     // `managed` is the word the route grammar uses. A custom provider named

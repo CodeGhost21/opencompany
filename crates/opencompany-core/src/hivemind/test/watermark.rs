@@ -355,3 +355,43 @@ fn a_member_reads_its_own_turns_as_its_own() {
     let anonymous = crate::hivemind::prompt::render_transcript(&visible, None, None);
     assert!(anonymous.contains("[2] planner:"), "{anonymous}");
 }
+
+/// A seat is promised an `@handle` answer only when one could actually arrive.
+///
+/// `consider` returns immediately on a policy that is not `enabled`, and
+/// `enabled` defaults to OFF — so deriving this from "a federation exists"
+/// told every seat in a federated company that writing an `@handle` "puts your
+/// question to them, they answer at once", for a question that was silently
+/// dropped (CodeRabbit, #2341).
+#[test]
+fn the_at_handle_promise_is_made_only_when_a_referral_can_be_answered() {
+    let desk = desk_of(&three_member_manifest(), "eng").expect("a room");
+    let member = desk.member("planner").expect("planner is seated").clone();
+    let quorum = desk.policy().quorum;
+    let turn = hive_turn("planner", tinyhivemind_hive::Visibility::Full, Sequence(0));
+    let visible = [message(1, "scout", "!propose #euler249 Old guess.")];
+
+    let rendered = |can_ask: bool| {
+        EpisodePrompt::new(&member, &desk, "Decide the answer.", quorum, &[])
+            .able_to_ask(can_ask)
+            .render(&turn, &visible)
+    };
+
+    let promised = rendered(true);
+    assert!(
+        promised.contains("write their @handle"),
+        "a seat that can be answered is told how to ask: {promised}"
+    );
+
+    let silent = rendered(false);
+    assert!(
+        !silent.contains("write their @handle"),
+        "a seat whose questions are dropped is promised nothing: {silent}"
+    );
+    // The roster itself still renders — the seat works with these colleagues,
+    // it just cannot put a private question to them.
+    assert!(
+        silent.contains("In the room with you"),
+        "the room is still described: {silent}"
+    );
+}

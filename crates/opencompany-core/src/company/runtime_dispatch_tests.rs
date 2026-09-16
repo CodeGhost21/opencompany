@@ -184,6 +184,47 @@ async fn workflow_wiring_names_why_each_namespace_is_unwired() {
     );
 }
 
+/// An uncredentialed process-wide Search handle exists so a company key
+/// added later can reuse its ledger. Presence is not availability: without
+/// either credential, workflow grounding must still report Search unwired.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn workflow_wiring_rejects_an_uncredentialed_search_handle() {
+    let (mut runtime, mut record, _home) = runtime_and_record().await;
+    record.manifest.tools.allow.push("search".to_string());
+    let mut deps = wiring_deps(
+        &runtime,
+        None,
+        crate::harness::toolbelt::CapabilityFilter::AllowAll,
+        None,
+    );
+    deps.search = Some(crate::harness::search::SearchBackend::new(
+        "https://api.tinyhumans.ai".to_string(),
+        crate::company::credentials::Credential::None,
+        crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+    ));
+    deps.secrets = Some(runtime.secrets().clone());
+    runtime.set_workflow_harness_deps(deps);
+
+    let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
+    assert_eq!(
+        wiring.missing.get("search").copied(),
+        Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured)
+    );
+
+    runtime
+        .secrets()
+        .set(
+            &record.id,
+            crate::company::search::MANAGED_KEY_SECRET,
+            crate::ports::types::SecretValue("company-search-key".to_string()),
+        )
+        .await
+        .expect("store company Search key");
+    let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
+    assert!(wiring.wired_namespaces.contains("search"));
+}
+
 /// Issue #874, the staging repro at the layer the route reads: a company that
 /// explicitly grants `search` on a deployment with **no** search backend must
 /// not be offered `web_search` for grounding — it must be reported as granted

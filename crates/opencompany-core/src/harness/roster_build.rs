@@ -132,8 +132,7 @@ impl RosterBuilder {
         model: Option<&str>,
     ) -> Option<Self> {
         use crate::harness::provider::{
-            DEFAULT_HOSTED_MODEL, DEFAULT_TINYHUMANS_INFERENCE_URL, HostedProvider,
-            HostedProviderConfig, harness_inference_from_env,
+            DEFAULT_HOSTED_MODEL, HostedProvider, HostedProviderConfig, harness_inference_from_env,
         };
 
         let selected_provider = provider.map(str::trim).filter(|value| !value.is_empty());
@@ -191,7 +190,7 @@ impl RosterBuilder {
             .map(|key| {
                 let base_url = env
                     .get("OPENCOMPANY_INFERENCE_URL")
-                    .unwrap_or_else(|| DEFAULT_TINYHUMANS_INFERENCE_URL.to_string());
+                    .unwrap_or_else(crate::company::inference::platform_base_url);
                 (
                     HostedProviderConfig {
                         base_url,
