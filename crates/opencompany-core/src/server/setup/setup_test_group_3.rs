@@ -1,3 +1,4 @@
+#[cfg(feature = "openhuman")]
 use crate::app::config::MapEnv;
 use crate::ports::types::CompanyId;
 use axum::http::StatusCode;
