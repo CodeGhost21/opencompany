@@ -5,13 +5,13 @@ use std::sync::Mutex;
 
 /// A log that records what was appended, so a test can ask what actually
 /// reached the journal rather than what the tool said it did.
-struct RecordingLog(Mutex<Vec<CompanyEvent>>);
+pub(super) struct RecordingLog(Mutex<Vec<CompanyEvent>>);
 
 /// Like [`RecordingLog`], but refuses to append to one named channel —
 /// for proving a `desk_dm` to several recipients does not treat one
 /// recipient's journal failure as a reason to report the whole call
 /// failed after earlier recipients already got a durable row.
-struct FlakyLog {
+pub(super) struct FlakyLog {
     events: Mutex<Vec<CompanyEvent>>,
     refuses: &'static str,
 }
@@ -52,7 +52,7 @@ impl EventLog for FlakyLog {
 /// append, but makes them useless for testing a tool whose entire job is
 /// reading history back.
 #[derive(Default)]
-struct HistoryLog(Mutex<Vec<StoredEvent>>);
+pub(super) struct HistoryLog(Mutex<Vec<StoredEvent>>);
 
 #[async_trait]
 impl EventLog for HistoryLog {
@@ -132,7 +132,7 @@ impl EventLog for RecordingLog {
     }
 }
 
-fn context() -> (SpeechContext, Arc<RecordingLog>, tempfile::TempDir) {
+pub(super) fn context() -> (SpeechContext, Arc<RecordingLog>, tempfile::TempDir) {
     let dir = tempfile::Builder::new()
         .prefix("speech-tools-")
         .tempdir()
@@ -150,7 +150,7 @@ fn context() -> (SpeechContext, Arc<RecordingLog>, tempfile::TempDir) {
 }
 
 /// A roster with one desk `designer` sits on and one it does not.
-async fn context_with_desks() -> (SpeechContext, Arc<RecordingLog>, tempfile::TempDir) {
+pub(super) async fn context_with_desks() -> (SpeechContext, Arc<RecordingLog>, tempfile::TempDir) {
     let (context, events, dir) = context();
     let manifest: crate::company::CompanyManifest = toml::from_str(
         r#"
@@ -214,7 +214,7 @@ members = ["engineer"]
 /// `Nova` is unique, and two sharing the display name `Rivers` — the two
 /// [`crate::ports::types::TeammateResolution`] arms `desk_dm` must not
 /// collapse into "found something, ship it".
-async fn context_with_overlay_teammates()
+pub(super) async fn context_with_overlay_teammates()
 -> (SpeechContext, Arc<RecordingLog>, tempfile::TempDir) {
     let (context, events, dir) = context();
     let manifest: crate::company::CompanyManifest = toml::from_str(
