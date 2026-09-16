@@ -4176,6 +4176,9 @@ pub(crate) fn is_chat_only_turn() -> bool {
 #[path = "delegation_tests_core.rs"]
 mod tests_core;
 #[cfg(test)]
+#[path = "delegation_tests_core2.rs"]
+mod tests_core2;
+#[cfg(test)]
 #[path = "delegation_tests_part1.rs"]
 mod tests_part1;
 #[cfg(test)]

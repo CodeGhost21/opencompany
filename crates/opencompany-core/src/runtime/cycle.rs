@@ -4209,6 +4209,12 @@ impl CycleHost for CycleHostImpl<'_> {
 #[path = "cycle_tests_core.rs"]
 mod tests_core;
 #[cfg(test)]
+#[path = "cycle_tests_core2.rs"]
+mod tests_core2;
+#[cfg(test)]
+#[path = "cycle_tests_core3.rs"]
+mod tests_core3;
+#[cfg(test)]
 #[path = "cycle_tests_part1.rs"]
 mod tests_part1;
 #[cfg(test)]
