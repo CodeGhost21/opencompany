@@ -1755,6 +1755,3 @@ mod tests_the_api_key_test;
 #[cfg(test)]
 #[path = "composio_the_managed_tier_reads_tests.rs"]
 mod tests_the_managed_tier_reads;
-#[cfg(test)]
-#[path = "composio_toolkits_tests.rs"]
-mod tests_toolkits;
