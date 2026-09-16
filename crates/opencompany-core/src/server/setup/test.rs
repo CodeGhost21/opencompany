@@ -2422,3 +2422,63 @@ async fn an_account_key_with_no_company_to_own_it_is_not_written_anywhere() {
         "a company this wizard did not create must not be given a wallet"
     );
 }
+
+#[cfg(feature = "openhuman")]
+mod setup_model_preference {
+    use crate::server::inference_models::InferenceModel;
+    use crate::server::setup::{PREFERRED_SETUP_MODEL, probe_model_candidates};
+
+    fn model(id: &str) -> InferenceModel {
+        InferenceModel {
+            id: id.to_string(),
+            name: None,
+            context_length: None,
+        }
+    }
+
+    #[test]
+    fn the_preferred_model_is_probed_before_whatever_the_catalogue_lists_first() {
+        let candidates = probe_model_candidates(vec![
+            model("vendor/reasoning-heavy"),
+            model("vendor/another"),
+            model(PREFERRED_SETUP_MODEL),
+        ]);
+
+        assert_eq!(
+            candidates.first().map(|model| model.id.as_str()),
+            Some(PREFERRED_SETUP_MODEL),
+            "a first company must not inherit a default from catalogue position"
+        );
+    }
+
+    #[test]
+    fn a_catalogue_without_the_preferred_model_keeps_its_own_order() {
+        let candidates = probe_model_candidates(vec![
+            model("vendor/first"),
+            model("vendor/second"),
+            model("vendor/text-embed-3"),
+        ]);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vendor/first", "vendor/second", "vendor/text-embed-3"],
+            "preference must not reorder a catalogue that does not offer it"
+        );
+    }
+
+    #[test]
+    fn an_embedding_model_never_outranks_the_preferred_one() {
+        let candidates = probe_model_candidates(vec![
+            model("vendor/text-embed-3"),
+            model(PREFERRED_SETUP_MODEL),
+        ]);
+
+        assert_eq!(
+            candidates.first().map(|model| model.id.as_str()),
+            Some(PREFERRED_SETUP_MODEL)
+        );
+    }
+}

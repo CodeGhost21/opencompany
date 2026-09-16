@@ -1303,15 +1303,24 @@ const MODEL_DISCOVERY_FAILURE: &str = "Could not list models from this provider.
 #[cfg(feature = "openhuman")]
 const MODEL_PROBE_CANDIDATE_LIMIT: usize = 5;
 
+/// The model a first company thinks with when its provider offers it.
+///
+/// Without this the default is whichever model the provider happens to list
+/// first, which is a position in someone else's catalogue rather than a choice.
+#[cfg(feature = "openhuman")]
+const PREFERRED_SETUP_MODEL: &str = "z-ai/glm-5.3-flash";
+
 #[cfg(feature = "openhuman")]
 fn probe_model_candidates(
     mut models: Vec<crate::server::inference_models::InferenceModel>,
 ) -> Vec<crate::server::inference_models::InferenceModel> {
     models.sort_by_key(|model| {
         let id = model.id.to_ascii_lowercase();
-        ["embed", "rerank", "moderation"]
+        let unusable = ["embed", "rerank", "moderation"]
             .iter()
-            .any(|marker| id.contains(marker))
+            .any(|marker| id.contains(marker));
+        let preferred = id == PREFERRED_SETUP_MODEL;
+        (unusable, !preferred)
     });
     models
         .into_iter()
