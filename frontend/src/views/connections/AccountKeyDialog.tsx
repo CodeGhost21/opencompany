@@ -84,7 +84,7 @@ interface Props {
  * the key to and this page has one. The link is the hub **this host is on**
  * (`keysUrl`, from the status), not a constant: the console used to send a
  * staging host's operator to mint a key on production
- * ({@link TINYHUMANS_API_KEYS_URL} survives only as the wizard's fallback for
+ * (`TINYHUMANS_API_KEYS_URL` in `@/lib/links` survives only as the wizard's fallback for
  * a host too old to report its own).
  *
  * Deliberately minimal (operator request, 2026-09-14): a heading, the field,
