@@ -270,6 +270,154 @@ pub const AGENT_QUESTION_BLOCKER: BlockerClass = BlockerClass {
     needed: "an answer to the question on this card",
 };
 
+
+// ───────────────────────────────────────────────────────────────────────────
+// The agent's own door (issue #1861)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// The `escalate_to_human` tool name.
+pub const ESCALATE_TO_HUMAN_TOOL: &str = "escalate_to_human";
+
+/// Queues an [`Information`](BlockerKind::Information) blocker for the operator.
+/// The turn's drain parks accepted questions through the approval lifecycle.
+///
+/// Escalation establishes the turn boundary: subsequent tool calls are refused
+/// until a new turn. An accepted question is queued for the operator; a full
+/// batch returns an explicit refusal.
+pub struct EscalateToHumanTool {
+    requests: crate::harness::built_in::policy::ApprovalRequestQueue,
+    agent: String,
+}
+
+impl EscalateToHumanTool {
+    /// Builds the tool over the shared approval-request queue, for one agent.
+    pub fn new(
+        requests: crate::harness::built_in::policy::ApprovalRequestQueue,
+        agent: String,
+    ) -> Self {
+        Self { requests, agent }
+    }
+}
+
+#[async_trait::async_trait]
+impl openhuman_core::tools::traits::Tool for EscalateToHumanTool {
+    fn name(&self) -> &str {
+        ESCALATE_TO_HUMAN_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Ask the operator a question you cannot answer yourself, when the work genuinely cannot \
+         proceed without it — a missing prerequisite, a choice only they can make, two \
+         instructions that contradict each other. Provide the `question` in plain words, and \
+         optionally the `context` you already gathered. The card parks and waits for their \
+         answer rather than failing. Use it instead of guessing, and instead of finishing with \
+         prose explaining that you were stuck. Do NOT use it for something you can look up, for \
+         something a teammate would know, or to confirm a decision you have already been given."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "What you need the operator to tell you, in one or two plain sentences."
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional: what you already tried or found, so they can answer without re-deriving it."
+                }
+            },
+            "required": ["question"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> openhuman_core::tools::traits::PermissionLevel {
+        openhuman_core::tools::traits::PermissionLevel::Write
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> anyhow::Result<openhuman_core::tools::traits::ToolResult> {
+        use openhuman_core::tools::traits::ToolResult;
+
+        let question = args
+            .get("question")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("`question` is required"))?
+            .to_string();
+        let context = args
+            .get("context")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+
+        // The reason a person reads is the question plus whatever the agent
+        // already worked out — not a wrapper sentence about escalation, which
+        // would push the actual question down the card.
+        let reason = match context {
+            Some(context) => format!("{question}\n\nWhat {} already has: {context}", self.agent),
+            None => question.clone(),
+        };
+
+        let payload = crate::ports::blockers::BlockerPayload {
+            kind: AGENT_QUESTION_BLOCKER.kind,
+            source: AGENT_QUESTION_BLOCKER.source,
+            // No step: a question asked mid-conversation has no card behind it,
+            // and where one does exist the approval's own task link already
+            // names it. See `BlockerPayload::step`.
+            step: None,
+            reason: reason.clone(),
+            needed: AGENT_QUESTION_BLOCKER.needed.to_string(),
+            // A question is particular to its own card; nothing else shares its
+            // answer, so it groups with nothing.
+            group_key: None,
+        };
+        let effect = crate::ports::types::Effect {
+            kind: payload.effect_kind(),
+            group: crate::ports::types::EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+            // `None`, even though an agent did raise this and the field exists
+            // to name one. `Some(agent)` means "a tool call openhuman blocked",
+            // and approving one mints a single-use grant and re-dispatches the
+            // agent to run that exact call again — which here would call
+            // `escalate_to_human` a second time and park the same question.
+            // Carrying the operator's answer back into the turn is #1863; until
+            // it lands, approving a blocker is deliberately inert.
+            agent: None,
+            // Stamped by the dispatch boundary's `stamp_run`, which retro-fills
+            // every request this turn queued.
+            run_id: None,
+        };
+        if !self
+            .requests
+            .push_blocker(crate::harness::built_in::policy::ApprovalRequest {
+                tool: ESCALATE_TO_HUMAN_TOOL.to_string(),
+                reason,
+                effect,
+            })
+        {
+            return Ok(ToolResult::error(format!(
+                "Your question was not raised: this batch already has the maximum of {} approval \
+                 requests. Stop and wait for the queued requests to be resolved, then ask again.",
+                crate::harness::built_in::policy::MAX_APPROVAL_REQUESTS_PER_TURN
+            )));
+        }
+
+        Ok(ToolResult::success(format!(
+            "Raised your question with the operator: \"{question}\". This card parks until they \
+             answer. Stop and wait for their answer; do not ask it again."
+        )))
+    }
+}
+
 #[cfg(test)]
 #[path = "blockers_tests.rs"]
 mod tests;
