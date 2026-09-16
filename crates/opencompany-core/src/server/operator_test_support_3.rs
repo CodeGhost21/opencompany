@@ -400,11 +400,11 @@ impl crate::ports::brain::Brain for MultiParkBrain {
 
 /// A company whose next turn parks four sign-offs.
 pub(super) struct MultiParkCompany {
-    app: axum::Router,
-    runtime: Arc<CompanyRuntime>,
-    approvals: Vec<ApprovalId>,
-    decisions: Arc<std::sync::Mutex<Vec<String>>>,
-    cycles: Arc<std::sync::atomic::AtomicUsize>,
+    pub(super) app: axum::Router,
+    pub(super) runtime: Arc<CompanyRuntime>,
+    pub(super) approvals: Vec<ApprovalId>,
+    pub(super) decisions: Arc<std::sync::Mutex<Vec<String>>>,
+    pub(super) cycles: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub(super) async fn multi_park_company(
