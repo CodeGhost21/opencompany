@@ -450,10 +450,14 @@ async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
 /// company whose account key, row and default all read as set while every
 /// turn still answered `You said: …`.
 ///
-/// Only rebuilds when the fan-out actually moved the provider row or the
-/// default — a save that changed nothing about inference (a Composio-only
-/// copy, a rotation of an already-live key) never quiesces a running
-/// company. Returns the runtime the response status must be read off: the
+/// Only rebuilds when the fan-out actually moved the LLM copy itself, the
+/// provider row, or the default — a save that changed nothing about
+/// inference (a Composio-only copy, a rotation of an already-live key) never
+/// quiesces a running company. The LLM slot is included alongside the row
+/// and default so a self-hosted company whose routes already resolve to
+/// `managed` (no row/default write needed) still rebuilds off the echo brain
+/// the moment its key lands (Codex/tinysweeper review, KR-ACCT-01). Returns
+/// the runtime the response status must be read off: the
 /// successor after a rebuild, else the one the request came in on. A failed
 /// rebuild is logged and falls back to the incoming runtime, whose status
 /// still reports `restart_required` — the honest answer, exactly as
