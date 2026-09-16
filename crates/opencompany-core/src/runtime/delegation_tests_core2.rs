@@ -141,7 +141,7 @@ pub(super) fn card_in(id: &str, column: &str) -> TaskRecord {
 /// write does not, driving a delegation through the store-fault arm
 /// rather than the "no such card" one.
 pub(super) struct FailingUpsertStore {
-    inner: Arc<dyn TaskStore>,
+    pub(super) inner: Arc<dyn TaskStore>,
 }
 
 #[async_trait]
@@ -176,8 +176,8 @@ impl TaskStore for FailingUpsertStore {
 /// interleaving a read-then-write cycle with no per-card lock allows,
 /// made deterministic instead of left to chance.
 pub(super) struct BothReadBeforeEitherWritesStore {
-    inner: Arc<dyn TaskStore>,
-    barrier: Arc<tokio::sync::Barrier>,
+    pub(super) inner: Arc<dyn TaskStore>,
+    pub(super) barrier: Arc<tokio::sync::Barrier>,
 }
 
 #[async_trait]
@@ -207,9 +207,9 @@ impl TaskStore for BothReadBeforeEitherWritesStore {
 }
 
 pub(super) struct AssignmentBeforeReviewStore {
-    inner: Arc<dyn TaskStore>,
-    both_read: Arc<tokio::sync::Barrier>,
-    assignment_written: Arc<tokio::sync::Barrier>,
+    pub(super) inner: Arc<dyn TaskStore>,
+    pub(super) both_read: Arc<tokio::sync::Barrier>,
+    pub(super) assignment_written: Arc<tokio::sync::Barrier>,
 }
 
 #[async_trait]
