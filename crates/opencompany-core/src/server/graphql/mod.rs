@@ -171,7 +171,20 @@ pub(crate) fn now_millis() -> u64 {
 // `src/company/` must never import from `server`.
 
 #[cfg(test)]
-mod test;
+#[path = "graphql_test_group_1.rs"]
+mod graphql_test_group_1;
+#[cfg(test)]
+#[path = "graphql_test_group_2.rs"]
+mod graphql_test_group_2;
+#[cfg(test)]
+#[path = "graphql_test_group_3.rs"]
+mod graphql_test_group_3;
+#[cfg(test)]
+#[path = "graphql_test_group_4.rs"]
+mod graphql_test_group_4;
+#[cfg(test)]
+#[path = "graphql_test_support_1.rs"]
+mod graphql_test_support_1;
 
 /// What a page authored by an agent can reach when its `oc:graphql` request is
 /// bridged to this handler.
