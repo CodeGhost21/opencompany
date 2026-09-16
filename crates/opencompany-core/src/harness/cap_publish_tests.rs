@@ -6,7 +6,7 @@
 //!
 //! - Part 1 (#926) taught the chat path to say "I paused" —
 //!   `iteration_cap_pause_notice`, proven end to end in
-//!   [`cap_turn_test`](crate::harness::cap_turn_test).
+//!   [`cap_turn_tests`](crate::harness::cap_turn_tests).
 //! - #244 taught the **task-dispatch** path (`run_task`) to scan the agent's
 //!   sandbox for files it wrote and never published, and to ask about them in
 //!   one follow-up turn — proven end to end in
@@ -18,7 +18,7 @@
 //! writing a file got the pause notice and nothing else. The file just sat in
 //! its sandbox with nothing anywhere saying so.
 //!
-//! This reuses the same lever [`cap_turn_test`] and [`publish_turn_test`] both
+//! This reuses the same lever [`cap_turn_tests`] and [`publish_turn_test`] both
 //! do: a real [`HarnessBrain`], real `build_agent`, real [`HostedProvider`]
 //! against a scripted loopback endpoint, real `FsOps` stores, and a real agent
 //! workspace on disk — only the model's *choices* are scripted.
@@ -53,7 +53,7 @@ const AGENT: &str = "ceo";
 
 /// `build_agent` states this explicitly via `set_max_tool_iterations`
 /// (issue #988) — the same constant
-/// [`cap_turn_test`](crate::harness::cap_turn_test) binds to and checks the
+/// [`cap_turn_tests`](crate::harness::cap_turn_tests) binds to and checks the
 /// observed call count against, for the same reason: if a vendor bump or
 /// another `set_max_tool_iterations` call moves the effective cap without
 /// moving the constant, this test must fail loudly rather than silently
@@ -292,7 +292,7 @@ fn record() -> CompanyRecord {
 }
 
 /// Real deps pointed at the scripted endpoint, with task and artifact stores
-/// wired — unlike [`cap_turn_test::deps_for`](crate::harness::cap_turn_test),
+/// wired — unlike [`cap_turn_tests::deps_for`](crate::harness::cap_turn_tests),
 /// this needs `artifacts: Some(..)` too, or the publish claim this issue
 /// depends on is never taken and `publish_artifact` is never even offered.
 fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
