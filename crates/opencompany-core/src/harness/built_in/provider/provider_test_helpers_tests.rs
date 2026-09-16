@@ -251,7 +251,7 @@ pub(crate) type Seen = Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
 
 /// An OpenAI-compatible stub that records every request's `model` field
 /// and `Authorization` header, in arrival order.
-async fn spawn_capturing_stub() -> (String, Seen) {
+pub(super) async fn spawn_capturing_stub() -> (String, Seen) {
     use axum::Router;
     use axum::extract::Json as JsonExtract;
     use axum::http::HeaderMap;

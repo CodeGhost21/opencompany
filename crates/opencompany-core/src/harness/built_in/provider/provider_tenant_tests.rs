@@ -10,7 +10,7 @@ use std::sync::Mutex;
 // ---- TenantProvider (issue #56 — BYOK) --------------------------------
 
 #[derive(Default)]
-struct MemSecrets {
+pub(super) struct MemSecrets {
     map: Mutex<HashMap<String, String>>,
 }
 
