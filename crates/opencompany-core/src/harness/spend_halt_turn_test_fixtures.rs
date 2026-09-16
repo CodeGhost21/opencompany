@@ -181,7 +181,7 @@ pub(super) fn write_then_answer(n: usize) -> Vec<Turn> {
 // ---------------------------------------------------------------------------
 
 /// An inert `CycleHost` — these tests are about the turn, not the effect gate.
-struct NoopHost;
+pub(super) struct NoopHost;
 
 #[async_trait]
 impl CycleHost for NoopHost {
