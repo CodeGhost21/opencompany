@@ -17,7 +17,7 @@ use super::planning_fixtures_tests::*;
 // The whole pass
 // ---------------------------------------------------------------------------
 
-async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+pub(crate) async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
     let home = tempfile::Builder::new()
         .prefix("opencompany-planning-")
         .tempdir()
@@ -31,7 +31,7 @@ async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<Comp
     (home, Arc::new(runtime))
 }
 
-fn card(id: &str, assignee: &str) -> TaskRecord {
+pub(crate) fn card(id: &str, assignee: &str) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
         title: TaskTitle::authored("Ship the changelog"),
@@ -57,7 +57,7 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
     }
 }
 
-async fn read(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
+pub(crate) async fn read(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
     runtime
         .tasks()
         .list(runtime.id())
