@@ -2,7 +2,7 @@ use super::*;
 
 /// The single-harness turn over a fresh pool, as the non-lane entrypoint
 /// wraps — what a workflow agent node runs on when no lanes are declared.
-fn single_turn(deps: &HarnessDeps) -> Arc<dyn RunTurn> {
+pub(super) fn single_turn(deps: &HarnessDeps) -> Arc<dyn RunTurn> {
     Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
         Arc::new(crate::harness::HarnessPool::new()),
         Arc::new(deps.clone()),
