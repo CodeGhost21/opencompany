@@ -795,8 +795,17 @@ async fn journal_fan_out(
 }
 
 #[cfg(test)]
-#[path = "company_key_tests.rs"]
-mod tests;
+#[path = "company_key_a_companys_own_key_tests.rs"]
+mod tests_a_companys_own_key;
+#[cfg(test)]
+#[path = "company_key_p1_1_legacy_managed_tests.rs"]
+mod tests_p1_1_legacy_managed;
+#[cfg(test)]
+#[path = "company_key_put_credential_with_a_tests.rs"]
+mod tests_put_credential_with_a;
+#[cfg(test)]
+#[path = "company_key_the_key_round_trips_tests.rs"]
+mod tests_the_key_round_trips;
 
 /// `GET …/credential/billing` — what the account behind this company's key has
 /// left to spend, and on which plan.
