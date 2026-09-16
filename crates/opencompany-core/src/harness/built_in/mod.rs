@@ -214,7 +214,11 @@ pub mod workspace_tools;
 /// End-to-end proof that the #237 workspace tools are reachable from a real
 /// turn, with only the model's choices stubbed. Test-only.
 #[cfg(test)]
-mod workspace_turn_test;
+mod workspace_turn_helpers_tests;
+#[cfg(test)]
+mod workspace_turn_basic_tests;
+#[cfg(test)]
+mod workspace_turn_supervised_tests;
 
 use crate::harness::run_trace::RunTraceSink;
 pub use brain::HarnessBrain;

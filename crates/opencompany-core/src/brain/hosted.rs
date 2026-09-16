@@ -396,5 +396,8 @@ impl std::fmt::Debug for HostedMedullaBrain {
 }
 
 #[cfg(test)]
-#[path = "hosted_tests.rs"]
-mod tests;
+#[path = "hosted_offline_tests.rs"]
+mod tests_offline;
+#[cfg(test)]
+#[path = "hosted_e2e_tests.rs"]
+mod tests_e2e;
