@@ -857,7 +857,7 @@ pub(crate) mod hosted_mode {
         /// tail — sees the finish, which is exactly what lets the read tell the
         /// two apart.
         pub(crate) struct FinishesDuringTheRead {
-            inner: std::sync::Arc<dyn crate::ports::EventLog>,
+            pub(crate) inner: std::sync::Arc<dyn crate::ports::EventLog>,
                         pub(crate) finish: std::sync::Mutex<Option<(CompanyId, CompanyEvent)>>,
         }
 
@@ -1175,7 +1175,7 @@ pub(crate) mod running {
 
 
         pub(crate) struct Stalled {
-            app: axum::Router,
+            pub(crate) app: axum::Router,
                         pub(crate) runtime: Arc<crate::company::runtime::CompanyRuntime>,
                         pub(crate) entered: Arc<tokio::sync::Notify>,
                         pub(crate) release: Arc<tokio::sync::Notify>,
