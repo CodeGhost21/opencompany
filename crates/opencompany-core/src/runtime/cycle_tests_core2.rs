@@ -1,4 +1,3 @@
-
 /// Parks one harness tool call behind a **zero-TTL** gate, so it is past its
 /// deadline the instant it lands — the state an operator meets when they get
 /// to the queue late (issue #1449).
@@ -308,11 +307,7 @@ pub(super) async fn park_two_blocked_tool_calls_for(
 
     #[async_trait]
     impl Brain for PerCycleParkingBrain {
-        async fn run_cycle(
-            &self,
-            req: CycleRequest,
-            host: &dyn CycleHost,
-        ) -> Result<CycleResult> {
+        async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
             for event in &req.events {
                 if let CompanyEvent::OperatorMessage { .. } = event {
                     let effect = {

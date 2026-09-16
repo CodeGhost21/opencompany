@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// **Issue #1059.** A runtime with no agent pool says so when a card is
 /// dispatched, instead of leaving it inert in silence.
@@ -351,9 +350,7 @@ async fn boot_reclaims_a_chat_turn_stranded_by_a_previous_host() {
         .unwrap()
         .into_iter()
         .filter_map(|s| match s.event {
-            CompanyEvent::TurnFailed { turn_id, error } if turn_id == "turn-dead" => {
-                Some(error)
-            }
+            CompanyEvent::TurnFailed { turn_id, error } if turn_id == "turn-dead" => Some(error),
             _ => None,
         })
         .collect();

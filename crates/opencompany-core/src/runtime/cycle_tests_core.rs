@@ -374,11 +374,7 @@ pub(super) struct FailingBrain;
 
 #[async_trait]
 impl Brain for FailingBrain {
-    async fn run_cycle(
-        &self,
-        _req: CycleRequest,
-        _host: &dyn CycleHost,
-    ) -> Result<CycleResult> {
+    async fn run_cycle(&self, _req: CycleRequest, _host: &dyn CycleHost) -> Result<CycleResult> {
         Err(OpenCompanyError::Store("the brain fell over".into()))
     }
 }
@@ -430,7 +426,10 @@ impl Brain for SettlingBrain {
 
 /// Mints a `Pending` run for `task`, so a test can drive a dispatch cycle
 /// the way `CompanyRuntime::dispatch_task` does.
-pub(super) async fn pending_run(rt: &crate::company::runtime::CompanyRuntime, task: &str) -> String {
+pub(super) async fn pending_run(
+    rt: &crate::company::runtime::CompanyRuntime,
+    task: &str,
+) -> String {
     rt.runs()
         .create_run(
             rt.id(),
@@ -466,11 +465,7 @@ impl MemoryStore for CountingMemory {
         self.inner.save_trace(id, trace).await
     }
 
-    async fn recent_traces(
-        &self,
-        id: &CompanyId,
-        limit: usize,
-    ) -> Result<Vec<CompressedTrace>> {
+    async fn recent_traces(&self, id: &CompanyId, limit: usize) -> Result<Vec<CompressedTrace>> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.recent_traces(id, limit).await
     }
@@ -527,12 +522,7 @@ impl ContextStore for CountingContext {
         self.inner.delete(id, addr).await
     }
 
-    async fn delete_label(
-        &self,
-        id: &CompanyId,
-        addr: &ChunkAddr,
-        label: &str,
-    ) -> Result<bool> {
+    async fn delete_label(&self, id: &CompanyId, addr: &ChunkAddr, label: &str) -> Result<bool> {
         self.inner.delete_label(id, addr, label).await
     }
 }

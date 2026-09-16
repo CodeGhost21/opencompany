@@ -4218,30 +4218,6 @@ mod tests_core3;
 #[path = "cycle_tests_part1.rs"]
 mod tests_part1;
 #[cfg(test)]
-#[path = "cycle_tests_part2.rs"]
-mod tests_part2;
-#[cfg(test)]
-#[path = "cycle_tests_what_the_card_says_issue_372.rs"]
-mod tests_what_the_card_says_issue_372;
-#[cfg(test)]
-#[path = "cycle_tests_part4.rs"]
-mod tests_part4;
-#[cfg(test)]
-#[path = "cycle_tests_part5.rs"]
-mod tests_part5;
-#[cfg(test)]
-#[path = "cycle_tests_the_cycle_bracket_issue_390.rs"]
-mod tests_the_cycle_bracket_issue_390;
-#[cfg(test)]
-#[path = "cycle_tests_part7.rs"]
-mod tests_part7;
-#[cfg(test)]
-#[path = "cycle_tests_part8.rs"]
-mod tests_part8;
-#[cfg(test)]
-#[path = "cycle_tests_part9.rs"]
-mod tests_part9;
-#[cfg(test)]
 #[path = "cycle_tests_part10.rs"]
 mod tests_part10;
 #[cfg(test)]
@@ -4253,3 +4229,27 @@ mod tests_part12;
 #[cfg(test)]
 #[path = "cycle_tests_part13.rs"]
 mod tests_part13;
+#[cfg(test)]
+#[path = "cycle_tests_part2.rs"]
+mod tests_part2;
+#[cfg(test)]
+#[path = "cycle_tests_part4.rs"]
+mod tests_part4;
+#[cfg(test)]
+#[path = "cycle_tests_part5.rs"]
+mod tests_part5;
+#[cfg(test)]
+#[path = "cycle_tests_part7.rs"]
+mod tests_part7;
+#[cfg(test)]
+#[path = "cycle_tests_part8.rs"]
+mod tests_part8;
+#[cfg(test)]
+#[path = "cycle_tests_part9.rs"]
+mod tests_part9;
+#[cfg(test)]
+#[path = "cycle_tests_the_cycle_bracket_issue_390.rs"]
+mod tests_the_cycle_bracket_issue_390;
+#[cfg(test)]
+#[path = "cycle_tests_what_the_card_says_issue_372.rs"]
+mod tests_what_the_card_says_issue_372;

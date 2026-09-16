@@ -1,7 +1,6 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
-
+use super::*;
 
 /// A hand-off the MEMBER's own tool refused reaches the card and the
 /// operator, attributed to the member that attempted it.
@@ -501,11 +500,7 @@ async fn review_refuses_every_non_review_column_and_preserves_later_valid_work()
             );
             let outcome = fx
                 .runner(&turns)
-                .handle_operator_message(
-                    "chief",
-                    "review the launch plan cards",
-                    Some("general"),
-                )
+                .handle_operator_message("chief", "review the launch plan cards", Some("general"))
                 .await
                 .expect("a refused review does not discard a valid sibling");
             let cards = fx.cards().await;
@@ -529,8 +524,7 @@ async fn review_refuses_every_non_review_column_and_preserves_later_valid_work()
             assert_eq!(reviewed.column, lifecycle::review_landing_column(decision));
             assert!(reviewed.note.as_deref().unwrap().contains("valid review"));
             assert!(
-                outcome.reply.contains("card-refused")
-                    && outcome.reply.contains("not in_review"),
+                outcome.reply.contains("card-refused") && outcome.reply.contains("not in_review"),
                 "refusal must reach the operator: {}",
                 outcome.reply
             );

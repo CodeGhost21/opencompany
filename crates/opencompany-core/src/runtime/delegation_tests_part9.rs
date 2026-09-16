@@ -1,7 +1,6 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
-
+use super::*;
 
 /// Two assignments that read the same card revision admit one writer and
 /// explicitly refuse the stale one.

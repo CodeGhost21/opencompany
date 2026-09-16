@@ -4822,23 +4822,20 @@ async fn any_agent_pair_resolves(
 }
 
 #[cfg(test)]
+#[path = "builder_tests_agent_pin_boot_check_keys_rewo.rs"]
+mod tests_agent_pin_boot_check_keys_rewo;
+#[cfg(test)]
+#[path = "builder_tests_boot_1_a_card_is_dispatched_st.rs"]
+mod tests_boot_1_a_card_is_dispatched_st;
+#[cfg(test)]
 #[path = "builder_tests_core.rs"]
 mod tests_core;
-#[cfg(test)]
-#[path = "builder_tests_seed_cards.rs"]
-mod tests_seed_cards;
-#[cfg(test)]
-#[path = "builder_tests_scoped_grants.rs"]
-mod tests_scoped_grants;
 #[cfg(test)]
 #[path = "builder_tests_desk_tool_carry.rs"]
 mod tests_desk_tool_carry;
 #[cfg(test)]
 #[path = "builder_tests_part1.rs"]
 mod tests_part1;
-#[cfg(test)]
-#[path = "builder_tests_boot_1_a_card_is_dispatched_st.rs"]
-mod tests_boot_1_a_card_is_dispatched_st;
 #[cfg(test)]
 #[path = "builder_tests_part3.rs"]
 mod tests_part3;
@@ -4852,11 +4849,14 @@ mod tests_part5;
 #[path = "builder_tests_part6.rs"]
 mod tests_part6;
 #[cfg(test)]
-#[path = "builder_tests_agent_pin_boot_check_keys_rewo.rs"]
-mod tests_agent_pin_boot_check_keys_rewo;
-#[cfg(test)]
 #[path = "builder_tests_part8.rs"]
 mod tests_part8;
 #[cfg(test)]
 #[path = "builder_tests_part9.rs"]
 mod tests_part9;
+#[cfg(test)]
+#[path = "builder_tests_scoped_grants.rs"]
+mod tests_scoped_grants;
+#[cfg(test)]
+#[path = "builder_tests_seed_cards.rs"]
+mod tests_seed_cards;

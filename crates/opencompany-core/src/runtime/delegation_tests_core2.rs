@@ -1,4 +1,3 @@
-
 impl ScriptedTriage {
     fn new(verdict: crate::harness::triage::TriageVerdict) -> Self {
         Self {

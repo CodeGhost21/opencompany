@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// A manifest upgrade that widens the allow-list into a BYO namespace must
 /// not hand billing to persisted teammates whose grant was left unstated
@@ -198,8 +197,7 @@ async fn memory_overlay_carries_scratch_scopes_and_archive_access_to_runtime() {
     let context = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let scoped = tempfile::tempdir().unwrap();
-    let plain: Arc<dyn ContextStore> =
-        Arc::new(FsContextStore::new(context.path().to_path_buf()));
+    let plain: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(context.path().to_path_buf()));
     let scratch: Arc<dyn ContextStore> =
         Arc::new(FsContextStore::new(scratch.path().to_path_buf()));
     let scopes: Arc<dyn crate::store::MemoryScopes> = Arc::new(TestMemoryScopes {

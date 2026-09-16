@@ -1,8 +1,7 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
 use super::tests_core3::*;
-
+use super::*;
 
 #[tokio::test]
 async fn email_send_effect_sends_and_records() {

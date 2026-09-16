@@ -1,7 +1,6 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
-
+use super::*;
 
 /// The responder's own pause survives the relay turn replacing its text —
 /// the budget-pause analogue of
@@ -576,8 +575,7 @@ async fn the_fan_out_cap_applies_at_every_level() {
     titles.sort();
     assert_eq!(titles.len(), 4, "{titles:?}");
     assert!(
-        titles.contains(&"follow-up 3".to_string())
-            && !titles.contains(&"follow-up 4".to_string()),
+        titles.contains(&"follow-up 3".to_string()) && !titles.contains(&"follow-up 4".to_string()),
         "{titles:?}"
     );
 }

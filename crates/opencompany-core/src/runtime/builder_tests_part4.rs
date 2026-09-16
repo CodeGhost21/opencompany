@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// Issue #1865 (Codex review): the boot reaper's card sweep bounces a
 /// stranded card to To-do through the same guarded mover `abandon_run` and
@@ -593,8 +592,7 @@ fn a_changed_seed_policy_clears_the_override() {
     // silently.
     let loosened = seed_policy("full", &["payment.send"], None);
     assert!(
-        carry_policy_override(&tightened, &loosened, Some(&held_override("readonly")))
-            .is_none()
+        carry_policy_override(&tightened, &loosened, Some(&held_override("readonly"))).is_none()
     );
 }
 
@@ -608,14 +606,11 @@ fn every_policy_field_counts_as_the_seed_speaking() {
     let base = seed_policy("supervised", &["payment.send"], None);
 
     let list_changed = seed_policy("supervised", &["payment.send", "filing.submit"], None);
-    assert!(
-        carry_policy_override(&base, &list_changed, Some(&held_override("full"))).is_none()
-    );
+    assert!(carry_policy_override(&base, &list_changed, Some(&held_override("full"))).is_none());
 
     let threshold_changed = seed_policy("supervised", &["payment.send"], Some(1.0));
     assert!(
-        carry_policy_override(&base, &threshold_changed, Some(&held_override("full")))
-            .is_none()
+        carry_policy_override(&base, &threshold_changed, Some(&held_override("full"))).is_none()
     );
 }
 

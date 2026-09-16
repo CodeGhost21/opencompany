@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// Issue #242, the property this whole PR exists to create, proven across a
 /// real restart: a host killed mid-run leaves the attempt's **partial trace

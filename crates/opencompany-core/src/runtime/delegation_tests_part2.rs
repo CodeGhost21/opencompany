@@ -1,7 +1,6 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
-
+use super::*;
 
 /// "By construction" means the card is on the board **while** the delegate
 /// works, not reconstructed once they are done. Proven by reading the board

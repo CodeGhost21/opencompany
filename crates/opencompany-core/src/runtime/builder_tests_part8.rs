@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// The same defect one field over, and the one that would have made this
 /// PR's whole promise false: a console rename and a console removal must

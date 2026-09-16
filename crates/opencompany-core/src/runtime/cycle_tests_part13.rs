@@ -1,8 +1,7 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
 use super::tests_core3::*;
-
+use super::*;
 
 /// A card still running is never called finished — the "concluded the work
 /// had finished when it had in fact parked" misreading #377 exists to
@@ -257,11 +256,7 @@ async fn a_settled_card_is_briefed_through_the_desks_other_spelling() {
         "did that ship?",
     )];
     CycleRunner::new(&rt)
-        .inject_handed_task_awareness(
-            &record,
-            &mut events,
-            &rt.tasks().list(&id).await.unwrap(),
-        )
+        .inject_handed_task_awareness(&record, &mut events, &rt.tasks().list(&id).await.unwrap())
         .await;
     let text = message_text(&events[0]);
 
@@ -308,11 +303,7 @@ async fn a_card_no_conversation_raised_is_briefed_into_none_of_them() {
         attachments: Vec::new(),
     }];
     CycleRunner::new(&rt)
-        .inject_handed_task_awareness(
-            &record,
-            &mut events,
-            &rt.tasks().list(&id).await.unwrap(),
-        )
+        .inject_handed_task_awareness(&record, &mut events, &rt.tasks().list(&id).await.unwrap())
         .await;
 
     assert!(
@@ -357,11 +348,7 @@ async fn an_unaddressed_message_is_briefed_as_the_general_desk() {
         attachments: Vec::new(),
     }];
     CycleRunner::new(&rt)
-        .inject_handed_task_awareness(
-            &record,
-            &mut events,
-            &rt.tasks().list(&id).await.unwrap(),
-        )
+        .inject_handed_task_awareness(&record, &mut events, &rt.tasks().list(&id).await.unwrap())
         .await;
     let text = message_text(&events[0]);
 

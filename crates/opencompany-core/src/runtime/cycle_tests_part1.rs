@@ -1,8 +1,7 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
 use super::tests_core3::*;
-
+use super::*;
 
 /// `single_agent` picks an agent slot only when the batch is one addressed
 /// operator message, and falls back to the whole-company lock otherwise —
@@ -500,18 +499,17 @@ async fn everything_that_is_not_a_pleasantry_still_runs_the_turn() {
             .unwrap(),
     );
 
-    let message =
-        |text: &str, deliverable, attachments: Vec<crate::ports::types::Attachment>| {
-            CompanyEvent::OperatorMessage {
-                text: text.into(),
-                by: Some(operator()),
-                chat: None,
-                parent: None,
-                deliverable,
-                mentions: Vec::new(),
-                attachments,
-            }
-        };
+    let message = |text: &str, deliverable, attachments: Vec<crate::ports::types::Attachment>| {
+        CompanyEvent::OperatorMessage {
+            text: text.into(),
+            by: Some(operator()),
+            chat: None,
+            parent: None,
+            deliverable,
+            mentions: Vec::new(),
+            attachments,
+        }
+    };
     let attached = vec![crate::ports::types::Attachment {
         node_id: "node-1".into(),
         name: "brief.pdf".into(),

@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// The narrower guarantee round one's fix protects, isolated from round
 /// two's live-grandfather behavior above: a resume that does NOT clear

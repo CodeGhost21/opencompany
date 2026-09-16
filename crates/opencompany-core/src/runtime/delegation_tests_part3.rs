@@ -1,7 +1,6 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
-
+use super::*;
 
 /// The whole point: the model is asked only about the residue. A message the
 /// lexical layer classified costs nothing and waits for nothing.
@@ -197,8 +196,7 @@ async fn without_a_titler_a_card_is_still_opened_and_still_named() {
 async fn a_handler_card_is_adopted_by_its_message_not_by_its_title() {
     let imperative = "draft the launch plan for next quarter";
     let fx = Fixture::new();
-    let mut handler =
-        handler_card_in("Reword the middle pricing tier".to_string(), COLUMN_TODO);
+    let mut handler = handler_card_in("Reword the middle pricing tier".to_string(), COLUMN_TODO);
     handler.id = "handler-card".to_string();
     TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
         .await

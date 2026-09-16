@@ -1,8 +1,7 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
 use super::tests_core3::*;
-
+use super::*;
 
 #[tokio::test]
 async fn shutdown_registration_defers_replayed_approval_work_to_next_boot() {
@@ -412,11 +411,7 @@ async fn an_undrained_consumption_stays_spent_during_a_restart() {
 
     #[async_trait]
     impl Brain for ConsumingBrain {
-        async fn run_cycle(
-            &self,
-            req: CycleRequest,
-            host: &dyn CycleHost,
-        ) -> Result<CycleResult> {
+        async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
             for event in &req.events {
                 match event {
                     CompanyEvent::OperatorMessage { .. } => {
@@ -491,9 +486,7 @@ async fn an_undrained_consumption_stays_spent_during_a_restart() {
     let id = report.parked[0].clone();
     let resolving = {
         let rt = Arc::clone(&rt);
-        tokio::spawn(
-            async move { rt.resolve_approval(&id, Verdict::Approve, operator()).await },
-        )
+        tokio::spawn(async move { rt.resolve_approval(&id, Verdict::Approve, operator()).await })
     };
     consumed.wait().await;
     assert_eq!(rt.grants.live_count(), 0, "the grant was redeemed");

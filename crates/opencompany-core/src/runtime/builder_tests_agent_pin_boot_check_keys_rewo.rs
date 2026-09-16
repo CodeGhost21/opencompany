@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// **The invariant that would have caught #981, restored by #1757.** The
 /// picker's set (`deliverable_channel_ids`) and the delivery layer's set

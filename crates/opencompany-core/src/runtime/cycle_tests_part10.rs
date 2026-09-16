@@ -1,8 +1,7 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
 use super::tests_core3::*;
-
+use super::*;
 
 #[tokio::test]
 async fn delegate_to_desk_arm_records_handoff_and_rejects_unknown_desk() {
@@ -85,9 +84,7 @@ async fn delegate_to_desk_refuses_an_auto_channel_on_the_hosted_path() {
         ApprovalConversation::default(),
     );
     let refused = host
-        .delegate_to_desk(
-            serde_json::json!({ "desk": "launch", "instruction": "ship the launch" }),
-        )
+        .delegate_to_desk(serde_json::json!({ "desk": "launch", "instruction": "ship the launch" }))
         .await
         .unwrap();
     assert!(!refused.ok, "{:?}", refused.output);
@@ -240,8 +237,7 @@ async fn handed_task_awareness_surfaces_open_cards_on_a_direct_query() {
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 2);
     assert!(
-        seen[0].contains("Open work already handed to you")
-            && seen[0].contains("Ship invoicing"),
+        seen[0].contains("Open work already handed to you") && seen[0].contains("Ship invoicing"),
         "direct query carries the briefing: {:?}",
         seen[0]
     );

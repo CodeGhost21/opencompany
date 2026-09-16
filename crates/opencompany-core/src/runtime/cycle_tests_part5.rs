@@ -1,8 +1,7 @@
-use super::*;
 use super::tests_core::*;
 use super::tests_core2::*;
 use super::tests_core3::*;
-
+use super::*;
 
 /// Issue #243: resolving an approval that is already gone is a no-op, not a
 /// second resolution.

@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// A seed `[tools]` change clears the console grants — version control wins
 /// when it speaks.
@@ -14,8 +13,7 @@ fn a_changed_seed_tools_block_clears_the_grants() {
     let before = seed_tools(&["*", "chargebee"]);
     let revoked = seed_tools(&["*"]);
     assert!(
-        carry_tool_grants_override(&before, &revoked, Some(&held_grants(&["paypal"])))
-            .is_none(),
+        carry_tool_grants_override(&before, &revoked, Some(&held_grants(&["paypal"]))).is_none(),
         "a seed that edited `[tools]` must clear the console grants"
     );
 
@@ -24,8 +22,7 @@ fn a_changed_seed_tools_block_clears_the_grants() {
     // turned their attention to the company's grant.
     let widened = seed_tools(&["*", "hosting"]);
     assert!(
-        carry_tool_grants_override(&revoked, &widened, Some(&held_grants(&["paypal"])))
-            .is_none()
+        carry_tool_grants_override(&revoked, &widened, Some(&held_grants(&["paypal"]))).is_none()
     );
 }
 
@@ -39,8 +36,7 @@ fn every_tools_field_counts_as_the_seed_speaking() {
     let mut narrowed = base.clone();
     narrowed.composio.toolkits = vec!["gmail".to_string()];
     assert!(
-        carry_tool_grants_override(&base, &narrowed, Some(&held_grants(&["composio"])))
-            .is_none()
+        carry_tool_grants_override(&base, &narrowed, Some(&held_grants(&["composio"]))).is_none()
     );
 }
 
