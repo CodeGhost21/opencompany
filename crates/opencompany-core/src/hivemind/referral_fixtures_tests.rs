@@ -93,7 +93,7 @@ impl FarDesk {
     }
 
     /// Every `(desk, agent, prompt)` this runner was handed, in order.
-    fn asked(&self) -> Vec<(String, String, String)> {
+    pub(super) fn asked(&self) -> Vec<(String, String, String)> {
         self.asked.lock().expect("poisoned").clone()
     }
 }
