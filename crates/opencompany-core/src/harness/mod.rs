@@ -47,12 +47,12 @@ pub use built_in::*;
 /// and nudge the task-dispatch path (`run_task`) already gets — and that a
 /// capped turn which wrote nothing is not nudged on top of it. Test-only.
 #[cfg(test)]
-mod cap_publish_test;
+mod cap_publish_tests;
 /// Issue #926: end-to-end proof that a turn which exhausts its tool-iteration
 /// budget pauses **visibly** — the flag is read, the operator gets a second
 /// bubble saying so, and the notice never reaches memory. Test-only.
 #[cfg(test)]
-mod cap_turn_test;
+mod cap_turn_tests;
 /// Agent-authored internal dashboard pages: `pages_list` / `pages_read` /
 /// `pages_write` / `pages_delete` over `pages/<slug>/` in the same
 /// [`crate::ports::workspace::WorkspaceStore`], with `pages_write` compiling
@@ -85,7 +85,7 @@ pub mod spend;
 /// brake **says so** — and says something different from a turn that paused at
 /// its step cap. Test-only.
 #[cfg(test)]
-mod spend_halt_turn_test;
+mod spend_halt_turn_tests;
 pub mod thread_tools;
 
 /// The ACP `RunTurn`, under the path it had before the split.
