@@ -315,6 +315,160 @@ async fn await_finished(
     None
 }
 
+struct EchoRunner;
+
+impl WorkflowRunner for EchoRunner {
+    async fn run(
+        &self,
+        _company: &CompanyId,
+        _workflow: &crate::company::WorkflowFile,
+        _input: serde_json::Value,
+        _ctx: &WorkflowRunContext,
+    ) -> crate::Result<WorkflowRun> {
+        Ok(WorkflowRun {
+            output: serde_json::json!({ "run": {}, "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "done".to_string(),
+                status: crate::ports::types::WorkflowNodeStatus::Ok,
+                elapsed_ms: 3,
+                diagnostics: Vec::new(),
+            }],
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        })
+    }
+}
+
+struct DroppedReportRunner;
+
+struct DryRunRunner;
+
+impl WorkflowRunner for DryRunRunner {
+    async fn run(
+        &self,
+        _company: &CompanyId,
+        _workflow: &crate::company::WorkflowFile,
+        _input: serde_json::Value,
+        _ctx: &WorkflowRunContext,
+    ) -> crate::Result<WorkflowRun> {
+        Ok(WorkflowRun {
+            output: serde_json::json!({ "run": {}, "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: vec![crate::ports::DeliveryReport {
+                node: "done".to_string(),
+                kind: "channel".to_string(),
+                target: Some("engineering".to_string()),
+                status: crate::ports::DeliveryStatus::Skipped,
+                detail: "this was a test run — nothing was sent".to_string(),
+                reason: crate::ports::DeliveryReason::DryRun,
+            }],
+            cancelled: false,
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "done".to_string(),
+                status: crate::ports::types::WorkflowNodeStatus::Ok,
+                elapsed_ms: 3,
+                diagnostics: Vec::new(),
+            }],
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        })
+    }
+}
+
+impl WorkflowRunner for DroppedReportRunner {
+    async fn run(
+        &self,
+        _company: &CompanyId,
+        _workflow: &crate::company::WorkflowFile,
+        _input: serde_json::Value,
+        _ctx: &WorkflowRunContext,
+    ) -> crate::Result<WorkflowRun> {
+        Ok(WorkflowRun {
+            output: serde_json::json!({ "run": {}, "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: vec![crate::ports::DeliveryReport {
+                node: "done".to_string(),
+                kind: "channel".to_string(),
+                target: Some("operator".to_string()),
+                status: crate::ports::DeliveryStatus::Failed,
+                detail: "`operator` is not an automation delivery channel".to_string(),
+                reason: crate::ports::DeliveryReason::ChannelNotWired,
+            }],
+            cancelled: false,
+            nodes: vec![crate::ports::WorkflowRunNodeRow {
+                node_id: "done".to_string(),
+                status: crate::ports::types::WorkflowNodeStatus::Ok,
+                elapsed_ms: 3,
+                diagnostics: Vec::new(),
+            }],
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        })
+    }
+}
+
+async fn echo_company(home: &std::path::Path) -> axum::Router {
+    company_with_runner(home, Arc::new(EchoRunner)).await
+}
+
+async fn company_with_runner(
+    home: &std::path::Path,
+    runner: Arc<dyn WorkflowRunner>,
+) -> axum::Router {
+    let manifest: CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+    let id = CompanyId::new("acme");
+    FsCompanyStore::new(home.to_path_buf())
+        .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: vec![crate::ports::types::OverlayWorkflow {
+                id: "demo".to_string(),
+                toml: GRAPH.to_string(),
+            }],
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            lifecycle: "running".to_string(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+        })
+        .await
+        .unwrap();
+    let mut runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    runtime.set_workflow_runner(runner);
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id.clone(), Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+    router(state)
+}
+
 /// T8 — `{"dry_run":true}` answers 200 carrying `dryRun:true` and the
 /// per-node `nodes`; a plain body carries neither `dryRun` (a real run's
 /// shape an old host would produce) — the presence discriminator the

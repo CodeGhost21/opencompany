@@ -59,7 +59,7 @@ fn stored_index(secrets: &MemSecrets) -> serde_json::Value {
 /// observed through it. A port that yields is the honest stand-in for one that
 /// talks to a database, and it is what makes the test below mean anything.
 #[derive(Default)]
-struct SlowSecrets {
+pub(super) struct SlowSecrets {
     inner: MemSecrets,
 }
 
