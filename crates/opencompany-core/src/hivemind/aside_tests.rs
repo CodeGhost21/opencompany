@@ -1,5 +1,7 @@
 use super::*;
 use tinyhivemind_hive::{Sequence, SessionAuthor, SessionMessage};
+use tinyhivemind_hive::aside::{AsidePolicy, Audience};
+use super::{opens_aside, surfaces, party, spent_and_unsettled};
 
 fn row(seq: u64, author: &str, content: &str, audience: Audience) -> SessionMessage {
     SessionMessage {
