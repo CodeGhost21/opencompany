@@ -31,7 +31,6 @@ role = "Designer"
 [[agent]]
 id = "writer"
 role = "Writer"
-name = "Sam"
 
 [[group_chat]]
 id = "engineering"
@@ -67,8 +66,7 @@ fn every_other_teammate_is_listed_with_role_and_mandate_but_not_the_agent_itself
     assert!(section.contains("- `pm` — Product Manager (the orchestrator"), "{section}");
     assert!(section.contains("owns the board): Own the roadmap.\n"), "{section}");
     assert!(section.contains("- `backend` — Backend Engineer: Build the services.\n"), "{section}");
-    // A named teammate is listed by name AND role, as the console addresses it.
-    assert!(section.contains("- `writer` — Sam, Writer\n"), "{section}");
+    assert!(section.contains("- `writer` — Writer\n"), "{section}");
     assert!(!section.contains("- `designer`"), "{section}");
 }
 
@@ -128,4 +126,19 @@ role = "B"
     assert!(section.contains("- `b` — B\n"), "{section}");
     assert!(!section.contains("Desks ("), "{section}");
     assert!(!section.contains("You sit on"), "{section}");
+}
+
+#[test]
+fn an_operator_added_teammate_is_listed_by_name_and_role() {
+    let mut record = record(TEAM);
+    record.overlay_agents.push(crate::ports::types::OverlayAgent {
+        id: "sam".to_string(),
+        name: "Sam".to_string(),
+        role: "Copywriter".to_string(),
+        description: Some("Write the words.".to_string()),
+        ..Default::default()
+    });
+    let section = team_section(&record, "designer");
+    assert!(section.contains("one of 5 teammates"), "{section}");
+    assert!(section.contains("- `sam` — Sam, Copywriter: Write the words.\n"), "{section}");
 }

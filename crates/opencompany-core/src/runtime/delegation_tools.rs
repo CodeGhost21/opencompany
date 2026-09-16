@@ -522,7 +522,9 @@ that is not already on that list."
         // request addressed to a specialist sitting beside it. It now names the
         // tool that does exist, the in-turn teaching shape #272 and #176 use
         // everywhere else on this seam.
-        let peers = agent_list(teammate_targets(record, delegator, &[]));
+        // Peers on the desk itself — the people the refused hand-off was
+        // aimed at — not the whole roster an unrestricted reach spans.
+        let peers = agent_list(desk_peers(record, delegator));
         return Some(match peers {
             Some(list) => format!(
                 "You lead the \"{desk_id}\" desk, so handing this to it would hand it back to \
@@ -746,6 +748,23 @@ pub fn roster_agent_ids(record: &CompanyRecord) -> Vec<String> {
     ids
 }
 
+/// Everybody on a desk with `caller`, in desk-membership order, deduplicated,
+/// never the caller — the desk-peer arm of [`teammate_targets`] on its own.
+pub fn desk_peers(record: &CompanyRecord, caller: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for desk in desks_of_member(record, caller) {
+        for member in record.effective_desk_members(&desk) {
+            if member != caller
+                && record.is_roster_agent(&member)
+                && !ids.iter().any(|held| held == &member)
+            {
+                ids.push(member);
+            }
+        }
+    }
+    ids
+}
+
 /// Whether a [`delegates_to`](crate::company::Agent::delegates_to) list places
 /// no bound on where its holder may hand work: **empty**, or carrying the
 /// [`DELEGATES_TO_WILDCARD`](crate::company::DELEGATES_TO_WILDCARD).
@@ -785,17 +804,12 @@ pub fn reach_is_unrestricted(allowed: &[String]) -> bool {
 /// order, deduplicated — so a refusal (and the team brief) lists the nearest
 /// options first.
 pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
+    let mut ids: Vec<String> = desk_peers(record, caller);
     let push = |ids: &mut Vec<String>, id: &str| {
         if id != caller && record.is_roster_agent(id) && !ids.iter().any(|held| held == id) {
             ids.push(id.to_string());
         }
     };
-    for desk in desks_of_member(record, caller) {
-        for member in record.effective_desk_members(&desk) {
-            push(&mut ids, &member);
-        }
-    }
     if reach_is_unrestricted(allowed) {
         for id in roster_agent_ids(record) {
             push(&mut ids, &id);
