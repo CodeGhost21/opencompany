@@ -16,6 +16,7 @@ use crate::ports::types::LedgerEntry;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_inference_turns_cannot_both_spend_the_last_monthly_budget() {
+    let _serial = CEILING_SERIAL.lock().await;
     struct DelayedProvider(ScriptedProvider);
 
     #[async_trait]
@@ -106,6 +107,7 @@ async fn racing_inference_turns_cannot_both_spend_the_last_monthly_budget() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_turns_cannot_dispatch_against_the_same_total_budget() {
+    let _serial = CEILING_SERIAL.lock().await;
     struct DelayedUsageProvider(ScriptedProvider);
 
     #[async_trait]
