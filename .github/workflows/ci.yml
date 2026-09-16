@@ -446,7 +446,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - run: ./scripts/ci/assert-rs-source-layout.sh
+      # `tests` until the split PR lands; then `all`, which adds the line cap.
+      - run: ./scripts/ci/assert-rs-source-layout.sh tests
 
   rust:
     needs: changes

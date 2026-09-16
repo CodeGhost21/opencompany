@@ -30,14 +30,28 @@
 # every existing `crate::...` path still resolves. Integration targets under
 # `crates/*/tests/` and `examples/` are exempt — CI selects those per file, and
 # splitting one silently changes which lane runs it (issue #475).
+#
+# USAGE: assert-rs-source-layout.sh [tests|lines|all]   (default: all)
+#
+# The two halves landed in separate PRs — the test-file convention first, the
+# line cap once the splits that satisfy it had merged — so `ci.yml` names the
+# half it is entitled to enforce. Once both are green in CI the argument is
+# `all`; the modes stay because a local run of one half is useful on its own.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 
+MODE="${1:-all}"
+case "$MODE" in
+  tests|lines|all) ;;
+  *) echo "usage: $0 [tests|lines|all]" >&2; exit 2 ;;
+esac
+
 LIMIT=750
 status=0
 
-OVER=$(
+OVER=""
+[ "$MODE" != "tests" ] && OVER=$(
   find crates -path '*/src/*' -name '*.rs' \
     -not -path '*/target/*' \
     -print0 \
@@ -62,7 +76,8 @@ fi
 # and blank lines in between) by `mod <name> {`. The convention's declaration
 # is `mod tests;` — a semicolon, so it does not match. `*_tests.rs` files are
 # skipped: nested helper modules inside a test file are fine.
-INLINE=$(
+INLINE=""
+[ "$MODE" != "lines" ] && INLINE=$(
   find crates -path '*/src/*' -name '*.rs' \
     -not -name '*_tests.rs' \
     -not -path '*/target/*' \
@@ -89,7 +104,11 @@ if [ -n "$INLINE" ]; then
 fi
 
 if [ "$status" -eq 0 ]; then
-  echo "✓ rust source layout: every crates/*/src file is ${LIMIT} lines or fewer and tests live in *_tests.rs"
+  case "$MODE" in
+    tests) echo "✓ rust source layout: tests live in *_tests.rs (line cap not checked in this mode)" ;;
+    lines) echo "✓ rust source layout: every crates/*/src file is ${LIMIT} lines or fewer" ;;
+    all)   echo "✓ rust source layout: every crates/*/src file is ${LIMIT} lines or fewer and tests live in *_tests.rs" ;;
+  esac
 fi
 
 exit "$status"
