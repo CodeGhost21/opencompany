@@ -13,12 +13,6 @@
 //! 3. **A wallet signature is checked against the challenge the host issued**,
 //!    not against anything the caller supplied.
 
-use std::sync::Arc;
-use axum::body::{Body, to_bytes};
-use axum::extract::ConnectInfo;
-use axum::http::{Request, StatusCode};
-use ed25519_dalek::{Signer as _, SigningKey};
-use tower::ServiceExt;
 use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
@@ -31,6 +25,12 @@ use crate::server::router;
 use crate::server::users::token;
 use crate::server::users::wallet::{self, VerifyRequest};
 use crate::{AppConfig, AppState};
+use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
+use axum::http::{Request, StatusCode};
+use ed25519_dalek::{Signer as _, SigningKey};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 pub(super) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()

@@ -1,9 +1,5 @@
 //! End-to-end tests for the login and admin routes.
 
-use std::sync::Arc;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord, SecretValue};
@@ -13,6 +9,10 @@ use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::{AppConfig, AppState};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 pub(super) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -38,7 +38,10 @@ pub(super) fn manifest_without_admins() -> CompanyManifest {
     toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
 }
 
-pub(super) async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> AppState {
+pub(super) async fn state_with(
+    home: &std::path::Path,
+    connections: ConnectionsRuntime,
+) -> AppState {
     state_bound_to(home, &AppConfig::default().bind, connections).await
 }
 
@@ -227,7 +230,11 @@ pub(super) fn code_from_last_mail(sender: &RecordingMailSender) -> String {
 }
 
 /// Requests a link for `email` and returns the code, read out of the mail.
-pub(super) async fn request_code(state: &AppState, sender: &RecordingMailSender, email: &str) -> String {
+pub(super) async fn request_code(
+    state: &AppState,
+    sender: &RecordingMailSender,
+    email: &str,
+) -> String {
     let echoed = request_dev_code(state, email).await;
     assert_eq!(
         echoed, None,
@@ -237,7 +244,11 @@ pub(super) async fn request_code(state: &AppState, sender: &RecordingMailSender,
 }
 
 /// Logs `email` in via the magic link, returning the session cookie.
-pub(super) async fn login_via_link(state: &AppState, sender: &RecordingMailSender, email: &str) -> String {
+pub(super) async fn login_via_link(
+    state: &AppState,
+    sender: &RecordingMailSender,
+    email: &str,
+) -> String {
     let code = request_code(state, sender, email).await;
     let app = router(state.clone());
     let response = app
@@ -452,7 +463,11 @@ pub(super) async fn login_via_dev_code(state: &AppState, email: &str) -> String 
 }
 
 /// Invites `email` as `admin`, returning the status and decoded body.
-pub(super) async fn invite_as(state: &AppState, admin: &str, email: &str) -> (StatusCode, serde_json::Value) {
+pub(super) async fn invite_as(
+    state: &AppState,
+    admin: &str,
+    email: &str,
+) -> (StatusCode, serde_json::Value) {
     let app = router(state.clone());
     let response = app
         .oneshot(post_with_cookie(

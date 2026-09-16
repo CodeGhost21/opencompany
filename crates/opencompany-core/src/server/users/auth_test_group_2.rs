@@ -1,7 +1,3 @@
-use std::sync::Arc;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use crate::company::CompanyManifest;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::ports::{CompanyStore, SessionKind, SessionRecord, UserRecord, UserRole, UserStatus};
@@ -11,6 +7,10 @@ use crate::server::router;
 use crate::server::users::cookie::session_cookie_name;
 use crate::server::users::token::{OsTokens, mint_session_token, sha256_hex};
 use crate::{AppConfig, AppState};
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 use super::auth_test_support_1::*;
 
