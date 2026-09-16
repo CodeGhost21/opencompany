@@ -1,4 +1,5 @@
 use super::*;
+use super::speech_tools_test_fixtures::*;
 // `desk_read` — tinysweeper: the only speech tool with no coverage of
 // its scan, its channel/audience filtering, or its truncation footer.
 // -------------------------------------------------------------------
