@@ -823,7 +823,9 @@ impl CompanyRuntime {
             .as_ref()
             .is_some_and(|backend| !backend.credential.configured())
         {
-            match crate::company::search::load_managed_key(&company.id, self.secrets()).await {
+            match crate::company::search::load_managed_key(&company.id, self.secrets().as_ref())
+                .await
+            {
                 Ok(Some(_)) => {}
                 Ok(None) => resolved.search = None,
                 Err(err) => {
@@ -8904,6 +8906,35 @@ mod tests {
             !wiring.missing.contains_key("shell"),
             "a wired namespace carries no reason: {:?}",
             wiring.missing
+        );
+    }
+
+    /// An uncredentialed process-wide Search handle exists so a company key
+    /// added later can reuse its ledger. Presence is not availability: without
+    /// either credential, workflow grounding must still report Search unwired.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_rejects_an_uncredentialed_search_handle() {
+        let (mut runtime, mut record, _home) = runtime_and_record().await;
+        record.manifest.tools.allow.push("search".to_string());
+        let mut deps = wiring_deps(
+            &runtime,
+            None,
+            crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            None,
+        );
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.tinyhumans.ai".to_string(),
+            crate::company::credentials::Credential::None,
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        deps.secrets = Some(runtime.secrets().clone());
+        runtime.set_workflow_harness_deps(deps);
+
+        let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
+        assert_eq!(
+            wiring.missing.get("search").copied(),
+            Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured)
         );
     }
 

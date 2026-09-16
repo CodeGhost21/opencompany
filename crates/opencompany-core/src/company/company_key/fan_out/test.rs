@@ -2049,6 +2049,20 @@ async fn no_report_or_note_contains_a_key() {
     assert!(!note.contains(NEW), "{note}");
 }
 
+#[test]
+fn a_failed_search_copy_points_the_operator_to_search_settings() {
+    let report = FanOutReport {
+        slots: vec![SlotReport {
+            slot: Slot::Search,
+            outcome: SlotOutcome::Failed,
+        }],
+        ..FanOutReport::default()
+    };
+
+    let note = fan_out_note(false, &report, None);
+    assert!(note.contains("Search pages"), "{note}");
+}
+
 // ---------------------------------------------------------------------------
 // copy_account_key_to_composio — keys rework #2306, slice 4c (Composio half)
 // ---------------------------------------------------------------------------
