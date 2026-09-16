@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::content_tests_support::*;
 use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
@@ -11,7 +12,6 @@ use super::{
     grants_workspace_write_explicit, load_catalog_skills, load_dir_ledgers, load_dir_skills,
     parse_workflow, walk_workspace,
 };
-use super::content_tests_support::*;
 
 #[test]
 fn every_company_ledger_declaration_parses_and_fits_under_the_cap() {

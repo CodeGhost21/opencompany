@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::content_tests_support::*;
 use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
@@ -11,7 +12,6 @@ use super::{
     grants_workspace_write_explicit, load_catalog_skills, load_dir_ledgers, load_dir_skills,
     parse_workflow, walk_workspace,
 };
-use super::content_tests_support::*;
 
 #[test]
 fn every_company_manifest_is_valid() {
@@ -176,7 +176,6 @@ const FULL_BELT_PLUS_SEARCH: [&str; 8] = [
     "software_company",
     "venture_studio",
 ];
-
 
 /// One agent's effective grants: the company `[tools].allow` narrowed by that
 /// agent's own `tools`. Runs the *real* narrowing (`effective_grants` over a
@@ -548,4 +547,3 @@ fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
     assert!(!grants_paypal_explicit(&["chargebee".to_string()]));
     assert!(!grants_chargebee_explicit(&["paypal".to_string()]));
 }
-

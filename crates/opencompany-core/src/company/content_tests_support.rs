@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use super::CompanyManifest;
 
-
 pub(super) fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -42,7 +41,6 @@ pub(super) fn toml_files(dir: &Path) -> Vec<PathBuf> {
     files.sort();
     files
 }
-
 
 pub(super) fn load_company(name: &str) -> CompanyManifest {
     let dir = repo_root().join("companies").join(name);
