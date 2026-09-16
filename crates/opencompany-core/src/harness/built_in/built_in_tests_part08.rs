@@ -195,6 +195,15 @@ async fn racing_turns_cannot_dispatch_against_the_same_total_budget() {
     }
 }
 
+/// Every test in this file drives the total-ceiling gate for the same company
+/// (`record()` is always `acme`), and that gate reserves against
+/// `metering::reservation::IN_FLIGHT`, a process-global map keyed by company.
+/// Run concurrently, one test's held reservation is another test's "ceiling
+/// crossed". They were spread across the old 8k-line inline module and rarely
+/// collided; grouped here they collide on every run, so each holds this lock
+/// for its duration. Serialising the file, not the crate: the lock is local.
+static CEILING_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The hard total-token ceiling (issue #188): once the tenant's total period
 /// spend crosses the plan's `total_budget`, the very next dispatch is refused
 /// **before any model call** — the reply is the fixed operator notice, the
@@ -202,6 +211,7 @@ async fn racing_turns_cannot_dispatch_against_the_same_total_budget() {
 /// outcome lands in memory. A turn under the ceiling still runs normally.
 #[tokio::test]
 async fn run_refuses_dispatch_once_the_total_ceiling_is_crossed() {
+    let _serial = CEILING_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let context = Arc::new(MockContext::default());
     let meter = Arc::new(RecordingMeter::default());
@@ -301,6 +311,7 @@ async fn run_refuses_dispatch_once_the_total_ceiling_is_crossed() {
 /// would simply keep spending past the cap.
 #[tokio::test]
 async fn a_confined_turn_is_refused_once_the_total_ceiling_is_crossed() {
+    let _serial = CEILING_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let context = Arc::new(MockContext::default());
     let meter = Arc::new(RecordingMeter::default());
@@ -383,6 +394,7 @@ async fn a_confined_turn_is_refused_once_the_total_ceiling_is_crossed() {
 /// is a transient read that clears on the next one.
 #[tokio::test]
 async fn run_refuses_when_a_declared_total_ceiling_cannot_be_read() {
+    let _serial = CEILING_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let context = Arc::new(MockContext::default());
     // A generous ceiling: a readable meter would admit this turn, so the
@@ -463,6 +475,7 @@ async fn run_refuses_when_a_declared_total_ceiling_cannot_be_read() {
 /// nothing to enforce means nothing to fail closed on, meter or no meter.
 #[tokio::test]
 async fn a_company_with_no_declared_ceiling_runs_without_a_meter() {
+    let _serial = CEILING_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let context = Arc::new(MockContext::default());
     let deps = deps_with_plan(dir.path(), context.clone(), None, None);
@@ -531,6 +544,7 @@ fn an_exhausted_cap_and_an_unreadable_meter_do_not_read_alike() {
 
 #[tokio::test]
 async fn run_refuses_dispatch_for_a_teammate_over_its_daily_cap() {
+    let _serial = CEILING_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let context = Arc::new(MockContext::default());
     let meter = Arc::new(RecordingMeter::default());
@@ -622,6 +636,7 @@ async fn run_refuses_dispatch_for_a_teammate_over_its_daily_cap() {
 /// not uncap it, and nothing here says so.
 #[tokio::test]
 async fn a_zero_daily_cap_refuses_the_teammates_very_first_turn() {
+    let _serial = CEILING_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let context = Arc::new(MockContext::default());
     let meter = Arc::new(RecordingMeter::default());
