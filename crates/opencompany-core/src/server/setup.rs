@@ -305,6 +305,30 @@ pub struct SetupRequest {
     /// stays for `desktop::bootstrap_companies` and for any caller that still
     /// wants a preset.
     pub company: Option<SetupCompany>,
+    /// The TinyHumans account key the wizard's managed branch collected, to be
+    /// stored against the company this call seeds.
+    ///
+    /// Write-only, and never a `config.toml` write: this is the **company's**
+    /// credential ([`company_key::KEY_KEY`](crate::company::company_key::KEY_KEY)),
+    /// the one the Connections Account page sets, not the instance-wide
+    /// `tinyhumans_api_key` field. Sent here rather than written by the console
+    /// itself because `PUT …/credential` is admin-scoped to an existing
+    /// company, and during first run there is neither: the company is created
+    /// by this very call, and nobody has signed in yet to be its admin.
+    ///
+    /// Applies to both seed paths — a designed company and a seeded template —
+    /// which is why it sits at the top level rather than inside
+    /// [`SetupCompany`]: an operator who took the managed branch and kept an
+    /// untouched preset roster is sent back as a template slug, with no
+    /// designed company to carry anything.
+    pub tinyhumans_key: Option<String>,
+    /// The model to finish the `tinyhumans` row with, as the setup probe
+    /// discovered it.
+    ///
+    /// The fan-out creates no row without one, so a probe that named no model
+    /// leaves the row unmade and says so through
+    /// [`AppliedDto::credential_note`] rather than silently reporting success.
+    pub tinyhumans_model: Option<String>,
 }
 
 /// The company the wizard designed, as it arrives from the review step.
@@ -367,6 +391,15 @@ pub struct AppliedDto {
     pub restart_required: Vec<String>,
     /// The company seeded by this call, if any.
     pub seeded_company: Option<String>,
+    /// What the account-key fan-out actually did, in the host's own words
+    /// ([`fan_out_note`](crate::company::company_key::fan_out_note)) — the same
+    /// sentence the Account page's save toast carries.
+    ///
+    /// `None` when no key was sent or no company was seeded. Reported rather
+    /// than assumed because the fan-out honestly skips slots it must not
+    /// touch, and a model it was never given leaves the `tinyhumans` row
+    /// unmade: "you're set up" alone would paper over both.
+    pub credential_note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,6 +1034,8 @@ async fn apply_inner(
         _ => None,
     };
 
+    let credential_note = store_account_key(state, seeded.as_deref(), &req).await?;
+
     // Companies that already existed still hold the old mode on their cached
     // runtime, so rebuild them in place. `seeded` is excluded — it was just
     // built with the new mode and rebuilding it would be pure work.
@@ -1040,7 +1075,65 @@ async fn apply_inner(
         config_path: path.display().to_string(),
         restart_required,
         seeded_company: seeded,
+        credential_note,
     })
+}
+
+/// Stores the wizard's TinyHumans key as the seeded company's own credential,
+/// through the same fan-out `PUT …/credential` runs.
+///
+/// Reuse, not a parallel path: [`fan_out_and_evict`] and [`rebuild_if_pending`]
+/// are the two halves of what the Account page's save does either side of its
+/// journal line, so the wizard's key lands in every slot that page's key lands
+/// in — the Composio copy, the LLM copy, the `tinyhumans` row, the default —
+/// and the company that just booted without inference is rebuilt onto it
+/// instead of being left on the echo brain behind a "restart required" notice.
+///
+/// Deliberately **not** journalled. The journal attributes a credential change
+/// to the admin who made it, and a first run has no signed-in admin to name —
+/// the apply itself is what records that this happened. A rebuild failure is
+/// already logged by [`rebuild_if_pending`] and leaves the honest
+/// restart-required state behind.
+async fn store_account_key(
+    state: &AppState,
+    seeded: Option<&str>,
+    req: &SetupRequest,
+) -> Result<Option<String>, OpenCompanyError> {
+    let Some(key) = req
+        .tinyhumans_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    else {
+        return Ok(None);
+    };
+    // Only ever onto a company this call created. A key with nowhere to go is
+    // dropped rather than guessed at: on a host that already had companies
+    // there is no one of them this wizard can claim the operator meant.
+    let Some(id) = seeded.map(crate::ports::types::CompanyId::new) else {
+        return Ok(None);
+    };
+    let Some(runtime) = state.registry().get(&id) else {
+        return Ok(None);
+    };
+
+    let model = req
+        .tinyhumans_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    let report = crate::server::ops::company_key::fan_out_and_evict(
+        state,
+        runtime.as_ref(),
+        crate::company::company_key::FanOutKey::Explicit(key),
+        model,
+        false,
+    )
+    .await?;
+    crate::server::ops::company_key::rebuild_if_pending(state, &runtime, &report).await;
+    Ok(Some(crate::company::company_key::fan_out_note(
+        false, &report, model,
+    )))
 }
 
 /// Validates a submitted `bind` value the same way the boot path resolves one,

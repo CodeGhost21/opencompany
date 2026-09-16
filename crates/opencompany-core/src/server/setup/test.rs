@@ -448,6 +448,8 @@ async fn a_write_to_an_env_owned_field_is_refused() {
             company: None,
             name: None,
             admin_email: None,
+            tinyhumans_key: None,
+            tinyhumans_model: None,
         },
         &env,
     )
