@@ -1,6 +1,7 @@
 use super::tests::tmp_root;
 use super::tests_company_store::sample_manifest;
 use super::*;
+use futures::StreamExt;
 
 #[tokio::test]
 async fn append_ledger_grows_without_rewrite() {
