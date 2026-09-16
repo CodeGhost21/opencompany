@@ -35,18 +35,6 @@ pub(super) fn desk_record(toml_src: &str, overlay: Vec<OverlayDeskMember>) -> Co
     }
 }
 
-/// Like [`desk_record`] but with an explicit per-desk order overlay, for the
-/// desk-hierarchy tests.
-pub(super) fn desk_record_ordered(
-    toml_src: &str,
-    overlay: Vec<OverlayDeskMember>,
-    order: Vec<OverlayDeskOrder>,
-) -> CompanyRecord {
-    let mut record = desk_record(toml_src, overlay);
-    record.overlay_desk_order = order;
-    record
-}
-
 pub(super) fn mint_record() -> CompanyRecord {
     desk_record(
         "[company]\nname = \"Acme\"\n\
