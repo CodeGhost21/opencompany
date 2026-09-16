@@ -174,6 +174,22 @@ fn tools_composio_section_parses_toolkits_and_defaults_empty() {
     assert!(without.tools.composio.toolkits.is_empty());
 }
 
+#[test]
+fn speech_is_on_by_default_and_can_be_opted_out() {
+    let defaulted: CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n").expect("bare manifest parses");
+    assert!(
+        defaulted.speech.enabled,
+        "an omitted [speech] section must wire the speech belt"
+    );
+
+    let opted_out: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[speech]\nenabled = false\n",
+    )
+    .expect("speech opt-out parses");
+    assert!(!opted_out.speech.enabled);
+}
+
 // Guards the newly-added `Serialize` derive: a manifest with renamed
 // `[[agent]]`/`[[schedule]]` arrays must survive a serialize→deserialize
 // round-trip through JSON without dropping the renamed fields.
