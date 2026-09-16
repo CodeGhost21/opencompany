@@ -606,25 +606,35 @@ async fn set_model(
     Json(body): Json<SetModel>,
 ) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let Some(key) = runtime
+    // A friendly, fast refusal for the common case — no key at all — read
+    // with no lock held. This is deliberately *not* the value `fan_out`
+    // treats as "the key": passing this snapshot through would race a
+    // concurrent rotation or clear that lands between this read and
+    // `fan_out` taking `slot_guard` (Codex P1 review), silently writing a
+    // stale key back as though it were freshly set, or resurrecting one that
+    // had just been removed. `FanOutKey::Stored` below re-reads the same
+    // secret *after* the lock is held, which is the only read this call
+    // actually acts on; a key that vanishes between this check and that one
+    // still fails safely — `fan_out` refuses `Some(model)` against a clearing
+    // key with the same "cannot be chosen while removing the key" error.
+    let has_key = runtime
         .secrets()
         .get(runtime.id(), company_key::KEY_KEY)
         .await
         .map_err(ApiError)?
-        .map(|crate::ports::types::SecretValue(v)| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-    else {
+        .is_some_and(|crate::ports::types::SecretValue(v)| !v.trim().is_empty());
+    if !has_key {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "No TinyHumans account key is stored for this company; add one first.".to_string(),
         )));
-    };
+    }
 
     let prober = prober_for(runtime);
     let report = company_key::fan_out(
         runtime.id(),
         runtime.secrets().as_ref(),
         company_key::FanOutRequest {
-            key: &key,
+            key: company_key::FanOutKey::Stored,
             model: Some(body.model.as_str()),
             confirm_in_use: false,
             proxy_base_url: Some(&state.config().api_url),
