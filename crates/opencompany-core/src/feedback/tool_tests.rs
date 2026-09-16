@@ -16,8 +16,7 @@ fn wiring() -> (BuiltinToolProvider, Arc<FeedbackStore>, tempfile::TempDir) {
     let feedback = Arc::new(FeedbackStore::new(&bundle));
     let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(root.clone()));
     let inner: Arc<dyn ToolProvider> = Arc::new(StubToolProvider::new(vec!["email.*".into()]));
-    let provider =
-        BuiltinToolProvider::new(inner, feedback.clone(), events, ConsentMode::Manual);
+    let provider = BuiltinToolProvider::new(inner, feedback.clone(), events, ConsentMode::Manual);
     (provider, feedback, dir)
 }
 

@@ -86,11 +86,8 @@ async fn dedupe_comments_on_canonical_and_closes_duplicate() {
 
 #[tokio::test]
 async fn dedupe_leaves_a_distinct_issue_untouched() {
-    let client = Arc::new(MockGitHubClient::new().with_existing(
-        9,
-        "https://gh/issues/9",
-        "unique problem",
-    ));
+    let client =
+        Arc::new(MockGitHubClient::new().with_existing(9, "https://gh/issues/9", "unique problem"));
     let agent = TriageAgent::new(client.clone(), "acme/repo");
     let candidate = ExistingIssue {
         number: 9,

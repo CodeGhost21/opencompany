@@ -305,8 +305,7 @@ fn desktop_path_env_prefers_install_bin_and_gates_cargo_bin_on_home() {
     // HOME set: install bin first, then ~/.cargo/bin, then the inherited
     // PATH. Compare segment-by-segment, not against a `:`-joined string.
     let dev_home = PathBuf::from("home").join("dev");
-    let with_home =
-        desktop_path_env(&install_root, Some(&dev_home.to_string_lossy()), &inherited);
+    let with_home = desktop_path_env(&install_root, Some(&dev_home.to_string_lossy()), &inherited);
     let segments: Vec<_> = std::env::split_paths(&with_home).collect();
     assert_eq!(
         segments,

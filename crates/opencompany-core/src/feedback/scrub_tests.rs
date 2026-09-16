@@ -77,8 +77,7 @@ async fn wallet_private_key_aborts() {
         unreadable: false,
     };
     // A 66-char base58-only token (key-shaped).
-    let key =
-        "5Kb8kLf9zgWQnogidDA76MzPL6TsZZY36hWXMssSzNydYXYB9KF2".to_string() + "aBcDeFgHjKmNpQ";
+    let key = "5Kb8kLf9zgWQnogidDA76MzPL6TsZZY36hWXMssSzNydYXYB9KF2".to_string() + "aBcDeFgHjKmNpQ";
     let out = scrub_with(secrets, &format!("seed {key} here")).await;
     assert!(matches!(out, ScrubOutcome::Aborted { reason } if reason.contains("wallet key")));
 }

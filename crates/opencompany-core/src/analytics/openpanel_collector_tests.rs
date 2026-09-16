@@ -162,7 +162,6 @@ fn events() -> Vec<Event> {
     ]
 }
 
-
 /// **A shutdown flush waits for a send already in flight.**
 ///
 /// The periodic drain takes the whole queue before it awaits its POSTs, so
@@ -417,10 +416,7 @@ async fn a_loopback_endpoint_never_goes_through_a_system_proxy() {
         // not at send time.
         HttpOpenPanelTracker::new(
             &collector.url,
-            &crate::analytics::config::ClientCredentials::new(
-                TEST_CLIENT_ID,
-                TEST_CLIENT_SECRET,
-            ),
+            &crate::analytics::config::ClientCredentials::new(TEST_CLIENT_ID, TEST_CLIENT_SECRET),
             envelope(),
         )
         .expect("the client builds")
@@ -622,8 +618,7 @@ async fn a_real_collector_accepts_an_event() {
         status.is_success(),
         "the collector refused the event with {status}: {text}"
     );
-    let parsed: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     assert!(
         parsed.get("deviceId").is_some(),
         "a 2xx with no deviceId is a proxy answering, not OpenPanel accepting: \

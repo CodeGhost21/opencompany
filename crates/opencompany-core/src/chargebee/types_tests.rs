@@ -33,8 +33,7 @@ fn a_bare_amount_does_not_satisfy_a_line_item() {
     // The whole point of the naming convention: "$100" becoming `100`
     // must not deserialize into a field that means cents.
     assert!(
-        serde_json::from_str::<ChargeLine>(r#"{"description":"Consulting","amount":100}"#)
-            .is_err(),
+        serde_json::from_str::<ChargeLine>(r#"{"description":"Consulting","amount":100}"#).is_err(),
         "a bare `amount` must not satisfy ChargeLine"
     );
     let ok: ChargeLine =

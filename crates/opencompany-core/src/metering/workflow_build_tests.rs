@@ -40,8 +40,8 @@ fn a_builder_sample_is_charged_to_the_assignee_with_a_run() {
 /// the ceiling fails a test instead.
 #[test]
 fn builder_spend_counts_toward_the_capability_ceiling() {
-    let sample = workflow_build_sample(&usage_with(0.6), "managed", "maya", "run-7", None)
-        .expect("sample");
+    let sample =
+        workflow_build_sample(&usage_with(0.6), "managed", "maya", "run-7", None).expect("sample");
     assert_eq!(
         crate::metering::tokens_in(std::slice::from_ref(&sample)),
         1_600
@@ -55,8 +55,7 @@ fn the_provider_slug_is_normalised() {
     let sample = workflow_build_sample(&usage_with(0.1), "  MANAGED ", "maya", "run-7", None)
         .expect("sample");
     assert_eq!(sample.provider, "managed");
-    let blank =
-        workflow_build_sample(&usage_with(0.1), "", "maya", "run-7", None).expect("sample");
+    let blank = workflow_build_sample(&usage_with(0.1), "", "maya", "run-7", None).expect("sample");
     assert_eq!(blank.provider, crate::metering::UNKNOWN_PROVIDER);
 }
 
@@ -66,8 +65,7 @@ fn the_provider_slug_is_normalised() {
 #[test]
 fn a_zero_pass_writes_no_sample() {
     assert!(
-        workflow_build_sample(&TokenUsage::default(), "managed", "maya", "run-7", None)
-            .is_none()
+        workflow_build_sample(&TokenUsage::default(), "managed", "maya", "run-7", None).is_none()
     );
     assert!(
         workflow_build_sample(

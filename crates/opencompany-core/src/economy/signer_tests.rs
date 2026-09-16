@@ -58,8 +58,8 @@ fn sign_verify_round_trip_and_wrong_key_fails() {
 #[test]
 fn hex_codec_round_trips() {
     let seed = [
-        0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-        24, 25, 26, 27, 28, 29, 30, 255,
+        0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 255,
     ];
     let hex = encode_hex(&seed);
     assert_eq!(hex.len(), 64);

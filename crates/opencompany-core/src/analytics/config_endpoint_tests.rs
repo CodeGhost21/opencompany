@@ -22,7 +22,6 @@ fn configured(pairs: &[(&str, &str)]) -> MapEnv {
     ];
     all.extend_from_slice(pairs);
     MapEnv::new(all)
-
 }
 
 /// The positive control for the endpoint group, and deliberately
@@ -482,8 +481,7 @@ fn a_usable_endpoint_still_reports_to_exactly_itself() {
 /// someone eventually prints in full.
 #[test]
 fn neither_half_of_the_credential_is_printable() {
-    let credentials =
-        ClientCredentials::new("not-a-real-client-id", "not-a-real-client-secret");
+    let credentials = ClientCredentials::new("not-a-real-client-id", "not-a-real-client-secret");
     let printed = format!("{credentials:?}");
     for half in ["not-a-real-client-id", "not-a-real-client-secret"] {
         assert!(

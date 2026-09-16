@@ -36,8 +36,8 @@ fn a_setup_sample_is_charged_to_the_company_with_no_run() {
 #[test]
 fn a_setup_sample_is_not_a_planning_sample() {
     let setup = roster_build_sample(&usage_with(0.2), "managed", None).expect("sample");
-    let planning = super::super::planning::planning_sample(&usage_with(0.2), "managed", None)
-        .expect("sample");
+    let planning =
+        super::super::planning::planning_sample(&usage_with(0.2), "managed", None).expect("sample");
     assert_ne!(setup.kind, planning.kind);
     // But both belong to the company rather than to a teammate.
     assert_eq!(setup.agent, planning.agent);

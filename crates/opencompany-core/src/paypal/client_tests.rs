@@ -68,8 +68,7 @@ async fn a_token_is_reused_rather_than_refetched() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let client =
-        PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
+    let client = PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
     assert_eq!(client.token().await.expect("first"), "tok_1");
     assert_eq!(client.token().await.expect("second"), "tok_1");
     assert_eq!(client.token().await.expect("third"), "tok_1");
@@ -96,8 +95,7 @@ async fn bad_credentials_name_the_environment_not_just_invalid_client() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let client =
-        PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
+    let client = PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
     let message = client
         .token()
         .await
@@ -141,8 +139,7 @@ async fn a_path_that_could_move_the_host_is_refused_before_any_request() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let client =
-        PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
+    let client = PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
 
     for path in [
         // The one that matters: concatenated onto the base this reads as
@@ -209,8 +206,7 @@ async fn a_body_paypal_did_not_describe_is_logged_rather_than_relayed() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let client =
-        PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
+    let client = PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
     // The token call fails on the same body, which is the path that runs
     // first — both fallbacks share `unparsed_body_message`.
     let message = client

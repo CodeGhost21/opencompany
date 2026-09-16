@@ -20,8 +20,7 @@ fn response_envelope_defaults_missing_fields() {
 
 #[tokio::test]
 async fn mock_returns_registered_result_and_records_calls() {
-    let rpc =
-        MockOpenHumanRpc::new().with_result("openhuman.tools_list", serde_json::json!([]));
+    let rpc = MockOpenHumanRpc::new().with_result("openhuman.tools_list", serde_json::json!([]));
     let out = rpc
         .call("openhuman.tools_list", serde_json::json!({}))
         .await

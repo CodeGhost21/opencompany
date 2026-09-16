@@ -147,8 +147,7 @@ fn with_workflow_stamps_run_and_node_on_the_wire() {
 /// wire form byte-for-byte as it did before #1702.
 #[test]
 fn a_chat_frame_omits_the_workflow_ids() {
-    let j =
-        serde_json::to_value(frame("tool_call", 0).with_chat("General")).expect("serialize");
+    let j = serde_json::to_value(frame("tool_call", 0).with_chat("General")).expect("serialize");
     assert_eq!(j["chatId"], "General");
     assert!(
         j.get("workflowRunId").is_none(),
@@ -275,8 +274,7 @@ fn two_queries_in_one_chat_are_told_apart_by_message_seq() {
 /// field existed, so an older one reads the wire form unchanged.
 #[test]
 fn a_turn_answering_no_message_carries_no_message_seq() {
-    let j =
-        serde_json::to_value(frame("tool_call", 0).with_chat("general")).expect("serialize");
+    let j = serde_json::to_value(frame("tool_call", 0).with_chat("general")).expect("serialize");
     assert!(
         j.get("messageSeq").is_none(),
         "absent rather than null, so presence is the check: {j}"

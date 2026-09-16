@@ -1,8 +1,8 @@
 use super::*;
 use crate::ledger::registry::Registry;
 use crate::ports::tasks::{
-    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO,
-    TaskDeliverable, TaskTitle,
+    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable,
+    TaskTitle,
 };
 
 fn card(id: &str, column: &str, updated: u64) -> TaskRecord {

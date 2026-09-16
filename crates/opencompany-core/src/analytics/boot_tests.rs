@@ -254,8 +254,8 @@ fn a_tenant_with_an_identity_key_is_identified_as_one() {
         ]),
     );
 
-    let key = crate::analytics::types::TenantIdKey::new("not-a-real-id-key")
-        .expect("a non-blank key");
+    let key =
+        crate::analytics::types::TenantIdKey::new("not-a-real-id-key").expect("a non-blank key");
     assert_eq!(
         chosen.as_str(),
         OpaqueId::tenant("acmecorp-holdings", &key).as_str(),

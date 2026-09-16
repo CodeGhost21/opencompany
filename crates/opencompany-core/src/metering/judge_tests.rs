@@ -42,11 +42,7 @@ impl UsageMeter for RecordingMeter {
         Ok(())
     }
 
-    async fn query(
-        &self,
-        _company: &CompanyId,
-        _since: u64,
-    ) -> crate::Result<Vec<UsageSample>> {
+    async fn query(&self, _company: &CompanyId, _since: u64) -> crate::Result<Vec<UsageSample>> {
         Ok(self.samples.lock().unwrap().clone())
     }
 }

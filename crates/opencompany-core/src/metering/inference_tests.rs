@@ -160,11 +160,7 @@ impl UsageMeter for RecordingMeter {
         self.samples.lock().unwrap().push(sample.clone());
         Ok(())
     }
-    async fn query(
-        &self,
-        _company: &CompanyId,
-        _since: u64,
-    ) -> crate::Result<Vec<UsageSample>> {
+    async fn query(&self, _company: &CompanyId, _since: u64) -> crate::Result<Vec<UsageSample>> {
         Ok(self.samples.lock().unwrap().clone())
     }
 }
@@ -176,11 +172,7 @@ impl UsageMeter for FailingMeter {
     async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
         Err(OpenCompanyError::Store("disk on fire".to_string()))
     }
-    async fn query(
-        &self,
-        _company: &CompanyId,
-        _since: u64,
-    ) -> crate::Result<Vec<UsageSample>> {
+    async fn query(&self, _company: &CompanyId, _since: u64) -> crate::Result<Vec<UsageSample>> {
         Ok(Vec::new())
     }
 }

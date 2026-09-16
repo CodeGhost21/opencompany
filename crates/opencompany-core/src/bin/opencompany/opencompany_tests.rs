@@ -146,8 +146,7 @@ async fn export_and_import_migrate_before_they_read() {
         match command {
             "export" => {
                 let out = home.join("out");
-                let _ =
-                    run_export("acme".to_string(), Some(out), false, Some(home.clone())).await;
+                let _ = run_export("acme".to_string(), Some(out), false, Some(home.clone())).await;
             }
             _ => {
                 let _ = import_from_dir(&home.join("nothing-here"), Some(home.clone())).await;

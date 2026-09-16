@@ -280,8 +280,7 @@ async fn send_task_402_over_budget_rejected() {
     let company = CompanyId::new("acme");
     let (_dir, store) = seeded_store(&company).await;
     let mock = Arc::new(
-        MockTinyplaceClient::new()
-            .with_send_task(PaidOutcome::PaymentRequired(challenge("80.00"))),
+        MockTinyplaceClient::new().with_send_task(PaidOutcome::PaymentRequired(challenge("80.00"))),
     );
     let economy = TinyplaceEconomy::new(
         mock.clone(),

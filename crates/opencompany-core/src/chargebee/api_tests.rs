@@ -186,12 +186,10 @@ fn line(desc: &str, minor: i64) -> ChargeLine {
 }
 
 const NO_CUSTOMER: &str = r#"{"list":[]}"#;
-const ONE_CUSTOMER: &str =
-    r#"{"list":[{"customer":{"id":"cus_1","email":"alan@tinyhumans.ai"}}]}"#;
+const ONE_CUSTOMER: &str = r#"{"list":[{"customer":{"id":"cus_1","email":"alan@tinyhumans.ai"}}]}"#;
 const CREATED_CUSTOMER: &str = r#"{"customer":{"id":"cus_new","email":"alan@tinyhumans.ai"}}"#;
 const CREATED_INVOICE: &str = r#"{"invoice":{"id":"inv_1","customer_id":"cus_new","status":"payment_due","currency_code":"USD","total":10000,"amount_due":10000,"amount_paid":0,"line_items":[{"description":"Consulting"}]}}"#;
-const HOSTED_PAGE: &str =
-    r#"{"hosted_page":{"url":"https://acme.chargebee.com/pages/v3/abc"}}"#;
+const HOSTED_PAGE: &str = r#"{"hosted_page":{"url":"https://acme.chargebee.com/pages/v3/abc"}}"#;
 
 #[tokio::test]
 async fn an_unknown_customer_is_created_before_invoicing() {

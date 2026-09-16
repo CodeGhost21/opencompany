@@ -15,8 +15,7 @@ fn usage_with(cost: f64) -> TokenUsage {
 /// daily cap must not be unable to have work planned for it.
 #[test]
 fn a_planning_sample_is_charged_to_the_company_with_no_run() {
-    let sample =
-        planning_sample(&usage_with(0.4), "managed", None).expect("a real pass meters");
+    let sample = planning_sample(&usage_with(0.4), "managed", None).expect("a real pass meters");
     assert_eq!(sample.agent, UNATTRIBUTED_AGENT);
     assert_eq!(sample.agent, "company");
     assert_eq!(sample.kind, SampleKind::PlanningCall);
@@ -79,8 +78,8 @@ fn a_zero_pass_writes_no_sample() {
 /// about.
 #[test]
 fn planning_spend_posts_to_the_inference_ledger_under_the_company() {
-    let entry = inference_ledger_entry(&usage_with(0.25), UNATTRIBUTED_AGENT)
-        .expect("a costed pass posts");
+    let entry =
+        inference_ledger_entry(&usage_with(0.25), UNATTRIBUTED_AGENT).expect("a costed pass posts");
     assert_eq!(entry.kind, crate::metering::INFERENCE_SPEND_KIND);
     assert_eq!(
         entry.amount_usd, -0.25,
