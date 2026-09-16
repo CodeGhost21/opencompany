@@ -4,7 +4,7 @@ use super::*;
 // `openhuman::agent::cost::TurnCost`, whose module is crate-private to
 // openhuman, so a `TurnState` cannot be constructed from here and the
 // hook's Continue/Stop decision cannot be unit-tested. It is proven
-// end-to-end instead, by `harness::spend_halt_turn_test`, which drives a
+// end-to-end instead, by `harness::spend_halt_turn_tests`, which drives a
 // real turn through `with_stop_hooks` against a scripted provider.
 //
 // What is testable here is the wiring either side of that decision: the
