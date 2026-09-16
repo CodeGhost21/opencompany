@@ -57,6 +57,13 @@ fn a_clean_turn_carries_no_approval_notification() {
     );
 }
 
+// -----------------------------------------------------------------
+// PLAT-057 / PLAT-060: the `call` HTTP handler itself. Every test above
+// this point calls `open_session`/`prompt`/etc. directly, bypassing the
+// axum extraction, method dispatch and JSON-RPC envelope that only `call`
+// (mounted by `router()`) actually implements.
+// -----------------------------------------------------------------
+
 /// PLAT-060 (AUTH): a `none`-mode company's local owner is reachable over
 /// the real HTTP `call` handler with zero credentials — no cookie, no
 /// bearer — same as every other credential-less surface that mode grants.
