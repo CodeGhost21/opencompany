@@ -1364,22 +1364,30 @@ async fn resolve_legacy_scoped(
         )
         .await?;
         let had_key = !key.trim().is_empty();
-        // The **normalized** kind here, unlike the runtime branch above, and the
-        // difference is who wrote the value. A runtime blob comes from the
-        // console, whose managed card has no URL field — so a `base_url` beside
-        // `managed` there is a stale value a previously-picked provider left in
-        // the form, and honouring it would send the managed probe somewhere the
-        // operator never chose. A manifest is hand-authored and committed:
-        // `provider = "managed"` with a `base_url` is a sentence somebody typed
-        // on purpose, usually a gateway in front of the platform, and silently
-        // redirecting it to the platform endpoint would be the same disregard in
-        // the opposite direction.
-        //
-        // The credential chain is unaffected either way: an explicit endpoint
-        // resolves `proxied = false`, which is exactly what denies it both the
-        // platform credential and the company identity. A gateway is a vendor.
-        let (base_url, credential, proxied) =
-            resolve_endpoint(&provider, manifest.base_url.as_deref(), key, env_default);
+        // Which spelling reaches `resolve_endpoint` depends on whether the
+        // manifest also names an endpoint. A manifest is hand-authored and
+        // committed: `provider = "managed"` **with** a `base_url` is a sentence
+        // somebody typed on purpose, usually a gateway in front of the platform,
+        // and `resolve_endpoint`'s managed branch would silently discard that
+        // URL — so the normalized kind goes in and the gateway is honoured as a
+        // vendor (`proxied = false`, no platform credential, no company
+        // identity). Without a `base_url` the **raw** word must go in, exactly
+        // as the runtime branch above does: the normalized `openrouter` skips
+        // the managed branch, and a manifest `managed` with a stored key — the
+        // first-run wizard's TinyHumans card writes precisely that — resolved to
+        // `openrouter.ai` carrying the TinyHumans key. The e2e symptom was a
+        // wizard-built company answering every turn with a 401 from OpenRouter.
+        let endpoint_kind = if manifest.base_url.is_some() {
+            provider.as_str()
+        } else {
+            declared
+        };
+        let (base_url, credential, proxied) = resolve_endpoint(
+            endpoint_kind,
+            manifest.base_url.as_deref(),
+            key,
+            env_default,
+        );
         let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider,
@@ -2290,6 +2298,40 @@ mod tests {
             DEFAULT_PROVIDER,
             "naming nothing is not naming the managed route"
         );
+    }
+
+    /// The first-run wizard's TinyHumans card writes `provider = "managed"`
+    /// with no `base_url` into the manifest and the typed key into the store.
+    /// That company must resolve to the platform proxy with that key — not to
+    /// `openrouter.ai`, which is where the normalized kind sent it (and the
+    /// key with it) until the umbrella e2e caught a wizard-built company
+    /// answering every turn with OpenRouter's 401.
+    #[tokio::test]
+    async fn a_managed_manifest_with_a_stored_key_stays_on_the_platform() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        store_key(&company, &secrets, "th-not-a-real-key")
+            .await
+            .unwrap();
+        let decl = resolve_effective(&company, &inference(LEGACY_MANAGED), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.source, InferenceSource::Manifest);
+        assert_eq!(decl.base_url, platform_base_url());
+        assert!(decl.is_proxied());
+        assert_eq!(bearer(&decl).await.as_deref(), Some("th-not-a-real-key"));
+
+        // A manifest that ALSO names an endpoint is a gateway the operator
+        // chose on purpose, and keeps resolving to it as a vendor.
+        let mut gateway = inference(LEGACY_MANAGED);
+        gateway.base_url = Some("https://gateway.example/v1".into());
+        let decl = resolve_effective(&company, &gateway, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://gateway.example/v1");
+        assert!(!decl.is_proxied());
     }
 
     /// A committed manifest still saying `provider = "managed"` resolves as
