@@ -375,16 +375,18 @@ async fn proxy_base_url_override_lands_on_the_stored_row() {
         .unwrap();
     assert_eq!(providers.len(), 1);
     assert_eq!(providers[0].slug, "tinyhumans");
-    assert_eq!(
-        providers[0].base_url,
-        catalogue::tinyhumans_proxy_url(api_url)
-    );
+    let expected = catalogue::tinyhumans_proxy_url(api_url);
+    assert_eq!(providers[0].base_url, expected);
     assert_ne!(
         providers[0].base_url,
         catalogue::cloud_provider(inference::MANAGED_SLUG)
             .unwrap()
             .endpoint
     );
+    // The health probe reads the same override, not the catalogue's
+    // production endpoint (tinysweeper review: the row and the probe base
+    // must not be able to drift apart).
+    assert_eq!(prober.last_base_url(), Some(expected));
 }
 
 /// A `tinyhumans` row minted before this instance followed
