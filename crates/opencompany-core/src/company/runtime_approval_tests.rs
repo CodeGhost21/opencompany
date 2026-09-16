@@ -1,6 +1,7 @@
 //! Runtime tests: approval extension, retirement failures, and thread-root resolution.
 
 use super::CompanyEvent;
+#[cfg(all(feature = "openhuman", feature = "hivemind"))]
 use std::sync::Arc;
 
 /// **Fail-closed, and leave nothing behind.** The fixture roster declares
