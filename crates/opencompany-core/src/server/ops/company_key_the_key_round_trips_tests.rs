@@ -661,7 +661,7 @@ async fn a_journal_failure_after_the_key_is_stored_still_leaves_the_key_stored()
 /// One slot's `outcome` field, looked up by slot name rather than by
 /// position — `company_key::fan_out` promises the order, but a test should
 /// not have to remember it to read one entry.
-fn slot_outcome<'a>(resp: &'a Value, slot: &str) -> &'a Value {
+pub(super) fn slot_outcome<'a>(resp: &'a Value, slot: &str) -> &'a Value {
     let entry = resp["slots"]
         .as_array()
         .expect("slots array")
