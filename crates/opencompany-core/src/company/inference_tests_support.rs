@@ -41,3 +41,4 @@ impl SecretStore for MemSecrets {
         self.map.lock().unwrap().insert(key.to_string(), value.0);
         Ok(())
     }
+}
