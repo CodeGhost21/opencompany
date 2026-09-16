@@ -4,6 +4,14 @@ use std::sync::Arc;
 use crate::ports::tasks::TaskTitle;
 use super::CompanyEvent;
 
+/// `run_dispatch_cycle` discarded the `CycleReport` carrying it (`let
+/// Err(err) = self.run_cycle(...).await else { return; }`), which is the
+/// generic bug underneath #1852, independent of which `Brain` produced
+/// the relay: reverting `run_dispatch_cycle` to that shape reproduces the
+/// failure this test now guards — zero `AgentReply` events land in the
+/// origin thread, because nothing ever journals the discarded report.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
 async fn a_dispatched_cards_relay_is_journaled_into_its_origin_thread() {
     use std::sync::Arc;
 
