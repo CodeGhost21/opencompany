@@ -402,6 +402,57 @@ async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
     super::inference::restart_pending(runtime, configured)
 }
 
+/// Runs the account-key fan-out and drops the caches its outcome invalidates.
+///
+/// Every route that writes this credential needs the same three things in the
+/// same order — the fan-out under its own lock, the Composio catalog dropped
+/// because the key decides which account answers it, and the inference model
+/// catalog dropped only when the LLM copy itself actually moved. Taking them
+/// together means a new caller reaches the whole mechanism rather than the
+/// fan-out alone.
+///
+/// Does **not** journal and does not rebuild: those are the caller's, because
+/// `set_key` needs a journal failure raised only after the rebuild has had its
+/// chance, and a caller with no human actor behind it (first-run setup) has
+/// nobody to attribute a journal line to.
+pub(crate) async fn fan_out_and_evict(
+    state: &AppState,
+    runtime: &CompanyRuntime,
+    key: company_key::FanOutKey<'_>,
+    model: Option<&str>,
+    confirm_in_use: bool,
+) -> Result<company_key::FanOutReport, OpenCompanyError> {
+    let prober = prober_for(runtime);
+    let report = company_key::fan_out(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        company_key::FanOutRequest {
+            key,
+            model,
+            confirm_in_use,
+            proxy_base_url: Some(&state.config().api_url),
+        },
+        prober.as_ref(),
+    )
+    .await?;
+
+    // The credential decides which account the backend resolves, so a change can
+    // change which Composio catalog this company gets. Drop the cached one
+    // rather than serving the previous account's answer for up to `CATALOG_TTL`.
+    super::composio::evict_catalog_cache(runtime);
+    // Same reasoning for the inference model-list cache, only when the LLM
+    // copy itself actually moved — a `Kept`/`Skipped`/`Failed` inference slot
+    // left `provider/tinyhumans/key` exactly as it was.
+    if report
+        .slots
+        .iter()
+        .any(|s| s.slot == company_key::Slot::Inference && slot_changed(s.outcome))
+    {
+        crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
+    }
+    Ok(report)
+}
+
 /// Puts a fan-out that just configured inference to work, the way the LLM
 /// page's own `PUT …/inference` does (issue #290): when the company booted
 /// with no inference source it is on the offline echo brain, and a
@@ -423,12 +474,12 @@ async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
 /// rebuild is logged and falls back to the incoming runtime, whose status
 /// still reports `restart_required` — the honest answer, exactly as
 /// `set_config` handles the same failure.
-async fn rebuild_if_pending(
+pub(crate) async fn rebuild_if_pending(
     state: &AppState,
-    company: &AdminScopedCompany,
+    company: &Arc<CompanyRuntime>,
     report: &company_key::FanOutReport,
 ) -> Arc<CompanyRuntime> {
-    let runtime = company.runtime.clone();
+    let runtime = company.clone();
     let inference_moved = report.slots.iter().any(|s| {
         matches!(
             s.slot,
@@ -484,17 +535,12 @@ async fn set_key(
     let runtime = company.runtime.as_ref();
     let clearing = body.key.trim().is_empty();
 
-    let prober = prober_for(runtime);
-    let report = company_key::fan_out(
-        runtime.id(),
-        runtime.secrets().as_ref(),
-        company_key::FanOutRequest {
-            key: company_key::FanOutKey::Explicit(&body.key),
-            model: body.model.as_deref(),
-            confirm_in_use: body.confirm_in_use,
-            proxy_base_url: Some(&state.config().api_url),
-        },
-        prober.as_ref(),
+    let report = fan_out_and_evict(
+        &state,
+        runtime,
+        company_key::FanOutKey::Explicit(&body.key),
+        body.model.as_deref(),
+        body.confirm_in_use,
     )
     .await
     .map_err(ApiError)?;
@@ -503,21 +549,6 @@ async fn set_key(
     // before it wrote anything; `None` on a set/rotate or a clear with
     // nothing to warn about.
     let used_by = report.used_by.clone();
-
-    // The credential decides which account the backend resolves, so a change can
-    // change which Composio catalog this company gets. Drop the cached one
-    // rather than serving the previous account's answer for up to `CATALOG_TTL`.
-    super::composio::evict_catalog_cache(runtime);
-    // Same reasoning for the inference model-list cache, only when the LLM
-    // copy itself actually moved — a `Kept`/`Skipped`/`Failed` inference slot
-    // left `provider/tinyhumans/key` exactly as it was.
-    if report
-        .slots
-        .iter()
-        .any(|s| s.slot == company_key::Slot::Inference && slot_changed(s.outcome))
-    {
-        crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
-    }
 
     // Namespaced `company_key_*` rather than reusing `ops::composio`'s
     // `credential_set` / `credential_cleared`. Both routes append
@@ -538,7 +569,7 @@ async fn set_key(
 
     // Read off whichever runtime is live after this write — the successor if
     // the fan-out configured inference for a company that booted without any.
-    let live = rebuild_if_pending(&state, &company, &report).await;
+    let live = rebuild_if_pending(&state, &company.runtime, &report).await;
     journal_result?;
     Ok(Json(MutationResponse {
         status: effective_status(&state, live.as_ref()).await?,
@@ -599,27 +630,21 @@ async fn set_model(
         )));
     }
 
-    let prober = prober_for(runtime);
-    let report = company_key::fan_out(
-        runtime.id(),
-        runtime.secrets().as_ref(),
-        company_key::FanOutRequest {
-            key: company_key::FanOutKey::Stored,
-            model: Some(body.model.as_str()),
-            confirm_in_use: false,
-            proxy_base_url: Some(&state.config().api_url),
-        },
-        prober.as_ref(),
+    let report = fan_out_and_evict(
+        &state,
+        runtime,
+        company_key::FanOutKey::Stored,
+        Some(body.model.as_str()),
+        false,
     )
     .await
     .map_err(ApiError)?;
-    super::composio::evict_catalog_cache(runtime);
     // Same ordering as `set_key`: rebuild before propagating a journal
     // failure, so a retry of an already-configured save is not the only way
     // this company ever leaves the echo brain (CodeRabbit review).
     let journal_result = journal_fan_out(&company, false, &report).await;
 
-    let live = rebuild_if_pending(&state, &company, &report).await;
+    let live = rebuild_if_pending(&state, &company.runtime, &report).await;
     journal_result?;
     Ok(Json(MutationResponse {
         status: effective_status(&state, live.as_ref()).await?,
@@ -838,32 +863,19 @@ async fn finish_link(
     // their account doing nothing. A grant never names a model, so it never
     // creates a `tinyhumans` row or a default on its own (Q10) — only the key
     // itself, and its Composio/LLM/Search copies.
-    let prober = prober_for(runtime);
-    let report = company_key::fan_out(
-        runtime.id(),
-        runtime.secrets().as_ref(),
-        company_key::FanOutRequest {
-            key: company_key::FanOutKey::Explicit(&key),
-            model: None,
-            // A grant never clears (Q10) — this flag never gates anything on
-            // this path, so it is set unconditionally rather than threaded
-            // from a request that has no such field.
-            confirm_in_use: true,
-            proxy_base_url: Some(&state.config().api_url),
-        },
-        prober.as_ref(),
+    // A grant never names a model and never clears (Q10), so the model is
+    // `None` and the confirm flag is set unconditionally rather than threaded
+    // from a request that has no such field.
+    let report = fan_out_and_evict(
+        &state,
+        runtime,
+        company_key::FanOutKey::Explicit(&key),
+        None,
+        true,
     )
     .await
     .map_err(ApiError)?;
 
-    super::composio::evict_catalog_cache(runtime);
-    if report
-        .slots
-        .iter()
-        .any(|s| s.slot == company_key::Slot::Inference && slot_changed(s.outcome))
-    {
-        crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
-    }
     // Same ordering as `set_key`/`set_model`: rebuild before propagating a
     // journal failure. The grant's link is already consumed by this point, so
     // an identical retry cannot re-run this fan-out — but a rebuild skipped
@@ -871,7 +883,7 @@ async fn finish_link(
     // never allowed to be the thing that costs it (CodeRabbit review).
     let journal_result = journal_fan_out(&company, false, &report).await;
 
-    let live = rebuild_if_pending(&state, &company, &report).await;
+    let live = rebuild_if_pending(&state, &company.runtime, &report).await;
     journal_result?;
     Ok(Json(MutationResponse {
         status: effective_status(&state, live.as_ref()).await?,
@@ -1005,6 +1017,8 @@ async fn get_billing(
             configured: false,
             summary: None,
             unavailable: None,
+            unavailable_reason: None,
+            unavailable_code: None,
         }));
     };
 
@@ -1014,7 +1028,9 @@ async fn get_billing(
         return Ok(Json(BillingDto {
             configured: true,
             summary: None,
-            unavailable: Some("this host is not part of a TinyHumans ecosystem".to_string()),
+            unavailable: Some("This host is not part of a TinyHumans ecosystem.".to_string()),
+            unavailable_reason: Some("noHub"),
+            unavailable_code: None,
         }));
     };
 
@@ -1023,17 +1039,67 @@ async fn get_billing(
             configured: true,
             summary: Some(summary),
             unavailable: None,
+            unavailable_reason: None,
+            unavailable_code: None,
         })),
         // A hub that will not answer is reported as "not known right now", not
         // as a zero balance. The two look identical on a card and mean opposite
         // things: one is "top up", the other is "try again".
-        Err(error) => Ok(Json(BillingDto {
-            configured: true,
-            summary: None,
-            unavailable: Some(error.to_string()),
-        })),
+        Err(error) => {
+            let (reason, sentence, code) = billing_unavailable(&error);
+            tracing::warn!(
+                company = %runtime.id(),
+                reason,
+                code = code.as_deref().unwrap_or("none"),
+                error = %error,
+                "company billing summary unavailable"
+            );
+            Ok(Json(BillingDto {
+                configured: true,
+                summary: None,
+                unavailable: Some(sentence),
+                unavailable_reason: Some(reason),
+                unavailable_code: code,
+            }))
+        }
     }
 }
+
+/// Classifies a failed billing read into what the console may say about it.
+///
+/// Three values out: the machine-readable `reason` the console switches on, a
+/// sentence **this host owns**, and the hub's stable failure token. The hub's
+/// own `message` is not among them and never reaches the wire: it is a response
+/// body written for whoever reads a log, it can carry anything, and a console
+/// has no way to turn it into something a person can act on.
+///
+/// Only a 401 earns `rejected`, which is the one reason that tells somebody
+/// their key is dead. A 403 is a key the hub recognises and will not let
+/// through this route, and telling its owner to replace it would send them to
+/// mint a second key with the same standing; it goes to `unreachable` with
+/// everything else that means "ask again later". An unrecognised code is
+/// `unknown` rather than the nearest guess: the reasons differ in what they
+/// tell a person to *do*, so guessing between them is worse than declining to.
+fn billing_unavailable(error: &OpenCompanyError) -> (&'static str, String, Option<String>) {
+    let OpenCompanyError::TinyHumans { code, .. } = error else {
+        return ("unknown", BILLING_UNKNOWN.to_string(), None);
+    };
+    let reason = match code.as_str() {
+        "http_401" => "rejected",
+        "unreachable" | "decode" => "unreachable",
+        other if other.starts_with("http_4") || other.starts_with("http_5") => "unreachable",
+        _ => "unknown",
+    };
+    let sentence = match reason {
+        "rejected" => "TinyHumans refused this company's key.",
+        "unreachable" => "TinyHumans could not be reached just now.",
+        _ => BILLING_UNKNOWN,
+    };
+    (reason, sentence.to_string(), Some(code.clone()))
+}
+
+/// What this host says when it cannot tell why the figures are missing.
+const BILLING_UNKNOWN: &str = "The balance could not be read just now.";
 
 /// The billing panel's whole state, including the two ways it can have no
 /// figures to show.
@@ -1045,7 +1111,16 @@ struct BillingDto {
     /// The account's standing, when the hub answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<crate::server::hub_identity::BillingSummary>,
-    /// Why there are no figures, when there are none and a credential exists.
+    /// Why there are no figures, in this host's own words.
     #[serde(skip_serializing_if = "Option::is_none")]
     unavailable: Option<String>,
+    /// Which kind of failure it was: `rejected`, `unreachable`, `noHub` or
+    /// `unknown`. The field a console switches on, so that what it draws does
+    /// not depend on parsing prose — see [`billing_unavailable`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<&'static str>,
+    /// The hub's stable failure token (`http_401`, `unreachable`, …), for a
+    /// report or a log line. Never its message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_code: Option<String>,
 }

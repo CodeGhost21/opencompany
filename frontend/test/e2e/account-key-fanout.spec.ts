@@ -31,6 +31,7 @@ type Page = import("@playwright/test").Page;
 type Route = import("@playwright/test").Route;
 
 const isCredential = (url: URL) => /\/credential$/.test(url.pathname);
+const isBilling = (url: URL) => /\/credential\/billing$/.test(url.pathname);
 
 const KEY_A = "th-not-a-real-key";
 const KEY_B = "th-not-a-real-key-2";
@@ -115,8 +116,25 @@ async function stubSavesWithStatus(
   });
 }
 
+/**
+ * Answers `GET …/credential/billing` so the card's state is decided by this
+ * file and not by whatever the running host's own hub read returns.
+ *
+ * The page reads billing alongside the credential and the account row's state
+ * is drawn from both — a stored key the hub refuses is a different row from a
+ * stored key, and `isCredential` does not match this path. Left to the live
+ * host, every assertion below would depend on a hub answer no stub controls.
+ */
+async function stubBilling(page: Page, body: Record<string, unknown>): Promise<void> {
+  await page.route(isBilling, async (route: Route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    await route.fulfill({ json: body });
+  });
+}
+
 /** Open the Account page with the first-run tour out of the way. */
 async function openAccount(page: Page): Promise<void> {
+  await stubBilling(page, { configured: false });
   await page.goto("/#/connections/api-key");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
