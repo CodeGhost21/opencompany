@@ -20,9 +20,12 @@ use tinymemory_api::types::{
 };
 
 use super::BoundMemory;
+use super::tests_behavior::ConformanceStores;
 use crate::ports::{
     CompanyId, CompressedTrace, ContextChunk, EvictionPolicy, FactKind, FactRecord,
 };
+use crate::store::conformance;
+use crate::store::{FsCompanyStore, FsEventLog};
 
 /// An in-memory `Memory` backend, keyed exactly as the contract specifies.
 #[derive(Default)]
