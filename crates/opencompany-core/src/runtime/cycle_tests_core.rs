@@ -482,11 +482,11 @@ impl MemoryStore for CountingMemory {
 /// The [`ContextStore`] half of the same instrument.
 pub(super) struct CountingContext {
     inner: FsContextStore,
-    lists: AtomicUsize,
+    pub(super) lists: AtomicUsize,
 }
 
 impl CountingContext {
-    fn new(inner: FsContextStore) -> Self {
+    pub(super) fn new(inner: FsContextStore) -> Self {
         Self {
             inner,
             lists: AtomicUsize::new(0),
