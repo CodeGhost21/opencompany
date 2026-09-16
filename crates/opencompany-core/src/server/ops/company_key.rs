@@ -528,7 +528,7 @@ async fn set_key(
         runtime.id(),
         runtime.secrets().as_ref(),
         company_key::FanOutRequest {
-            key: &body.key,
+            key: company_key::FanOutKey::Explicit(&body.key),
             model: body.model.as_deref(),
             confirm_in_use: body.confirm_in_use,
             proxy_base_url: Some(&state.config().api_url),
@@ -869,7 +869,7 @@ async fn finish_link(
         runtime.id(),
         runtime.secrets().as_ref(),
         company_key::FanOutRequest {
-            key: &key,
+            key: company_key::FanOutKey::Explicit(&key),
             model: None,
             // A grant never clears (Q10) — this flag never gates anything on
             // this path, so it is set unconditionally rather than threaded
