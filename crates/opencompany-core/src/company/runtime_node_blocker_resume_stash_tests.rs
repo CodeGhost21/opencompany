@@ -39,6 +39,10 @@ to = "draft"
 
 #[derive(Clone, Debug)]
 struct StartedRun {
+    // Not read by any assertion in this file — kept to match the shape
+    // `RecordingRunner` shares with `runtime_node_blocker_resume_retry_tests.rs`,
+    // where `workflow_id` is the field under test.
+    #[allow(dead_code)]
     workflow_id: String,
     input: Value,
 }
