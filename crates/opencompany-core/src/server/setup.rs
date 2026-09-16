@@ -240,8 +240,8 @@ pub struct InferenceReadyDto {
 ///
 /// The credential itself never leaves this function.
 #[cfg(feature = "openhuman")]
-fn house_credential(env: &dyn EnvSource) -> Option<String> {
-    crate::harness::provider::harness_inference_from_env(env)
+fn house_credential(env: &dyn EnvSource, api_url: &str) -> Option<String> {
+    crate::harness::provider::harness_inference_from_env_at(env, Some(api_url))
         // Redacted, because "it is a URL" is not the same as "it is not a
         // secret": `OPENCOMPANY_INFERENCE_URL` can carry userinfo, and this
         // one is the deployer's own endpoint rather than a tenant's, so no
@@ -668,7 +668,7 @@ fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompa
             .map(|id| id.as_ref().to_string())
             .collect(),
         inference: {
-            let base_url = house_credential(env);
+            let base_url = house_credential(env, &state.config().api_url);
             InferenceReadyDto {
                 ready: base_url.is_some(),
                 provider: base_url.is_some().then_some("managed"),
@@ -1360,7 +1360,7 @@ async fn test_inference(
     Json(req): Json<InferenceTestRequest>,
 ) -> Result<Json<InferenceTestDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
-    Ok(Json(probe_inference(&req, &ProcessEnv).await))
+    Ok(Json(probe_inference(&req, &ProcessEnv, &state.config().api_url).await))
 }
 
 /// Runs the probe against the resolved config.
@@ -1368,14 +1368,17 @@ async fn test_inference(
 async fn probe_inference<E: EnvSource + Sync>(
     req: &InferenceTestRequest,
     env: &E,
+    api_url: &str,
 ) -> InferenceTestDto {
-    let env_default =
-        crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| {
-            crate::company::inference::EnvDefault {
-                base_url: config.base_url,
-                credential: config.credential,
-            }
-        });
+    // The endpoint follows the host's `api_url` with or without an instance
+    // credential — the same default the runtime builder attaches — so a key
+    // typed into the wizard on a staging host is probed against staging.
+    let (config, _) =
+        crate::harness::provider::platform_inference_default_at(env, Some(api_url));
+    let env_default = Some(crate::company::inference::EnvDefault {
+        base_url: config.base_url,
+        credential: config.credential,
+    });
     let normalized_base_url =
         crate::company::inference::normalize_setup_base_url(&req.provider, req.base_url.as_deref());
     // **Refused before anything is sent.** The catalogue read below and the
@@ -1662,6 +1665,7 @@ async fn propose_roster(
     } else {
         propose_for_setup(
             &answers,
+            &state.config().api_url,
             req.inference_provider.as_deref(),
             req.inference_base_url.as_deref(),
             req.inference_key.as_deref(),
@@ -1739,6 +1743,7 @@ async fn propose_roster(
 #[cfg(feature = "openhuman")]
 async fn propose_for_setup(
     answers: &crate::company::setup::SetupAnswers,
+    api_url: &str,
     provider: Option<&str>,
     base_url: Option<&str>,
     credential: Option<&str>,
@@ -1746,6 +1751,7 @@ async fn propose_for_setup(
 ) -> crate::company::setup::RosterProposal {
     match crate::harness::roster_build::RosterBuilder::for_setup(
         &ProcessEnv,
+        Some(api_url),
         provider,
         base_url,
         credential,
@@ -1767,6 +1773,7 @@ async fn propose_for_setup(
 #[cfg(not(feature = "openhuman"))]
 async fn propose_for_setup(
     answers: &crate::company::setup::SetupAnswers,
+    _api_url: &str,
     _provider: Option<&str>,
     _base_url: Option<&str>,
     _credential: Option<&str>,
