@@ -1,9 +1,13 @@
 use super::*;
 use crate::company::CompanyManifest;
+#[cfg(feature = "openhuman")]
 use crate::ports::types::CompanyRecord;
+#[cfg(feature = "openhuman")]
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
+#[cfg(feature = "openhuman")]
 use crate::store::FsCompanyStore;
+#[cfg(feature = "openhuman")]
 use crate::{AppConfig, AppState};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
