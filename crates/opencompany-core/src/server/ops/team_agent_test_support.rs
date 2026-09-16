@@ -329,3 +329,94 @@ pub(super) fn plan_with(total_tokens: Option<u64>) -> crate::company::Plan {
         ..Default::default()
     }
 }
+
+/// The smallest legal GIF: a 1x1 image. Small enough to embed here, and
+/// real enough that the decoder — rather than believing the part's declared
+/// type — accepts it.
+pub(super) const TINY_GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\xff\x00,\x00\x00\x00\x00\
+\x01\x00\x01\x00\x00\x02\x00;";
+
+/// A PNG whose header claims a 65535×65535 frame in a body of a few dozen
+/// bytes — the decompression bomb the dimension caps exist for. The
+/// signature and IHDR are enough for both the sniff and the size read.
+pub(super) fn bomb_png() -> Vec<u8> {
+    let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+    v.extend_from_slice(&13u32.to_be_bytes());
+    v.extend_from_slice(b"IHDR");
+    v.extend_from_slice(&65535u32.to_be_bytes());
+    v.extend_from_slice(&65535u32.to_be_bytes());
+    v.extend_from_slice(&[8, 6, 0, 0, 0]);
+    v
+}
+
+/// Posts `bytes` to the avatar upload route as a `file` part named `name`.
+pub(super) async fn upload_avatar(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
+    const BOUNDARY: &str = "----ocavatartest";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"{name}\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/avatars")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// Posts `bytes` to the generic workspace upload route as a `file` part
+/// named `name`, declaring `mime` as its `Content-Type`. The declared type
+/// is what the store keeps — the referent check must not trust it, and this
+/// helper exists to prove that.
+pub(super) async fn upload_workspace_binary(
+    state: &AppState,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
+    const BOUNDARY: &str = "----ocworkspacetest";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/workspace/upload")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
