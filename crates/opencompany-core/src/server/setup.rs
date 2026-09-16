@@ -228,6 +228,16 @@ pub struct InferenceReadyDto {
     /// automatically safe to show, because it can carry userinfo. See
     /// [`redact_endpoint`](crate::company::inference::catalogue::redact_endpoint).
     pub base_url: Option<String>,
+    /// Where an operator mints a TinyHumans key by hand — the API-keys tab of
+    /// the dashboard belonging to the platform **this host is on**. The wizard
+    /// runs before any company exists, so the one-click grant (which the host
+    /// scopes to a company) cannot; a link is what is left, and it has to be a
+    /// link to the right hub. The console used to hard-code production here,
+    /// so a host on staging sent its operator to mint a key staging would
+    /// never accept. `None` when `api_url` follows no convention the site
+    /// derivation knows (`hub_account::site_for_api`), and the wizard then
+    /// shows no link rather than a guess.
+    pub keys_url: Option<String>,
 }
 
 /// Whether the host already holds a usable credential, and where it points.
@@ -673,6 +683,10 @@ fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompa
                 ready: base_url.is_some(),
                 provider: base_url.is_some().then_some("managed"),
                 base_url,
+                keys_url: state
+                    .config()
+                    .hub_site()
+                    .map(|site| crate::server::hub_account::manage_keys_url(&site)),
             }
         },
     })
