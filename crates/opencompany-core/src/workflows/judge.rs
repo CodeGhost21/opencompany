@@ -563,5 +563,8 @@ fn usage_from(response: &ModelResponse) -> TokenUsage {
 }
 
 #[cfg(test)]
-#[path = "judge_tests.rs"]
-mod tests;
+#[path = "judge_parsing_tests.rs"]
+mod tests_parsing;
+#[cfg(test)]
+#[path = "judge_peer_tests.rs"]
+mod tests_peer;
