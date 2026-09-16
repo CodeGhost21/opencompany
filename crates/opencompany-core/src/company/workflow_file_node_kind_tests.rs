@@ -1,5 +1,7 @@
 //! workflow_file: the P2 node kinds, per-kind required config (issue #661), and inescapable-cycle/reachability checks (G15, issue #540).
 
+use super::*;
+
 // --- P2: the six new node kinds ----------------------------------------
 
 /// Each new node kind parses to its enum variant, and `WORKFLOW_NODE_KINDS`

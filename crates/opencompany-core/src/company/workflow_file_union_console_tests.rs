@@ -1,5 +1,7 @@
 //! workflow_file: seed/overlay union loading (issue #168), console-message parity, and issue #1016's per-kind config gate.
 
+use super::*;
+
 // --- seed ∪ overlay union (issue #168) ----------------------------------
 
 use crate::ports::types::OverlayWorkflow;

@@ -1,5 +1,7 @@
 //! workflow_file: per-node config, error/retry policy, and postcondition/verify field validation (P1).
 
+use super::*;
+
 // --- Per-node config / error / retry policy (P1) -----------------------
 
 #[test]

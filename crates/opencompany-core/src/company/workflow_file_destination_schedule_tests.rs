@@ -1,5 +1,7 @@
 //! workflow_file: output destinations (issue #170) and trigger schedules (issue #169).
 
+use super::*;
+
 // --- Output destination (issue #170) ------------------------------------
 
 /// A graph with one `output` node carrying `destination` of `kind`, plus an
