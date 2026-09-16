@@ -262,4 +262,7 @@ async fn the_composio_key_check_reports_the_verdict_and_writes_nothing() {
         state.registry().is_empty(),
         "a check creates nothing and configures nothing"
     );
+    // `setup` is a shared slot, not a company id, so this must not outlive the
+    // test that forced it.
+    crate::server::ops::composio::probe_override::clear("setup");
 }
