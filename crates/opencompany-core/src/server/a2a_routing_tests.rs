@@ -114,6 +114,9 @@ async fn well_known_and_skill_md_bodies() {
     assert!(md.contains("`seo.audit` — 25.00 USDC (solana)"));
 }
 
+/// PLAT-067 / PLAT-066-067: `tasks/send` is fully synchronous, so a cycle
+/// that never returns must not be able to hold the connection (and the
+/// task behind it) open forever.
 #[tokio::test(start_paused = true)]
 async fn a_task_that_never_finishes_is_bounded_by_a_cycle_timeout() {
     let dir = tempfile::tempdir().unwrap();
@@ -142,6 +145,9 @@ async fn a_task_that_never_finishes_is_bounded_by_a_cycle_timeout() {
     );
 }
 
+/// PLAT-067: one `tasks/send` POST must append exactly one
+/// `A2aTaskReceived` event — not a batch, not a loop that could run the
+/// counterparty's task more than once.
 #[tokio::test]
 async fn exactly_one_cycle_runs_per_inbound_task() {
     let dir = tempfile::tempdir().unwrap();
@@ -180,6 +186,9 @@ async fn exactly_one_cycle_runs_per_inbound_task() {
     );
 }
 
+/// PLAT-066: the prosumer fallback is scoped to a genuinely sole company.
+/// With two companies registered, an unmatched handle must 404 rather than
+/// silently answering as either of them.
 #[tokio::test]
 async fn the_prosumer_fallback_does_not_fire_when_more_than_one_company_is_registered() {
     let dir = tempfile::tempdir().unwrap();
@@ -203,6 +212,10 @@ async fn the_prosumer_fallback_does_not_fire_when_more_than_one_company_is_regis
     );
 }
 
+/// PLAT-066-067: this IS the SIWX design — a self-issued identity, not an
+/// allow-listed one. Two independently generated keypairs, neither ever
+/// provisioned or seen before, must each transact on their very first
+/// request.
 #[tokio::test]
 async fn two_independent_strangers_each_transact_without_prior_registration() {
     let dir = tempfile::tempdir().unwrap();

@@ -172,6 +172,9 @@ async fn paid_skill_with_valid_x402_routes_and_journals() {
     assert_eq!(inflow.amount_usd, 25.0);
 }
 
+/// The same signed authorization, presented on two different tasks. Each
+/// request carries its own SIWX signature, so the transport replay cache
+/// admits both; only the payment layer can refuse the second.
 #[tokio::test]
 async fn replayed_x402_authorization_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -207,6 +210,7 @@ async fn replayed_x402_authorization_is_refused() {
     );
 }
 
+/// Spending one nonce must not blind the company to the next payment.
 #[tokio::test]
 async fn a_freshly_minted_authorization_is_admitted() {
     let dir = tempfile::tempdir().unwrap();
@@ -232,6 +236,8 @@ async fn a_freshly_minted_authorization_is_admitted() {
     }
 }
 
+/// A skill id the card never advertises must not slip past the pricing gate
+/// on a company that prices its work.
 #[tokio::test]
 async fn unknown_skill_id_is_refused_on_a_pricing_card() {
     let dir = tempfile::tempdir().unwrap();
@@ -493,6 +499,8 @@ async fn replayed_signature_is_rejected() {
     assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// The spent-nonce set is the only thing that makes an authorization
+/// single-use, so a set that cannot answer must stop the sale.
 #[tokio::test]
 async fn an_unusable_spent_nonce_set_refuses_a_paid_task() {
     let dir = tempfile::tempdir().unwrap();

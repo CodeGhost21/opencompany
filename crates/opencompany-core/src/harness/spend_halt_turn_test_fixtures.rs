@@ -5,7 +5,6 @@
 //!
 //! See [`super::spend_halt_turn_tests`] for what each test proves.
 
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -28,7 +27,6 @@ use crate::ports::types::{
     ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
     Effect, EffectDisposition, OutboundMessage, ToolCall, ToolResult,
 };
-
 
 /// The agent every test here talks to.
 pub(super) const AGENT: &str = "ceo";

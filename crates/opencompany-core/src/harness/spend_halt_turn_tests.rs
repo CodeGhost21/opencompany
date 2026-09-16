@@ -44,6 +44,7 @@ use axum::Json;
 use axum::routing::post;
 use serde_json::{Value, json};
 
+use super::spend_halt_turn_test_fixtures::*;
 use crate::company::CompanyManifest;
 use crate::company::credentials::Credential;
 use crate::harness::brain::{iteration_cap_pause_notice, spend_halt_notice};
@@ -59,7 +60,6 @@ use crate::ports::types::{
     ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
     Effect, EffectDisposition, OutboundMessage, ToolCall, ToolResult,
 };
-use super::spend_halt_turn_test_fixtures::*;
 
 // ---------------------------------------------------------------------------
 // The flag
@@ -435,4 +435,3 @@ fn the_notice_quotes_the_spend_the_cap_and_the_teammate() {
         "a spend halt is not resumable by asking again: {notice}"
     );
 }
-

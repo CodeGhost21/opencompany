@@ -995,14 +995,14 @@ pub fn speech_belt(context: SpeechContext) -> Vec<Box<dyn Tool>> {
 #[cfg(test)]
 #[path = "speech_tools_test_fixtures.rs"]
 mod speech_tools_test_fixtures;
+/// `desk_read` coverage: scan, channel/audience filtering, and truncation.
+/// See `tests_dm` above for why this is split out.
+#[cfg(test)]
+#[path = "speech_tools_desk_read_tests.rs"]
+mod tests_desk_read;
 /// `desk_dm` / `desk_post` coverage: resolution, journaling, and multi-recipient
 /// delivery. Split from `desk_read` coverage (below) because the combined
 /// inline module exceeded the 750-line file limit.
 #[cfg(test)]
 #[path = "speech_tools_dm_tests.rs"]
 mod tests_dm;
-/// `desk_read` coverage: scan, channel/audience filtering, and truncation.
-/// See `tests_dm` above for why this is split out.
-#[cfg(test)]
-#[path = "speech_tools_desk_read_tests.rs"]
-mod tests_desk_read;

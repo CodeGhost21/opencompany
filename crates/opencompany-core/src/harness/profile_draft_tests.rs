@@ -391,8 +391,7 @@ fn prose_is_not_a_design() {
 /// into a job title; the pass refuses and the operator is asked instead.
 #[test]
 fn a_designed_role_is_never_truncated_into_shape() {
-    let long =
-        "Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm";
+    let long = "Runs wholesale outreach to boutique retailers and keeps the stockist pipeline warm";
     assert!(long.chars().count() > MAX_ROLE);
     let answer = format!(
         r#"{{"role": "{long}", "description": "Owns stockists.", "instructions": "Be terse."}}"#

@@ -95,6 +95,7 @@ pub(super) async fn seeded_state_with_brain(
     (state, client_signer)
 }
 
+/// A brain that never returns, so a test can prove the cycle it drives is
 /// bounded by something other than the brain's own good behavior.
 pub(super) struct HangingBrain;
 
@@ -110,6 +111,7 @@ impl Brain for HangingBrain {
     }
 }
 
+/// A brain that answers a cycle with nothing, cheaply — for tests that
 /// only care about the transport, not what cognition produces.
 pub(super) struct SilentBrain;
 
@@ -177,6 +179,7 @@ pub(super) fn siwx_header(signer: &LocalSigner, handle: &str, body: &[u8], ts: i
     siwx::header_value(&header)
 }
 
+/// Builds a SIWX-signed `seo.audit` request carrying `auth` as its payment.
 /// `site` varies the body so each request has its own SIWX signature.
 pub(super) fn paid_request(client: &LocalSigner, auth: &X402Authorization, site: &str) -> Request<Body> {
     let rpc = JsonRpcRequest::new(
@@ -194,7 +197,6 @@ pub(super) fn paid_request(client: &LocalSigner, auth: &X402Authorization, site:
         .unwrap()
 }
 
-
 pub(super) fn task_body(skill: &str) -> Vec<u8> {
     serde_json::to_vec(&JsonRpcRequest::new(
         "tasks/send",
@@ -202,7 +204,6 @@ pub(super) fn task_body(skill: &str) -> Vec<u8> {
     ))
     .unwrap()
 }
-
 
 pub(super) fn card_pricing(skills: &[(&str, &str)]) -> AgentCard {
     AgentCard {
