@@ -19,7 +19,7 @@ pub(super) use crate::ports::types::{
 // The two-level resolver. Test-only now: the roster build goes through
 // `agent_scoped_grants`, and these tests assert the desk-less case still
 // resolves identically to what shipped before desks could scope tools.
-use crate::runtime::builder::agent_effective_grants;
+pub(super) use crate::runtime::builder::agent_effective_grants;
 
 pub(super) fn fp_entry_full(
     mode: Option<&str>,
