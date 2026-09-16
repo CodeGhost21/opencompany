@@ -455,33 +455,6 @@ async fn a_provider_name_past_the_bound_is_refused_rather_than_breaking_the_stor
 // not the built-in production constant.
 // ---------------------------------------------------------------------
 
-/// Where a staging deployment is pointed with `OPENCOMPANY_INFERENCE_URL`.
-const STAGING_URL: &str = "https://staging-api.tinyhumans.ai/openai/v1";
-
-/// The platform default a staging tenant is injected with.
-fn staging_platform() -> EnvDefault {
-    EnvDefault {
-        base_url: STAGING_URL.to_string(),
-        credential: crate::company::credentials::Credential::from_value(
-            "platform-token".to_string(),
-        ),
-    }
-}
-
-/// A built runtime whose committed manifest is `manifest_toml`.
-async fn runtime_with(home: &std::path::Path, manifest_toml: &str) -> CompanyRuntime {
-    let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
-    let id = CompanyId::new("acme");
-    save_record(home, &id, &manifest).await;
-    RuntimeBuilder::new(home.to_path_buf(), manifest)
-        .with_id(id)
-        .build()
-        .await
-        .unwrap()
-}
-
-const NO_INFERENCE: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
-
 const MANAGED_MANIFEST: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
      [inference]\nprovider = \"managed\"\n";
 
