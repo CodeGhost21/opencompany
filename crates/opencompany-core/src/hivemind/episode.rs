@@ -789,7 +789,12 @@ impl<'a> EpisodeDriver<'a> {
                         (
                             ledger.asked.len() > answered_before
                                 && last.is_some_and(|asked| asked.returned || !asked.crossed),
-                            last.and_then(|asked| asked.conversation.clone()),
+                            last.and_then(|asked| {
+                                asked
+                                    .conversation
+                                    .clone()
+                                    .map(|thread| (thread, asked.opened, asked.target.clone()))
+                            }),
                         )
                     };
                     // **The exchange the asker is about to speak on, when it
@@ -807,12 +812,43 @@ impl<'a> EpisodeDriver<'a> {
                     // asker may quote and which move no option here. The desk
                     // record stays private; what reaches the floor is whatever
                     // the asker chooses to say in its own words.
+                    //
+                    // Bounded at the row this exchange opened on. The pair key
+                    // is deterministic, so two agents reuse one thread for
+                    // every crossing they have; unbounded, the asker was handed
+                    // every past exchange with that teammate as though it were
+                    // the answer it had just received (tinysweeper, #2341).
                     let mut carried = elsewhere.clone();
-                    if let Some(thread) = held_in.as_deref()
+                    if let Some((thread, opened, other)) = held_in.as_ref()
                         && answered
-                        && let Some(rows) = self.conversation_rows(thread, &turn.agent_id).await
+                        && let Some(rows) = self
+                            .conversation_rows(thread, &turn.agent_id, *opened)
+                            .await
                     {
-                        carried.push((format!("Your exchange with @{thread}"), rows));
+                        // Labelled by WHO, not by where. `thread` is the pair's
+                        // storage key — `dm:<a>+<b>` — and interpolating it put
+                        // "Your exchange with @dm:planner+sre" in front of the
+                        // model, naming an internal id as though it were a
+                        // colleague's handle.
+                        //
+                        // Merged into the section that label already names,
+                        // rather than opening a second one beside it: now that
+                        // `elsewhere_for` carries this seat's pair threads, an
+                        // earlier exchange with the SAME teammate is already
+                        // here under this exact label, and two sections with
+                        // one name is the ambiguity `elsewhere` renders per
+                        // conversation to avoid. Sorted and deduplicated for
+                        // the same reason the direct line's two spellings are.
+                        let label = format!("Your exchange with @{other}");
+                        if let Some(existing) =
+                            carried.iter_mut().find(|(existing, _)| *existing == label)
+                        {
+                            existing.1.extend(rows);
+                            existing.1.sort_by_key(|message| message.sequence);
+                            existing.1.dedup_by_key(|message| message.sequence);
+                        } else {
+                            carried.push((label, rows));
+                        }
                     }
                     // **The asker's turn continues on the answer it paid for.**
                     //
@@ -1121,6 +1157,10 @@ impl<'a> EpisodeDriver<'a> {
         &self,
         conversation: &str,
         viewer_id: &str,
+        // The row this exchange opened on. A pair thread is keyed on its two
+        // members and nothing else, so without this the projection returns
+        // every crossing those two have ever had inside `SESSION_WINDOW`.
+        since: Option<u64>,
     ) -> Option<Vec<tinyhivemind_hive::SessionMessage>> {
         let log = EventLogSessionLog::new(
             Arc::clone(&self.events),
@@ -1145,6 +1185,15 @@ impl<'a> EpisodeDriver<'a> {
         )
         .await
         .ok()?;
+        // Inclusive: `since` IS the question that opened the exchange, and an
+        // exchange rendered without it starts at the answer.
+        let rows: Vec<_> = match since {
+            Some(from) => rows
+                .into_iter()
+                .filter(|row| row.sequence.0 >= from)
+                .collect(),
+            None => rows,
+        };
         (!rows.is_empty()).then_some(rows)
     }
 
@@ -1422,6 +1471,47 @@ impl<'a> EpisodeDriver<'a> {
             .context_desks
             .iter()
             .all(|desk| desk.id != agent_id && desk.name != agent_id);
+        // **Every private line this seat holds, not just the one with the
+        // operator.**
+        //
+        // A pair thread is `dm:<a>+<b>` — neither a desk nor either
+        // participant's own direct line — so it matched none of the targets
+        // above and no agent ever read one again. The asker got the exchange it
+        // had just had, on the single turn straight after it, and that was all:
+        // the teammate who ANSWERED never saw it again, and neither side
+        // retained anything from a previous one. Two seats could settle
+        // something on Monday and rediscover it from scratch on Tuesday, which
+        // is exactly what a live retail run did — agents re-asking each other
+        // about capabilities they had already exchanged.
+        //
+        // Deterministic keys make this enumerable rather than searchable:
+        // `pair_conversation` sorts the two ids, so the thread this seat shares
+        // with any teammate is computable without an index. A thread that never
+        // happened simply projects empty and is skipped by the loop below.
+        //
+        // Only threads this seat is IN: every key is built from `agent_id`
+        // itself, so a pair between two other people is not addressable here.
+        // The viewer narrowing below is the second line of that defence.
+        let mut partners: Vec<String> = self
+            .context_desks
+            .iter()
+            .flat_map(|desk| desk.members.iter())
+            .filter(|member| *member != agent_id)
+            .cloned()
+            .collect();
+        partners.sort();
+        partners.dedup();
+        let pairs: Vec<(String, String, String)> = partners
+            .into_iter()
+            .map(|other| {
+                let thread = super::referral::pair_conversation(agent_id, &other);
+                (
+                    thread.clone(),
+                    thread,
+                    format!("Your exchange with @{other}"),
+                )
+            })
+            .collect();
         let targets: Vec<(String, String, String)> = self
             .context_desks
             .iter()
@@ -1451,6 +1541,7 @@ impl<'a> EpisodeDriver<'a> {
                 format!("{}{agent_id}", crate::runtime::assignee::DM_PREFIX),
                 direct_line_label,
             )))
+            .chain(pairs)
             .collect();
         let mut elsewhere: Vec<(String, Vec<tinyhivemind_hive::SessionMessage>)> =
             Vec::with_capacity(targets.len());

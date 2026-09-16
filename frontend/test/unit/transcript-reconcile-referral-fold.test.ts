@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { ReferralConversationDto } from "@/api/types";
-import { type ChatMessage, reconcileTranscript } from "@/lib/chat";
+import {
+  type ChatMessage,
+  mergeHistoryInOrder,
+  reconcileTranscript,
+} from "@/lib/chat";
 
 /**
  * A crossing's exchange folds onto the row that ASKED — a row the transcript
@@ -20,6 +24,9 @@ const row = (id: string, extra: Partial<ChatMessage> = {}): ChatMessage =>
     author: "planner",
     text: "what is the lag budget?",
     mine: false,
+    // `mergeHistoryInOrder` orders on it, so a fixture without one is not a
+    // row that path can actually fold.
+    at: 1_000 + Number(id.replace(/\D/g, "")),
     ...extra,
   }) as ChatMessage;
 
@@ -88,5 +95,49 @@ describe("reconcileTranscript", () => {
     const merged = reconcileTranscript(existing, [row("h11"), row("h12")]);
 
     expect(merged).toBe(existing);
+  });
+});
+
+/**
+ * The 5-second poll is the path that matters most, and it had the same fault
+ * in mirror image: `reconcileTranscript` kept the held copy when it was equal,
+ * while `mergeHistoryInOrder` kept the held copy *always*.
+ *
+ * So the poll fetched the finished crossing and discarded it in favour of the
+ * one-message version caught mid-exchange. Only a full reload ever showed the
+ * whole exchange — which is exactly how it presented live.
+ */
+describe("mergeHistoryInOrder", () => {
+  const crossing = (messages: number): ReferralConversationDto => ({
+    askerId: "cancellations",
+    otherId: "amendments",
+    otherDeskId: "order_ops",
+    otherDeskName: "Order Operations",
+    direct: true,
+    lines: Array.from({ length: messages }, (_, i) => ({
+      authorId: i % 2 === 0 ? "cancellations" : "amendments",
+      authorLabel: "",
+      text: `line ${i}`,
+      outbound: i % 2 === 0,
+    })),
+  });
+
+  it("takes the host's updated fold over the stale one already on screen", () => {
+    const midExchange = row("h4", { referralConversation: crossing(1) });
+    const finished = row("h4", { referralConversation: crossing(4) });
+
+    const merged = mergeHistoryInOrder([midExchange], [finished]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].referralConversation?.lines).toHaveLength(4);
+  });
+
+  it("still keeps the held object when nothing changed, so React can bail", () => {
+    const held = row("h4", { referralConversation: crossing(4) });
+    const same = row("h4", { referralConversation: crossing(4) });
+
+    const merged = mergeHistoryInOrder([held], [same]);
+
+    expect(merged[0]).toBe(held);
   });
 });

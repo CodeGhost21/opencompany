@@ -43,6 +43,7 @@ export function WorkingIndicator({
   steps,
   queued,
   name,
+  label,
   className,
 }: {
   /** The stable assistive string, e.g. "Replying…". Never the step label. */
@@ -80,11 +81,24 @@ export function WorkingIndicator({
    * replaces it outright.
    */
   name?: string;
+  /**
+   * A complete line, for work that "<name> is working…" cannot describe.
+   *
+   * A crossing is the case: a question put to a person has TWO seats talking,
+   * and one put to a desk has a room answering — neither is one teammate at a
+   * keyboard. Given here already phrased, because the alternative is this
+   * component inferring a sentence from parts, which is the drift its own note
+   * above forbids.
+   *
+   * Ranks exactly where `name` does: below a running step, above the generic
+   * line.
+   */
+  label?: string;
   className?: string;
 }) {
   const reduced = usePrefersReducedMotion();
   const running = runningStepLabel(steps);
-  const idle = name ? `${name} is working…` : GENERIC_LABEL;
+  const idle = label ?? (name ? `${name} is working…` : GENERIC_LABEL);
 
   return (
     <span
@@ -122,7 +136,7 @@ export function WorkingIndicator({
           this never announces "Amendments is working…" while the visible
           line (and the live step timeline beside it) is naming a step. */}
       <span className="sr-only">
-        {queued ? QUEUED_LABEL : !running && name ? idle : srLabel}
+        {queued ? QUEUED_LABEL : !running && (name || label) ? idle : srLabel}
       </span>
     </span>
   );

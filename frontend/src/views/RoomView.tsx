@@ -184,6 +184,7 @@ interface Props {
    */
   transcripts: Transcripts;
   setTranscripts: Dispatch<SetStateAction<Transcripts>>;
+
   /**
    * How far the shell's rehydration of each channel's history has got, so the
    * timeline can hold a loading state instead of claiming a channel is empty

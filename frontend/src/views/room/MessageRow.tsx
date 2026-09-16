@@ -496,7 +496,7 @@ export function MessageRow({
             says what was asked and what came back, collapsed so the desk still
             reads as its own conversation. */}
         {message.referralConversation && (
-          <ReferralConversation crossing={message.referralConversation} />
+          <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
         )}
         {message.asideConversation && (
           <AsideConversation aside={message.asideConversation} />
