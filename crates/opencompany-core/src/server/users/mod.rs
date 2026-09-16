@@ -85,10 +85,34 @@ pub(crate) fn validate_display_name(name: &str) -> Result<(), OpenCompanyError> 
 }
 
 #[cfg(test)]
-mod auth_test;
+#[path = "auth_test_support_1.rs"]
+mod auth_test_support_1;
+#[cfg(test)]
+#[path = "auth_test_group_1.rs"]
+mod auth_test_group_1;
+#[cfg(test)]
+#[path = "auth_test_group_2.rs"]
+mod auth_test_group_2;
 #[cfg(test)]
 mod hub_tests;
 #[cfg(test)]
-mod mode_test;
+#[path = "mode_test_support_1.rs"]
+mod mode_test_support_1;
 #[cfg(test)]
-mod routes_test;
+#[path = "mode_test_group_1.rs"]
+mod mode_test_group_1;
+#[cfg(test)]
+#[path = "mode_test_group_2.rs"]
+mod mode_test_group_2;
+#[cfg(test)]
+#[path = "routes_test_support_1.rs"]
+mod routes_test_support_1;
+#[cfg(test)]
+#[path = "routes_test_group_1.rs"]
+mod routes_test_group_1;
+#[cfg(test)]
+#[path = "routes_test_group_2.rs"]
+mod routes_test_group_2;
+#[cfg(test)]
+#[path = "routes_test_group_3.rs"]
+mod routes_test_group_3;
