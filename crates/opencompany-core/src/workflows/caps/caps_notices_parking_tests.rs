@@ -1,6 +1,6 @@
-use super::*;
 use super::tests_multi_call_notices::overflowing_runner_notices;
 use super::tests_turn_dispatch::single_turn;
+use super::*;
 
 /// The ordering fix that rides with it. The `parking`-is-`None` guard
 /// `return`s, and it used to sit **above** the overflow branch — so on a

@@ -1,7 +1,7 @@
 use super::*;
 use crate::ports::{WorkflowBlockedNode, WorkflowRun};
 use crate::workflows::caps::ParkedCalls;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The block trigger, pinned exhaustively over the shapes a drain can hand
 /// back. Emptiness is the whole decision — a node blocks on the bare
