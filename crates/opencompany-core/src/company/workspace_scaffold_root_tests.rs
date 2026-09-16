@@ -340,9 +340,3 @@ async fn scaffolding_is_per_company() {
     assert!(ws.is_empty(&other).await.unwrap());
 }
 
-// -- the lazy minters ---------------------------------------------------
-
-/// The property #552's publish path depends on: minting on every publish
-/// must be free after the first one, and must hand back the *same* parent
-/// id so two deliverables land in one folder rather than two.
-#[tokio::test]

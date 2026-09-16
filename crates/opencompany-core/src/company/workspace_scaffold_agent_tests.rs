@@ -1,3 +1,9 @@
+// -- the lazy minters ---------------------------------------------------
+
+/// The property #552's publish path depends on: minting on every publish
+/// must be free after the first one, and must hand back the *same* parent
+/// id so two deliverables land in one folder rather than two.
+#[tokio::test]
 //! Workspace scaffold: per-agent folder minting, adoption, and error
 //! handling when a member collides with something already there.
 
