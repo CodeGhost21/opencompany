@@ -510,6 +510,9 @@ fn prompt_text(params: &Value) -> Result<String, String> {
 #[path = "transport_test_support.rs"]
 mod test_support;
 #[cfg(test)]
+#[path = "transport_call_handler_tests.rs"]
+mod tests_call_handler;
+#[cfg(test)]
 #[path = "transport_parsing_tests.rs"]
 mod tests_parsing;
 #[cfg(test)]
@@ -518,6 +521,3 @@ mod tests_prompt;
 #[cfg(test)]
 #[path = "transport_session_tests.rs"]
 mod tests_session;
-#[cfg(test)]
-#[path = "transport_call_handler_tests.rs"]
-mod tests_call_handler;

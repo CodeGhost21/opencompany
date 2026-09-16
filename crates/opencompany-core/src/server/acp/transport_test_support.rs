@@ -39,7 +39,12 @@ impl Brain for SilentBrain {
     }
 }
 
-pub(super) async fn seed_user(state: &AppState, company: &CompanyId, id: &str, display: &str) -> String {
+pub(super) async fn seed_user(
+    state: &AppState,
+    company: &CompanyId,
+    id: &str,
+    display: &str,
+) -> String {
     let runtime = state.registry().get(company).expect("company");
     let now = crate::ports::now_millis();
     runtime
@@ -212,7 +217,11 @@ pub(super) fn acp_call_request(body: Value) -> Request<Body> {
         .unwrap()
 }
 
-pub(super) fn admin_auth(company: &CompanyId, user_id: String, session_token_hash: &str) -> GqlAuth {
+pub(super) fn admin_auth(
+    company: &CompanyId,
+    user_id: String,
+    session_token_hash: &str,
+) -> GqlAuth {
     GqlAuth::User(UserPrincipal {
         company: company.clone(),
         user_id,
@@ -226,7 +235,11 @@ pub(super) fn admin_auth(company: &CompanyId, user_id: String, session_token_has
 
 /// Mints a real, HTTP-carriable admin session for `acp_state`'s "acme"
 /// company, returning its `Cookie` header value.
-pub(super) async fn seed_admin_session_cookie(state: &AppState, company: &CompanyId, user_id: &str) -> String {
+pub(super) async fn seed_admin_session_cookie(
+    state: &AppState,
+    company: &CompanyId,
+    user_id: &str,
+) -> String {
     let runtime = state.registry().get(company).expect("company");
     let now = crate::ports::now_millis();
     runtime
@@ -271,7 +284,11 @@ pub(super) async fn seed_admin_session_cookie(state: &AppState, company: &Compan
     format!("{cookie_name}={token}")
 }
 
-pub(super) fn session_new_request(cookie: &str, connection_id: &str, request_id: u64) -> Request<Body> {
+pub(super) fn session_new_request(
+    cookie: &str,
+    connection_id: &str,
+    request_id: u64,
+) -> Request<Body> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": request_id,
