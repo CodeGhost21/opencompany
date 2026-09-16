@@ -98,8 +98,7 @@ fn roles_that_slug_alike_still_get_distinct_ids() {
 /// refuses, and the operator never sees why. Handled here instead.
 #[test]
 fn a_role_starting_with_a_digit_still_yields_a_valid_id() {
-    let manifest =
-        manifest_from_setup(&answers("a studio", ""), &[proposed("3D Artist")], None);
+    let manifest = manifest_from_setup(&answers("a studio", ""), &[proposed("3D Artist")], None);
     assert_eq!(manifest.validate(), Vec::<String>::new());
     assert!(
         manifest.agents[0]
@@ -186,4 +185,3 @@ fn answers_round_trip_through_serde() {
         SetupAnswers::default()
     );
 }
-

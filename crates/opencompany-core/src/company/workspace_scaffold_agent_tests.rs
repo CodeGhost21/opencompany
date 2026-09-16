@@ -311,4 +311,3 @@ async fn rollback_leaves_an_adopted_folder_but_sweeps_an_unadopted_one() {
         "but an unadopted empty minted folder is still swept: {names:?}"
     );
 }
-

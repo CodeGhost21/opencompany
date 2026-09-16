@@ -1656,14 +1656,14 @@ pub fn validate_roster_bounded(proposed: Vec<ProposedAgent>, max: usize) -> Vec<
 }
 
 #[cfg(test)]
-#[path = "setup_roster_tests.rs"]
-mod tests_roster;
-#[cfg(test)]
-#[path = "setup_manifest_tests.rs"]
-mod tests_manifest;
-#[cfg(test)]
 #[path = "setup_focus_tests.rs"]
 mod tests_focus;
 #[cfg(test)]
 #[path = "setup_focus_fixture_tests.rs"]
 mod tests_focus_fixture;
+#[cfg(test)]
+#[path = "setup_manifest_tests.rs"]
+mod tests_manifest;
+#[cfg(test)]
+#[path = "setup_roster_tests.rs"]
+mod tests_roster;

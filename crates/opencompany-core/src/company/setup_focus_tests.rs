@@ -659,4 +659,3 @@ fn focus_round_trips_through_serde() {
         None
     );
 }
-

@@ -1,8 +1,8 @@
 //! Runtime tests: cross-desk conversation width limits and gated-node approval expiry.
 
-use std::sync::Arc;
-use crate::ports::tasks::TaskTitle;
 use super::CompanyEvent;
+use crate::ports::tasks::TaskTitle;
+use std::sync::Arc;
 
 /// Issue #1852 Part 1 — the discard bug and its fix, proven directly on
 /// `run_dispatch_cycle` rather than on any one `Brain`'s output shape.
@@ -26,9 +26,7 @@ async fn a_dispatched_cards_relay_is_journaled_into_its_origin_thread() {
     use crate::ports::TaskRecord;
     use crate::ports::brain::CycleHost;
     use crate::ports::tasks::COLUMN_IN_PROGRESS;
-    use crate::ports::types::{
-        CycleRequest, CycleResult, OutboundMessage, ReplyTo, TokenUsage,
-    };
+    use crate::ports::types::{CycleRequest, CycleResult, OutboundMessage, ReplyTo, TokenUsage};
 
     /// Answers a `TaskDispatched { task_id: "t-1" }` with a
     /// `relay_reply`-shaped bubble; silent on everything else, mirroring
@@ -178,9 +176,7 @@ async fn a_private_dm_relay_is_authored_by_the_dm_agent_not_the_orchestrator() {
     use crate::ports::TaskRecord;
     use crate::ports::brain::CycleHost;
     use crate::ports::tasks::COLUMN_IN_REVIEW;
-    use crate::ports::types::{
-        CycleRequest, CycleResult, EventSeq, OutboundMessage, TokenUsage,
-    };
+    use crate::ports::types::{CycleRequest, CycleResult, EventSeq, OutboundMessage, TokenUsage};
 
     /// Replays a pre-built relay for each `TaskDispatched` it recognises.
     struct RelayBrain {
@@ -438,7 +434,9 @@ async fn journal_dispatch_replies_only_touches_relay_shaped_responses() {
 
     let CompanyEvent::AgentReply { chat_id, .. } = relays
         .iter()
-        .find(|event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id.is_empty()))
+        .find(
+            |event| matches!(event, CompanyEvent::AgentReply { chat_id, .. } if chat_id.is_empty()),
+        )
         .expect("the empty-chat_id General relay must be present")
     else {
         unreachable!()
@@ -546,8 +544,7 @@ async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
     // And a card raised at channel level still relays flat — `None` is the
     // channel-level conversation, not a gap.
     card.id = "t-flat".to_string();
-    card.origin =
-        crate::ports::TaskOrigin::new(card.origin_chat_id().map(str::to_string), None);
+    card.origin = crate::ports::TaskOrigin::new(card.origin_chat_id().map(str::to_string), None);
     rt.tasks().upsert(&id, &card).await.unwrap();
     let report = crate::runtime::types::CycleReport {
         responses: vec![relay(Some("t-flat"))],
@@ -584,8 +581,7 @@ async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
 /// A runtime whose one agent is allowed to refer to the `design` desk, so a
 /// forward reaches the width bound instead of stopping at authorization.
 #[cfg(all(feature = "openhuman", feature = "hivemind"))]
-async fn runtime_that_may_refer() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir)
-{
+async fn runtime_that_may_refer() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
     let home_dir = tempfile::Builder::new()
         .prefix("opencompany-refer-")
         .tempdir()
@@ -639,8 +635,7 @@ async fn a_second_crossing_question_is_refused_once_the_width_is_spent() {
     let (rt, _home) = runtime_that_may_refer().await;
     let rt = Arc::new(rt);
     let gate = Arc::new(tokio::sync::Mutex::new(()));
-    let queue =
-        crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1, 4, None);
+    let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 1, 4, None);
 
     let forward = |trigger: u64| tinyhivemind::referral::Referral {
         key: tinyhivemind::dispatch::DispatchKey {
@@ -675,4 +670,3 @@ async fn a_second_crossing_question_is_refused_once_the_width_is_spent() {
         "a different trigger, so this is the WIDTH bound refusing it, not the marker"
     );
 }
-
