@@ -975,8 +975,8 @@ fn trimmed_str(args: &Value, key: &str) -> Option<String> {
 #[path = "delegation_tools_tests_core.rs"]
 mod tests_core;
 #[cfg(test)]
-#[path = "delegation_tools_tests_recursive_delegation_target_ch.rs"]
-mod tests_recursive_delegation_target_ch;
-#[cfg(test)]
 #[path = "delegation_tools_tests_part2.rs"]
 mod tests_part2;
+#[cfg(test)]
+#[path = "delegation_tools_tests_recursive_delegation_target_ch.rs"]
+mod tests_recursive_delegation_target_ch;

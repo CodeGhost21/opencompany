@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 #[test]
 fn manifest_entries_cover_both_delegation_tools() {
@@ -30,8 +29,8 @@ fn spawn_task_args_require_a_nonblank_title() {
     assert_eq!(parsed.note.as_deref(), Some("brief"));
     assert_eq!(parsed.assignee.as_deref(), Some("eng"));
     // Blank optionals collapse to None.
-    let bare = SpawnTaskArgs::parse(&json!({ "title": "x", "note": "", "assignee": "" }))
-        .expect("valid");
+    let bare =
+        SpawnTaskArgs::parse(&json!({ "title": "x", "note": "", "assignee": "" })).expect("valid");
     assert_eq!(bare.note, None);
     assert_eq!(bare.assignee, None);
 }
@@ -386,8 +385,7 @@ fn the_desk_list_is_capped_and_counts_the_remainder() {
 fn a_desk_already_on_the_chain_is_refused_as_a_cycle() {
     let record = record();
     let chain = vec!["engineering".to_string()];
-    let message =
-        reject_cycle_target(&record, &chain, "engineering", "writer").expect("rejected");
+    let message = reject_cycle_target(&record, &chain, "engineering", "writer").expect("rejected");
     assert!(message.contains("engineering"), "{message}");
     assert!(message.contains("loop"), "{message}");
     // A desk that is NOT on the chain is a step forward.
@@ -481,8 +479,7 @@ fn the_wildcard_teammate_reach_is_desk_members_not_the_whole_roster() {
     // The refusal path agrees: the orchestrator is not a valid target even
     // though the caller holds the widest possible grant.
     assert!(
-        reject_teammate_target(&record, Some("brand_strategist"), &["*".into()], "chief")
-            .is_some()
+        reject_teammate_target(&record, Some("brand_strategist"), &["*".into()], "chief").is_some()
     );
 }
 
@@ -490,9 +487,8 @@ fn the_wildcard_teammate_reach_is_desk_members_not_the_whole_roster() {
 #[test]
 fn a_teammate_hand_off_to_yourself_is_refused() {
     let record = desk_record();
-    let message =
-        reject_teammate_target(&record, Some("seo_specialist"), &[], "seo_specialist")
-            .expect("rejected");
+    let message = reject_teammate_target(&record, Some("seo_specialist"), &[], "seo_specialist")
+        .expect("rejected");
     assert!(message.contains("yourself"), "{message}");
 }
 
@@ -502,13 +498,13 @@ fn a_teammate_hand_off_to_yourself_is_refused() {
 #[test]
 fn an_unknown_teammate_target_is_grounded() {
     let record = desk_record();
-    let message = reject_teammate_target(&record, Some("brand_strategist"), &[], "nobody")
-        .expect("rejected");
+    let message =
+        reject_teammate_target(&record, Some("brand_strategist"), &[], "nobody").expect("rejected");
     assert!(message.contains("no \"nobody\""), "{message}");
     assert!(message.contains("copywriter"), "{message}");
 
-    let message = reject_teammate_target(&record, Some("brand_strategist"), &[], "data")
-        .expect("rejected");
+    let message =
+        reject_teammate_target(&record, Some("brand_strategist"), &[], "data").expect("rejected");
     assert!(message.contains(DELEGATE_TO_DESK_TOOL), "{message}");
     assert!(message.contains("is a desk, not a teammate"), "{message}");
 }
@@ -604,8 +600,7 @@ fn the_self_desk_refusal_names_the_teammate_tool() {
 
     // A lead with nobody else on its desk gets the old advice, not an empty
     // list and a tool that would refuse every target.
-    let message =
-        reject_cycle_target(&solo_record(), &[], "content", "writer").expect("rejected");
+    let message = reject_cycle_target(&solo_record(), &[], "content", "writer").expect("rejected");
     assert!(!message.contains(DELEGATE_TO_TEAMMATE_TOOL), "{message}");
     assert!(message.contains("nobody else is on it"), "{message}");
 }
