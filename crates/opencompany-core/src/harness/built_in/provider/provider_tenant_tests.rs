@@ -1,15 +1,13 @@
+use super::provider_test_helpers_tests::*;
 use super::*;
 use crate::app::config::MapEnv;
+use crate::company::Inference;
+use crate::ports::types::SecretValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use super::provider_test_helpers_tests::*;
 
 // ---- TenantProvider (issue #56 — BYOK) --------------------------------
-
-
 
 #[derive(Default)]
 struct MemSecrets {
@@ -31,7 +29,6 @@ impl SecretStore for MemSecrets {
         Ok(())
     }
 }
-
 
 #[tokio::test]
 async fn request_plan_maps_tier_and_injects_openrouter_headers() {
@@ -285,11 +282,6 @@ async fn request_plan_never_attaches_the_product_header_for_third_party_provider
     );
 }
 
-
-
-
-
-
 /// The live-switch contract: the same `TenantProvider` instance routes turn
 /// 1 to stub A, then — after the operator flips the runtime override in the
 /// secret store — routes turn 2 to stub B, with **no rebuild** of the
@@ -454,4 +446,3 @@ async fn tenant_provider_errors_when_nothing_is_configured() {
         "{err}"
     );
 }
-

@@ -1,10 +1,10 @@
 use super::*;
 use crate::app::config::MapEnv;
+use crate::company::Inference;
+use crate::ports::types::SecretValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
 
 /// A three-segment JWT whose `exp` is `secs_from_now` in the future, so the
 /// projected-file cache window is wide open for the whole test.
@@ -334,4 +334,3 @@ pub(crate) async fn spawn_model_unavailable_stub() -> String {
     });
     format!("http://{addr}")
 }
-

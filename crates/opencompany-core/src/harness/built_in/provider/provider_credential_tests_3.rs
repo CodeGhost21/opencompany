@@ -1,11 +1,11 @@
+use super::provider_test_helpers_tests::*;
 use super::*;
 use crate::app::config::MapEnv;
+use crate::company::Inference;
+use crate::ports::types::SecretValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use super::provider_test_helpers_tests::*;
 
 /// Legacy sibling of the above: `finish_reason: "function_call"` with no
 /// `message.function_call` field at all, beside a nonempty array-shaped
@@ -49,9 +49,8 @@ fn function_call_finish_reason_with_missing_call_body_errors_instead_of_promotin
             }
         }]
     });
-    let err = model_response_from_payload(payload).expect_err(
-        "a function_call finish reason with no call body must not promote reasoning",
-    );
+    let err = model_response_from_payload(payload)
+        .expect_err("a function_call finish reason with no call body must not promote reasoning");
     let msg = err.to_string();
     assert!(
         msg.contains("function_call"),
@@ -375,7 +374,6 @@ fn both_providers_advertise_the_same_context_window() {
 static MANAGED_PROFILE_WINDOW: std::sync::LazyLock<Option<u64>> =
     std::sync::LazyLock::new(|| super::MANAGED_PROFILE.max_input_tokens);
 
-
 /// The rotation contract at the transport: the SAME provider instance must
 /// present the token the projected file holds **now**, not the one it held
 /// when the provider was built. Without this, a hosted pod keeps sending a
@@ -393,9 +391,7 @@ async fn hosted_provider_resolves_the_bearer_per_request() {
 
     let provider = HostedProvider::new(HostedProviderConfig {
         base_url: url,
-        credential: Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(
-            &path,
-        ))),
+        credential: Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(&path))),
         extra_headers: Vec::new(),
     });
 
@@ -511,9 +507,7 @@ async fn a_rejected_bearer_forces_a_re_read_on_the_next_turn() {
 
     let provider = HostedProvider::new(HostedProviderConfig {
         base_url: format!("http://{addr}"),
-        credential: Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(
-            &path,
-        ))),
+        credential: Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(&path))),
         extra_headers: Vec::new(),
     });
 
@@ -572,4 +566,3 @@ async fn hosted_provider_surfaces_an_unreadable_token_file() {
         .expect_err("unreadable credential");
     assert!(err.to_string().contains("credential"), "{err}");
 }
-

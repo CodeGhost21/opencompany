@@ -1,11 +1,11 @@
+use super::provider_test_helpers_tests::*;
 use super::*;
 use crate::app::config::MapEnv;
+use crate::company::Inference;
+use crate::ports::types::SecretValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use super::provider_test_helpers_tests::*;
 
 #[tokio::test]
 async fn tenant_turn_preserves_a_provider_status() {
@@ -487,7 +487,6 @@ fn unrelated_failures_are_left_alone() {
         "a 5xx is the provider's fault, not the operator's config"
     );
 }
-
 
 /// `probe`'s repair hint must name the harness whose table the failing
 /// request actually read (Codex review on #1824's #1811 follow-up):

@@ -1,14 +1,13 @@
+use super::provider_test_helpers_tests::*;
 use super::*;
 use crate::app::config::MapEnv;
+use crate::company::Inference;
+use crate::ports::types::SecretValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use super::provider_test_helpers_tests::*;
 
 // ---- boot-time platform credential status (issue #879) -----------------
-
 
 /// The #879 tenant: nothing at all is set. One warning must name every
 /// surface that silently failed closed, and both tiers, because the fix
@@ -388,12 +387,9 @@ fn a_tool_call_shape_inside_reasoning_is_never_recovered_or_leaked() {
         }]
     });
     let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
-    let err = model_response_from_payload_offering(
-        payload,
-        &offered,
-        &std::collections::BTreeMap::new(),
-    )
-    .expect_err("a reasoning-only turn must not parse as success");
+    let err =
+        model_response_from_payload_offering(payload, &offered, &std::collections::BTreeMap::new())
+            .expect_err("a reasoning-only turn must not parse as success");
     let msg = err.to_string();
     assert!(
         msg.contains("neither"),
@@ -461,12 +457,9 @@ fn a_refusal_duplicated_into_content_still_blocks_recovery() {
         }]
     });
     let offered = std::collections::BTreeSet::from(["read_ledger".to_string()]);
-    let resp = model_response_from_payload_offering(
-        payload,
-        &offered,
-        &std::collections::BTreeMap::new(),
-    )
-    .expect("the refusal turn still parses");
+    let resp =
+        model_response_from_payload_offering(payload, &offered, &std::collections::BTreeMap::new())
+            .expect("the refusal turn still parses");
 
     assert!(
         resp.message.tool_calls.is_empty(),
@@ -499,12 +492,9 @@ fn a_recovered_batch_pairing_request_approval_with_a_sibling_is_refused() {
     });
     let offered =
         std::collections::BTreeSet::from(["read_ledger".to_string(), approval.to_string()]);
-    let err = model_response_from_payload_offering(
-        payload,
-        &offered,
-        &std::collections::BTreeMap::new(),
-    )
-    .expect_err("the whole recovered batch must be refused");
+    let err =
+        model_response_from_payload_offering(payload, &offered, &std::collections::BTreeMap::new())
+            .expect_err("the whole recovered batch must be refused");
 
     assert!(
         err.to_string().contains("approval boundary"),
@@ -565,4 +555,3 @@ fn a_refusal_wins_over_leaked_reasoning_when_refusal_is_an_array_content_part() 
     assert_eq!(resp.text(), "I can't help with that.");
     assert!(resp.message.tool_calls.is_empty());
 }
-

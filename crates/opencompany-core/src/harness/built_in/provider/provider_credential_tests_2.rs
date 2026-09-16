@@ -1,11 +1,11 @@
+use super::provider_test_helpers_tests::*;
 use super::*;
 use crate::app::config::MapEnv;
+use crate::company::Inference;
+use crate::ports::types::SecretValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use super::provider_test_helpers_tests::*;
 
 /// Multiple `{"type":"refusal",…}` parts in the same array-shaped
 /// `content`. `extract_array_refusal_text`'s `find_map` stops at the
@@ -431,9 +431,8 @@ fn malformed_modern_tool_call_with_reasoning_errors_instead_of_promoting() {
             }
         }]
     });
-    let err = model_response_from_payload(payload).expect_err(
-        "a malformed raw tool_calls entry must not be dropped for promoted reasoning",
-    );
+    let err = model_response_from_payload(payload)
+        .expect_err("a malformed raw tool_calls entry must not be dropped for promoted reasoning");
     let msg = err.to_string();
     assert!(
         msg.contains("tool_calls"),
@@ -494,9 +493,8 @@ fn non_array_tool_calls_with_reasoning_errors_instead_of_promoting() {
             }
         }]
     });
-    let err = model_response_from_payload(payload).expect_err(
-        "a non-array raw tool_calls value must not be dropped for promoted reasoning",
-    );
+    let err = model_response_from_payload(payload)
+        .expect_err("a non-array raw tool_calls value must not be dropped for promoted reasoning");
     let msg = err.to_string();
     assert!(
         msg.contains("stop"),
@@ -598,4 +596,3 @@ fn tool_calls_finish_reason_with_empty_array_beside_content_preamble_errors_inst
         "error must name finish_reason for diagnosis, got: {msg}"
     );
 }
-

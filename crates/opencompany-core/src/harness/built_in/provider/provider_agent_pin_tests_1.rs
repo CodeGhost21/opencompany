@@ -1,14 +1,13 @@
+use super::provider_test_helpers_tests::*;
 use super::*;
 use crate::app::config::MapEnv;
+use crate::company::Inference;
+use crate::ports::types::SecretValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use super::provider_test_helpers_tests::*;
 
 // ---- agent pin: `pinned` / `AgentPin` (keys rework, issue #2306, slice 3a) ----
-
 
 /// Each request's `(model, Authorization header)`, in arrival order, as
 /// [`spawn_capturing_stub`] records them.
@@ -50,8 +49,7 @@ async fn two_agents_pinned_to_two_providers_reach_two_endpoints() {
             .unwrap();
     }
 
-    let base =
-        TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
+    let base = TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
     let a = base
         .pinned(
             "researcher",
@@ -166,8 +164,7 @@ async fn a_pinned_turn_naming_a_switched_off_provider_names_the_agent() {
     .await
     .unwrap();
 
-    let base =
-        TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
+    let base = TenantProvider::new(company.clone(), secrets.clone(), Inference::default(), None);
     let pinned = base
         .pinned(
             "researcher",
@@ -263,7 +260,6 @@ async fn hosted_provider_invoke_carries_the_product_identity_header() {
         "every hosted chat-completions request must attach the product identity header"
     );
 }
-
 
 /// Issue #1749, the concurrency half: a turn that **failed** must not
 /// publish its model into the shared cache.
@@ -481,4 +477,3 @@ async fn probe_preserves_a_provider_status() {
     assert_eq!(error.status, Some(404));
     assert_eq!(error.raw, None);
 }
-

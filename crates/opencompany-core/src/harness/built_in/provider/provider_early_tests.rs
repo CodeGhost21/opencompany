@@ -1,12 +1,11 @@
+use super::provider_test_helpers_tests::*;
 use super::*;
 use crate::app::config::MapEnv;
+use crate::company::Inference;
+use crate::ports::types::SecretValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use crate::company::Inference;
-use crate::ports::types::SecretValue;
-use super::provider_test_helpers_tests::*;
-
 
 /// The original defect at this seam: `None` meant "no opinion" and we wrote
 /// `0.0` — the one value Anthropic rejects across its entire current lineup
@@ -65,9 +64,6 @@ fn output_cap_without_the_variable_is_the_harness_cap() {
     assert_eq!(output_cap(Some(16384)), Some(16384));
     assert_eq!(output_cap(None), None);
 }
-
-
-
 
 #[tokio::test]
 async fn env_config_prefers_specific_key_and_fills_defaults() {
@@ -216,4 +212,3 @@ fn search_backend_has_no_credential_of_its_own_and_fails_closed() {
     ]);
     assert!(search_backend_from_env(&env).is_none());
 }
-
