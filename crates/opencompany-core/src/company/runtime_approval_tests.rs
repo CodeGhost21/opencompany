@@ -3,6 +3,15 @@
 use super::CompanyEvent;
 use std::sync::Arc;
 
+/// **Fail-closed, and leave nothing behind.** The fixture roster declares
+/// no `delegates_to`, so an agent may not cause a turn on another desk —
+/// referral is off until an operator opts somebody in.
+///
+/// And a refusal writes no marker, so it cannot be mistaken for a completed
+/// enqueue on the next attempt: the second call is refused for the same
+/// reason as the first, rather than coming back `Already`.
+#[cfg(all(feature = "openhuman", feature = "hivemind"))]
+#[tokio::test]
 async fn an_unauthorized_forward_is_refused_and_leaves_no_marker() {
     use tinyhivemind::dispatch::EnqueueOutcome;
     use tinyhivemind::referral::ReferralQueue;
