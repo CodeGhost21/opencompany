@@ -632,7 +632,7 @@ to = "done"
 /// each node's `prompt`: the node after `slow` must never be invoked once a
 /// parent cancel has propagated into the child run.
 pub(super) struct RecordingSlowProvider {
-    seen: Arc<std::sync::Mutex<Vec<String>>>,
-    entered_slow: Arc<tokio::sync::Notify>,
-    cancel: crate::ports::workflow_runner::RunCancel,
+    pub(super) seen: Arc<std::sync::Mutex<Vec<String>>>,
+    pub(super) entered_slow: Arc<tokio::sync::Notify>,
+    pub(super) cancel: crate::ports::workflow_runner::RunCancel,
 }

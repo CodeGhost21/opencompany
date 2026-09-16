@@ -155,12 +155,12 @@ fn a_halt_does_not_hide_an_unrelated_failure() {
 /// A workflow lane that records which agent it served. Its reply names the
 /// lane so the run output proves the same routing decision as the call log.
 pub(super) struct RecordingLane {
-    label: &'static str,
-    seen: std::sync::Mutex<Vec<String>>,
+    pub(super) label: &'static str,
+    pub(super) seen: std::sync::Mutex<Vec<String>>,
 }
 
 impl RecordingLane {
-    fn new(label: &'static str) -> Arc<Self> {
+    pub(super) fn new(label: &'static str) -> Arc<Self> {
         Arc::new(Self {
             label,
             seen: std::sync::Mutex::new(Vec::new()),

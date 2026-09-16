@@ -585,12 +585,12 @@ pub(super) struct GatedJournalStore {
     inner: crate::ports::journal::MemoryJournalStore,
     match_substr: &'static str,
     armed: std::sync::atomic::AtomicBool,
-    reached: tokio::sync::Notify,
-    release: tokio::sync::Notify,
+    pub(super) reached: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
 }
 
 impl GatedJournalStore {
-    fn new(match_substr: &'static str) -> Self {
+    pub(super) fn new(match_substr: &'static str) -> Self {
         Self {
             inner: Default::default(),
             match_substr,
