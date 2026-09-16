@@ -23,7 +23,7 @@ pub(super) const DESC_GRAPH: &str = r#"{"automatable":true,"summary":"email the 
                  {"id":"draft","kind":"agent","name":"Draft","agent":"maya","requires_approval":false}],
         "edges":[{"from":"start","to":"draft"}]}}"#;
 
-/// Seeds a real overlay workflow through the create path, so the drafter's host
+// Seeds a real overlay workflow through the create path, so the drafter's host
 
 // ---------------------------------------------------------------------------
 // The three copilot tools — unit tier (issue #840)
