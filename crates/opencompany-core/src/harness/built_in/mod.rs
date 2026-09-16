@@ -3321,11 +3321,14 @@ impl HarnessPool {
             hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
             hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
             hasher.write_u64(search_byo::TenantSearch::fingerprint(&tenant_search_config));
-            hasher.write_u32(
-                managed_search_config
-                    .as_ref()
-                    .map_or(u32::MAX, |backend| backend.daily_call_cap),
-            );
+            // Presence is a separate bit: every `u32`, including `MAX`, is a
+            // valid configured cap, so no cap value can safely stand in for
+            // "no backend" without making the first managed key invisible to
+            // this staleness fingerprint.
+            hasher.write_u8(u8::from(managed_search_config.is_some()));
+            if let Some(backend) = &managed_search_config {
+                hasher.write_u32(backend.daily_call_cap);
+            }
             hasher.finish()
         };
 

@@ -873,7 +873,7 @@ async fn replace_key(
     let key = supplied(body.api_key.as_deref()).unwrap_or_default();
     if slug == MANAGED_PROVIDER {
         let _guard = crate::company::company_key::slot_guard(runtime.id()).await;
-        if key.is_empty() && !body.confirm_in_use && !deployment_managed_configured() {
+        if key.is_empty() && !body.confirm_in_use {
             let current = status_of(runtime).await?;
             if current.effective_provider == MANAGED_PROVIDER && current.managed_key_configured {
                 return Err(ApiError(OpenCompanyError::InUse {

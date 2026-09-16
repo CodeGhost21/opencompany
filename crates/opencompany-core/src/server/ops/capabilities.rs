@@ -129,8 +129,11 @@ struct CapabilityStatusDto {
     /// tests it rather than a real-money surface shipping untested.
     search_in_build: bool,
     /// Whether a MANAGED search credential resolves for this company, either
-    /// from its copied TinyHumans key or the deployment fallback.
-    search_credential_configured: bool,
+    /// from its copied TinyHumans key or the deployment fallback. Omitted when
+    /// the company tier cannot be read and no deployment fallback establishes
+    /// a definitive `true` verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_credential_configured: Option<bool>,
     /// The provider this company's searches actually go to — `managed`, or the
     /// slug it configured in Settings → Search and finished configuring.
     ///
@@ -258,7 +261,7 @@ struct OptInFlags {
     /// below exists to catch.
     composio_credential_source: Option<CredentialSource>,
     search_granted: bool,
-    search_credential_configured: bool,
+    search_credential_configured: Option<bool>,
     search_daily_call_cap: u32,
     search_provider: String,
     /// Issue #1192. Carried on the flags rather than derived per DTO site for
@@ -294,7 +297,7 @@ impl OptInFlags {
             // not the same answer as "no credential resolves".
             composio_credential_source: None,
             search_granted: false,
-            search_credential_configured: search_deployment_credential_configured(),
+            search_credential_configured: Some(search_deployment_credential_configured()),
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             search_provider: crate::company::search::MANAGED_PROVIDER.to_string(),
             publish_granted: false,
@@ -402,20 +405,34 @@ fn search_deployment_credential_configured() -> bool {
 /// Whether MANAGED search can resolve for this company through the same two
 /// tiers as the request path: its copied TinyHumans key first, then the
 /// deployment credential. Off the harness feature there is no search tool.
-async fn search_credential_configured(runtime: &CompanyRuntime) -> Result<bool, ApiError> {
+async fn search_credential_configured(runtime: &CompanyRuntime) -> Option<bool> {
     #[cfg(feature = "openhuman")]
     {
-        Ok(
-            crate::company::search::load_managed_key(runtime.id(), runtime.secrets().as_ref())
-                .await?
-                .is_some()
-                || search_deployment_credential_configured(),
-        )
+        // A deployment identity proves availability without consulting the
+        // company store. Otherwise preserve an unreadable company-key verdict
+        // as unknown instead of failing unrelated capability/budget data or
+        // confidently reporting that Search is unavailable.
+        if search_deployment_credential_configured() {
+            return Some(true);
+        }
+        match crate::company::search::load_managed_key(runtime.id(), runtime.secrets().as_ref())
+            .await
+        {
+            Ok(key) => Some(key.is_some()),
+            Err(err) => {
+                tracing::warn!(
+                    company = %runtime.id(),
+                    error = %err,
+                    "[capabilities] could not resolve the managed Search credential tier; omitting `searchCredentialConfigured`"
+                );
+                None
+            }
+        }
     }
     #[cfg(not(feature = "openhuman"))]
     {
         let _ = runtime;
-        Ok(false)
+        Some(false)
     }
 }
 
@@ -516,7 +533,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         // ceiling, not a token budget — so both travel with the plan-independent
         // flags.
         search_granted: crate::company::grants_search_explicit(&record.manifest.tools.allow),
-        search_credential_configured: search_credential_configured(runtime).await?,
+        search_credential_configured: search_credential_configured(runtime).await,
         search_daily_call_cap: record
             .manifest
             .tools
