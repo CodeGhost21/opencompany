@@ -857,8 +857,8 @@ pub(crate) mod hosted_mode {
         /// tail — sees the finish, which is exactly what lets the read tell the
         /// two apart.
         pub(crate) struct FinishesDuringTheRead {
-            inner: std::sync::Arc<dyn crate::ports::EventLog>,
-            finish: std::sync::Mutex<Option<(CompanyId, CompanyEvent)>>,
+            pub(crate) inner: std::sync::Arc<dyn crate::ports::EventLog>,
+            pub(crate) finish: std::sync::Mutex<Option<(CompanyId, CompanyEvent)>>,
         }
 
 
@@ -1125,12 +1125,12 @@ pub(crate) mod running {
         /// the engine (the engine's own cancel behaviour is pinned in
         /// `workflows::runner`).
         pub(crate) struct StalledRunner {
-            entered: Arc<tokio::sync::Notify>,
-            release: Arc<tokio::sync::Notify>,
+            pub(crate) entered: Arc<tokio::sync::Notify>,
+            pub(crate) release: Arc<tokio::sync::Notify>,
             /// Set only if the run was allowed to finish on its own terms —
             /// which is how a test tells "the run completed" from "the run was
             /// dropped with the connection".
-            completed: Arc<AtomicBool>,
+            pub(crate) completed: Arc<AtomicBool>,
         }
 
 
@@ -1183,11 +1183,11 @@ pub(crate) mod running {
 
 
         pub(crate) struct Stalled {
-            app: axum::Router,
-            runtime: Arc<crate::company::runtime::CompanyRuntime>,
-            entered: Arc<tokio::sync::Notify>,
-            release: Arc<tokio::sync::Notify>,
-            completed: Arc<AtomicBool>,
+            pub(crate) app: axum::Router,
+            pub(crate) runtime: Arc<crate::company::runtime::CompanyRuntime>,
+            pub(crate) entered: Arc<tokio::sync::Notify>,
+            pub(crate) release: Arc<tokio::sync::Notify>,
+            pub(crate) completed: Arc<AtomicBool>,
         }
 
 
