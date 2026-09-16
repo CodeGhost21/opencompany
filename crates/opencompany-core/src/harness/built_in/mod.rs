@@ -149,7 +149,13 @@ pub mod publish;
 /// than a real turn loop can show — that the follow-up nudge fires **once**,
 /// records a decline, and can never fail the run it follows. Test-only.
 #[cfg(test)]
-mod publish_turn_test;
+mod publish_turn_helpers_tests;
+#[cfg(test)]
+mod publish_turn_dispatch_tests;
+#[cfg(test)]
+mod publish_turn_link_tests;
+#[cfg(test)]
+mod publish_turn_conversation_tests;
 pub mod run_origin;
 pub mod run_trace;
 pub mod run_turn;
