@@ -15,7 +15,6 @@ use crate::ledger::LedgerAuthor;
 use crate::ports::ledgers::LedgerStore;
 use crate::ports::types::CompanyId;
 
-
 async fn ledgers() -> (Ledgers, CompanyRuntime, tempfile::TempDir) {
     let (runtime, home) = runtime().await;
     let ctx = Ledgers::from(&runtime);
@@ -80,7 +79,6 @@ fn fields(pairs: &[(&str, &str)]) -> BTreeMap<String, Option<String>> {
 fn agent() -> LedgerAuthor {
     LedgerAuthor::agent("ceo")
 }
-
 
 fn person() -> LedgerAuthor {
     LedgerAuthor::human("u-1", "Dana")

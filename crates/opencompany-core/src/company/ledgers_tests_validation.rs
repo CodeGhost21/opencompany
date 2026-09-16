@@ -14,7 +14,6 @@ use crate::ledger::LedgerAuthor;
 use crate::ports::ledgers::LedgerStore;
 use crate::ports::types::CompanyId;
 
-
 async fn ledgers() -> (Ledgers, CompanyRuntime, tempfile::TempDir) {
     let (runtime, home) = runtime().await;
     let ctx = Ledgers::from(&runtime);

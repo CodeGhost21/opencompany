@@ -1,3 +1,14 @@
+    /// The boot sweep reclaims a payload whose node document never landed.
+    ///
+    /// This is the crash the write ordering deliberately allows: blob first,
+    /// document second, so an interrupted `create_binary` leaves bytes nothing
+    /// references. Seeded here directly — uploading to the bucket without ever
+    /// inserting the node — because that is precisely the state a crash between
+    /// the two writes produces, and it is not reachable through the port.
+    ///
+    /// The node-backed blob beside it is the half that must be left alone: a
+    /// sweep that reclaimed live payloads would be far worse than the leak it
+    /// fixes.
 use super::tests::{age_blobs_past_the_sweep_threshold, drop_db, store};
 use super::*;
 
