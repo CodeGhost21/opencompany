@@ -488,7 +488,8 @@ fn system_prompts(script: &Script) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests, split by topic (this file would otherwise exceed 750 lines).
+// ---------------------------------------------------------------------------
 
 #[path = "composio_turn_tests_discovery.rs"]
 mod tests_discovery;
