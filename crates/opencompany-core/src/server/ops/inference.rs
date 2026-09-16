@@ -3050,7 +3050,7 @@ base_url = "https://byo.example/v1"
         .unwrap()
         .expect("a company key resolves managed inference");
         assert_eq!(decl.base_url, expected);
-        assert!(decl.credential.configured());
+        assert!(decl.credential().configured());
     }
 
     /// A host with no instance credential and no company key still has a
