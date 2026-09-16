@@ -26,7 +26,11 @@ mod agent_upstream_input_tests;
 /// parked for approval reports `blocked`, stops its branch instead of handing
 /// its apology downstream, and that the run says what it parked.
 #[cfg(test)]
-mod blocked_node_tests;
+#[path = "blocked_node_pipeline_tests.rs"]
+mod blocked_node_pipeline_tests;
+#[cfg(test)]
+#[path = "blocked_node_pure_tests.rs"]
+mod blocked_node_pure_tests;
 /// Issue #661 (M5): end-to-end proof that a workflow node can open and re-own a
 /// board card, and that everything it may not do stays refused.
 #[cfg(test)]
