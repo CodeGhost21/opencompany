@@ -26,7 +26,7 @@ use tower::ServiceExt;
 /// that collides with a global, so that gap does not fire in this suite, but
 /// see `graphql_lists_a_company_override_of_a_global_id_by_its_own_content`
 /// for the same-id case asserted directly, without this helper.
-pub(super) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+pub(crate) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value> {
     value
         .as_array()
         .expect("summaries")
@@ -46,7 +46,7 @@ pub(super) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value
 /// is one of `crate::globals::skills()`. A company bundle or delta of the same
 /// slug supersedes the global and would be wrongly excluded — the fixtures that
 /// exercise that case assert on the row directly instead.
-pub(super) fn own_skills(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+pub(crate) fn own_skills(value: &serde_json::Value) -> Vec<&serde_json::Value> {
     value
         .as_array()
         .expect("skills")
