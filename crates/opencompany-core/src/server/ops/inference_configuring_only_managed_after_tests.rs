@@ -3,9 +3,6 @@ use serde_json::json;
 
 use super::inference_test_support::*;
 
-use crate::ports::types::CompanyId;
-use crate::runtime::RuntimeBuilder;
-use crate::{AppConfig, AppState};
 
 /// The reported company at the HTTP boundary: every tier routed to
 /// `managed`, a managed key stored, and nothing else configured.

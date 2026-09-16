@@ -1,7 +1,6 @@
 use super::composio_test_support::*;
 use crate::ports::types::CompanyId;
 use axum::http::StatusCode;
-use axum::{Json, Router};
 use serde_json::json;
 
 /// The ops tests that are decidable only in a build carrying `composio`.

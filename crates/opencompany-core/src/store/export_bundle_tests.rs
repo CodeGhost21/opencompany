@@ -1,7 +1,6 @@
-use super::tests::{admin_actor, budget_manifest, company_record, fs_ports, manifest, tmp_root};
+use super::tests::{admin_actor, budget_manifest, company_record, fs_ports, tmp_root};
 use super::*;
 use crate::ports::types::{Actor, ActorKind};
-use crate::runtime::RuntimeBuilder;
 
 /// **A console tool grant must not be promoted to a seed grant by a
 /// round-trip** (issue #1796).

@@ -15,7 +15,7 @@ use axum::http::{Request, StatusCode};
 use axum::routing::post;
 #[cfg(feature = "composio")]
 use axum::{Json, Router};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
