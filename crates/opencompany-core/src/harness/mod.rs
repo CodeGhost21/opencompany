@@ -81,6 +81,10 @@ pub mod speech_tools;
 /// operator-facing notice is composed from. Read by
 /// [`TurnOutcome::halted_for_spend`](built_in::TurnOutcome::halted_for_spend).
 pub mod spend;
+/// Fixtures shared by [`spend_halt_turn_tests`]: the scripted model,
+/// company/manifest/record builders, and the harness deps wiring. Test-only.
+#[cfg(test)]
+mod spend_halt_turn_test_fixtures;
 /// Issue #1032: end-to-end proof that a turn stopped by its in-turn spend
 /// brake **says so** — and says something different from a turn that paused at
 /// its step cap. Test-only.
