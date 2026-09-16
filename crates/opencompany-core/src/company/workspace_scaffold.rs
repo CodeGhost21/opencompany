@@ -737,5 +737,14 @@ fn is_legal_segment(name: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "workspace_scaffold_tests.rs"]
-mod tests;
+#[path = "workspace_scaffold_root_tests.rs"]
+mod tests_root;
+#[cfg(test)]
+#[path = "workspace_scaffold_agent_tests.rs"]
+mod tests_agent;
+#[cfg(test)]
+#[path = "workspace_scaffold_desk_tests.rs"]
+mod tests_desk;
+#[cfg(test)]
+#[path = "workspace_scaffold_rollback_tests.rs"]
+mod tests_rollback;

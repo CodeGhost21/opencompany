@@ -487,5 +487,14 @@ fn sanitize_value(value: Value) -> Value {
 }
 
 #[cfg(test)]
-#[path = "a2a_tests.rs"]
-mod tests;
+#[path = "a2a_test_support.rs"]
+mod test_support;
+#[cfg(test)]
+#[path = "a2a_pricing_tests.rs"]
+mod tests_pricing;
+#[cfg(test)]
+#[path = "a2a_routing_tests.rs"]
+mod tests_routing;
+#[cfg(test)]
+#[path = "a2a_x402_tests.rs"]
+mod tests_x402;

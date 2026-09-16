@@ -34,8 +34,35 @@ fn request(search: &str, detail: Detail, toolkits: &[&str]) -> ListRequest {
     }
 }
 
+// ── the root cause: a message cap applied to a body ────────────────
+
+// ── the toolkit listing ────────────────────────────────────────────
+
+fn toolkit_catalogue(count: usize) -> Vec<CatalogToolkit> {
+    (0..count)
+        .map(|i| CatalogToolkit {
+            slug: format!("toolkit{i:03}"),
+            name: format!("Toolkit {i}"),
+            description: "An integration with a long upstream description. ".repeat(4),
+            connected: Some(i % 3 == 0),
+        })
+        .collect()
+}
+
+// -----------------------------------------------------------------------
+// The capability-grounding + Composio-first routing brief (issue #1759)
+// -----------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
+// The http_request deflection guardrail (issue #1759, slice S2)
+// -----------------------------------------------------------------------
+
+use super::*;
+
 
 #[path = "composio_catalog_tests_part1.rs"]
 mod tests_part1;
 #[path = "composio_catalog_tests_part2.rs"]
 mod tests_part2;
+#[path = "composio_catalog_tests_part3.rs"]
+mod tests_part3;
