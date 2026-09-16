@@ -655,3 +655,11 @@ pub(super) fn digest_ops_posting_to(target: &str) -> Value {
     })
 }
 
+
+#[path = "write_test_support_doubles.rs"]
+mod doubles;
+pub(super) use doubles::*;
+
+#[path = "write_test_support_uploads.rs"]
+mod uploads;
+pub(super) use uploads::*;
