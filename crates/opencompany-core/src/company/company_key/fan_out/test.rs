@@ -490,6 +490,7 @@ async fn a_failed_row_migration_reports_failed_not_kept() {
     .unwrap();
 
     assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Failed);
+    assert_eq!(outcome(&report, Slot::Health), SlotOutcome::Failed);
     // The row itself really is unchanged — the write failed, not merely the
     // report of it.
     let providers = inference_store::list_providers(&cid, &secrets.inner)
@@ -500,6 +501,17 @@ async fn a_failed_row_migration_reports_failed_not_kept() {
         catalogue::cloud_provider(inference::MANAGED_SLUG)
             .unwrap()
             .endpoint
+    );
+    // The probe recorded health `ok` for the endpoint the row was *supposed*
+    // to migrate to; since the migration didn't land, that record must not
+    // survive — a reader trusting it would think turns reach a platform they
+    // do not (CodeRabbit review).
+    let health = inference_store::load_health(&cid, &secrets.inner)
+        .await
+        .unwrap();
+    assert!(
+        !health.contains_key(inference::MANAGED_SLUG),
+        "a failed migration must not leave a stale healthy record: {health:?}"
     );
 }
 
