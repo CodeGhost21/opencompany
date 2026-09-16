@@ -22,9 +22,11 @@
 //! embeddings still resolve from the environment (#585), so "wired to it" is a
 //! smaller set than "brokered" until that lands.
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use axum::extract::State;
@@ -102,6 +104,7 @@ const DEGRADED: &str = "No credential is set for this company and this instance 
 /// Builds the company-credential route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/credential", get(get_status).put(set_key))
+        .merge(scoped("/credential/model", put(set_model)))
         .merge(scoped("/credential/link/start", post(start_link)))
         .merge(scoped("/credential/link/finish", post(finish_link)))
         .merge(scoped("/credential/billing", get(get_billing)))
@@ -242,7 +245,7 @@ fn slot_changed(outcome: company_key::SlotOutcome) -> bool {
     use company_key::SlotOutcome;
     matches!(
         outcome,
-        SlotOutcome::Filled | SlotOutcome::Rotated | SlotOutcome::Cleared | SlotOutcome::RolledBack
+        SlotOutcome::Filled | SlotOutcome::Rotated | SlotOutcome::Cleared
     )
 }
 
@@ -438,6 +441,55 @@ async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
     super::inference::restart_pending(runtime, configured)
 }
 
+/// Puts a fan-out that just configured inference to work, the way the LLM
+/// page's own `PUT …/inference` does (issue #290): when the company booted
+/// with no inference source it is on the offline echo brain, and a
+/// `tinyhumans` row plus default this write created cannot reach agents until
+/// the runtime is rebuilt. Telling the operator "restart required" in a toast
+/// was the whole of the previous behaviour, and the observed result was a
+/// company whose account key, row and default all read as set while every
+/// turn still answered `You said: …`.
+///
+/// Only rebuilds when the fan-out actually moved the LLM copy itself, the
+/// provider row, or the default — a save that changed nothing about
+/// inference (a Composio-only copy, a rotation of an already-live key) never
+/// quiesces a running company. The LLM slot is included alongside the row
+/// and default so a self-hosted company whose routes already resolve to
+/// `managed` (no row/default write needed) still rebuilds off the echo brain
+/// the moment its key lands (Codex/tinysweeper review, KR-ACCT-01). Returns
+/// the runtime the response status must be read off: the
+/// successor after a rebuild, else the one the request came in on. A failed
+/// rebuild is logged and falls back to the incoming runtime, whose status
+/// still reports `restart_required` — the honest answer, exactly as
+/// `set_config` handles the same failure.
+async fn rebuild_if_pending(
+    state: &AppState,
+    company: &AdminScopedCompany,
+    report: &company_key::FanOutReport,
+) -> Arc<CompanyRuntime> {
+    let runtime = company.runtime.clone();
+    let inference_moved = report.slots.iter().any(|s| {
+        matches!(
+            s.slot,
+            company_key::Slot::Inference | company_key::Slot::Provider | company_key::Slot::Default
+        ) && slot_changed(s.outcome)
+    });
+    if !inference_moved || !restart_required_for(runtime.as_ref()).await {
+        return runtime;
+    }
+    match crate::runtime::rebuild_company(state, runtime.id()).await {
+        Ok(successor) => successor,
+        Err(err) => {
+            tracing::warn!(
+                company = %runtime.id(),
+                error = %err,
+                "account key saved but the runtime could not be rebuilt; a restart is still required",
+            );
+            runtime
+        }
+    }
+}
+
 /// `GET …/credential` — whether this company has its own key, and which identity
 /// its brokered calls present.
 async fn get_status(
@@ -476,9 +528,10 @@ async fn set_key(
         runtime.id(),
         runtime.secrets().as_ref(),
         company_key::FanOutRequest {
-            key: &body.key,
+            key: company_key::FanOutKey::Explicit(&body.key),
             model: body.model.as_deref(),
             confirm_in_use: body.confirm_in_use,
+            proxy_base_url: Some(&state.config().api_url),
         },
         prober.as_ref(),
     )
@@ -512,17 +565,110 @@ async fn set_key(
     // "the admin swapped the Composio token" — two changes with different blast
     // radii. An audit line that cannot name what changed is most of the way to
     // not having one.
-    journal_fan_out(&company, clearing, &report).await?;
+    // The rebuild runs even when the journal write fails, and the journal
+    // result is propagated only after — a journal failure must not also cost
+    // the rebuild. Retrying the identical payload once inference is already
+    // configured produces no changed inference/provider/default slot (every
+    // slot reads `alreadyCurrent`/`RowExists`/`DefaultAlreadySet`), so a
+    // journal-failure-then-retry sequence would otherwise never rebuild a
+    // company that has been on the echo brain since the first, unlogged
+    // attempt (CodeRabbit review).
+    let journal_result = journal_fan_out(&company, clearing, &report).await;
 
+    // Read off whichever runtime is live after this write — the successor if
+    // the fan-out configured inference for a company that booted without any.
+    let live = rebuild_if_pending(&state, &company, &report).await;
+    journal_result?;
     Ok(Json(MutationResponse {
-        status: effective_status(&state, runtime).await?,
+        status: effective_status(&state, live.as_ref()).await?,
         note: company_key::fan_out_note(clearing, &report, body.model.as_deref()),
         slots: report.slots.iter().map(SlotReportDto::from).collect(),
         needs_model: report.needs_model,
         sets_default: report.sets_default,
         models: report.models.clone(),
         used_by,
-        restart_required: restart_required_for(runtime).await,
+        restart_required: restart_required_for(live.as_ref()).await,
+    }))
+}
+
+/// `PUT …/credential/model` body: the model that finishes setting up TinyHumans
+/// for LLM with the account key **already stored** — write-only, so the console
+/// cannot resend it. The key-grant flow is the case: `finish_link` stores a key
+/// the console never saw and answers `needsModel`, and until this route existed
+/// the only way on from there was the LLM page's add flow, which asks for the
+/// very key nobody has.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetModel {
+    model: String,
+}
+
+/// `PUT …/credential/model` — re-runs the fan-out with the stored account key
+/// and the chosen model, which fills the `tinyhumans` row and the default
+/// exactly as a paste with a model would (every other slot reads
+/// `alreadyCurrent`), then rebuilds the runtime if that is what first
+/// configured inference. Refused when no account key is stored: there is
+/// nothing to finish.
+async fn set_model(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+    Json(body): Json<SetModel>,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    // A friendly, fast refusal for the common case — no key at all — read
+    // with no lock held. This is deliberately *not* the value `fan_out`
+    // treats as "the key": passing this snapshot through would race a
+    // concurrent rotation or clear that lands between this read and
+    // `fan_out` taking `slot_guard` (Codex P1 review), silently writing a
+    // stale key back as though it were freshly set, or resurrecting one that
+    // had just been removed. `FanOutKey::Stored` below re-reads the same
+    // secret *after* the lock is held, which is the only read this call
+    // actually acts on; a key that vanishes between this check and that one
+    // still fails safely — `fan_out` refuses `Some(model)` against a clearing
+    // key with the same "cannot be chosen while removing the key" error.
+    let has_key = runtime
+        .secrets()
+        .get(runtime.id(), company_key::KEY_KEY)
+        .await
+        .map_err(ApiError)?
+        .is_some_and(|crate::ports::types::SecretValue(v)| !v.trim().is_empty());
+    if !has_key {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "No TinyHumans account key is stored for this company; add one first.".to_string(),
+        )));
+    }
+
+    let prober = prober_for(runtime);
+    let report = company_key::fan_out(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        company_key::FanOutRequest {
+            key: company_key::FanOutKey::Stored,
+            model: Some(body.model.as_str()),
+            confirm_in_use: false,
+            proxy_base_url: Some(&state.config().api_url),
+        },
+        prober.as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
+    super::composio::evict_catalog_cache(runtime);
+    // Same ordering as `set_key`: rebuild before propagating a journal
+    // failure, so a retry of an already-configured save is not the only way
+    // this company ever leaves the echo brain (CodeRabbit review).
+    let journal_result = journal_fan_out(&company, false, &report).await;
+
+    let live = rebuild_if_pending(&state, &company, &report).await;
+    journal_result?;
+    Ok(Json(MutationResponse {
+        status: effective_status(&state, live.as_ref()).await?,
+        note: company_key::fan_out_note(false, &report, Some(&body.model)),
+        slots: report.slots.iter().map(SlotReportDto::from).collect(),
+        needs_model: report.needs_model,
+        sets_default: report.sets_default,
+        models: report.models.clone(),
+        used_by: None,
+        restart_required: restart_required_for(live.as_ref()).await,
     }))
 }
 
@@ -736,12 +882,13 @@ async fn finish_link(
         runtime.id(),
         runtime.secrets().as_ref(),
         company_key::FanOutRequest {
-            key: &key,
+            key: company_key::FanOutKey::Explicit(&key),
             model: None,
             // A grant never clears (Q10) — this flag never gates anything on
             // this path, so it is set unconditionally rather than threaded
             // from a request that has no such field.
             confirm_in_use: true,
+            proxy_base_url: Some(&state.config().api_url),
         },
         prober.as_ref(),
     )
@@ -756,17 +903,24 @@ async fn finish_link(
     {
         crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
     }
-    journal_fan_out(&company, false, &report).await?;
+    // Same ordering as `set_key`/`set_model`: rebuild before propagating a
+    // journal failure. The grant's link is already consumed by this point, so
+    // an identical retry cannot re-run this fan-out — but a rebuild skipped
+    // here still has no other trigger for this company, and journaling is
+    // never allowed to be the thing that costs it (CodeRabbit review).
+    let journal_result = journal_fan_out(&company, false, &report).await;
 
+    let live = rebuild_if_pending(&state, &company, &report).await;
+    journal_result?;
     Ok(Json(MutationResponse {
-        status: effective_status(&state, runtime).await?,
+        status: effective_status(&state, live.as_ref()).await?,
         note: company_key::fan_out_note(false, &report, None),
         slots: report.slots.iter().map(SlotReportDto::from).collect(),
         needs_model: report.needs_model,
         sets_default: report.sets_default,
         models: report.models.clone(),
         used_by: None,
-        restart_required: restart_required_for(runtime).await,
+        restart_required: restart_required_for(live.as_ref()).await,
     }))
 }
 

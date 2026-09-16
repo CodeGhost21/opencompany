@@ -21,7 +21,9 @@ use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
 use super::KEY_KEY;
-use super::types::{FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport};
+use super::types::{
+    FanOutKey, FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport,
+};
 
 // ---------------------------------------------------------------------------
 // The per-company lock
@@ -396,16 +398,18 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
 /// slots, read as one batch — always AFTER the account key itself is already
 /// safely stored, never before (see [`fan_out`]'s own step 3/4).
 ///
-/// Carries no default-marker read: unlike `row`, which step 8's health probe
-/// needs *before* the network round trip (for the provider's `base_url`),
-/// nothing here needs the default before the probe, and reading it this early
-/// only invited a second, later re-read to stay accurate. [`fan_out`] now
-/// reads `inference/default` exactly once, under `index_lock`, in step 9b
-/// (KR review comment 4012261302) — see [`RelockedReads`].
+/// Carries no default-marker read, and no provider row: step 8's health probe
+/// used to need the row's `base_url` here, before the network round trip, but
+/// now always probes the freshly derived `proxy_base_url` instead (Codex
+/// review — an existing row's stored endpoint can be stale, and probing it
+/// rather than the endpoint the row is about to be migrated to defeated the
+/// migration on the very call that performs it). The row itself is read once,
+/// fresh, under `index_lock` in step 9b — see [`RelockedReads`] — which is
+/// also why reading it this early only ever invited a second, later re-read
+/// to stay accurate.
 struct ReadSlots {
     composio_now: String,
     legacy_managed: bool,
-    row: Option<inference_store::Provider>,
     inference_key_key: String,
     inference_raw_new: Option<String>,
     legacy_owned: bool,
@@ -425,9 +429,6 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
     let providers = inference_store::list_providers(company, secrets).await?;
     let legacy_managed = providers.iter().any(|p| {
         p.origin == inference_store::ProviderOrigin::EntryZero && p.slug == inference::MANAGED_SLUG
-    });
-    let row = providers.into_iter().find(|p| {
-        p.origin == inference_store::ProviderOrigin::Indexed && p.slug == inference::MANAGED_SLUG
     });
     let inference_key_key = inference_store::provider_key_key(inference::MANAGED_SLUG);
     let inference_raw_new = secrets
@@ -452,7 +453,6 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
     Ok(ReadSlots {
         composio_now,
         legacy_managed,
-        row,
         inference_key_key,
         inference_raw_new,
         legacy_owned,
@@ -523,8 +523,35 @@ pub async fn fan_out(
 ) -> Result<FanOutReport> {
     let _guard = slot_guard(company).await;
 
+    // The proxy base every TinyHumans write below carries. From the caller's
+    // configured platform when it says so; the catalogue's production endpoint
+    // otherwise.
+    let proxy_base_url = request
+        .proxy_base_url
+        .map(catalogue::tinyhumans_proxy_url)
+        .or_else(|| {
+            catalogue::cloud_provider(inference::MANAGED_SLUG).map(|c| c.endpoint.to_string())
+        })
+        .unwrap_or_default();
+
     // 1. Validate. Nothing is written yet.
-    let new = request.key.trim().to_string();
+    //
+    // `FanOutKey::Stored` is resolved here, under the lock, rather than by a
+    // caller reading `KEY_KEY` beforehand and handing in the snapshot: that
+    // snapshot could go stale between the caller's read and this lock being
+    // taken if a concurrent rotation or clear won the race, and `fan_out`
+    // would then write the stale value back as though it were the intended
+    // new one (Codex P1 review). Resolving it here means the value this
+    // function treats as "new" is always read at the one point nothing else
+    // can be changing it.
+    let new = match request.key {
+        FanOutKey::Explicit(key) => key.trim().to_string(),
+        FanOutKey::Stored => secrets
+            .get(company, KEY_KEY)
+            .await?
+            .map(|SecretValue(v)| v.trim().to_string())
+            .unwrap_or_default(),
+    };
     let clearing = new.is_empty();
     let model: Option<String> = match request.model.map(str::trim).filter(|m| !m.is_empty()) {
         Some(_) if clearing => {
@@ -594,7 +621,6 @@ pub async fn fan_out(
     let ReadSlots {
         composio_now,
         legacy_managed,
-        row,
         inference_key_key,
         inference_raw_new,
         legacy_owned,
@@ -773,7 +799,7 @@ pub async fn fan_out(
 
     // 8. Health, before any row or default write (Q6 by construction).
     let mut probe_ids: Option<Vec<String>> = None;
-    let health_outcome = if legacy_managed {
+    let mut health_outcome = if legacy_managed {
         SlotOutcome::Skipped(SkipReason::LegacyManagedConfig)
     } else if !holds_new {
         match inference_outcome {
@@ -781,13 +807,17 @@ pub async fn fan_out(
             _ => SlotOutcome::Skipped(SkipReason::InferenceNotWritten),
         }
     } else {
-        let base = row
-            .as_ref()
-            .map(|r| r.base_url.clone())
-            .or_else(|| {
-                catalogue::cloud_provider(inference::MANAGED_SLUG).map(|c| c.endpoint.to_string())
-            })
-            .unwrap_or_default();
+        // Always the freshly derived proxy, never `row.base_url` — the
+        // `tinyhumans` row's slug is reserved (no add-provider path can point
+        // a second row at it), so an existing row's endpoint is either this
+        // same value already or a stale one an earlier boot minted under a
+        // different `TINYHUMANS_API_URL`. Step 10 below is about to rewrite a
+        // stale row to this value anyway; probing it first is what makes the
+        // probe (and the row it corrects) agree, instead of health-checking
+        // an endpoint the save is already in the middle of migrating away
+        // from (Codex review: "migrate existing TinyHumans rows to the
+        // configured platform").
+        let base = proxy_base_url.clone();
         match prober.probe(&base, &new).await {
             Ok(ids) => {
                 if let Err(err) = inference_store::record_health(
@@ -938,6 +968,80 @@ pub async fn fan_out(
             SlotOutcome::Kept(SkipReason::CustomKey) => SlotOutcome::Skipped(SkipReason::CustomKey),
             _ => SlotOutcome::Skipped(SkipReason::InferenceNotWritten),
         }
+    } else if let Some(existing) = row.as_ref().filter(|existing| {
+        existing.base_url != proxy_base_url
+            || model.as_ref().is_some_and(|chosen| {
+                existing.model() != inference_store::ModelOnRow::One(chosen.trim().to_string())
+            })
+    }) {
+        // The row already exists, but its stored endpoint predates (or was
+        // minted under) a different `TINYHUMANS_API_URL` than the one this
+        // instance is configured for now — a non-production deployment that
+        // already had a `tinyhumans` row before this instance started
+        // following its own platform, say. Left alone, every future save and
+        // health probe keeps reading and writing through the stale endpoint
+        // (Codex review). Refresh only `base_url`; every other field (model,
+        // enabled state, label) is the operator's and this save never
+        // touched it, so it is carried over from the existing row rather than
+        // reset to this call's own (often absent) `model`/`enabled` inputs.
+        match inference_store::put_provider(
+            company,
+            secrets,
+            inference_store::ProviderDraft {
+                slug: existing.slug.clone(),
+                label: existing.label.clone(),
+                kind: existing.kind.clone(),
+                base_url: proxy_base_url.clone(),
+                // `PUT …/credential/model` is the completion path for an
+                // existing legacy row with no unique model.  Persist its
+                // selection before making it the default; otherwise the
+                // default can name a model the row cannot route to.
+                models: model
+                    .as_deref()
+                    .map(tier_overrides)
+                    .unwrap_or_else(|| existing.models.clone()),
+                enabled: existing.enabled,
+            },
+        )
+        .await
+        {
+            // This is a stored mutation, not merely an existing row being
+            // observed.  Report it as a rotation so cache eviction and the
+            // audit fan-out record that the provider destination changed.
+            Ok(_) => SlotOutcome::Rotated,
+            // Unlike a successful migration, a failed one must not read as
+            // `Kept` — the account/inference keys are already updated and the
+            // health probe already checked the *new* endpoint, so a `Kept`
+            // here would report a clean save while the stored row keeps
+            // routing turns to the old one, with nothing on the response or
+            // in the journal saying the migration didn't land (Codex P1 /
+            // CodeRabbit review).
+            Err(err) => {
+                tracing::warn!(
+                    company = %company,
+                    error = %err,
+                    "keys rework: could not migrate tinyhumans provider endpoint",
+                );
+                // The probe above recorded health `ok` for `proxy_base_url` —
+                // the endpoint this row was *supposed* to end up on. That
+                // record is now a lie: the row still points at its old
+                // endpoint, so a reader trusting the health marker would
+                // think turns are reaching a platform they are not. Forget
+                // it rather than leave a stale "ok" behind (CodeRabbit
+                // review).
+                if let Err(forget_err) =
+                    inference_store::forget_health(company, secrets, inference::MANAGED_SLUG).await
+                {
+                    tracing::warn!(
+                        company = %company,
+                        error = %forget_err,
+                        "keys rework: could not clear tinyhumans health after a failed endpoint migration",
+                    );
+                }
+                health_outcome = SlotOutcome::Failed;
+                SlotOutcome::Failed
+            }
+        }
     } else if row.is_some() {
         SlotOutcome::Kept(SkipReason::RowExists)
     } else if let Some(chosen) = model.as_deref() {
@@ -950,7 +1054,7 @@ pub async fn fan_out(
                 slug: inference::MANAGED_SLUG.to_string(),
                 label: cat.label.to_string(),
                 kind: inference::MANAGED_SLUG.to_string(),
-                base_url: cat.endpoint.to_string(),
+                base_url: proxy_base_url.clone(),
                 models: tier_overrides(chosen),
                 enabled: true,
             },
@@ -990,7 +1094,7 @@ pub async fn fan_out(
                     Err(_) => SlotOutcome::Failed,
                 }
             }
-            SlotOutcome::Kept(SkipReason::RowExists) => {
+            SlotOutcome::Kept(SkipReason::RowExists) | SlotOutcome::Rotated => {
                 // P3-8 (keys rework #2306 review): a disabled row cannot
                 // currently serve anything, so it must not become the new
                 // default — that would point the company's default at a

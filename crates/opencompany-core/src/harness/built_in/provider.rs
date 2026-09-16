@@ -50,9 +50,10 @@ use crate::ports::SecretStore;
 use crate::ports::types::CompanyId;
 
 /// Default hosted inference endpoint when only a bare `TINYHUMANS_API_KEY` is
-/// supplied — the OpenAI-compatible surface a company agent's `chat-v1` /
-/// `reasoning-v1` / … workloads resolve against.
-pub const DEFAULT_TINYHUMANS_INFERENCE_URL: &str = "https://api.tinyhumans.ai/openai/v1";
+/// supplied: the TinyHumans OpenRouter proxy, the same endpoint as
+/// [`inference::PLATFORM_BASE_URL`]. Production value; fallbacks use
+/// [`inference::platform_base_url`] so a configured `TINYHUMANS_API_URL` wins.
+pub const DEFAULT_TINYHUMANS_INFERENCE_URL: &str = inference::PLATFORM_BASE_URL;
 
 /// Default hosted model/tier when none is configured.
 pub const DEFAULT_HOSTED_MODEL: &str = "chat-v1";
@@ -162,7 +163,8 @@ pub trait HarnessModel: ChatModel<()> {
 ///   source ([`TinyhumansTokenSource::from_env`]: a projected `TINYHUMANS_TOKEN_FILE`
 ///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`**, and
 ///   the runtime keeps its offline echo brain.
-/// * url — `OPENCOMPANY_INFERENCE_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
+/// * url — `OPENCOMPANY_INFERENCE_URL`, else the TinyHumans proxy derived from
+///   `TINYHUMANS_API_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
 /// * model — `OPENCOMPANY_INFERENCE_MODEL`, else [`DEFAULT_HOSTED_MODEL`].
 ///
 /// `OPENCOMPANY_INFERENCE_KEY` is checked first because it is a *different*
@@ -172,7 +174,17 @@ pub trait HarnessModel: ChatModel<()> {
 pub fn harness_inference_from_env(
     env: &dyn EnvSource,
 ) -> Option<(HostedProviderConfig, Option<String>)> {
-    let (credential, base_url) = hosted_endpoint_from_env(env)?;
+    harness_inference_from_env_at(env, None)
+}
+
+/// As [`harness_inference_from_env`], but uses the host's already-resolved API
+/// URL when an explicit inference URL is absent.  This matters for a URL set in
+/// `config.toml`: it is configuration, not a process environment variable.
+pub fn harness_inference_from_env_at(
+    env: &dyn EnvSource,
+    api_url: Option<&str>,
+) -> Option<(HostedProviderConfig, Option<String>)> {
+    let (credential, base_url) = hosted_endpoint_from_env_at(env, api_url)?;
     // The model is a per-roster **override** now: only an explicit
     // `OPENCOMPANY_INFERENCE_MODEL` flattens every agent to one workload. When
     // unset, each agent keeps its tier-derived model, which the tenant
@@ -221,6 +233,16 @@ pub fn harness_inference_from_env(
 /// The chat client POSTs to `{base_url}/chat/completions`, an OpenAI-compatible
 /// surface.
 pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credential, String)> {
+    hosted_endpoint_from_env_at(env, None)
+}
+
+/// Resolves the managed endpoint with an optional, already-normalized host API
+/// URL.  An environment endpoint remains the explicit highest-precedence
+/// override; the host URL is only the fallback proxy origin.
+pub(crate) fn hosted_endpoint_from_env_at(
+    env: &dyn EnvSource,
+    api_url: Option<&str>,
+) -> Option<(Credential, String)> {
     let credential = match env
         .get("OPENCOMPANY_INFERENCE_KEY")
         .map(|key| key.trim().to_string())
@@ -229,9 +251,18 @@ pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credentia
         Some(key) => Credential::from_value(key),
         None => Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?)),
     };
-    let base_url = env
-        .get("OPENCOMPANY_INFERENCE_URL")
-        .unwrap_or_else(|| DEFAULT_TINYHUMANS_INFERENCE_URL.to_string());
+    let base_url = env.get("OPENCOMPANY_INFERENCE_URL").unwrap_or_else(|| {
+        let platform_url = api_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                crate::company::composio::backend_url_or_default(
+                    env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
+                )
+            });
+        crate::company::inference::catalogue::tinyhumans_proxy_url(&platform_url)
+    });
     Some((credential, base_url))
 }
 
@@ -344,6 +375,12 @@ pub struct PlatformCredentialStatus {
 impl PlatformCredentialStatus {
     /// Resolves every managed surface against one environment read.
     pub fn resolve(env: &dyn EnvSource) -> Self {
+        Self::resolve_at(env, None)
+    }
+
+    /// Resolves managed surfaces using the host configuration for inference's
+    /// fallback endpoint.
+    pub fn resolve_at(env: &dyn EnvSource, api_url: Option<&str>) -> Self {
         let source = TinyhumansTokenSource::from_env(env);
         let projected_tier = source
             .as_ref()
@@ -351,7 +388,7 @@ impl PlatformCredentialStatus {
         Self {
             platform_identity: source.is_some(),
             projected_tier,
-            inference: hosted_endpoint_from_env(env).is_some(),
+            inference: hosted_endpoint_from_env_at(env, api_url).is_some(),
             search: search_backend_from_env(env).is_some(),
             media: media_backend_from_env(env).is_some(),
         }
@@ -2654,6 +2691,34 @@ mod tests {
         assert_eq!(bearer_of(&cfg).await.as_deref(), Some("sk-platform"));
         assert_eq!(cfg.base_url, "https://staging-api.tinyhumans.ai/openai/v1");
         assert_eq!(model.as_deref(), Some("reasoning-v1"));
+    }
+
+    #[tokio::test]
+    async fn env_config_derives_the_inference_proxy_from_the_platform_api_url() {
+        let env = MapEnv::new([
+            ("TINYHUMANS_API_KEY", "sk-platform"),
+            (
+                crate::company::composio::TINYHUMANS_API_URL_ENV,
+                "https://staging-api.tinyhumans.ai/",
+            ),
+        ]);
+        let (cfg, _) = harness_inference_from_env(&env).expect("configured");
+        assert_eq!(
+            cfg.base_url,
+            "https://staging-api.tinyhumans.ai/agent-integrations/openrouter"
+        );
+    }
+
+    #[tokio::test]
+    async fn env_config_uses_resolved_host_api_url_when_environment_omits_it() {
+        let env = MapEnv::new([("TINYHUMANS_API_KEY", "sk-platform")]);
+        let (cfg, _) =
+            harness_inference_from_env_at(&env, Some("https://config-api.tinyhumans.example/"))
+                .expect("configured");
+        assert_eq!(
+            cfg.base_url,
+            "https://config-api.tinyhumans.example/agent-integrations/openrouter"
+        );
     }
 
     #[test]

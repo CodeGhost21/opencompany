@@ -225,6 +225,23 @@ export function setCompanyCredential(
 }
 
 /**
+ * Finish setting up TinyHumans for LLM with the account key the host already
+ * holds — `PUT …/credential/model`. For a key the console cannot resend: a
+ * key-grant (`finishCredentialLink`) stores one the page never saw and can
+ * answer `needsModel`, and step two must then complete the row off the stored
+ * key rather than off a `pendingKey` this page never had.
+ */
+export function setCompanyCredentialModel(
+  client: OpenCompanyClient,
+  company: string | null,
+  model: string,
+): Promise<CompanyCredentialMutation> {
+  return client.put<CompanyCredentialMutation>(`${client.scopeFor(company)}/credential/model`, {
+    model,
+  });
+}
+
+/**
  * Finish a connection: hand the host the code the hub returned, and the `state`
  * it started with.
  *

@@ -103,6 +103,7 @@ impl SecretStore for SlowSecrets {
 struct FakeProber {
     answer: std::result::Result<Vec<String>, probe::ProbeClass>,
     calls: AtomicUsize,
+    last_base_url: Mutex<Option<String>>,
 }
 
 impl FakeProber {
@@ -110,6 +111,7 @@ impl FakeProber {
         Self {
             answer: Ok(ids.iter().map(|s| s.to_string()).collect()),
             calls: AtomicUsize::new(0),
+            last_base_url: Mutex::new(None),
         }
     }
 
@@ -117,7 +119,15 @@ impl FakeProber {
         Self {
             answer: Err(class),
             calls: AtomicUsize::new(0),
+            last_base_url: Mutex::new(None),
         }
+    }
+
+    /// The `base_url` the most recent [`InferenceProber::probe`] call
+    /// received, so a test can assert *what* was probed, not merely that
+    /// something was.
+    fn last_base_url(&self) -> Option<String> {
+        self.last_base_url.lock().unwrap().clone()
     }
 }
 
@@ -125,10 +135,11 @@ impl FakeProber {
 impl InferenceProber for FakeProber {
     async fn probe(
         &self,
-        _base_url: &str,
+        base_url: &str,
         _key: &str,
     ) -> std::result::Result<Vec<String>, probe::ProbeFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_base_url.lock().unwrap() = Some(base_url.to_string());
         match &self.answer {
             Ok(ids) => Ok(ids.clone()),
             Err(class) => Err(probe::ProbeFailure {
@@ -242,9 +253,10 @@ async fn matrix_m1() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -294,9 +306,10 @@ async fn matrix_m2() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -326,6 +339,180 @@ async fn matrix_m2() {
     assert_eq!(outcome(&report, Slot::Default), SlotOutcome::Filled);
     assert_eq!(outcome(&report, Slot::Health), SlotOutcome::HealthOk);
     assert!(!report.needs_model);
+}
+
+/// `proxy_base_url` (a staging or local platform's `api_url`) is not just
+/// consulted for the health probe — the stored `tinyhumans` row's `base_url`
+/// itself must carry the derived proxy URL, or a later resolver reading the
+/// row back would probe the wrong platform (tinysweeper review finding on
+/// this PR: every other `fan_out` unit test passes `proxy_base_url: None`,
+/// which only exercises the production fallback in
+/// [`catalogue::tinyhumans_proxy_url`]).
+#[tokio::test]
+async fn proxy_base_url_override_lands_on_the_stored_row() {
+    let cid = company("proxy-base-url");
+    let secrets = MemSecrets::default();
+    let prober = FakeProber::ok(&[MODEL]);
+    let api_url = "https://staging-api.tinyhumans.ai";
+
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: FanOutKey::Explicit(NEW),
+            model: Some(MODEL),
+            confirm_in_use: true,
+            proxy_base_url: Some(api_url),
+        },
+        &prober,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Filled);
+    let providers = inference_store::list_providers(&cid, &secrets)
+        .await
+        .unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].slug, "tinyhumans");
+    let expected = catalogue::tinyhumans_proxy_url(api_url);
+    assert_eq!(providers[0].base_url, expected);
+    assert_ne!(
+        providers[0].base_url,
+        catalogue::cloud_provider(inference::MANAGED_SLUG)
+            .unwrap()
+            .endpoint
+    );
+    // The health probe reads the same override, not the catalogue's
+    // production endpoint (tinysweeper review: the row and the probe base
+    // must not be able to drift apart).
+    assert_eq!(prober.last_base_url(), Some(expected));
+}
+
+/// A `tinyhumans` row minted before this instance followed
+/// `TINYHUMANS_API_URL` (or minted under a since-changed one) carries a stale
+/// `base_url` forever unless a later save corrects it — `Kept(RowExists)`
+/// used to leave an existing row's endpoint untouched no matter what
+/// `proxy_base_url` the request carried, so a staging/local deployment with a
+/// pre-existing row kept probing and pointing at whatever the row was first
+/// created against, typically production (Codex review: "migrate existing
+/// TinyHumans rows to the configured platform"). A save now refreshes the
+/// row's `base_url` in place — and only that field, so the row's model and
+/// enabled state survive untouched — and probes the *new* endpoint rather
+/// than the stale stored one.
+#[tokio::test]
+async fn an_existing_row_migrates_to_a_changed_proxy_base_url() {
+    let cid = company("migrate-row");
+    let secrets = MemSecrets::default();
+    raw_set(&secrets, &cid, ACCOUNT_KEY_KEY, OLD).await;
+    // Seeded at the catalogue's static production endpoint — the same shape a
+    // row minted before `TINYHUMANS_API_URL` existed, or under a different
+    // one, would carry.
+    seed_row(&secrets, &cid, MODEL).await;
+    let stale_base_url = catalogue::cloud_provider(inference::MANAGED_SLUG)
+        .unwrap()
+        .endpoint
+        .to_string();
+    assert_eq!(
+        inference_store::list_providers(&cid, &secrets)
+            .await
+            .unwrap()[0]
+            .base_url,
+        stale_base_url,
+        "sanity: seeded on the stale endpoint"
+    );
+
+    let new_api_url = "https://staging-api.tinyhumans.ai";
+    let prober = FakeProber::ok(&[MODEL]);
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: FanOutKey::Explicit(NEW),
+            model: None,
+            confirm_in_use: true,
+            proxy_base_url: Some(new_api_url),
+        },
+        &prober,
+    )
+    .await
+    .unwrap();
+
+    let migrated = catalogue::tinyhumans_proxy_url(new_api_url);
+    assert_ne!(migrated, stale_base_url);
+    let providers = inference_store::list_providers(&cid, &secrets)
+        .await
+        .unwrap();
+    assert_eq!(providers.len(), 1, "migrating in place, not adding a row");
+    assert_eq!(providers[0].base_url, migrated);
+    // Everything else about the row survived the migration untouched.
+    assert_eq!(
+        providers[0].model(),
+        inference_store::ModelOnRow::One(MODEL.to_string())
+    );
+    assert!(providers[0].enabled);
+    // The health probe checked the row's *new* endpoint, not the one it was
+    // about to migrate away from.
+    assert_eq!(prober.last_base_url(), Some(migrated));
+    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Rotated);
+}
+
+/// A failed row migration must not read as a clean `Kept(RowExists)` — the
+/// account/inference keys are already rotated and the health probe already
+/// checked the *new* endpoint by this point, so reporting success here would
+/// tell the operator the migration landed while the stored row keeps routing
+/// every turn to the old one, with nothing on the response or in the journal
+/// saying otherwise (Codex P1 / CodeRabbit review).
+#[tokio::test]
+async fn a_failed_row_migration_reports_failed_not_kept() {
+    let cid = company("migrate-row-fails");
+    let inner = MemSecrets::default();
+    raw_set(&inner, &cid, ACCOUNT_KEY_KEY, OLD).await;
+    seed_row(&inner, &cid, MODEL).await;
+    let secrets = FailsWriting {
+        inner,
+        failing_key: inference_store::PROVIDER_INDEX_KEY.to_string(),
+    };
+
+    let prober = FakeProber::ok(&[MODEL]);
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: FanOutKey::Explicit(NEW),
+            model: None,
+            confirm_in_use: true,
+            proxy_base_url: Some("https://staging-api.tinyhumans.ai"),
+        },
+        &prober,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Failed);
+    assert_eq!(outcome(&report, Slot::Health), SlotOutcome::Failed);
+    // The row itself really is unchanged — the write failed, not merely the
+    // report of it.
+    let providers = inference_store::list_providers(&cid, &secrets.inner)
+        .await
+        .unwrap();
+    assert_eq!(
+        providers[0].base_url,
+        catalogue::cloud_provider(inference::MANAGED_SLUG)
+            .unwrap()
+            .endpoint
+    );
+    // The probe recorded health `ok` for the endpoint the row was *supposed*
+    // to migrate to; since the migration didn't land, that record must not
+    // survive — a reader trusting it would think turns reach a platform they
+    // do not (CodeRabbit review).
+    let health = inference_store::load_health(&cid, &secrets.inner)
+        .await
+        .unwrap();
+    assert!(
+        !health.contains_key(inference::MANAGED_SLUG),
+        "a failed migration must not leave a stale healthy record: {health:?}"
+    );
 }
 
 #[tokio::test]
@@ -362,9 +549,10 @@ async fn matrix_m3() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -405,9 +593,10 @@ async fn matrix_m4() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -469,9 +658,10 @@ async fn matrix_m5() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -539,9 +729,10 @@ async fn matrix_m5_plus_auth() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -605,9 +796,10 @@ async fn matrix_m5_plus_auth() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober2,
     )
@@ -638,9 +830,10 @@ async fn matrix_m6() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -711,9 +904,10 @@ async fn matrix_m7() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -755,9 +949,10 @@ async fn matrix_m8() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -836,9 +1031,10 @@ async fn matrix_m9() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -879,9 +1075,10 @@ async fn matrix_m10() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -940,9 +1137,10 @@ async fn matrix_m11() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -953,9 +1151,10 @@ async fn matrix_m11() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1005,9 +1204,10 @@ async fn matrix_m12() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1040,9 +1240,10 @@ async fn matrix_m13() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1088,9 +1289,10 @@ async fn matrix_m14() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1133,9 +1335,10 @@ async fn matrix_c1() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1193,9 +1396,10 @@ async fn matrix_c2() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1227,9 +1431,10 @@ async fn matrix_c3() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1273,9 +1478,10 @@ async fn an_auth_probe_restores_the_llm_slots_exactly() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1310,9 +1516,10 @@ async fn a_non_auth_probe_failure_keeps_everything() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1348,9 +1555,10 @@ async fn an_invalid_model_writes_nothing() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some("chat-v1"),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1374,9 +1582,10 @@ async fn a_model_with_a_clear_is_refused() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1413,9 +1622,10 @@ async fn a_read_failure_after_the_account_key_is_stored_still_keeps_the_key() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1477,9 +1687,10 @@ async fn failing_account_key_write_writes_nothing_else() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1504,9 +1715,10 @@ async fn failing_composio_write_still_sets_up_llm() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1541,9 +1753,10 @@ async fn failing_inference_write_skips_row_default_and_probe() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1579,9 +1792,10 @@ async fn failing_row_write_keeps_the_key_copy() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1609,9 +1823,10 @@ async fn failing_default_write_keeps_the_row() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1642,9 +1857,10 @@ async fn failing_health_record_does_not_change_outcomes() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1678,9 +1894,10 @@ async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
             &c1,
             s1.as_ref(),
             FanOutRequest {
-                key: NEW,
+                key: FanOutKey::Explicit(NEW),
                 model: None,
                 confirm_in_use: true,
+                proxy_base_url: None,
             },
             &prober_a,
         );
@@ -1688,9 +1905,10 @@ async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
             &c2,
             s2.as_ref(),
             FanOutRequest {
-                key: OTHER,
+                key: FanOutKey::Explicit(OTHER),
                 model: None,
                 confirm_in_use: true,
+                proxy_base_url: None,
             },
             &prober_b,
         );
@@ -1736,9 +1954,10 @@ async fn no_report_or_note_contains_a_key() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     )
@@ -1918,9 +2137,10 @@ async fn a_fan_out_racing_a_provider_add_loses_neither_row() {
         &c1,
         s1.as_ref(),
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     );
@@ -2000,9 +2220,10 @@ async fn a_fan_out_racing_a_default_change_backs_off_or_wins_but_never_corrupts(
         &c1,
         s1.as_ref(),
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
+            proxy_base_url: None,
         },
         &prober,
     );

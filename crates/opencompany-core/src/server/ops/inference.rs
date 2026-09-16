@@ -1011,14 +1011,13 @@ async fn effective_status_with(
         Some(platform) => resolve_effective(runtime.id(), &manifest, Some(platform), secrets)
             .await
             .map_err(ApiError)?
-            .map_or_else(|| inference::PLATFORM_BASE_URL.to_string(), |d| d.base_url),
+            .map_or_else(|| platform.base_url.clone(), |d| d.base_url),
         // No platform endpoint on this deployment: nothing to inherit, so the
         // tenant resolve already holds the whole answer and the second read is
         // skipped.
-        None => decl.as_ref().map_or_else(
-            || inference::PLATFORM_BASE_URL.to_string(),
-            |d| d.base_url.clone(),
-        ),
+        None => decl
+            .as_ref()
+            .map_or_else(inference::platform_base_url, |d| d.base_url.clone()),
     };
     // This route is `ScopedCompany`, not admin — every console reader gets this
     // field on every page load. A credential embedded in the endpoint is
@@ -1169,7 +1168,7 @@ async fn managed_state(
         base_url: catalogue::redact_endpoint(
             &platform
                 .map(|p| p.base_url.clone())
-                .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string()),
+                .unwrap_or_else(inference::platform_base_url),
         ),
         enabled: store::managed_enabled(runtime.id(), secrets)
             .await
@@ -2869,11 +2868,16 @@ base_url = "https://byo.example/v1"
             dto.key_configured,
             "a console-set key must read as configured"
         );
-        // Same company, same injected platform default, opposite answer — and the
-        // key is not merely recorded: it moves the company off the subscription
-        // proxy and onto its own OpenRouter account, which is the only way a
-        // stored `sk-or-…` could actually be used.
-        assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL);
+        // Unlike plain `openrouter` (`keyless_openrouter_rides_the_subscription_
+        // and_a_key_goes_direct`), a `managed` config never goes direct: its
+        // whole reason to be a separate provider from `openrouter` is that its
+        // credential is a TinyHumans account key, valid only against the
+        // TinyHumans proxy, not a raw OpenRouter secret. `resolve_endpoint`'s
+        // managed branch documents this ("the endpoint is always the
+        // platform's") — the key changes which credential rides the request,
+        // never the endpoint it rides to. The base URL must therefore stay the
+        // platform's even once the tenant's own key is stored.
+        assert_eq!(dto.base_url, STAGING_URL);
     }
 
     #[tokio::test]

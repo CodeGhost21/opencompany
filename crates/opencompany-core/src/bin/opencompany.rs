@@ -583,10 +583,10 @@ fn company_builder(
     discoverable: bool,
 ) -> Result<RuntimeBuilder> {
     let mut builder = attach_tinyhumans_feedback(
-        attach_harness(attach_openhuman(RuntimeBuilder::new(
-            home.to_path_buf(),
-            manifest,
-        ))),
+        attach_harness(
+            attach_openhuman(RuntimeBuilder::new(home.to_path_buf(), manifest)),
+            state.config(),
+        ),
         state.config(),
     )
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
@@ -928,8 +928,8 @@ fn attach_openhuman(builder: RuntimeBuilder) -> RuntimeBuilder {
 /// through `desktop::register` rather than through this binary, and a second
 /// copy of the wiring here is exactly how that path came to build companies
 /// with no harness at all.
-fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
-    opencompany::app::attach_harness(builder)
+fn attach_harness(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
+    opencompany::app::attach_harness(builder, config)
 }
 
 /// Routes feedback to the TinyHumans hub when this instance is provisioned with

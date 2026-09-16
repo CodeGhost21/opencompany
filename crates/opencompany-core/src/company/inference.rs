@@ -146,13 +146,29 @@ impl Default for HarnessScope {
     }
 }
 
-/// The platform's OpenAI-compatible endpoint — the subscription proxy an
-/// `openrouter` company with **no** key of its own resolves against.
+/// The platform's OpenAI-compatible endpoint — the TinyHumans OpenRouter proxy
+/// that the legacy managed chain and an `openrouter` company with **no** key of
+/// its own resolve against. The production value; see [`platform_base_url`] for
+/// the one this instance actually uses.
 ///
-/// The proxy fronts OpenRouter upstream and meters the spend against the
-/// tenant's subscription, so from the workload's point of view this and
-/// [`OPENROUTER_BASE_URL`] serve the same catalogue; only who pays differs.
-pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/openai/v1";
+/// Keys rework (#2306), slice 2a "commit 5": this used to be
+/// `https://api.tinyhumans.ai/openai/v1`, the curated surface that takes tier
+/// names (`chat-v1`). Every path that resolves here now sends a real model id
+/// (2d), and the first-run wizard's `managed` provider probes and stores the id
+/// it discovered — so the proxy, which lists real ids and rejects tier names, is
+/// the right endpoint for all of them, and the same one the `tinyhumans`
+/// provider row uses. The proxy fronts OpenRouter upstream and meters the spend
+/// against the tenant's subscription, so from the workload's point of view this
+/// and [`OPENROUTER_BASE_URL`] serve the same catalogue; only who pays differs.
+pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/agent-integrations/openrouter";
+
+/// The production TinyHumans OpenRouter proxy base used only when a resolver
+/// has no per-runtime managed default. AppState carries its own `api_url` into
+/// every attached runtime as that default, so separate AppStates cannot affect
+/// one another's inference endpoint.
+pub fn platform_base_url() -> String {
+    PLATFORM_BASE_URL.to_string()
+}
 
 /// The provider kind removed when OpenCompany stopped exposing its own model
 /// SKUs. A manifest or stored runtime blob still naming it aliases to
@@ -453,7 +469,7 @@ fn resolve_endpoint(
         // else the injected managed one.
         let base_url = env_default
             .map(|e| e.base_url.clone())
-            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+            .unwrap_or_else(platform_base_url);
         let credential = if has_key {
             Credential::from_value(key)
         } else {
@@ -474,7 +490,7 @@ fn resolve_endpoint(
         }
         let base_url = env_default
             .map(|e| e.base_url.clone())
-            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+            .unwrap_or_else(platform_base_url);
         let credential = env_default
             .map(|e| e.credential.clone())
             .unwrap_or(Credential::None);
@@ -1273,30 +1289,64 @@ async fn resolve_legacy_scoped(
         let selected_provider = selected_kind(&runtime.provider).to_string();
         let provider = normalize_provider(&runtime.provider).to_string();
         reject_unknown_provider(&provider, "the stored runtime inference config")?;
-        let key = load_inference_key_for(
-            company,
-            secrets,
-            credential_slug(&runtime.provider),
-            None,
-            scope,
-            // It named its own endpoint, so the company's key is for somewhere
-            // else. See `load_inference_key_for`.
-            runtime.base_url.is_none(),
-        )
-        .await?;
+        // Trimmed and blank-filtered for the same reason the manifest arm
+        // below normalizes its own `base_url` before asking "did this name an
+        // endpoint": a stored `base_url: Some(String::new())` is not an
+        // endpoint anybody named (tinysweeper/CodeRabbit review, same root
+        // cause as the manifest arm's blank-`base_url` finding).
+        let runtime_base_url = runtime
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        // `managed` is an alias for the platform endpoint, not a credential
+        // type an arbitrary gateway can receive.  Once this runtime row names
+        // its own endpoint it resolves as a direct OpenRouter-compatible
+        // provider, so it must not read the managed slot: account-key fan-out
+        // deliberately places the write-only TinyHumans account key there.
+        // There is no runtime field for a gateway credential; operators that
+        // need one select the actual gateway provider, whose distinct slot the
+        // provider route writes.  Failing closed here prevents a `managed` +
+        // `base_url` row from disclosing a TinyHumans key to that endpoint.
+        let key = if runtime_base_url.is_some() && is_managed_choice(&runtime.provider) {
+            String::new()
+        } else {
+            load_inference_key_for(
+                company,
+                secrets,
+                credential_slug(&runtime.provider),
+                None,
+                scope,
+                // It named its own endpoint, so the company's key is for
+                // somewhere else. See `load_inference_key_for`.
+                runtime_base_url.is_none(),
+            )
+            .await?
+        };
         let had_key = !key.trim().is_empty();
-        // The **raw** kind, not the normalized one. `normalize_provider` folds
-        // `managed` onto `openrouter`, and resolving through the normalized
-        // value skipped both managed branches — so a company that declared
-        // `managed` and stored a key had its requests sent to `openrouter.ai`
-        // carrying a TinyHumans token. `resolve_endpoint` consults
-        // `is_managed_choice` first and needs the word the operator chose.
-        let (base_url, credential, proxied) = resolve_endpoint(
-            &runtime.provider,
-            runtime.base_url.as_deref(),
-            key,
-            env_default,
-        );
+        // Which spelling reaches `resolve_endpoint` depends on whether this
+        // runtime config also names an endpoint — the same split the manifest
+        // arm below makes, and for the same reason: `validate_runtime`
+        // accepts `provider: "managed"` with a valid non-blank `base_url`
+        // (normalizing to `openrouter` for the provider-allowlist check
+        // only), so a console `PUT` naming a gateway in front of the platform
+        // is exactly as valid a runtime config as a manifest one, and must be
+        // honoured the same way rather than having `resolve_endpoint`'s
+        // managed branch silently discard it for the platform's own endpoint
+        // (CodeRabbit review). Without a `base_url` the **raw** word must go
+        // in: `normalize_provider` folds `managed` onto `openrouter`, and
+        // resolving through the normalized value skipped both managed
+        // branches — so a company that declared `managed` and stored a key
+        // had its requests sent to `openrouter.ai` carrying a TinyHumans
+        // token. `resolve_endpoint` consults `is_managed_choice` first and
+        // needs the word the operator chose.
+        let endpoint_kind = if runtime_base_url.is_some() {
+            provider.as_str()
+        } else {
+            runtime.provider.as_str()
+        };
+        let (base_url, credential, proxied) =
+            resolve_endpoint(endpoint_kind, runtime.base_url.as_deref(), key, env_default);
         let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider,
@@ -1317,32 +1367,72 @@ async fn resolve_legacy_scoped(
         let provider = normalize_provider(declared).to_string();
         reject_unknown_provider(&provider, "`[inference].provider`")?;
         let raw = manifest.provider.as_deref().unwrap_or_default();
-        let key = load_inference_key_for(
-            company,
-            secrets,
-            credential_slug(raw),
-            manifest.api_key_secret.as_deref(),
-            scope,
-            manifest.base_url.is_none(),
-        )
-        .await?;
+        // Trimmed and blank-filtered once, up front: `resolve_endpoint` itself
+        // already treats a blank override as absent, but the two decisions
+        // below (whether the row/default may inherit the company-wide key, and
+        // which spelling of the provider reaches `resolve_endpoint`) used to
+        // check `manifest.base_url.is_some()` directly — a `base_url = ""` or
+        // whitespace-only manifest value read as "an endpoint was named" to
+        // both, which sent `credential_slug`'s lookup to `tinyhumans` while the
+        // endpoint side used the *normalized* `openrouter` spelling and skipped
+        // the managed branch entirely: a manifest `managed` with a blank
+        // `base_url` and a stored key resolved straight to `openrouter.ai`,
+        // reproducing the same 401 the raw/normalized split below exists to
+        // prevent (tinysweeper/CodeRabbit review).
+        let manifest_base_url = manifest
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        // An explicit endpoint is a direct provider.  In particular, the
+        // `managed` spelling must not make its TinyHumans account key travel
+        // to an operator-selected gateway.
+        let key = if manifest_base_url.is_some()
+            && is_managed_choice(raw)
+            && manifest
+                .api_key_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|secret| !secret.is_empty())
+                .is_none()
+        {
+            String::new()
+        } else {
+            load_inference_key_for(
+                company,
+                secrets,
+                credential_slug(raw),
+                manifest.api_key_secret.as_deref(),
+                scope,
+                manifest_base_url.is_none(),
+            )
+            .await?
+        };
         let had_key = !key.trim().is_empty();
-        // The **normalized** kind here, unlike the runtime branch above, and the
-        // difference is who wrote the value. A runtime blob comes from the
-        // console, whose managed card has no URL field — so a `base_url` beside
-        // `managed` there is a stale value a previously-picked provider left in
-        // the form, and honouring it would send the managed probe somewhere the
-        // operator never chose. A manifest is hand-authored and committed:
-        // `provider = "managed"` with a `base_url` is a sentence somebody typed
-        // on purpose, usually a gateway in front of the platform, and silently
-        // redirecting it to the platform endpoint would be the same disregard in
-        // the opposite direction.
-        //
-        // The credential chain is unaffected either way: an explicit endpoint
-        // resolves `proxied = false`, which is exactly what denies it both the
-        // platform credential and the company identity. A gateway is a vendor.
-        let (base_url, credential, proxied) =
-            resolve_endpoint(&provider, manifest.base_url.as_deref(), key, env_default);
+        // Which spelling reaches `resolve_endpoint` depends on whether the
+        // manifest also names an endpoint. A manifest is hand-authored and
+        // committed: `provider = "managed"` **with** a `base_url` is a sentence
+        // somebody typed on purpose, usually a gateway in front of the platform,
+        // and `resolve_endpoint`'s managed branch would silently discard that
+        // URL — so the normalized kind goes in and the gateway is honoured as a
+        // vendor (`proxied = false`, no platform credential, no company
+        // identity). Without a `base_url` the **raw** word must go in, exactly
+        // as the runtime branch above does: the normalized `openrouter` skips
+        // the managed branch, and a manifest `managed` with a stored key — the
+        // first-run wizard's TinyHumans card writes precisely that — resolved to
+        // `openrouter.ai` carrying the TinyHumans key. The e2e symptom was a
+        // wizard-built company answering every turn with a 401 from OpenRouter.
+        let endpoint_kind = if manifest_base_url.is_some() {
+            provider.as_str()
+        } else {
+            declared
+        };
+        let (base_url, credential, proxied) = resolve_endpoint(
+            endpoint_kind,
+            manifest.base_url.as_deref(),
+            key,
+            env_default,
+        );
         let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider,
@@ -2255,6 +2345,131 @@ mod tests {
         );
     }
 
+    /// The first-run wizard's TinyHumans card writes `provider = "managed"`
+    /// with no `base_url` into the manifest and the typed key into the store.
+    /// That company must resolve to the platform proxy with that key — not to
+    /// `openrouter.ai`, which is where the normalized kind sent it (and the
+    /// key with it) until the umbrella e2e caught a wizard-built company
+    /// answering every turn with OpenRouter's 401.
+    #[tokio::test]
+    async fn a_managed_manifest_with_a_stored_key_stays_on_the_platform() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        store_key(&company, &secrets, "th-not-a-real-key")
+            .await
+            .unwrap();
+        let decl = resolve_effective(&company, &inference(LEGACY_MANAGED), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.source, InferenceSource::Manifest);
+        assert_eq!(decl.base_url, platform_base_url());
+        assert!(decl.is_proxied());
+        assert_eq!(bearer(&decl).await.as_deref(), Some("th-not-a-real-key"));
+
+        // A manifest that ALSO names an endpoint is a gateway the operator
+        // chose on purpose, and keeps resolving to it as a vendor.
+        let mut gateway = inference(LEGACY_MANAGED);
+        gateway.base_url = Some("https://gateway.example/v1".into());
+        let decl = resolve_effective(&company, &gateway, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://gateway.example/v1");
+        assert!(!decl.is_proxied());
+    }
+
+    /// The runtime-override arm makes the identical "named a gateway or not"
+    /// choice the manifest arm above does, and for the same reason:
+    /// `validate_runtime` accepts `provider: "managed"` with a valid non-blank
+    /// `base_url`, so a console `PUT` naming a gateway is exactly as valid a
+    /// runtime config as a manifest one — `resolve_endpoint`'s managed branch
+    /// must not silently discard it for the platform's own endpoint
+    /// (CodeRabbit review).
+    #[tokio::test]
+    async fn a_managed_runtime_override_with_a_gateway_keeps_it() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        store_key(&company, &secrets, "th-not-a-real-key")
+            .await
+            .unwrap();
+
+        // No endpoint named: stays on the platform proxy, same as the
+        // manifest arm.
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: LEGACY_MANAGED.into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.source, InferenceSource::Runtime);
+        assert_eq!(decl.base_url, platform_base_url());
+        assert!(decl.is_proxied());
+
+        // A runtime config that ALSO names an endpoint is a gateway the
+        // operator chose on purpose, and keeps resolving to it as a vendor —
+        // not the platform's own endpoint with the gateway silently dropped.
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: LEGACY_MANAGED.into(),
+                base_url: Some("https://gateway.example/v1".into()),
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://gateway.example/v1");
+        assert!(!decl.is_proxied());
+    }
+
+    /// A blank or whitespace-only `base_url` is not "the operator named a
+    /// gateway" — it must resolve exactly like naming none at all, staying on
+    /// the platform proxy with the stored key (tinysweeper/CodeRabbit review:
+    /// `manifest.base_url.is_some()` used to read a blank string as an
+    /// explicit endpoint, which sent a `managed` company with a blank
+    /// `base_url` and a stored key straight to `openrouter.ai` — the same 401
+    /// `a_managed_manifest_with_a_stored_key_stays_on_the_platform` exists to
+    /// prevent for the no-`base_url` case).
+    #[tokio::test]
+    async fn a_blank_manifest_base_url_is_treated_as_absent() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        store_key(&company, &secrets, "th-not-a-real-key")
+            .await
+            .unwrap();
+
+        for blank in ["", "   ", "\t\n"] {
+            let mut manifest = inference(LEGACY_MANAGED);
+            manifest.base_url = Some(blank.to_string());
+            let decl = resolve_effective(&company, &manifest, None, &secrets)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(decl.base_url, platform_base_url(), "blank: {blank:?}");
+            assert!(decl.is_proxied(), "blank: {blank:?}");
+            assert_eq!(
+                bearer(&decl).await.as_deref(),
+                Some("th-not-a-real-key"),
+                "blank: {blank:?}"
+            );
+        }
+    }
+
     /// A committed manifest still saying `provider = "managed"` resolves as
     /// proxied OpenRouter rather than failing. It was valid when written, and the
     /// intent — "the platform's brain" — is exactly what proxied OpenRouter is.
@@ -2553,6 +2768,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(bearer(&decl).await.as_deref(), Some("named-secret"));
+    }
+
+    #[tokio::test]
+    async fn managed_gateway_uses_its_explicitly_named_secret() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(
+                &company,
+                "byo/gateway",
+                SecretValue("gateway-secret".into()),
+            )
+            .await
+            .unwrap();
+        let mut manifest = inference(LEGACY_MANAGED);
+        manifest.base_url = Some("https://gateway.example/v1".into());
+        manifest.api_key_secret = Some("byo/gateway".into());
+
+        let decl = resolve_effective(&company, &manifest, None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(decl.base_url, "https://gateway.example/v1");
+        assert!(!decl.is_proxied());
+        assert_eq!(bearer(&decl).await.as_deref(), Some("gateway-secret"));
     }
 
     // ---- validation --------------------------------------------------------
@@ -3100,6 +3341,43 @@ mod tests {
             presented, None,
             "no credential at all is the correct answer here"
         );
+    }
+
+    #[tokio::test]
+    async fn managed_runtime_override_never_sends_the_managed_key_to_its_endpoint() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        write(
+            &secrets,
+            &store::provider_key_key(MANAGED_SLUG),
+            "th-write-only-account-key",
+        )
+        .await;
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "managed".into(),
+                base_url: Some("https://gateway.example/v1".into()),
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let decl = resolve_effective(
+            &company,
+            &Inference::default(),
+            Some(&managed_env()),
+            &secrets,
+        )
+        .await
+        .unwrap()
+        .expect("an explicit endpoint resolves");
+
+        assert_eq!(decl.base_url, "https://gateway.example/v1");
+        assert!(!decl.is_proxied());
+        assert_eq!(bearer(&decl).await, None);
     }
 
     #[tokio::test]
