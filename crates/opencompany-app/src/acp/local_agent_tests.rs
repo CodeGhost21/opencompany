@@ -231,8 +231,7 @@ fn an_observer_is_registered_for_one_turn_and_no_longer() {
     // The guard, not a matching pair of calls: the steered path *drops*
     // the prompt future for a turn that ignored its cancel, and a manual
     // deregistration would never run for exactly those turns.
-    let live: Arc<StdMutex<HashMap<String, AcpObserver>>> =
-        Arc::new(StdMutex::new(HashMap::new()));
+    let live: Arc<StdMutex<HashMap<String, AcpObserver>>> = Arc::new(StdMutex::new(HashMap::new()));
     let seen = Arc::new(StdMutex::new(0usize));
     let counter = Arc::clone(&seen);
     let observer: AcpObserver = Arc::new(move |_| {

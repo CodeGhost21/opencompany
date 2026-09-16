@@ -549,10 +549,7 @@ async fn a_corrupt_roster_falls_back_to_the_default_instance() {
 /// because "settled" differs per test: one of these deliberately relaunches
 /// into a root something else is holding, where waiting for everything to
 /// run would wait forever.
-async fn relaunch_until(
-    root: &Path,
-    settled: impl Fn(&[LocalInstanceInfo]) -> bool,
-) -> LocalHosts {
+async fn relaunch_until(root: &Path, settled: impl Fn(&[LocalInstanceInfo]) -> bool) -> LocalHosts {
     for _ in 0..200 {
         let hosts = LocalHosts::load(root.to_path_buf()).await;
         if settled(&hosts.list()) {

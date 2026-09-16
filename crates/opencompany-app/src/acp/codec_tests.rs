@@ -5,8 +5,7 @@ fn a_request_is_distinguished_from_a_notification_by_its_id() {
     // The whole classification, in one test. Getting it backwards means
     // either awaiting a reply that will never come, or replying to
     // something that must not be replied to.
-    let request =
-        decode(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#).unwrap();
+    let request = decode(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#).unwrap();
     assert!(matches!(request, Message::Request { .. }));
 
     let notification =
@@ -53,10 +52,9 @@ fn a_response_is_recognised_and_correlated() {
 
 #[test]
 fn an_error_response_keeps_its_code_and_message() {
-    let decoded = decode(
-        r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"no such method"}}"#,
-    )
-    .unwrap();
+    let decoded =
+        decode(r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"no such method"}}"#)
+            .unwrap();
     match decoded {
         Message::Error { id, code, message } => {
             assert_eq!(id, Some(RequestId::Number(3)));
