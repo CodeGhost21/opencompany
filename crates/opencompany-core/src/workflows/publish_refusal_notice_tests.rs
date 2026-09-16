@@ -30,7 +30,7 @@
 //! `HarnessAgentRunner`, real `HarnessPool`, real file + publish tools, real
 //! artifact store — and stubs one thing at the one boundary that needs a
 //! credential: the model's *choices*, via the scripted endpoint
-//! [`gated_tool_turn_test`](crate::workflows::gated_tool_turn_test) established.
+//! [`gated_tool_turn_tests`](crate::workflows::gated_tool_turn_tests) established.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -46,7 +46,7 @@ use crate::ports::WorkflowRunContext;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::store::FsOps;
 
-use super::gated_tool_turn_test::{Turn, deps, spawn_script};
+use super::gated_tool_turn_tests::{Turn, deps, spawn_script};
 
 /// The one-agent graph: trigger → agent → output. The shape a company authors
 /// when it wants a teammate to produce something on a schedule — and the shape

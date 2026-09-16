@@ -177,7 +177,7 @@ tier = "orchestrator"
 fn record(always_approve: &str) -> CompanyRecord {
     CompanyRecord {
         manifest: manifest(always_approve),
-        ..super::gated_tool_turn_test::record()
+        ..super::gated_tool_turn_tests::record()
     }
 }
 
@@ -195,7 +195,7 @@ async fn run_tool_graph(
     // reached. Passing a dead address is the assertion — if a turn were
     // dispatched, the run would fail rather than quietly succeed.
     let (deps, journal) =
-        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir);
+        super::gated_tool_turn_tests::deps("http://127.0.0.1:1/unused".to_string(), dir);
     let record = record(always_approve);
     let pool = Arc::new(HarnessPool::new());
     pool.ensure(&record, &deps).await.expect("roster builds");
@@ -258,7 +258,7 @@ async fn always_approve_does_not_gate_a_child_workflow_call() {
     std::fs::write(workflows.join("child.toml"), SUB_WORKFLOW_CHILD).expect("write child workflow");
 
     let (mut deps, journal) =
-        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
+        super::gated_tool_turn_tests::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
     deps.workflow_source_dir = Some(source);
     let record = record("\"shell\"");
     let pool = Arc::new(HarnessPool::new());
@@ -299,7 +299,7 @@ async fn a_child_with_policy_named_calls_runs_without_approval_notices() {
     .expect("write child workflow");
 
     let (mut deps, _journal) =
-        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
+        super::gated_tool_turn_tests::deps("http://127.0.0.1:1/unused".to_string(), dir.path());
     deps.workflow_source_dir = Some(source);
     // `shell` gated, `http_request` not — so the child runs the POST and then
     // parks at the shell node, exactly the shape the hazard describes.
@@ -383,7 +383,7 @@ async fn run_http_graph(
     crate::Result<crate::ports::WorkflowRun>,
 ) {
     let (deps, journal) =
-        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir);
+        super::gated_tool_turn_tests::deps("http://127.0.0.1:1/unused".to_string(), dir);
     let record = record(always_approve);
     let pool = Arc::new(HarnessPool::new());
     pool.ensure(&record, &deps).await.expect("roster builds");

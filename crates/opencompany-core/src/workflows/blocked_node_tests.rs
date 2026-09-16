@@ -6,7 +6,7 @@
 //!
 //! The agent explicitly called `request_approval` — tested.
 //! `park_gated_calls` opened a decidable card — tested by
-//! [`gated_tool_turn_test`](crate::workflows::gated_tool_turn_test), which is
+//! [`gated_tool_turn_tests`](crate::workflows::gated_tool_turn_tests), which is
 //! this file's direct ancestor and shares its whole fixture. The engine marked
 //! the node from the capability's return value — tested upstream. What nobody
 //! tested was the *seam*: a gated call inside an agent node's turn is refused
@@ -38,7 +38,7 @@ use crate::ports::types::{CompanyId, CompanyRecord, WorkflowNodeStatus};
 use crate::ports::{WorkflowApprovalOutcome, WorkflowRun, WorkflowRunContext};
 use crate::runtime::journal::RuntimeJournal;
 
-use super::gated_tool_turn_test::{Turn, deps, spawn_script_recording};
+use super::gated_tool_turn_tests::{Turn, deps, spawn_script_recording};
 
 /// The instruction authored on the node **after** the one that blocks.
 ///
@@ -92,7 +92,7 @@ to = "done"
 /// A company running with policy HITL disabled. The approval in these tests is
 /// created only by the agent's explicit tool call.
 ///
-/// The same `always_approve` choice `gated_tool_turn_test` makes and for the
+/// The same `always_approve` choice `gated_tool_turn_tests` makes and for the
 /// same reason: parking under the *strongest* tier shows the block comes from
 /// the policy's explicit gate rather than from a supervised-mode classifier.
 /// A local copy rather than the sibling's fixture because this graph needs the

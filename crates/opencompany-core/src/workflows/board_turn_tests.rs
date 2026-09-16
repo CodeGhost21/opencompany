@@ -16,7 +16,7 @@
 //! `TaskStore` — and stub exactly one thing, at the one boundary that needs a
 //! credential: the model's *choices*, via a scripted OpenAI-compatible endpoint
 //! on loopback. That is the shape
-//! [`gated_tool_turn_test`](crate::workflows::gated_tool_turn_test) established
+//! [`gated_tool_turn_tests`](crate::workflows::gated_tool_turn_tests) established
 //! for #395, and it is reused here down to the `deps`/`record` fixtures.
 
 use std::sync::{Arc, Mutex};
@@ -32,7 +32,7 @@ use crate::ports::types::CompanyId;
 use crate::ports::{RunCancel, TaskRecord, TaskStore, WorkflowBoardAction, WorkflowRunContext};
 use crate::store::FsOps;
 
-use super::gated_tool_turn_test::{Turn, record, spawn_script};
+use super::gated_tool_turn_tests::{Turn, record, spawn_script};
 
 /// The one-agent graph these tests run: trigger → agent → output. The same
 /// shape a company authors when it wants a teammate to do something on a
@@ -108,7 +108,7 @@ async fn run_with_board(
     seed: Option<TaskRecord>,
 ) -> (crate::ports::WorkflowRun, Arc<dyn TaskStore>, String) {
     let base_url = spawn_script(turns).await;
-    let (mut deps, _journal) = super::gated_tool_turn_test::deps(base_url, dir);
+    let (mut deps, _journal) = super::gated_tool_turn_tests::deps(base_url, dir);
     let store = tasks(dir);
     deps.tasks = Some(store.clone());
     let record = record();
@@ -334,7 +334,7 @@ async fn a_board_write_that_fails_reports_a_row_and_does_not_fail_the_node() {
         Turn::Say("Opened a card for it."),
     ])
     .await;
-    let (mut deps, _journal) = super::gated_tool_turn_test::deps(base_url, dir.path());
+    let (mut deps, _journal) = super::gated_tool_turn_tests::deps(base_url, dir.path());
     deps.tasks = Some(Arc::new(FailingTasks));
     let record = record();
     let pool = Arc::new(HarnessPool::new());
@@ -394,7 +394,7 @@ async fn an_ungrounded_hand_off_surfaces_on_the_runs_own_notices() {
         Turn::Say("I could not hand that off."),
     ])
     .await;
-    let (mut deps, _journal) = super::gated_tool_turn_test::deps(base_url, dir.path());
+    let (mut deps, _journal) = super::gated_tool_turn_tests::deps(base_url, dir.path());
     deps.tasks = Some(tasks(dir.path()));
     let record = record();
     // The record has to be READABLE from the store, because `delegate_to_desk`
@@ -460,7 +460,7 @@ async fn a_dry_run_of_a_spawning_graph_writes_no_card() {
         Turn::Say("Opened a card for it."),
     ])
     .await;
-    let (mut deps, journal) = super::gated_tool_turn_test::deps(base_url, dir.path());
+    let (mut deps, journal) = super::gated_tool_turn_tests::deps(base_url, dir.path());
     let store = tasks(dir.path());
     deps.tasks = Some(store.clone());
     let record = record();
@@ -515,7 +515,7 @@ async fn a_sub_workflow_childs_card_carries_the_parent_runs_ids() {
         Turn::Say("Opened a card for it."),
     ])
     .await;
-    let (mut deps, _journal) = super::gated_tool_turn_test::deps(base_url, dir.path());
+    let (mut deps, _journal) = super::gated_tool_turn_tests::deps(base_url, dir.path());
     let store = tasks(dir.path());
     deps.tasks = Some(store.clone());
     deps.workflow_source_dir = Some(source);
@@ -701,7 +701,7 @@ async fn a_cancelled_runs_card_survives_and_stays_listed() {
     )
     .await;
 
-    let (mut deps, _journal) = super::gated_tool_turn_test::deps(base_url, dir.path());
+    let (mut deps, _journal) = super::gated_tool_turn_tests::deps(base_url, dir.path());
     let store = tasks(dir.path());
     deps.tasks = Some(store.clone());
     let record = record();

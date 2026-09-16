@@ -14,7 +14,7 @@
 //! So this drives the **real** path — real graph, real `translate`, real
 //! `run_workflow`, real `HarnessAgentRunner`, real `HarnessPool` — and stubs only
 //! the model, via a content-aware OpenAI-compatible endpoint on loopback (the
-//! shape [`gated_tool_turn_test`](super::gated_tool_turn_test) established). The
+//! shape [`gated_tool_turn_tests`](super::gated_tool_turn_tests) established). The
 //! endpoint answers by *which node is calling* (each node's prompt carries a
 //! marker), so the assertions do not depend on the order sibling branches run in.
 
@@ -29,7 +29,7 @@ use crate::harness::HarnessPool;
 use crate::ports::WorkflowRunContext;
 use crate::ports::types::{CompanyId, CompanyRecord};
 
-use super::gated_tool_turn_test::deps;
+use super::gated_tool_turn_tests::deps;
 
 /// A company whose roster carries **distinct** teammates for every node, so no
 /// two agent nodes share a session.

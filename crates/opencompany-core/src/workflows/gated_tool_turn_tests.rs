@@ -76,7 +76,7 @@ to = "done"
 /// What the scripted model does on each successive call.
 ///
 /// `pub(super)` alongside [`deps`] and [`record`] so the sibling
-/// [`board_turn_test`](crate::workflows::board_turn_test) drives the same
+/// [`board_turn_tests`](crate::workflows::board_turn_tests) drives the same
 /// scripted-model harness rather than duplicating it (issue #661).
 #[derive(Clone, Debug)]
 pub(super) enum Turn {
@@ -106,7 +106,7 @@ pub(super) struct Script {
 ///
 /// `pub(super)` since #881: proving a blocked node's branch did **not** continue
 /// means reading what the model was never asked, so the sibling
-/// [`blocked_node_test`](crate::workflows::blocked_node_test) needs the recorder
+/// [`blocked_node_tests`](crate::workflows::blocked_node_tests) needs the recorder
 /// rather than only the URL.
 pub(super) async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
     let script = Arc::new(Script {
@@ -342,7 +342,7 @@ async fn run_gated(dir: &std::path::Path) -> (Arc<RuntimeJournal>, HarnessDeps, 
     // the run settles short of its output node. It still settles `Ok` — a node
     // waiting on a person is not a failed one — which is what this `expect`
     // pins. The parking claims below are unaffected: blocking the node must not
-    // cost the operator the card, and `blocked_node_test` asserts the same
+    // cost the operator the card, and `blocked_node_tests` asserts the same
     // thing from the other side.
     .expect("the run settles — a gated tool blocks the node, it does not fail the run");
     (journal, deps, run_id)

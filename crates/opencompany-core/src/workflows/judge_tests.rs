@@ -195,7 +195,7 @@ async fn ask_around_finds_a_fact_reachable_only_by_a_focused_term() {
         .tempdir()
         .expect("tempdir");
     let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        crate::workflows::gated_tool_turn_tests::deps(String::new(), dir.path());
     deps.facts = Some(std::sync::Arc::new(ExactMatchFactStore {
         matches: "renewal",
         fact: crate::ports::FactRecord {
@@ -302,7 +302,7 @@ async fn a_spent_total_ceiling_skips_the_judge_call_entirely() {
         .tempdir()
         .expect("tempdir");
     let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        crate::workflows::gated_tool_turn_tests::deps(String::new(), dir.path());
     let provider = std::sync::Arc::new(PanicIfInvokedProvider::default());
     deps.provider = provider.clone();
     deps.plan = Some(crate::harness::capability_budget::CapabilityPlan {
@@ -341,7 +341,7 @@ async fn a_spent_total_ceiling_skips_the_judge_call_entirely() {
 /// A roster built from `[[agent]]` blocks, on the fixture record so every
 /// other field keeps the shape the rest of these tests use.
 fn roster(agents: &str) -> CompanyRecord {
-    let mut record = crate::workflows::gated_tool_turn_test::record();
+    let mut record = crate::workflows::gated_tool_turn_tests::record();
     record.manifest =
         toml::from_str(&format!("[company]\nname = \"Acme\"\n\n{agents}\n")).expect("manifest");
     record
@@ -492,7 +492,7 @@ async fn the_fact_rung_and_the_peer_rung_read_the_question_the_same_way() {
         .tempdir()
         .expect("tempdir");
     let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        crate::workflows::gated_tool_turn_tests::deps(String::new(), dir.path());
     let facts = std::sync::Arc::new(RecordingFactStore::default());
     deps.facts = Some(facts.clone());
 
@@ -667,7 +667,7 @@ async fn ladder_with_peer(
     record: &CompanyRecord,
     question: &str,
 ) -> RecoveryResult {
-    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir);
+    let (deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(String::new(), dir);
     ask_around(
         &deps,
         &CompanyId::new("acme"),
@@ -827,7 +827,7 @@ async fn a_spent_total_ceiling_never_asks_a_peer() {
         .tempdir()
         .expect("tempdir");
     let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        crate::workflows::gated_tool_turn_tests::deps(String::new(), dir.path());
     deps.plan = Some(crate::harness::capability_budget::CapabilityPlan {
         period: crate::harness::capability_budget::BudgetPeriod::Daily,
         budgets: Default::default(),
@@ -870,7 +870,7 @@ async fn a_fact_match_never_asks_a_peer() {
         .tempdir()
         .expect("tempdir");
     let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        crate::workflows::gated_tool_turn_tests::deps(String::new(), dir.path());
     deps.facts = Some(std::sync::Arc::new(ExactMatchFactStore {
         matches: "renewal",
         fact: crate::ports::FactRecord {

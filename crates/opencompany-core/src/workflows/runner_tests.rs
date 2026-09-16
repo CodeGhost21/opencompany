@@ -295,13 +295,13 @@ async fn assert_partial_run_artifact(blocked: bool) {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(FsOps::new(dir.path()));
-    let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+    let (mut deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(
         "http://127.0.0.1:1/unused".to_string(),
         dir.path(),
     );
     deps.workspace = Some(store.clone());
     deps.run_output_store = Some(store.clone());
-    let record = crate::workflows::gated_tool_turn_test::record();
+    let record = crate::workflows::gated_tool_turn_tests::record();
     let turn = Arc::new(ArtifactWritingTurn {
         workspace_root: deps.workspace_root.clone(),
         approvals: deps.approval_requests.clone(),
@@ -371,13 +371,13 @@ async fn a_genuinely_failed_checkpointed_run_prunes_its_lineage() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(FsOps::new(dir.path()));
-    let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+    let (mut deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(
         "http://127.0.0.1:1/unused".to_string(),
         dir.path(),
     );
     deps.workspace = Some(store.clone());
     deps.run_output_store = Some(store.clone());
-    let record = crate::workflows::gated_tool_turn_test::record();
+    let record = crate::workflows::gated_tool_turn_tests::record();
     let turn = Arc::new(ArtifactWritingTurn {
         workspace_root: deps.workspace_root.clone(),
         approvals: deps.approval_requests.clone(),
@@ -557,11 +557,11 @@ to = "done"
 /// different exit than the one its unit tests cover.
 async fn assert_capped_sibling_reclassified_before_early_return(blocked: bool) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+    let (deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(
         "http://127.0.0.1:1/unused".to_string(),
         dir.path(),
     );
-    let record = crate::workflows::gated_tool_turn_test::record();
+    let record = crate::workflows::gated_tool_turn_tests::record();
     let turn = Arc::new(CappedThenSettlingTurn {
         approvals: deps.approval_requests.clone(),
         blocked,
@@ -722,12 +722,12 @@ to = "done"
 #[tokio::test]
 async fn a_genuine_failure_scrubs_a_benign_halt_sibling_too() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let base_url = crate::workflows::gated_tool_turn_test::spawn_script(vec![
-        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"halt_benign\"}"),
+    let base_url = crate::workflows::gated_tool_turn_tests::spawn_script(vec![
+        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"halt_benign\"}"),
     ])
     .await;
-    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
-    let record = crate::workflows::gated_tool_turn_test::record();
+    let (deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(base_url, dir.path());
+    let record = crate::workflows::gated_tool_turn_tests::record();
     let turn = Arc::new(HaltOkTurn);
     let ctx = WorkflowRunContext::new(false);
 
@@ -896,11 +896,11 @@ to = "done"
 #[tokio::test]
 async fn a_capped_node_is_reclassified_when_the_run_is_cleanly_cancelled() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+    let (deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(
         "http://127.0.0.1:1/unused".to_string(),
         dir.path(),
     );
-    let record = crate::workflows::gated_tool_turn_test::record();
+    let record = crate::workflows::gated_tool_turn_tests::record();
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let turn = Arc::new(CappedThenGatedTurn {
@@ -2063,7 +2063,7 @@ to = "boom"
 /// and leaves everything else — including a capture of another shape —
 /// untouched.
 ///
-/// Unit-level beside the end-to-end proof in `blocked_node_test`, because
+/// Unit-level beside the end-to-end proof in `blocked_node_tests`, because
 /// the "leaves a value it does not recognise alone" half has no reachable
 /// path through a real run and would otherwise be an untested branch.
 #[test]
