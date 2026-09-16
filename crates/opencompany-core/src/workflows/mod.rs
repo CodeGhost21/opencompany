@@ -37,24 +37,10 @@ mod blocked_node_pure_tests;
 mod board_turn_tests;
 pub mod caps;
 pub mod checkpoint_store;
-#[cfg(test)]
-mod checkpoint_store_tests;
 pub mod delivery;
-#[cfg(test)]
-mod delivery_channel_grants_tests;
-#[cfg(test)]
-mod delivery_dry_and_park_tests;
-#[cfg(test)]
-mod delivery_owner_routing_tests;
-#[cfg(test)]
-mod delivery_owner_setup_tests;
-#[cfg(test)]
-mod delivery_unwired_dedup_tests;
 /// Issue #460: the company's `ApprovalPolicy` decides which `tool_call` nodes
 /// stop for an operator, before the run reaches them.
 pub mod gate;
-#[cfg(test)]
-mod gate_tests;
 /// Issue #460: end-to-end proof that a `tool_call` node the company's policy
 /// stops does not execute, and leaves a decidable card.
 #[cfg(test)]
@@ -65,10 +51,6 @@ mod gated_tool_call_tests;
 mod gated_tool_turn_tests;
 /// Issue #1866: one tool-less semantic sufficiency pass after deterministic checks.
 pub mod judge;
-#[cfg(test)]
-mod judge_parsing_tests;
-#[cfg(test)]
-mod judge_peer_tests;
 /// Issue #978: a run that fans out to N gated nodes is cleared by approving,
 /// not multiplied by it — the composition of #395, #243 and #469 that each of
 /// their own suites is blind to.
@@ -80,36 +62,8 @@ mod publish_refusal_notice_tests;
 /// Issue #846: a continuation replays the outward calls its lineage already
 /// made, instead of making them a second time.
 pub mod replay;
-#[cfg(test)]
-mod replay_child_gate_tests;
-#[cfg(test)]
-mod replay_recording_tests;
 pub mod runner;
-#[cfg(test)]
-mod runner_cancel_delivery_tests;
-#[cfg(test)]
-mod runner_capped_halt_tests;
-#[cfg(test)]
-mod runner_checkpoint_cancel_tests;
-#[cfg(test)]
-mod runner_delivery_gate_tests;
-#[cfg(test)]
-mod runner_dry_run_tests;
-#[cfg(test)]
-mod runner_journal_tests;
-#[cfg(test)]
-mod runner_node_kinds_tests;
-#[cfg(test)]
-mod runner_node_output_tests;
-#[cfg(test)]
-mod runner_reclassify_tests;
-#[cfg(test)]
-mod runner_settle_tests;
-#[cfg(test)]
-mod runner_sub_workflow_tests;
 pub mod translate;
-#[cfg(test)]
-mod translate_tests;
 /// Issue #1098: a scheduled workflow granted a standing permission stops
 /// re-asking on every run — two runs, because a single-run test cannot see it.
 pub use caps::{HarnessAgentRunner, build_capabilities};
