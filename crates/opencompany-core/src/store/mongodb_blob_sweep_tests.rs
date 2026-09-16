@@ -1,3 +1,6 @@
+use super::tests::{age_blobs_past_the_sweep_threshold, drop_db, store};
+use super::*;
+
     #[tokio::test]
     async fn the_boot_sweep_reclaims_orphaned_blobs_and_spares_live_ones() {
         let Some(s) = store().await else { return };
