@@ -424,7 +424,7 @@ pub(super) struct FailNthStandingMintStore {
 }
 
 impl FailNthStandingMintStore {
-    fn new(fail_at: usize) -> Self {
+    pub(super) fn new(fail_at: usize) -> Self {
         Self {
             inner: crate::ports::journal::MemoryJournalStore::default(),
             seen: std::sync::atomic::AtomicUsize::new(0),
