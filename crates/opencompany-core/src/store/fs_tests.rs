@@ -2,7 +2,7 @@
     use crate::store::conformance;
     use futures::StreamExt;
 
-    fn tmp_root() -> tempfile::TempDir {
+    pub(super) fn tmp_root() -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix("opencompany-test-")
             .tempdir()

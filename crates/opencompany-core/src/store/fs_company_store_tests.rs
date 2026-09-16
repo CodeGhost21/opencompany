@@ -1,4 +1,4 @@
-    fn sample_manifest() -> crate::company::CompanyManifest {
+    pub(super) fn sample_manifest() -> crate::company::CompanyManifest {
         let toml_src = r#"
             [company]
             name = "Acme"

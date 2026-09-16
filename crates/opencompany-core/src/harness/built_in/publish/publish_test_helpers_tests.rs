@@ -9,7 +9,7 @@ use super::*;
 
 
 /// A workspace with the given `path → contents` files written into it.
-fn workspace(files: &[(&str, &[u8])]) -> tempfile::TempDir {
+pub(crate) fn workspace(files: &[(&str, &[u8])]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     for (path, body) in files {
         let full = dir.path().join(path);
@@ -21,7 +21,7 @@ fn workspace(files: &[(&str, &[u8])]) -> tempfile::TempDir {
     dir
 }
 
-async fn run(tool: &PublishArtifactTool, args: serde_json::Value) -> ToolResult {
+pub(crate) async fn run(tool: &PublishArtifactTool, args: serde_json::Value) -> ToolResult {
     tool.execute(args).await.expect("the tool never propagates")
 }
 
@@ -31,13 +31,13 @@ async fn run(tool: &PublishArtifactTool, args: serde_json::Value) -> ToolResult 
 /// `let (queue, _) = claimed(..)` would un-claim it immediately and every
 /// publish would then be refused. That is the guard doing its job, but it makes
 /// for a confusing test failure, hence the name `_claim` at each call site.
-fn claimed(destination: PublishDestination) -> (PendingPublishQueue, PublishClaim) {
+pub(crate) fn claimed(destination: PublishDestination) -> (PendingPublishQueue, PublishClaim) {
     let queue = PendingPublishQueue::default();
     let claim = queue.claim(destination);
     (queue, claim)
 }
 
-fn text_of(result: &ToolResult) -> String {
+pub(crate) fn text_of(result: &ToolResult) -> String {
     result
         .content
         .iter()
