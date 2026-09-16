@@ -640,7 +640,7 @@ pub(super) struct FlakyFires {
 }
 
 impl FlakyFires {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             claims: Mutex::new(HashMap::new()),
             fail_latest: AtomicUsize::new(0),
@@ -648,15 +648,15 @@ impl FlakyFires {
         }
     }
     /// Arm the next `n` `latest_fire` reads to fail (armed AFTER any seeding).
-    fn arm_latest_failures(&self, n: usize) {
+    pub(super) fn arm_latest_failures(&self, n: usize) {
         self.fail_latest.store(n, Ordering::SeqCst);
     }
     /// Arm the next `n` `claim_fire` writes to fail.
-    fn arm_claim_failures(&self, n: usize) {
+    pub(super) fn arm_claim_failures(&self, n: usize) {
         self.fail_claim.store(n, Ordering::SeqCst);
     }
     /// Preset an anchor directly, bypassing the fail budgets.
-    fn seed(&self, company: &str, schedule: &str, minute: u64) {
+    pub(super) fn seed(&self, company: &str, schedule: &str, minute: u64) {
         self.claims
             .lock()
             .unwrap()
