@@ -155,25 +155,17 @@ async function pickTemplate(id: string) {
   });
 }
 
-/** model -> business -> sign-in (none) -> review. */
+/** step 1 -> business -> sign-in (none) -> review. */
 async function walkToReview(client: OpenCompanyClient, template: string | null) {
   await act(async () => {
     root.render(createElement(SetupWizard, { client, onDone: () => {} }));
   });
-  // Step 0 is the setup-way choice; the provider picker sits behind "Set it up
-  // yourself".
+  // Step 0 is the setup-way choice; the add-provider sequence sits behind "Set
+  // it up yourself", and connecting nothing is a first-class answer to it.
   await act(async () => {
     (container.querySelector('[data-testid="setup-way-self-managed"]') as HTMLElement).click();
   });
-  await next(); // -> model
-  // "No model" — the picker's last option, whose popup base-ui portals onto
-  // `document.body` and only mounts once the trigger opens it.
-  await act(async () => {
-    (container.querySelector('[data-testid="setup-provider-select"]') as HTMLElement).click();
-  });
-  await act(async () => {
-    (document.body.querySelector('[data-testid="setup-provider-none"]') as HTMLElement).click();
-  });
+  await next(); // -> step 1
   await next(); // -> business
   if (template) await pickTemplate(template);
   else await fill("setup-field-industry", "E-commerce — homeware online");
