@@ -52,7 +52,7 @@ impl FakeEngine {
     /// Reads the backing rows directly. Going through a read path would test the
     /// read path's fidelity as much as the write's, and taint is a property of
     /// what was *written* — a read that dropped it would make this pass.
-    fn taint_of(&self, needle: &str) -> Option<MemoryTaint> {
+    pub(super) fn taint_of(&self, needle: &str) -> Option<MemoryTaint> {
         self.rows
             .lock()
             .unwrap()
