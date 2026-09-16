@@ -231,7 +231,7 @@ pub(crate) fn nudge_text(script: &Script) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// An inert `CycleHost` — this test is about the harness, not the effect gate.
-struct NoopHost;
+pub(super) struct NoopHost;
 
 #[async_trait]
 impl CycleHost for NoopHost {
