@@ -127,7 +127,7 @@ impl EventLog for MemoryLog {
 /// so a test that scripted a flat sequence would be asserting the bid order by
 /// accident and would break for reasons that have nothing to do with what it
 /// meant to check.
-pub(super) struct ScriptedRunner {
+pub(crate) struct ScriptedRunner {
     lines: Mutex<Vec<(String, String)>>,
     asked: Mutex<Vec<(String, String)>>,
 }
@@ -169,7 +169,7 @@ impl HiveTurnRunner for ScriptedRunner {
     }
 }
 
-pub(super) fn record(manifest: &str) -> CompanyRecord {
+pub(crate) fn record(manifest: &str) -> CompanyRecord {
     let manifest: crate::company::CompanyManifest =
         toml::from_str(manifest).expect("test manifest parses");
     CompanyRecord {
@@ -210,7 +210,7 @@ pub(crate) fn three_member_manifest() -> String {
         .to_string()
 }
 
-pub(super) fn desk_of(manifest: &str, chat: &str) -> Option<HiveDesk> {
+pub(crate) fn desk_of(manifest: &str, chat: &str) -> Option<HiveDesk> {
     desk_episode(&record(manifest), Some(chat))
 }
 
