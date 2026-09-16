@@ -7,7 +7,6 @@ use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
 
-
 /// The two halves of #457's scoping, exercised **together and directly**
 /// (issue #610).
 ///

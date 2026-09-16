@@ -1,11 +1,11 @@
-use super::*;
-use crate::ports::types::Verdict;
-use serde_json::json;
-use super::consequence_hosting_tests::*;
 use super::consequence_composio_tests::*;
+use super::consequence_hosting_tests::*;
 use super::consequence_mcp_roster_tests::*;
 use super::consequence_scope_labels_tests::*;
 use super::consequence_shell_git_mcp_tests::*;
+use super::*;
+use crate::ports::types::Verdict;
+use serde_json::json;
 
 // -----------------------------------------------------------------------
 // Issue #673: a host-scoped fetch grant, and the `auto` line it must not
@@ -91,8 +91,8 @@ pub(super) fn the_declared_grantability_table_is_pinned() {
     rows.sort_unstable();
     let rendered = format!("{}\n", rows.join("\n"));
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/snapshots/tool-standing.txt");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/tool-standing.txt");
     if std::env::var_os("BLESS_TOOL_STANDING").is_some() {
         std::fs::write(&path, &rendered).expect("write the grantability snapshot");
         return;

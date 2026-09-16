@@ -1,12 +1,11 @@
+use super::consequence_composio_tests::*;
+use super::consequence_fetch_grant_tests::*;
+use super::consequence_hosting_tests::*;
+use super::consequence_scope_labels_tests::*;
+use super::consequence_shell_git_mcp_tests::*;
 use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
-use super::consequence_hosting_tests::*;
-use super::consequence_fetch_grant_tests::*;
-use super::consequence_composio_tests::*;
-use super::consequence_scope_labels_tests::*;
-use super::consequence_shell_git_mcp_tests::*;
-
 
 /// Issue #443: the agent persona instructs every agent to call these rather
 /// than answer a capability question from memory. They read local

@@ -1,12 +1,11 @@
-use super::*;
-use crate::ports::types::Verdict;
-use serde_json::json;
-use super::consequence_hosting_tests::*;
 use super::consequence_fetch_grant_tests::*;
+use super::consequence_hosting_tests::*;
 use super::consequence_mcp_roster_tests::*;
 use super::consequence_scope_labels_tests::*;
 use super::consequence_shell_git_mcp_tests::*;
-
+use super::*;
+use crate::ports::types::Verdict;
+use serde_json::json;
 
 /// The `auto` line, named tool by tool and taken from the whole table
 /// rather than a sample (issue #560).
@@ -143,9 +142,8 @@ pub(super) fn the_auto_tier_line_is_pinned_tool_by_tool() {
 #[test]
 #[cfg(feature = "openhuman")]
 pub(super) fn the_auto_line_reads_composio_arguments_not_the_tool_name() {
-    let auto = |slug: &str| {
-        consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": slug })).parks_under_auto()
-    };
+    let auto =
+        |slug: &str| consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": slug })).parks_under_auto();
     assert!(!auto("GITHUB_LIST_PULL_REQUESTS"), "a catalogue read runs");
     assert!(auto("GMAIL_SEND_EMAIL"), "a send still parks");
     assert!(

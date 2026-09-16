@@ -211,7 +211,7 @@ pub(super) struct FlakyStore {
 }
 
 impl FlakyStore {
-    fn arc(fail_archive_store_on: u32) -> Arc<dyn Memory> {
+    pub(super) fn arc(fail_archive_store_on: u32) -> Arc<dyn Memory> {
         Arc::new(Self {
             inner: Arc::new(FakeEngine::default()),
             fail_archive_store_on,
