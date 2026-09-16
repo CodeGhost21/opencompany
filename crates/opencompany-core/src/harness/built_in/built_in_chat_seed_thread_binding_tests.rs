@@ -10,9 +10,9 @@ use std::sync::Mutex as StdMutex;
 use futures::stream::{self, BoxStream};
 use tinyinference::model::{ModelRequest, ModelResponse};
 
+use super::built_in_test_fixtures::*;
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
-use super::built_in_test_fixtures::*;
 
 /// An appendable in-memory journal. `read_from` returns ascending order,
 /// so the trait's default `read_before` yields the newest-first paging the
@@ -86,11 +86,7 @@ impl InMemoryLog {
 
 #[async_trait]
 impl EventLog for InMemoryLog {
-    async fn append(
-        &self,
-        _id: &CompanyId,
-        event: CompanyEvent,
-    ) -> crate::Result<EventSeq> {
+    async fn append(&self, _id: &CompanyId, event: CompanyEvent) -> crate::Result<EventSeq> {
         let mut log = self.events.lock().unwrap();
         let seq = EventSeq::new(log.len() as u64);
         log.push(StoredEvent {
@@ -275,14 +271,10 @@ async fn the_thread_binding_holds_with_no_event_log_wired() {
     let pool = HarnessPool::new();
     pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
-    let thread_a = crate::runtime::delegation::ChatTarget::in_thread(
-        Some("general"),
-        Some(EventSeq::new(1)),
-    );
-    let thread_b = crate::runtime::delegation::ChatTarget::in_thread(
-        Some("general"),
-        Some(EventSeq::new(2)),
-    );
+    let thread_a =
+        crate::runtime::delegation::ChatTarget::in_thread(Some("general"), Some(EventSeq::new(1)));
+    let thread_b =
+        crate::runtime::delegation::ChatTarget::in_thread(Some("general"), Some(EventSeq::new(2)));
 
     pool.run(&rec.id, "ceo", "first", &fx.deps, thread_a)
         .await
@@ -328,10 +320,8 @@ async fn a_second_turn_in_the_same_thread_does_not_re_read_the_journal() {
 
     let pool = HarnessPool::new();
     pool.ensure(&rec, &fx.deps).await.expect("ensure");
-    let thread = crate::runtime::delegation::ChatTarget::in_thread(
-        Some("general"),
-        Some(EventSeq::new(0)),
-    );
+    let thread =
+        crate::runtime::delegation::ChatTarget::in_thread(Some("general"), Some(EventSeq::new(0)));
 
     pool.run(&rec.id, "ceo", "first", &fx.deps, thread)
         .await

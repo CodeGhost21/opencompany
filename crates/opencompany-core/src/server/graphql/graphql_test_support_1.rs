@@ -1,10 +1,6 @@
 //! Cross-cutting tests for the GraphQL read plane: a four-case suite per query
 //! and a committed SDL snapshot that freezes the read contract for WS7.
 
-use std::sync::Arc;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::tasks::TaskTitle;
@@ -13,6 +9,10 @@ use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 pub(super) async fn state_with_builder(
     home: &std::path::Path,
@@ -155,7 +155,12 @@ pub(super) async fn state_with_rich_company(home: &std::path::Path) -> AppState 
 // ---------------------------------------------------------------------------
 
 /// Mints a real binary node in the store, the way an upload or a publish does.
-pub(super) async fn given_a_binary_node(state: &AppState, name: &str, mime: &str, bytes: &[u8]) -> String {
+pub(super) async fn given_a_binary_node(
+    state: &AppState,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> String {
     let id = CompanyId::new("acme");
     let workspace = state.registry().get(&id).unwrap().workspace().clone();
     let node = crate::ports::workspace::WorkspaceNode {

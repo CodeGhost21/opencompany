@@ -5,9 +5,9 @@
 //! Shared setup lives in [`super::built_in_test_fixtures`] and
 //! [`super::built_in_test_fixtures_2`].
 
-use super::*;
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::*;
 
 /// This file's own default `park()` call site — the top-level turn, not
 /// a delegated re-park — stamps the marker with the ambient

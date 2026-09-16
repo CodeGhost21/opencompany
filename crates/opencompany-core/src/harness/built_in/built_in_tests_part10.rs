@@ -5,9 +5,9 @@
 //! Shared setup lives in [`super::built_in_test_fixtures`] and
 //! [`super::built_in_test_fixtures_2`].
 
-use super::*;
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::*;
 
 /// An **overlay** teammate — one added from the console, with no manifest
 /// row — can be capped through the same override, and is refused when it has

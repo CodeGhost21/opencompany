@@ -1,7 +1,3 @@
-use std::sync::Arc;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::tasks::TaskTitle;
@@ -10,6 +6,10 @@ use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 use super::graphql_test_support_1::*;
 

@@ -5,9 +5,9 @@
 //! Shared setup lives in [`super::built_in_test_fixtures`] and
 //! [`super::built_in_test_fixtures_2`].
 
-use super::*;
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::*;
 
 /// Codex review (PR #2053) — **the regression.** A ledger write is a
 /// separate concern from what the turn itself did, and a failure in it

@@ -144,6 +144,10 @@ pub mod provider;
 /// scan that detects unpublished work, and the follow-up nudge's prompt. See
 /// [`publish`].
 pub mod publish;
+#[cfg(test)]
+mod publish_turn_conversation_tests;
+#[cfg(test)]
+mod publish_turn_dispatch_tests;
 /// End-to-end proof that #244's `publish_artifact` is reachable from a real
 /// dispatch, that a re-run extends by identity, and — the part nothing shorter
 /// than a real turn loop can show — that the follow-up nudge fires **once**,
@@ -151,11 +155,7 @@ pub mod publish;
 #[cfg(test)]
 mod publish_turn_helpers_tests;
 #[cfg(test)]
-mod publish_turn_dispatch_tests;
-#[cfg(test)]
 mod publish_turn_link_tests;
-#[cfg(test)]
-mod publish_turn_conversation_tests;
 pub mod run_origin;
 pub mod run_trace;
 pub mod run_turn;
@@ -211,12 +211,12 @@ pub mod workflow_refs;
 #[cfg(test)]
 mod workspace_provision_turn_tests;
 pub mod workspace_tools;
+#[cfg(test)]
+mod workspace_turn_basic_tests;
 /// End-to-end proof that the #237 workspace tools are reachable from a real
 /// turn, with only the model's choices stubbed. Test-only.
 #[cfg(test)]
 mod workspace_turn_helpers_tests;
-#[cfg(test)]
-mod workspace_turn_basic_tests;
 #[cfg(test)]
 mod workspace_turn_supervised_tests;
 
@@ -6247,7 +6247,18 @@ pub(crate) fn workflow_wiring_deps(
     }
 }
 
-
+/// Issue #1840: chat-turn history seeding, first half.
+#[cfg(test)]
+#[path = "built_in_chat_seed_seed_tests.rs"]
+mod built_in_chat_seed_seed_tests;
+/// Issue #1840: chat-turn history seeding, thread-binding half.
+#[cfg(test)]
+#[path = "built_in_chat_seed_thread_binding_tests.rs"]
+mod built_in_chat_seed_thread_binding_tests;
+/// `routed_context` fingerprint/resolution coverage.
+#[cfg(test)]
+#[path = "built_in_routed_context_tests.rs"]
+mod built_in_routed_context_tests;
 /// Shared fixtures for this module's own inline tests (part 1 of 2). See
 /// `built_in_test_fixtures_2` for the rest.
 #[cfg(test)]
@@ -6257,18 +6268,6 @@ mod built_in_test_fixtures;
 #[cfg(test)]
 #[path = "built_in_test_fixtures_2.rs"]
 mod built_in_test_fixtures_2;
-/// `routed_context` fingerprint/resolution coverage.
-#[cfg(test)]
-#[path = "built_in_routed_context_tests.rs"]
-mod built_in_routed_context_tests;
-/// Issue #1840: chat-turn history seeding, first half.
-#[cfg(test)]
-#[path = "built_in_chat_seed_seed_tests.rs"]
-mod built_in_chat_seed_seed_tests;
-/// Issue #1840: chat-turn history seeding, thread-binding half.
-#[cfg(test)]
-#[path = "built_in_chat_seed_thread_binding_tests.rs"]
-mod built_in_chat_seed_thread_binding_tests;
 /// This module's own inline tests, split into 10 files in original order
 /// (see `built_in_tests_part01.rs` for why there is no topical grouping).
 #[cfg(test)]

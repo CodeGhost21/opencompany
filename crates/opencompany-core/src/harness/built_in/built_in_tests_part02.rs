@@ -5,9 +5,9 @@
 //! Shared setup lives in [`super::built_in_test_fixtures`] and
 //! [`super::built_in_test_fixtures_2`].
 
-use super::*;
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::*;
 
 /// The roster builds end-to-end with the skill read surface wired: the
 /// effective set materializes, the read tools build, and the catalogue folds
@@ -81,8 +81,8 @@ async fn roster_builds_with_skill_surface_wired() {
         workspace: None,
     };
 
-    let roster = build_roster(&record(), &deps, &[], &HashMap::new())
-        .expect("roster builds with skills");
+    let roster =
+        build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster builds with skills");
     assert_eq!(roster.len(), 2);
     // The scratch skill tree was materialized for the first roster agent.
     assert!(
@@ -230,11 +230,7 @@ async fn a_tool_added_teammate_colliding_with_a_manifest_id_still_joins_the_rost
         async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
             Ok(Vec::new())
         }
-        async fn append_ledger(
-            &self,
-            _id: &CompanyId,
-            _entry: LedgerEntry,
-        ) -> crate::Result<()> {
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
             Ok(())
         }
     }
@@ -286,8 +282,7 @@ async fn a_tool_added_teammate_colliding_with_a_manifest_id_still_joins_the_rost
 #[tokio::test]
 async fn a_roster_rebuild_writes_nothing_to_the_workspace() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let ws: Arc<dyn crate::ports::WorkspaceStore> =
-        Arc::new(crate::store::FsOps::new(dir.path()));
+    let ws: Arc<dyn crate::ports::WorkspaceStore> = Arc::new(crate::store::FsOps::new(dir.path()));
     let mut fx = fixture();
     fx.deps.workspace = Some(ws.clone());
 
@@ -320,13 +315,10 @@ async fn a_roster_rebuild_writes_nothing_to_the_workspace() {
 
     // …and the folder the teammate *does* get is the one it earns by
     // producing something, minted through the lazy seam instead.
-    let minted = crate::company::workspace_scaffold::ensure_agent_folder(
-        ws.as_ref(),
-        &rec.id,
-        "designer",
-    )
-    .await
-    .expect("mint");
+    let minted =
+        crate::company::workspace_scaffold::ensure_agent_folder(ws.as_ref(), &rec.id, "designer")
+            .await
+            .expect("mint");
     let tree = ws.tree(&rec.id).await.expect("tree");
     let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
     names.sort_unstable();

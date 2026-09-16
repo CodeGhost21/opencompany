@@ -18,9 +18,9 @@ use std::sync::Mutex as StdMutex;
 use futures::stream::{self, BoxStream};
 use tinyinference::model::{ModelRequest, ModelResponse};
 
+use super::built_in_test_fixtures::*;
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
-use super::built_in_test_fixtures::*;
 
 /// An appendable in-memory journal. `read_from` returns ascending order,
 /// so the trait's default `read_before` yields the newest-first paging the
@@ -94,11 +94,7 @@ impl InMemoryLog {
 
 #[async_trait]
 impl EventLog for InMemoryLog {
-    async fn append(
-        &self,
-        _id: &CompanyId,
-        event: CompanyEvent,
-    ) -> crate::Result<EventSeq> {
+    async fn append(&self, _id: &CompanyId, event: CompanyEvent) -> crate::Result<EventSeq> {
         let mut log = self.events.lock().unwrap();
         let seq = EventSeq::new(log.len() as u64);
         log.push(StoredEvent {
@@ -428,10 +424,7 @@ async fn a_thread_switch_within_one_channel_re_seeds() {
         "ceo",
         "first",
         &fx.deps,
-        crate::runtime::delegation::ChatTarget::in_thread(
-            Some("general"),
-            Some(EventSeq::new(0)),
-        ),
+        crate::runtime::delegation::ChatTarget::in_thread(Some("general"), Some(EventSeq::new(0))),
     )
     .await
     .expect("first chat turn");
@@ -445,10 +438,7 @@ async fn a_thread_switch_within_one_channel_re_seeds() {
         "ceo",
         "second",
         &fx.deps,
-        crate::runtime::delegation::ChatTarget::in_thread(
-            Some("general"),
-            Some(EventSeq::new(1)),
-        ),
+        crate::runtime::delegation::ChatTarget::in_thread(Some("general"), Some(EventSeq::new(1))),
     )
     .await
     .expect("second chat turn");

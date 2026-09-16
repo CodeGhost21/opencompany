@@ -5,9 +5,9 @@
 //! Shared setup lives in [`super::built_in_test_fixtures`] and
 //! [`super::built_in_test_fixtures_2`].
 
-use super::*;
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::*;
 
 /// **The no-restart proof for the one-click grant.** A namespace granted
 /// through the company store — the exact path `PUT …/tools/grants` writes

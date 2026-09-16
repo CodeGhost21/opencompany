@@ -223,11 +223,7 @@ impl UsageMeter for FailingMeter {
     async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
         Ok(())
     }
-    async fn query(
-        &self,
-        _company: &CompanyId,
-        _since: u64,
-    ) -> crate::Result<Vec<UsageSample>> {
+    async fn query(&self, _company: &CompanyId, _since: u64) -> crate::Result<Vec<UsageSample>> {
         Err(OpenCompanyError::Store("meter unavailable".into()))
     }
 }
@@ -354,7 +350,6 @@ pub(super) fn fixture() -> Fixture {
         _dir: dir,
     }
 }
-
 
 /// A provider double with its own, distinct telemetry identity — stands
 /// in for a pinned agent's own `TenantProvider` sibling

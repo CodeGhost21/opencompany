@@ -19,12 +19,14 @@ use crate::ports::types::{
 // The two-level resolver. Test-only now: the roster build goes through
 // `agent_scoped_grants`, and these tests assert the desk-less case still
 // resolves identically to what shipped before desks could scope tools.
-use crate::runtime::builder::agent_effective_grants;
 use super::built_in_test_fixtures::*;
+use crate::runtime::builder::agent_effective_grants;
 
 /// Build a single [`CompanyAgent`] over a scripted provider so the wrapper can
 /// be exercised directly (its retry logic is the unit under test).
-pub(super) fn scripted_agent(outcomes: Vec<Result<String, String>>) -> (Arc<CompanyAgent>, HarnessDeps) {
+pub(super) fn scripted_agent(
+    outcomes: Vec<Result<String, String>>,
+) -> (Arc<CompanyAgent>, HarnessDeps) {
     scripted_agent_over(ScriptedProvider::new(outcomes))
 }
 

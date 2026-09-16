@@ -2,8 +2,8 @@
 //! `built_in_test_fixtures` to keep that file under the 750-line limit and to
 //! stop mislabeling tests as fixtures.
 
-use super::*;
 use super::built_in_test_fixtures::*;
+use super::*;
 
 /// Context routing: the resolution that feeds a persona, and the fingerprint
 /// that decides whether an edit reaches the next turn.

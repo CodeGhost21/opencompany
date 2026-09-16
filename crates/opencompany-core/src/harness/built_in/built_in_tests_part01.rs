@@ -5,9 +5,9 @@
 //! Shared setup lives in [`super::built_in_test_fixtures`] and
 //! [`super::built_in_test_fixtures_2`].
 
-use super::*;
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::*;
 
 /// The fingerprint moves when the tier moves (issue #562).
 ///
@@ -576,8 +576,7 @@ async fn mock_context_addresses_survive_deletion_without_reuse() {
 #[tokio::test]
 async fn roster_builds_every_manifest_agent() {
     let fx = fixture();
-    let roster =
-        build_roster(&record(), &fx.deps, &[], &HashMap::new()).expect("roster builds");
+    let roster = build_roster(&record(), &fx.deps, &[], &HashMap::new()).expect("roster builds");
     let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
     assert_eq!(ids, vec!["ceo", "engineer"]);
     assert_eq!(roster[0].role, "Chief Executive");

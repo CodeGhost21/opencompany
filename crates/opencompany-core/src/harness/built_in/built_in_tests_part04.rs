@@ -5,9 +5,9 @@
 //! Shared setup lives in [`super::built_in_test_fixtures`] and
 //! [`super::built_in_test_fixtures_2`].
 
-use super::*;
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::*;
 
 /// Codex review (PR #2053): an earlier version of the reused-agent fix
 /// above compared each `read_turn_usage` against the value seen before
@@ -202,8 +202,7 @@ fn a_chained_ceiling_error_keeps_its_leaf() {
         "a chained ceiling hit is still a ceiling hit"
     );
 
-    let msg =
-        wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
+    let msg = wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
     assert!(
         msg.contains("56636 ms"),
         "the remaining-budget figure survives the chain: {msg}"
@@ -277,8 +276,7 @@ fn elapsed_reads_as_an_operator_reads_a_clock() {
 #[test]
 fn ceiling_message_reports_elapsed_and_reframes_the_harness_number() {
     let err = ceiling_error();
-    let msg =
-        wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
+    let msg = wall_clock_ceiling_message("product_manager", Duration::from_millis(601_000), &err);
 
     assert!(msg.contains("product_manager"), "names the agent: {msg}");
     assert!(
@@ -439,8 +437,7 @@ async fn classify_turn_recognises_every_known_budget_wire_shape_as_paused_not_ha
     ];
 
     for (label, body) in wire_shapes {
-        let outcome =
-            agent.classify_turn(Err(anyhow::anyhow!("{body}")), Duration::from_secs(1));
+        let outcome = agent.classify_turn(Err(anyhow::anyhow!("{body}")), Duration::from_secs(1));
         let AttemptOutcome::BudgetPaused { summary } = outcome else {
             panic!("{label}: must classify BudgetPaused for wire body: {body}");
         };

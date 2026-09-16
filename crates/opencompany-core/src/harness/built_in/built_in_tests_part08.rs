@@ -5,9 +5,9 @@
 //! Shared setup lives in [`super::built_in_test_fixtures`] and
 //! [`super::built_in_test_fixtures_2`].
 
-use super::*;
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_inference_turns_cannot_both_spend_the_last_monthly_budget() {
