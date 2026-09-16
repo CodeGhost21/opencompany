@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use axum::extract::State;
@@ -607,7 +607,7 @@ async fn set_model(
         .get(runtime.id(), company_key::KEY_KEY)
         .await
         .map_err(ApiError)?
-        .map(|crate::ports::SecretValue(v)| v.trim().to_string())
+        .map(|crate::ports::types::SecretValue(v)| v.trim().to_string())
         .filter(|v| !v.is_empty())
     else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
