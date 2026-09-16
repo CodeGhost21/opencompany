@@ -136,7 +136,10 @@ fn an_operator_added_teammate_is_listed_by_name_and_role() {
         name: "Sam".to_string(),
         role: "Copywriter".to_string(),
         description: Some("Write the words.".to_string()),
-        ..Default::default()
+        provider: None,
+        tools: None,
+        model: None,
+        harness: None,
     });
     let section = team_section(&record, "designer");
     assert!(section.contains("one of 5 teammates"), "{section}");
