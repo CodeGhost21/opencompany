@@ -7,6 +7,7 @@ use tinyinference::usage::Usage;
 use tinyinference::{Error as InferenceError, Result as TaResult};
 
 use super::planning_fixtures_tests::*;
+use super::planning_whole_pass_tests::runtime_with;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
