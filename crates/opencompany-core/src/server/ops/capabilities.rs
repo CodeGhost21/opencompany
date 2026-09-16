@@ -1140,6 +1140,31 @@ mod tests {
         assert_eq!(dto["searchCredentialConfigured"], true, "{dto}");
     }
 
+    /// A secret-store outage is neither "no credential" nor a reason to lose
+    /// the endpoint's unrelated budget and grant data.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn omits_managed_search_verdict_when_the_secret_store_is_unreadable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"search\"]\n";
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_secrets(std::sync::Arc::new(BrokenSecrets))
+            .build()
+            .await
+            .unwrap();
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK, "{dto}");
+        assert_eq!(dto["searchGranted"], true, "{dto}");
+        assert!(dto.get("searchCredentialConfigured").is_none(), "{dto}");
+    }
+
     /// Issue #567: the MCP bridge's build state travels on every response, with
     /// a `[plan]` and without one. The `/mcp/servers` management routes ship in
     /// every build while the agent-side registry is pushed onto the belt behind

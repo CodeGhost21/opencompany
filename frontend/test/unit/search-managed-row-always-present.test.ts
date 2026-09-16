@@ -100,6 +100,22 @@ function at(testid: string): HTMLElement | null {
   return container.querySelector<HTMLElement>(`[data-testid="${testid}"]`);
 }
 
+async function press(element: Element | null) {
+  if (!element) throw new Error("expected a control to press");
+  await act(async () => {
+    (element as HTMLElement).click();
+  });
+  await act(async () => {});
+}
+
+function menuItem(label: string): HTMLElement | null {
+  return (
+    Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+      (item) => item.textContent?.trim() === label,
+    ) ?? null
+  );
+}
+
 beforeEach(() => {
   (
     globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -172,6 +188,27 @@ describe("the Managed row on Connections → Search", () => {
 
     await render({ providers: [], managedConfigured: true, managedKeyConfigured: false });
     expect(at("search-provider-managed-menu")).toBeNull();
+  });
+
+  it("wires both managed-key menu actions to their matching dialogs", async () => {
+    await render({ providers: [], managedConfigured: true, managedKeyConfigured: true });
+
+    await press(at("search-provider-managed-menu"));
+    await press(menuItem("Replace key"));
+    expect(document.querySelector('[data-testid="search-connect-provider"]')).not.toBeNull();
+
+    // Close the replacement dialog, then exercise the other callback from a
+    // freshly opened menu so the two actions cannot accidentally share one.
+    const cancel = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Cancel",
+    );
+    await press(cancel ?? null);
+    await press(at("search-provider-managed-menu"));
+    await press(menuItem("Remove key"));
+    expect(document.querySelector('[data-testid="search-confirm"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="search-confirm"]')?.textContent).toContain(
+      "Remove Managed key?",
+    );
   });
 
   it("renders above a connected provider, and drops the notice", async () => {

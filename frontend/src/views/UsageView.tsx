@@ -494,7 +494,9 @@ export function searchStatus(caps: CapabilityStatusDto): { label: string; varian
   // badge a working search "Awaiting credential".
   if (caps.searchProvider && caps.searchProvider !== "managed")
     return { label: "Own provider", variant: "default" };
-  if (!caps.searchCredentialConfigured)
+  if (caps.searchCredentialConfigured === undefined)
+    return { label: "Couldn't check", variant: "outline" };
+  if (caps.searchCredentialConfigured === false)
     return { label: "Awaiting credential", variant: "destructive" };
   // A zero cap leaves the grant in place but spends nothing — say so rather
   // than reporting "Active" for a tool that will refuse every call.

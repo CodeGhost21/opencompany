@@ -2079,7 +2079,11 @@ export interface CapabilityStatusDto {
    * CI actually compiles and tests it.
    */
   searchInBuild?: boolean;
-  /** Whether managed search resolves from the company's key or deployment fallback. */
+  /**
+   * Whether managed search resolves from the company's key or deployment
+   * fallback. `undefined` means the host could not read the company credential
+   * store and had no deployment fallback from which to establish availability.
+   */
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
