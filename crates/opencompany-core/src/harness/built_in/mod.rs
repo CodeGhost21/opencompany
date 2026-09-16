@@ -164,7 +164,7 @@ pub mod search_byo;
 /// meter are all real; only the model's choices and the search backend's
 /// responses are scripted. Test-only.
 #[cfg(test)]
-mod search_turn_test;
+mod search_turn_tests;
 /// The per-message responder selection for `auto` channels (issue #1835): the
 /// tool-less model call that picks which member of a leadless channel answers
 /// an unmentioned message, falling back to the channel's first roster member
@@ -203,7 +203,7 @@ pub mod workflow_refs;
 /// a manifest teammate and a runtime overlay teammate, and pins that a traversal
 /// out of a provisioned sandbox is still refused. Test-only.
 #[cfg(test)]
-mod workspace_provision_turn_test;
+mod workspace_provision_turn_tests;
 pub mod workspace_tools;
 /// End-to-end proof that the #237 workspace tools are reachable from a real
 /// turn, with only the model's choices stubbed. Test-only.
