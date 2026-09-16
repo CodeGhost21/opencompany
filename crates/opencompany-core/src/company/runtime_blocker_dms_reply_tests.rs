@@ -50,7 +50,6 @@ fn assignee(id: &str) -> BlockerSenderSignals {
     }
 }
 
-
 /// A blocker parks into its teammate's DM: the approval's thread is that
 /// DM, and a `blocker_parked` notification is filed pointing at it — with
 /// no payload beyond the one-line title.
@@ -122,10 +121,7 @@ async fn pending_approvals_names_the_stopped_steps_kind() {
         .collect();
     assert_eq!(
         kinds,
-        std::collections::HashSet::from([
-            Some("task".to_string()),
-            Some("node".to_string())
-        ]),
+        std::collections::HashSet::from([Some("task".to_string()), Some("node".to_string())]),
         "a task-step and a node-step blocker must project distinct step kinds, not the \
          same value: {pending:?}"
     );

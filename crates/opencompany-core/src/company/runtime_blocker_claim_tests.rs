@@ -23,12 +23,11 @@ async fn a_failed_extend_append_leaves_a_live_extension_that_reverts_on_restart(
     });
     let home_dir = tempfile::tempdir().expect("tempdir");
 
-    let rt1 =
-        crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest.clone())
-            .with_journal_store(store.clone())
-            .build()
-            .await
-            .expect("runtime");
+    let rt1 = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest.clone())
+        .with_journal_store(store.clone())
+        .build()
+        .await
+        .expect("runtime");
     let id = seed_parked(&rt1, "appr-extend-fail", 1_000).await;
     let ttl = rt1.approval_gate.ttl_millis();
     let original_deadline = 1_000 + ttl;
@@ -92,10 +91,7 @@ impl crate::ports::journal::JournalStore for RefusingExpiredStore {
         self.inner.read_journal(id).await
     }
 
-    async fn journal_imported(
-        &self,
-        id: &crate::ports::types::CompanyId,
-    ) -> crate::Result<bool> {
+    async fn journal_imported(&self, id: &crate::ports::types::CompanyId) -> crate::Result<bool> {
         self.inner.journal_imported(id).await
     }
 
@@ -656,4 +652,3 @@ async fn a_transient_journal_failure_releases_the_blocker_claim_for_retry() {
          {receipt:?}"
     );
 }
-

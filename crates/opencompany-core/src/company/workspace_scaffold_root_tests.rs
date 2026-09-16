@@ -339,4 +339,3 @@ async fn scaffolding_is_per_company() {
 
     assert!(ws.is_empty(&other).await.unwrap());
 }
-

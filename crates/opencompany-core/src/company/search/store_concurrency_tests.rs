@@ -439,4 +439,3 @@ async fn a_legacy_searxng_address_survives_the_slug_entering_the_index() {
         "{moved:?}"
     );
 }
-

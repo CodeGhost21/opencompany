@@ -354,4 +354,3 @@ async fn ensure_agent_folder_tracked_reports_created_then_adopted() {
     assert!(!created_again, "a second call adopts rather than minting");
     assert_eq!(first, second, "and hands back the same folder");
 }
-

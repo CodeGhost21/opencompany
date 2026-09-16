@@ -267,18 +267,12 @@ async fn park_node_blocker_on_run(
     id.to_string()
 }
 
-async fn answer(
-    rt: &Arc<CompanyRuntime>,
-    id: &str,
-    intent: BlockerReplyIntent,
-    text: &str,
-) {
+async fn answer(rt: &Arc<CompanyRuntime>, id: &str, intent: BlockerReplyIntent, text: &str) {
     let ids = vec![crate::ports::types::ApprovalId::from(id.to_string())];
     rt.apply_blocker_reply(&ids, intent, text, None)
         .await
         .expect("applies");
 }
-
 
 /// The acceptance headline: a workflow parked at a failed node and
 /// answered `retry` re-runs, and the answer is on the trigger input the
@@ -435,13 +429,8 @@ async fn a_second_card_on_the_same_node_is_acknowledged_once_the_first_dispatche
     let home = seed_home();
     let (rt, runner) = runtime(home.path(), true).await;
     let first = park_node_blocker(&rt, json!({ "topic": "quarterly numbers" })).await;
-    let second = park_node_blocker_stashed(
-        &rt,
-        json!({ "topic": "quarterly numbers" }),
-        false,
-        None,
-    )
-    .await;
+    let second =
+        park_node_blocker_stashed(&rt, json!({ "topic": "quarterly numbers" }), false, None).await;
 
     answer(&rt, &first, BlockerReplyIntent::Retry, "retry").await;
     assert_eq!(
@@ -473,13 +462,8 @@ async fn a_second_card_on_the_same_node_is_acknowledged_once_the_first_dispatche
 async fn an_answer_with_no_run_to_re_enter_is_reported_not_swallowed() {
     let home = seed_home();
     let (rt, runner) = runtime(home.path(), true).await;
-    let id = park_node_blocker_stashed(
-        &rt,
-        json!({ "topic": "quarterly numbers" }),
-        false,
-        None,
-    )
-    .await;
+    let id =
+        park_node_blocker_stashed(&rt, json!({ "topic": "quarterly numbers" }), false, None).await;
 
     let ids = vec![crate::ports::types::ApprovalId::from(id)];
     let outcome = rt
@@ -499,20 +483,11 @@ async fn an_answer_with_no_run_to_re_enter_is_reported_not_swallowed() {
 async fn a_batch_follow_up_continues_past_one_members_failure() {
     let home = seed_home();
     let (rt, runner) = runtime(home.path(), true).await;
-    let failing_id = park_node_blocker_on_run(
-        &rt,
-        RUN_ID,
-        json!({ "topic": "quarterly numbers" }),
-        false,
-    )
-    .await;
-    let ok_id = park_node_blocker_on_run(
-        &rt,
-        "run-ok",
-        json!({ "topic": "quarterly numbers" }),
-        true,
-    )
-    .await;
+    let failing_id =
+        park_node_blocker_on_run(&rt, RUN_ID, json!({ "topic": "quarterly numbers" }), false).await;
+    let ok_id =
+        park_node_blocker_on_run(&rt, "run-ok", json!({ "topic": "quarterly numbers" }), true)
+            .await;
 
     let ids = vec![
         crate::ports::types::ApprovalId::from(failing_id),
@@ -533,4 +508,3 @@ async fn a_batch_follow_up_continues_past_one_members_failure() {
          because an earlier member's follow-up errored"
     );
 }
-

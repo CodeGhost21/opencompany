@@ -1,7 +1,7 @@
 //! Runtime tests: approval extension, retirement failures, and thread-root resolution.
 
-use std::sync::Arc;
 use super::CompanyEvent;
+use std::sync::Arc;
 
 async fn an_unauthorized_forward_is_refused_and_leaves_no_marker() {
     use tinyhivemind::dispatch::EnqueueOutcome;
@@ -12,8 +12,7 @@ async fn an_unauthorized_forward_is_refused_and_leaves_no_marker() {
     let gate = Arc::new(tokio::sync::Mutex::new(()));
     // A cap high enough not to be what this test measures: the second
     // enqueue must be refused as `Already`, by the marker, not by width.
-    let queue =
-        crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 8, 4, None);
+    let queue = crate::runtime::hivemind::JournalReferralQueue::new(rt.clone(), gate, 8, 4, None);
 
     let referral = tinyhivemind::referral::Referral {
         key: tinyhivemind::dispatch::DispatchKey {
@@ -340,8 +339,7 @@ async fn an_expiry_settles_its_attempt_even_when_it_releases_a_continuation() {
     // The node's *second* gated call, answered by the operator before the
     // first expires. Its banked event is what makes the released batch
     // non-empty, and so what makes this node continue at all.
-    let node_turn =
-        crate::runtime::workflow_resume::workflow_node_turn_key("wr-released", "solve");
+    let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key("wr-released", "solve");
     rt.continuations.arm(&node_turn);
     assert!(
         rt.continuations
@@ -516,11 +514,10 @@ async fn extend_approval_moves_deadline_and_survives_replay() {
             .expect("manifest");
 
     // First boot: park an old approval, confirm its original deadline, extend.
-    let rt1 =
-        crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest.clone())
-            .build()
-            .await
-            .expect("runtime");
+    let rt1 = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest.clone())
+        .build()
+        .await
+        .expect("runtime");
     let id = seed_parked(&rt1, "appr-replay", 1_000).await;
     let ttl = rt1.approval_gate.ttl_millis();
     assert_eq!(
@@ -607,10 +604,7 @@ impl crate::ports::journal::JournalStore for RefusingExtendStore {
         self.inner.read_journal(id).await
     }
 
-    async fn journal_imported(
-        &self,
-        id: &crate::ports::types::CompanyId,
-    ) -> crate::Result<bool> {
+    async fn journal_imported(&self, id: &crate::ports::types::CompanyId) -> crate::Result<bool> {
         self.inner.journal_imported(id).await
     }
 
@@ -622,4 +616,3 @@ impl crate::ports::journal::JournalStore for RefusingExtendStore {
         self.inner.complete_import(id, lines).await
     }
 }
-

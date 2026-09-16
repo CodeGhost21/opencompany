@@ -501,4 +501,3 @@ async fn the_index_row_address_wins_over_the_per_slug_one() {
         Some("http://row.acme.internal")
     );
 }
-

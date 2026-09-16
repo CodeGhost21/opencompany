@@ -5,8 +5,8 @@ use crate::company::runtime::CompanyRuntime;
 use crate::company::task_intent::BlockerReplyIntent;
 use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
 use crate::ports::tasks::{
-    COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable,
-    TaskRecord, TaskTitle,
+    COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord,
+    TaskTitle,
 };
 use crate::ports::types::CompanyId;
 use std::path::Path;
@@ -110,7 +110,6 @@ async fn stored(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
         .find(|t| t.id == id)
         .expect("card exists")
 }
-
 
 /// The headline of the tier: an operator's "retry" moves the paused card
 /// back into In Progress so its dispatch edge fires, and the blocker is
@@ -225,8 +224,7 @@ async fn skip_settles_the_paused_card_without_another_run() {
 
     let replies = dm_notes(&runtime).await;
     assert!(replies.iter().any(|reply| {
-        reply
-            == "Okay — I've waived that blocker. The card is in review; nothing ran again."
+        reply == "Okay — I've waived that blocker. The card is in review; nothing ran again."
     }));
 
     let notification = runtime
@@ -531,9 +529,9 @@ async fn an_agent_question_whose_card_moved_on_answers_the_conversation() {
     );
     let notes = dm_notes(&runtime).await;
     assert!(
-        notes.iter().any(
-            |note| note == "Thanks — using that and carrying on from where it stopped."
-        ),
+        notes
+            .iter()
+            .any(|note| note == "Thanks — using that and carrying on from where it stopped."),
         "the answer must reach the conversation it was asked in; posted: {notes:?}"
     );
 }

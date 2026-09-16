@@ -372,4 +372,3 @@ async fn an_unreadable_index_is_reported_rather_than_read_as_empty() {
     seed(&secrets, &[(PROVIDER_INDEX_KEY, "{not json")]).await;
     assert!(list_providers(&company(), &secrets).await.is_err());
 }
-

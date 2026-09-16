@@ -50,8 +50,6 @@ fn assignee(id: &str) -> BlockerSenderSignals {
     }
 }
 
-
-
 /// Manually parks a blocker with an arbitrary `at_millis` (and
 /// therefore an arbitrary deadline), bypassing `park_blocker`'s
 /// always-now stamp — the same technique `seed_parked` uses elsewhere

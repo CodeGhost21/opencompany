@@ -709,4 +709,3 @@ async fn a_dm_reply_after_a_console_verdict_already_won_is_told_it_lost() {
     );
     drop(dm_follow_up);
 }
-
