@@ -263,6 +263,13 @@ impl SearchBackend {
         self
     }
 
+    /// Keeps this backend's current endpoint and credential configuration but
+    /// adopts the process-lifetime call ledger from `previous`.
+    pub(crate) fn with_ledger_from(mut self, previous: &Self) -> Self {
+        self.calls = previous.calls.clone();
+        self
+    }
+
     /// Adds the company-owned managed-search tier ahead of the deployment
     /// credential while preserving this backend's shared daily-call ledger.
     pub fn with_company_credential(

@@ -134,6 +134,9 @@ struct CapabilityStatusDto {
     /// a definitive `true` verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     search_credential_configured: Option<bool>,
+    /// The effective managed Search owner: company first, then deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_credential_source: Option<CredentialSource>,
     /// The provider this company's searches actually go to — `managed`, or the
     /// slug it configured in Settings → Search and finished configuring.
     ///
@@ -262,6 +265,7 @@ struct OptInFlags {
     composio_credential_source: Option<CredentialSource>,
     search_granted: bool,
     search_credential_configured: Option<bool>,
+    search_credential_source: Option<CredentialSource>,
     search_daily_call_cap: u32,
     search_provider: String,
     /// Issue #1192. Carried on the flags rather than derived per DTO site for
@@ -298,6 +302,7 @@ impl OptInFlags {
             composio_credential_source: None,
             search_granted: false,
             search_credential_configured: Some(search_deployment_credential_configured()),
+            search_credential_source: None,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             search_provider: crate::company::search::MANAGED_PROVIDER.to_string(),
             publish_granted: false,
@@ -328,6 +333,7 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: flags.search_credential_configured,
+        search_credential_source: flags.search_credential_source,
         search_daily_call_cap: flags.search_daily_call_cap,
         search_provider: flags.search_provider.clone(),
         publish_granted: flags.publish_granted,
@@ -405,25 +411,25 @@ fn search_deployment_credential_configured() -> bool {
 /// Whether MANAGED search can resolve for this company through the same two
 /// tiers as the request path: its copied TinyHumans key first, then the
 /// deployment credential. Off the harness feature there is no search tool.
-async fn search_credential_configured(runtime: &CompanyRuntime) -> Option<bool> {
+async fn search_credential_source(runtime: &CompanyRuntime) -> Option<CredentialSource> {
     #[cfg(feature = "openhuman")]
     {
-        // A deployment identity proves availability without consulting the
-        // company store. Otherwise preserve an unreadable company-key verdict
-        // as unknown instead of failing unrelated capability/budget data or
-        // confidently reporting that Search is unavailable.
-        if search_deployment_credential_configured() {
-            return Some(true);
-        }
         match crate::company::search::load_managed_key(runtime.id(), runtime.secrets().as_ref())
             .await
         {
-            Ok(key) => Some(key.is_some()),
+            Ok(Some(_)) => Some(CredentialSource::Company),
+            Ok(None) => Some(
+                crate::company::TinyhumansTokenSource::from_env(
+                    &crate::app::config::ProcessEnv,
+                )
+                .map(|source| source.source())
+                .unwrap_or(CredentialSource::None),
+            ),
             Err(err) => {
                 tracing::warn!(
                     company = %runtime.id(),
                     error = %err,
-                    "[capabilities] could not resolve the managed Search credential tier; omitting `searchCredentialConfigured`"
+                    "[capabilities] could not resolve the managed Search credential tier; omitting its source and configured verdict"
                 );
                 None
             }
@@ -432,7 +438,7 @@ async fn search_credential_configured(runtime: &CompanyRuntime) -> Option<bool> 
     #[cfg(not(feature = "openhuman"))]
     {
         let _ = runtime;
-        Some(false)
+        Some(CredentialSource::None)
     }
 }
 
@@ -533,7 +539,8 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         // ceiling, not a token budget — so both travel with the plan-independent
         // flags.
         search_granted: crate::company::grants_search_explicit(&record.manifest.tools.allow),
-        search_credential_configured: search_credential_configured(runtime).await,
+        search_credential_source: search_credential_source(runtime).await,
+        search_credential_configured: None,
         search_daily_call_cap: record
             .manifest
             .tools
@@ -615,6 +622,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: flags.search_credential_configured,
+        search_credential_source: flags.search_credential_source,
         search_daily_call_cap: flags.search_daily_call_cap,
         search_provider: flags.search_provider.clone(),
         publish_granted: flags.publish_granted,

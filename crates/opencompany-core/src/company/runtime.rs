@@ -833,7 +833,9 @@ impl CompanyRuntime {
                         company = %company.id,
                         "[search] could not read the managed company credential while resolving workflow wiring: {err}"
                     );
-                    resolved.search = None;
+                    // Unknown is not unconfigured. Keep the base handle in the
+                    // wiring verdict so callers do not misreport a transient
+                    // secret-store outage as missing configuration.
                 }
             }
         }

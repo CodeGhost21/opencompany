@@ -1320,7 +1320,7 @@ async fn gather_evidence(
                             runtime.secrets().as_ref(),
                         )
                         .await
-                        .is_ok_and(|key| key.is_some()));
+                        .map(|key| key.is_some())?);
                 let search_backend_configured = managed_search_configured
                     || (search_granted
                         && match crate::harness::search_byo::TenantSearch::resolve(

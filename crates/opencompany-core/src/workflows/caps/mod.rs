@@ -278,7 +278,15 @@ pub async fn build_capabilities(
         .tools
         .search_daily_calls
         .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS);
-    let managed_search = match (&deps.search, &deps.secrets) {
+    let search_granted = crate::company::grants_search_explicit(&grants);
+    let managed_search = if dry_run {
+        // Dry runs install inert effect slots and deliberately never consult
+        // the secret store. Preserve the deployment wiring verdict only.
+        deps.search.clone()
+    } else if !search_granted {
+        None
+    } else {
+        match (&deps.search, &deps.secrets) {
         (Some(backend), Some(secrets)) => {
             let company_key =
                 crate::company::search::load_managed_key(&company, secrets.as_ref()).await?;
@@ -292,7 +300,8 @@ pub async fn build_capabilities(
         (Some(backend), None) if backend.credential.configured() => {
             Some(backend.clone().with_daily_call_cap(search_daily_call_cap))
         }
-        _ => None,
+            _ => None,
+        }
     };
     let mut wiring_deps = deps.clone();
     wiring_deps.search = managed_search.clone();
