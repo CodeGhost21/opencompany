@@ -4121,24 +4121,22 @@ impl HarnessBrain {
                     // One thread, one card: a follow-up joins the work its
                     // thread already opened instead of opening another.
                     let thread_card = self.thread_card(chat.as_deref(), *parent).await;
-                    let responder = match crate::runtime::mentions::mention_responder(
-                        &self.record(),
-                        chat.as_deref(),
-                        mentions,
-                    )
-                    .or(overseer)
-                    {
-                        Some(responder) => responder,
-                        // Issue #1835: below a mention, above the deterministic
-                        // answer, an `auto` channel picks its best-fit member
-                        // for this message. Every way the pick cannot happen —
-                        // not an auto channel, one member, selection failed —
-                        // is `None`, and the ladder continues exactly where it
-                        // always stood.
-                        None => match self.auto_channel_responder(chat.as_deref(), text).await {
-                            Some(responder) => responder,
-                            None => self.responder_for(chat.as_deref()),
-                        },
+                    let routed = self
+                        .tinyhivemind_responder(chat.as_deref(), text, mentions)
+                        .await;
+                    // A direct address remains stronger than thread ownership.
+                    // Otherwise the last agent holding the thread keeps it;
+                    // TinyHiveMind supplies the channel/DM/orchestrator fallback.
+                    let responder = match routed {
+                        Some(decision)
+                            if matches!(
+                                decision.rung,
+                                tinyhivemind::responder::ResponderRung::ExplicitMention
+                                    | tinyhivemind::responder::ResponderRung::DirectAgent
+                            ) => decision.responder_id,
+                        Some(decision) => overseer.unwrap_or(decision.responder_id),
+                        None => overseer
+                            .unwrap_or_else(|| self.responder_for(chat.as_deref())),
                     };
                     // Everyone else the message named, for the answering turn's
                     // context. A list, not a fan-out: one operator message still
