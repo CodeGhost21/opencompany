@@ -252,7 +252,7 @@ fn house_credential(env: &dyn EnvSource, api_url: &str) -> Option<String> {
 /// Without the harness there is no inference path at all, so the host holds
 /// nothing and the step asks for everything.
 #[cfg(not(feature = "openhuman"))]
-fn house_credential(_env: &dyn EnvSource) -> Option<String> {
+fn house_credential(_env: &dyn EnvSource, _api_url: &str) -> Option<String> {
     None
 }
 
@@ -1525,6 +1525,7 @@ async fn probe_inference<E: EnvSource + Sync>(
 async fn probe_inference<E: EnvSource + Sync>(
     req: &InferenceTestRequest,
     _env: &E,
+    _api_url: &str,
 ) -> InferenceTestDto {
     InferenceTestDto {
         ok: false,
