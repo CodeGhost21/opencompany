@@ -5,8 +5,6 @@ use serde_json::{Value, json};
 use super::team_agent_test_support::*;
 use crate::server::router;
 
-}
-
 /// Issue #601: the roster **list** answers for tools and desks too, with
 /// the same values as the detail read.
 ///
