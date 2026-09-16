@@ -72,7 +72,7 @@ pub(super) struct MeteredBrain {
 }
 
 impl MeteredBrain {
-    fn per_cycle(usage: TokenUsage) -> Self {
+    pub(super) fn per_cycle(usage: TokenUsage) -> Self {
         Self {
             usage,
             metering: UsageMetering::PerCycle,
