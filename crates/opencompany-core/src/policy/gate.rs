@@ -851,5 +851,8 @@ impl ApprovalGate for ManifestApprovalGate {
 }
 
 #[cfg(test)]
-#[path = "gate_tests.rs"]
-mod tests;
+#[path = "gate_approval_tests.rs"]
+mod tests_approval;
+#[cfg(test)]
+#[path = "gate_resolution_tests.rs"]
+mod tests_resolution;
