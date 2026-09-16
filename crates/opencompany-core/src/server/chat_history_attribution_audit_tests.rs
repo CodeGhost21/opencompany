@@ -6,6 +6,7 @@
 //! different wrong string and still has to be counted.
 
 use super::*;
+use super::tests_reactions::at;
 
 fn reply(seq: u64, agent_id: &str) -> StoredEvent {
     at(
