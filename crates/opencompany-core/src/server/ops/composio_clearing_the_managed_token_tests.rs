@@ -1,4 +1,3 @@
-use super::ComposioMode;
 use super::composio_test_support::*;
 use axum::http::StatusCode;
 use serde_json::json;

@@ -8,7 +8,6 @@
 use super::{CatalogEntry, CredentialSource, TinyhumansTokenSource, access_for};
 use crate::company::runtime::CompanyRuntime;
 use crate::server::error::ApiError;
-use crate::server::ops::composio_toolkits;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
