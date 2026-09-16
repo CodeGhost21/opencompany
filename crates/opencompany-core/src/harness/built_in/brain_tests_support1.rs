@@ -9,19 +9,19 @@ use tinyinference::Result as TaResult;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
-use crate::company::CompanyManifest;
-use crate::harness::provider::{HarnessModel, MockProvider};
-use crate::hivemind::episode::HiveTurnRunner;
-use crate::hivemind::referral::HiveReferralRunner;
-use crate::ports::brain::CycleHost;
+pub(super) use crate::company::CompanyManifest;
+pub(super) use crate::harness::provider::{HarnessModel, MockProvider};
+pub(super) use crate::hivemind::episode::HiveTurnRunner;
+pub(super) use crate::hivemind::referral::HiveReferralRunner;
+pub(super) use crate::ports::brain::CycleHost;
 // Issue #301: every lifecycle return now lands in To-do (the `backlog` pool
 // is gone), so these assertions read the const rather than a literal.
-use crate::ports::tasks::{COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO};
-use crate::ports::types::{
+pub(super) use crate::ports::tasks::{COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO};
+pub(super) use crate::ports::types::{
     ApprovalId, CompanyId, ContextOp, ContextOpResult, Effect, EffectDisposition, OverlayAgent,
     ToolCall, ToolResult,
 };
-use crate::store::{FsCompanyStore, FsContextStore, FsOps};
+pub(super) use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
 /// A `CycleHost` that auto-executes anything the brain asks for and swallows
 /// anything it parks; used by every test that isn't about approvals.
