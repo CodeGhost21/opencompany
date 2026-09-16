@@ -454,10 +454,7 @@ async fn an_existing_row_migrates_to_a_changed_proxy_base_url() {
     // The health probe checked the row's *new* endpoint, not the one it was
     // about to migrate away from.
     assert_eq!(prober.last_base_url(), Some(migrated));
-    assert_eq!(
-        outcome(&report, Slot::Provider),
-        SlotOutcome::Kept(SkipReason::RowExists)
-    );
+    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Rotated);
 }
 
 /// A failed row migration must not read as a clean `Kept(RowExists)` — the

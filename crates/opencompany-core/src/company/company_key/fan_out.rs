@@ -993,7 +993,10 @@ pub async fn fan_out(
         )
         .await
         {
-            Ok(_) => SlotOutcome::Kept(SkipReason::RowExists),
+            // This is a stored mutation, not merely an existing row being
+            // observed.  Report it as a rotation so cache eviction and the
+            // audit fan-out record that the provider destination changed.
+            Ok(_) => SlotOutcome::Rotated,
             // Unlike a successful migration, a failed one must not read as
             // `Kept` — the account/inference keys are already updated and the
             // health probe already checked the *new* endpoint, so a `Kept`
@@ -1062,7 +1065,7 @@ pub async fn fan_out(
                     Err(_) => SlotOutcome::Failed,
                 }
             }
-            SlotOutcome::Kept(SkipReason::RowExists) => {
+            SlotOutcome::Kept(SkipReason::RowExists) | SlotOutcome::Rotated => {
                 // P3-8 (keys rework #2306 review): a disabled row cannot
                 // currently serve anything, so it must not become the new
                 // default — that would point the company's default at a
