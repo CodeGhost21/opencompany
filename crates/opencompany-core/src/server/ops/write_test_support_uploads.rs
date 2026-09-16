@@ -224,5 +224,3 @@ pub(super) async fn chat_upload(
     };
     (status, value)
 }
-
-

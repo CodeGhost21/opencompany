@@ -234,4 +234,3 @@ impl crate::ports::workspace::WorkspaceStore for RecordingReads {
         self.inner.is_empty(company).await
     }
 }
-

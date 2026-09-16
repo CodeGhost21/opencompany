@@ -559,7 +559,6 @@ pub(super) async fn send_cookie(
     (status, value)
 }
 
-
 pub(super) async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
     seed_proposal_card_assigned(state, ops, "ceo").await
 }
@@ -654,7 +653,6 @@ pub(super) fn digest_ops_posting_to(target: &str) -> Value {
         ]
     })
 }
-
 
 #[path = "write_test_support_doubles.rs"]
 mod doubles;
