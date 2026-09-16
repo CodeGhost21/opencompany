@@ -151,9 +151,14 @@ test("the account key sets up TinyHumans for LLM and a turn reaches the backend"
   //    marker's underscores become emphasis (see `wiring.spec.ts`).
   await open(page, "/#/chat");
   const prompt = `tinyhumans account key e2e ${Date.now()}`;
+  const backendReplies = page.locator("article[data-message-id]").filter({ hasText: /MOCK_LLM/ });
+  const replyCountBefore = await backendReplies.count();
   await page.getByPlaceholder(/^Message /).fill(prompt);
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText(/MOCK_LLM/).first()).toBeVisible({ timeout: 90_000 });
+  // Scoped to rendered message bubbles and counted before/after so this
+  // proves the *new* turn reached the backend rather than matching an older
+  // `MOCK_LLM` reply already in `transcripts[channel.id]` (CodeRabbit review).
+  await expect(backendReplies).toHaveCount(replyCountBefore + 1, { timeout: 90_000 });
   await expect(page.getByText(/^You said:/)).toHaveCount(0);
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
 });
