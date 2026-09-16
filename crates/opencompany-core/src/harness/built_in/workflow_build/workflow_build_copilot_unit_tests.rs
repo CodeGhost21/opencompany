@@ -30,7 +30,7 @@ use openhuman_core::tools::traits::Tool;
 
 /// A drafter answer whose graph carries a model-chosen id and per-node approval
 /// gating — both of which the host overrides — plus a real roster agent.
-const DESC_GRAPH: &str = r#"{"automatable":true,"summary":"email the weekly digest",
+pub(super) const DESC_GRAPH: &str = r#"{"automatable":true,"summary":"email the weekly digest",
     "workflow":{"id":"the-model-should-not-pick-this","name":"Weekly digest",
         "nodes":[{"id":"start","kind":"trigger","name":"Every Monday","schedule":"0 9 * * 1","requires_approval":true},
                  {"id":"draft","kind":"agent","name":"Draft","agent":"maya","requires_approval":false}],
