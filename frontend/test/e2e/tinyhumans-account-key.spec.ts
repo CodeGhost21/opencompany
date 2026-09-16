@@ -54,28 +54,23 @@ type Page = import("@playwright/test").Page;
 const toasts = (page: Page) => page.locator("[data-sonner-toast]");
 
 /**
- * Clears the activation gate ("Skip setup") and the tour ("Skip for now") if
- * either is up, then re-opens `hash` — dismissing the gate navigates away
- * from a deep link. The umbrella runner starts the host with
- * `OPENCOMPANY_SKIP_ACTIVATION_GATE=1`, so normally neither appears; this is
- * for a hand-started host. Same shape as `agent-session.spec.ts`'s helper.
+ * Clears the tour ("Skip for now") if it is up, then re-opens `hash` —
+ * dismissing it navigates away from a deep link. Same shape as
+ * `agent-session.spec.ts`'s helper.
  */
 async function open(page: Page, hash: string): Promise<void> {
   await page.goto(hash);
-  const any = page.getByRole("button", { name: /^(Skip setup|Skip for now)$/ });
-  await any
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await skip
     .first()
     .waitFor({ state: "visible", timeout: 3_000 })
     .catch(() => {});
   let dismissed = false;
-  for (const name of ["Skip setup", "Skip for now"]) {
-    const skip = page.getByRole("button", { name });
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      if (!(await skip.isVisible().catch(() => false))) break;
-      dismissed = true;
-      await skip.click({ force: true }).catch(() => {});
-      await page.waitForTimeout(300);
-    }
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (!(await skip.isVisible().catch(() => false))) break;
+    dismissed = true;
+    await skip.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(300);
   }
   if (dismissed) await page.goto(hash);
 }

@@ -22,38 +22,27 @@ import { expect, test, type Page } from "@playwright/test";
  */
 
 /**
- * Clears both things that can stand in front of a deep link, and says whether
- * it had to.
+ * Clears the guided tour if it is up, and says whether it had to.
  *
- * "Skip setup" is the activation gate's control and "Skip for now" is the
- * guided tour's — two different surfaces with two different labels, and either
- * can be up on a fresh data directory. Both are tried because which one appears
- * depends on state this test does not own.
- *
- * It *waits* for a control before deciding there is none. The gate mounts after
- * the shell's first data reads, and on a loaded CI runner that is later than an
- * instant `isVisible()` probe: the neutral visit then saw nothing, the gate
- * came up under the deep link, and dismissing it there navigated — its redirect
- * rewrites the hash — so the assertion ran against `#general` instead of the
- * address the test opened. Callers use the answer to re-open the deep link.
+ * It *waits* for the control before deciding there is none. The tour mounts
+ * after the shell's first data reads, and on a loaded CI runner that is later
+ * than an instant `isVisible()` probe: the neutral visit then saw nothing, the
+ * tour came up under the deep link, and dismissing it there navigated — so the
+ * assertion ran against `#general` instead of the address the test opened.
+ * Callers use the answer to re-open the deep link.
  */
 async function dismissOnboarding(page: Page): Promise<boolean> {
   let dismissed = false;
-  const gate = page.getByRole("button", {
-    name: /^(Skip setup|Skip for now)$/,
-  });
-  await gate
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await skip
     .first()
     .waitFor({ state: "visible", timeout: 5_000 })
     .catch(() => {});
-  for (const name of ["Skip setup", "Skip for now"]) {
-    const skip = page.getByRole("button", { name });
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      if (!(await skip.isVisible().catch(() => false))) break;
-      dismissed = true;
-      await skip.click({ force: true }).catch(() => {});
-      await page.waitForTimeout(300);
-    }
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (!(await skip.isVisible().catch(() => false))) break;
+    dismissed = true;
+    await skip.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(300);
   }
   return dismissed;
 }
@@ -61,7 +50,7 @@ async function dismissOnboarding(page: Page): Promise<boolean> {
 /**
  * Opens a deep link and keeps it open.
  *
- * If the gate was still up when the link opened, dismissing it navigates
+ * If the tour was still up when the link opened, dismissing it navigates
  * away; the link is then opened once more onto the cleared shell, so what the
  * test looks at is the address it asked for.
  */
@@ -87,9 +76,9 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("a teammate's session opens from its own address", async ({ page }) => {
-  // Clear the gate FIRST, on a neutral address. Dismissing it navigates, and a
-  // navigation rewrites the hash — so opening the deep link before the gate is
-  // gone would test the gate's redirect rather than the link.
+  // Clear the tour FIRST, on a neutral address. Dismissing it navigates, and a
+  // navigation rewrites the hash — so opening the deep link before the tour is
+  // gone would test that redirect rather than the link.
   await page.goto("/");
   await dismissOnboarding(page);
 
