@@ -475,9 +475,17 @@ pub fn pair_turn_prompt(other_label: &str, exchange: &[(String, String)], left: 
         .map(|(who, words)| format!("{who}: {words}"))
         .collect::<Vec<_>>()
         .join("\n");
+    // `left` counts the lines that come AFTER this one, so only zero is the
+    // last line. Closing on `1` as well told the second-to-last speaker to
+    // conclude and then let another line run anyway: with `pair_messages = 4`
+    // the third row was handed "this is the last line" while a fourth was
+    // still coming (CodeRabbit, #2341).
     let closing = match left {
-        0 | 1 => "This is the last line of this exchange — close it: say what you have concluded, \
-                  or that you cannot answer."
+        0 => "This is the last line of this exchange — close it: say what you have concluded, \
+              or that you cannot answer."
+            .to_string(),
+        1 => "You have 1 more line in this exchange. Use it only if you still need something; \
+              if you have your answer, say so and stop."
             .to_string(),
         remaining => format!(
             "You have {remaining} more lines in this exchange. Use them only if you still need \
@@ -1154,7 +1162,14 @@ impl<'a> EpisodeReferrals<'a> {
             (target.clone(), answer.clone()),
         ];
         let mut answer = answer;
-        if by_name {
+        // `asked` as well as `by_name`: when the question failed to append, the
+        // answer above was skipped too, so the first durable row would be a
+        // FOLLOW-UP — and the positional projection reads row one as the
+        // question, showing a reader a mid-exchange line labelled as the ask.
+        // That is the same "better to carry nothing than to carry it
+        // mislabelled" the question's own failure path takes; this loop was
+        // left outside it (Codex + CodeRabbit, #2341).
+        if by_name && asked {
             let budget = self.pair_messages;
             while u32::try_from(exchange.len()).unwrap_or(u32::MAX) < budget {
                 let next_is_asker = exchange.len() % 2 == 0;

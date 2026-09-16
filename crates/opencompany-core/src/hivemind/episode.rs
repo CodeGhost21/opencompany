@@ -359,6 +359,11 @@ impl<'a> EpisodeDriver<'a> {
         }];
         let retired: Vec<String> = Vec::new();
         let policy = self.desk.policy();
+        // Whether a crossing THIS desk makes convenes the far desk as a room or
+        // asks a single seat. The prompt described the room unconditionally,
+        // which is wrong for a desk that set `deliberates = false` and gets the
+        // single-responder crossing (CodeRabbit, #2341).
+        let deliberates = self.desk.config.referral.deliberates();
         // Held separately because the referral block below binds its own
         // `policy` (a `ReferralPolicy`), and the continuation inside it still
         // renders a prompt for THIS room.
@@ -414,6 +419,17 @@ impl<'a> EpisodeDriver<'a> {
         // the same reason the recall is: it cannot change mid-episode, and a
         // seat that saw a different set of desks from the seat before it would
         // be reading a different company.
+        // **Can this seat actually get an answer, not just is federation wired.**
+        //
+        // `referrals` is `Some` whenever a federation exists, but `consider`
+        // returns immediately on a policy that is not `enabled` — and `enabled`
+        // defaults to OFF. Deriving the prompt's capability from `is_some()`
+        // therefore promised every seat in a federated company that writing an
+        // `@handle` would be answered "at once", for a question that was
+        // silently dropped (CodeRabbit, #2341).
+        let can_ask = referrals
+            .as_ref()
+            .is_some_and(|(_, _, policy)| policy.enabled);
         let peers: Vec<(String, String, Option<String>)> = referrals
             .as_ref()
             .filter(|(_, _, policy)| policy.enabled && policy.reach.addresses_desks())
@@ -559,7 +575,8 @@ impl<'a> EpisodeDriver<'a> {
                         .with_elsewhere(&elsewhere)
                         .with_unspoken(&unspoken)
                         .with_peers(peers.clone())
-                        .able_to_ask(referrals.is_some())
+                        .desks_deliberate(deliberates)
+                        .able_to_ask(can_ask)
                         .with_trigger(Sequence(trigger.value()))
                         .render(&turn, &visible);
 
@@ -828,7 +845,8 @@ impl<'a> EpisodeDriver<'a> {
                         .with_elsewhere(&carried)
                         .with_unspoken(&unspoken)
                         .with_peers(peers.clone())
-                        .able_to_ask(referrals.is_some())
+                        .desks_deliberate(deliberates)
+                        .able_to_ask(can_ask)
                         .with_trigger(Sequence(trigger.value()))
                         .continuing()
                         .render(&turn, &visible);

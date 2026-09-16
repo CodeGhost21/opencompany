@@ -291,6 +291,9 @@ pub struct EpisodePrompt<'a> {
     /// to use a move that does not exist, which is the failure `peers()` is
     /// careful to avoid for desks.
     can_ask: bool,
+    /// Whether a crossing to a peer desk convenes that desk as a room, or asks
+    /// one seat on it ([`ReferralConfig::deliberates`]).
+    desks_deliberate: bool,
     /// Whether this is the SECOND pass of one member's turn, taken because the
     /// question it asked another desk has come back answered.
     ///
@@ -333,6 +336,7 @@ impl<'a> EpisodePrompt<'a> {
             peers: Vec::new(),
             elsewhere: &[],
             can_ask: false,
+            desks_deliberate: true,
             continuing: false,
             trigger: None,
         }
@@ -368,6 +372,11 @@ impl<'a> EpisodePrompt<'a> {
     /// Off by default: an episode without a referral queue cannot, and a prompt
     /// that promises the move anyway sends a seat to a dead end.
     #[must_use]
+    pub fn desks_deliberate(mut self, deliberates: bool) -> Self {
+        self.desks_deliberate = deliberates;
+        self
+    }
+
     pub fn able_to_ask(mut self, can_ask: bool) -> Self {
         self.can_ask = can_ask;
         self
@@ -607,9 +616,11 @@ impl<'a> EpisodePrompt<'a> {
 
     /// The other desks this seat may ask, or nothing when it may ask none.
     ///
-    /// One question per line, and only one seat's worth: the far desk answers
-    /// with a single turn by a single member, so this is a colleague to consult
-    /// and not a channel to broadcast into.
+    /// One question per line: a colleague to consult and not a channel to
+    /// broadcast into. Whether the far desk answers as a room or through a
+    /// single seat is [`ReferralConfig::deliberates`], and the text follows it
+    /// — the doc here said "a single turn by a single member" for both, which
+    /// stopped being true when #2332 made deliberation the default.
     fn peers(&self) -> String {
         if self.peers.is_empty() {
             return String::new();
@@ -623,8 +634,15 @@ impl<'a> EpisodePrompt<'a> {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // A desk that set `deliberates = false` answers with a single seat's
+        // turn, so promising a room would describe a mechanism this company
+        // turned off.
+        let answered = match self.desks_deliberate {
+            true => "That desk answers as a room and sends back what it settled on",
+            false => "One member of that desk answers and sends back what they said",
+        };
         format!(
-            "Other desks you may put ONE question to, by writing their handle in your line:\n             {listed}\n             Ask only for a fact this desk does not hold and cannot check for itself, and ask it              EARLY — a room that has already backed an answer has voted past whatever comes back.              That desk answers as a room and sends back what it settled on, which arrives as a              message you can read and cite; it is not a vote, and it supports nothing here until              one of us spends a line on it.\n\n",
+            "Other desks you may put ONE question to, by writing their handle in your line:\n             {listed}\n             Ask only for a fact this desk does not hold and cannot check for itself, and ask it              EARLY — a room that has already backed an answer has voted past whatever comes back.              {answered}, which arrives as a              message you can read and cite; it is not a vote, and it supports nothing here until              one of us spends a line on it.\n\n",
         )
     }
 

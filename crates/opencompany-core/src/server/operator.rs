@@ -1830,9 +1830,21 @@ fn project_event_for_viewer(
             ..
         } => {
             let mut o = envelope("referral");
-            // The desk whose transcript gains the fold: the crossing is folded
-            // onto the ASKING row, which lives on the desk the question left.
-            o["chatId"] = json!(from_desk);
+            // **The desk whose transcript gains the fold, which is not the same
+            // field on both legs.**
+            //
+            // The fold lands on the ASKING row, and a return leg is addressed
+            // the other way round: `mark` builds it from the answering desk, so
+            // its `from_desk` is the far desk and `to_desk` is the desk that
+            // asked. Emitting `from_desk` unconditionally pointed the console at
+            // the far desk exactly on the leg that carries the answer — and
+            // since the forward frame goes out before an answer exists, a
+            // cross-desk crossing was never refreshed on the desk waiting for it
+            // (Codex, #2341).
+            o["chatId"] = json!(match returning {
+                true => to_desk,
+                false => from_desk,
+            });
             // The row it folds onto, so a console need not re-read a whole desk
             // to find what changed.
             o["sequence"] = json!(trigger_sequence);
@@ -14671,6 +14683,38 @@ mode = "full"
             v.get("lines").is_none() && v.get("referralConversation").is_none(),
             "no crossing content travels on this frame: {v}"
         );
+    }
+
+    /// A return leg is addressed the other way round, and the frame must follow
+    /// the fold rather than the field name.
+    ///
+    /// `mark` builds a return from the ANSWERING desk, so `from_desk` is the far
+    /// desk and `to_desk` is the desk that asked and is still waiting. Reading
+    /// `from_desk` on both legs sent the console to re-read the far desk exactly
+    /// on the leg that carries the answer — and because the forward frame goes
+    /// out before any answer exists, the asking desk was never refreshed at all
+    /// (Codex, #2341).
+    #[test]
+    fn a_returning_crossing_names_the_desk_that_asked() {
+        let v = super::project_event(&stored(CompanyEvent::ReferralEnqueued {
+            conversation: None,
+            answers: Some(41),
+            from_desk: "design".into(),
+            from_desk_name: "Design".into(),
+            asker: "product_designer".into(),
+            asker_label: "product_designer".into(),
+            trigger_sequence: 58,
+            to_desk: "engineering".into(),
+            target: "software_engineer".into(),
+            returning: true,
+        }))
+        .expect("a return is projected at all");
+
+        assert_eq!(
+            v["chatId"], "engineering",
+            "the answer folds onto the asking desk, which a return names as `to_desk`"
+        );
+        assert_eq!(v["returning"], true);
     }
 
     #[test]
