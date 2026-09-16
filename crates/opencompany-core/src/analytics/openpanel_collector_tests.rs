@@ -111,24 +111,6 @@ fn env(endpoint: &str, pairs: &[(&str, &str)]) -> MapEnv {
     MapEnv::new(all)
 }
 
-fn events() -> Vec<Event> {
-    vec![
-        Event::InstanceStarted {
-            companies: 1,
-            storage: "fs",
-            setup_complete: true,
-        },
-        Event::TurnFinished {
-            trigger: Trigger::OperatorMessage,
-            outcome: Outcome::Ok,
-            failure: None,
-            duration_ms: 12,
-            effects_executed: 0,
-            approvals_parked: 0,
-        },
-    ]
-}
-
 /// **A shutdown flush waits for a send already in flight.**
 ///
 /// The periodic drain takes the whole queue before it awaits its POSTs, so
