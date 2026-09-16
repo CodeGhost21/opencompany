@@ -1,6 +1,9 @@
-use super::tests::{admin_actor, budget_manifest, company_record, fs_ports, manifest, tmp_root};
+use super::tests::{admin_actor, budget_manifest, company_record, fs_ports, tmp_root};
+#[cfg(feature = "export")]
+use super::tests::manifest;
 use super::*;
 use crate::ports::types::{Actor, ActorKind};
+#[cfg(feature = "export")]
 use crate::runtime::RuntimeBuilder;
 
 /// **A console tool grant must not be promoted to a seed grant by a
