@@ -35,7 +35,7 @@ fn an_acp_chat_turn_carries_the_query_it_answers() {
     assert_eq!(unaddressed.message_seq, None);
 }
 
-fn turn(updates: Vec<AcpUpdate>) -> AcpTurn {
+pub(super) fn turn(updates: Vec<AcpUpdate>) -> AcpTurn {
     AcpTurn {
         updates,
         stop_reason: "end_turn".to_string(),
