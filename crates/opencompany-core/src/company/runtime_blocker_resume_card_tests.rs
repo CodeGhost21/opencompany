@@ -298,7 +298,6 @@ async fn dm_notes(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
         .collect()
 }
 
-
 fn agent_question() -> BlockerPayload {
     BlockerPayload {
         kind: BlockerKind::Information,
