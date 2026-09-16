@@ -1,7 +1,5 @@
 use super::{AsideConversation, MessageView, aside_body, fold_asides};
 
-/// A desk-visible row by `author`, or an aside when `to` names somebody.
-
 /// A settled dispatch, as the harness journals it. `desk` is deliberately
 /// an agent id (`engineer`) and never a channel id (`engineering`) — that
 /// difference is the whole reason the origin has to be carried.

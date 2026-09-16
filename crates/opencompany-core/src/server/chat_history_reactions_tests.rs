@@ -1,7 +1,5 @@
 use super::{AsideConversation, MessageView, aside_body, fold_asides};
 
-/// A desk-visible row by `author`, or an aside when `to` names somebody.
-
 fn user(id: &str) -> Option<Actor> {
     Some(Actor {
         kind: ActorKind::User,
