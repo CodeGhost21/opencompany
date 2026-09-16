@@ -919,11 +919,11 @@ fn not_an_image() -> OpenCompanyError {
 }
 
 #[cfg(test)]
-#[path = "avatar_tests_reference.rs"]
-mod tests_reference;
-#[cfg(test)]
 #[path = "avatar_tests_formats.rs"]
 mod tests_formats;
+#[cfg(test)]
+#[path = "avatar_tests_reference.rs"]
+mod tests_reference;
 #[cfg(test)]
 #[path = "avatar_tests_resolve.rs"]
 mod tests_resolve;
