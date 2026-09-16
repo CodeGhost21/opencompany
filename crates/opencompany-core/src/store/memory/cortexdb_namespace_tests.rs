@@ -1,5 +1,5 @@
 use super::tests::{ACTOR, client, spawn_mock};
-use super::{CORTEXDB_DRIVER_ID, CortexdbMemory};
+use super::CORTEXDB_DRIVER_ID;
 use tinymemory_api::traits::Memory;
 use tinymemory_api::types::{MemoryCategory, RecallOpts};
 
