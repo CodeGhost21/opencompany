@@ -280,6 +280,20 @@ export interface BillingSummary {
 }
 
 /**
+ * Why the hub gave no figures, as the host classified it.
+ *
+ * - `rejected` — the hub refused the key (401). The one value that says the
+ *   credential itself is dead.
+ * - `unreachable` — the hub could not answer, or answered in a way this host
+ *   could not use. Includes a 403: a key the hub recognises and will not let
+ *   through is not a key to replace.
+ * - `noHub` — this build is not wired to a hub at all, so there is nobody to
+ *   ask. Says nothing about the key.
+ * - `unknown` — the host could not tell which of the above it was.
+ */
+export type BillingUnavailableReason = "rejected" | "unreachable" | "noHub" | "unknown";
+
+/**
  * The billing panel's whole state, including its two empty cases.
  *
  * `configured: false` is "no key, so nothing to ask about" — the page shows the
@@ -290,7 +304,23 @@ export interface BillingSummary {
 export interface CompanyBilling {
   configured: boolean;
   summary?: BillingSummary;
+  /**
+   * The host's own sentence for why there are no figures. Never the hub's
+   * response body, which is JSON written for a log.
+   */
   unavailable?: string;
+  /**
+   * Which kind of failure it was — the field to switch on, so what the console
+   * draws never depends on parsing prose.
+   *
+   * Absent on a host predating the field, which reads as "did not say" rather
+   * than any of the four (the idiom `inferenceHasOwnKey` and `restartRequired`
+   * already use). A missing reason must never be read as a working key: a
+   * verdict is earned by evidence, and absence is not evidence.
+   */
+  unavailableReason?: BillingUnavailableReason;
+  /** The hub's stable failure token (`http_401`, `unreachable`, …). */
+  unavailableCode?: string;
 }
 
 /**

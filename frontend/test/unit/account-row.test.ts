@@ -7,6 +7,8 @@ import {
   balanceLine,
   canRemoveKey,
   headerActions,
+  keyVerdict,
+  REJECTED_SUBLINE,
   REMOVAL_CONSEQUENCE,
   REMOVAL_AND_THINKING,
 } from "@/views/connections/account";
@@ -21,19 +23,111 @@ function status(overrides: Partial<CompanyCredentialStatus> = {}): CompanyCreden
   };
 }
 
+/** A billing read that came back with figures. */
+function answered(): CompanyBilling {
+  return {
+    configured: true,
+    summary: { balanceUsd: 4, plan: "free", activeSubscription: false },
+  };
+}
+
+/** A billing read the host classified as a failure. */
+function refused(
+  reason: CompanyBilling["unavailableReason"],
+  unavailable = "TinyHumans refused this company's key.",
+): CompanyBilling {
+  return reason === undefined
+    ? { configured: true, unavailable }
+    : { configured: true, unavailable, unavailableReason: reason };
+}
+
+describe("keyVerdict earns both of its verdicts and infers neither", () => {
+  // The inversion this whole pass is about. "No failure reported" is not
+  // success: a host with no hub reports no failure, and so does one too old to
+  // classify. Only figures coming back prove the key was presented and taken.
+  it("is working only where a summary actually came back", () => {
+    expect(keyVerdict(status({ source: "company" }), answered())).toBe("working");
+    expect(keyVerdict(status({ source: "company" }), { configured: true })).toBe("unknown");
+    expect(keyVerdict(status({ configured: true, source: "company" }), null)).toBe("unknown");
+    expect(keyVerdict(status({ source: "company" }), refused("noHub"))).toBe("unknown");
+  });
+
+  it("is rejected only where the host said so about this company's own key", () => {
+    expect(keyVerdict(status({ source: "company" }), refused("rejected"))).toBe("rejected");
+    expect(keyVerdict(status({ source: "company" }), refused("unreachable"))).toBe("unknown");
+    expect(keyVerdict(status({ source: "company" }), refused(undefined))).toBe("unknown");
+    expect(keyVerdict(null, refused("rejected"))).toBe("unknown");
+  });
+
+  // A refusal against the instance's platform identity is not this company's
+  // key to replace — its admin does not hold that credential.
+  it("never blames this company for a refusal on a borrowed identity", () => {
+    for (const source of ["attested", "static"] as const) {
+      expect(keyVerdict(status({ configured: false, source }), refused("rejected"))).toBe(
+        "unknown",
+      );
+    }
+  });
+});
+
 describe("accountShape keeps an unreadable store apart from an empty one", () => {
-  it("is connected whenever anything resolves", () => {
-    expect(accountShape("ready", status({ source: "company" }))).toBe("connected");
-    expect(accountShape("ready", status({ configured: false, source: "attested" }))).toBe(
+  it("is rejected when the hub refused this company's own key", () => {
+    expect(accountShape("ready", status({ source: "company" }), refused("rejected"))).toBe(
+      "rejected",
+    );
+  });
+
+  // The most valuable case here. A hub outage must never read as "your key is
+  // bad": one says wait, the other says revoke and re-mint, and the row is the
+  // only thing telling an operator which.
+  it("stays connected when the hub merely could not be reached", () => {
+    expect(accountShape("ready", status({ source: "company" }), refused("unreachable"))).toBe(
       "connected",
     );
-    expect(accountShape("ready", status({ configured: false, source: "static" }))).toBe(
+    expect(accountShape("ready", status({ source: "company" }), refused("noHub"))).toBe(
+      "connected",
+    );
+    expect(accountShape("ready", status({ source: "company" }), refused("unknown"))).toBe(
+      "connected",
+    );
+    expect(accountShape("ready", status({ source: "company" }), refused(undefined))).toBe(
+      "connected",
+    );
+  });
+
+  it("never calls a borrowed identity's refusal this company's problem", () => {
+    for (const source of ["attested", "static"] as const) {
+      expect(
+        accountShape("ready", status({ configured: false, source }), refused("rejected")),
+      ).toBe("connected");
+    }
+  });
+
+  // The load guards outrank every verdict: a page that does not know whose
+  // account this is cannot know whether that account works.
+  it("is unknown while the host could not answer, whatever billing said", () => {
+    expect(accountShape("error", status({ source: "company" }), refused("rejected"))).toBe(
+      "unknown",
+    );
+    expect(accountShape("loading", status({ source: "company" }), refused("rejected"))).toBe(
+      "unknown",
+    );
+    expect(accountShape("ready", null, refused("rejected"))).toBe("unknown");
+  });
+
+
+  it("is connected whenever anything resolves", () => {
+    expect(accountShape("ready", status({ source: "company" }), null)).toBe("connected");
+    expect(accountShape("ready", status({ configured: false, source: "attested" }), null)).toBe(
+      "connected",
+    );
+    expect(accountShape("ready", status({ configured: false, source: "static" }), null)).toBe(
       "connected",
     );
   });
 
   it("is empty only when the chain resolves to nothing", () => {
-    expect(accountShape("ready", status({ configured: false, source: "none" }))).toBe("empty");
+    expect(accountShape("ready", status({ configured: false, source: "none" }), null)).toBe("empty");
   });
 
   // The trap the whole page is built around. `company_key::resolve` propagates
@@ -43,16 +137,16 @@ describe("accountShape keeps an unreadable store apart from an empty one", () =>
   // distinction away at the last step and send an admin to set a key they may
   // already have set.
   it("is unknown — never empty — when the host could not answer", () => {
-    expect(accountShape("error", null)).toBe("unknown");
+    expect(accountShape("error", null, null)).toBe("unknown");
     // Even holding a status from a previous good read: the load says the
     // current answer is not known, and that outranks a stale one.
-    expect(accountShape("error", status({ source: "company" }))).toBe("unknown");
+    expect(accountShape("error", status({ source: "company" }), null)).toBe("unknown");
   });
 });
 
 describe("accountSubline says which tier actually answers", () => {
   it("names the company's own account", () => {
-    expect(accountSubline("ready", status({ source: "company" }))).toContain(
+    expect(accountSubline("ready", status({ source: "company" }), null)).toContain(
       "this company's own TinyHumans account",
     );
   });
@@ -61,7 +155,7 @@ describe("accountSubline says which tier actually answers", () => {
   // read "not configured" while the server's identity is the one answering.
   it("names the server's account for both fallback identities", () => {
     for (const source of ["attested", "static"] as const) {
-      expect(accountSubline("ready", status({ configured: false, source }))).toBe(
+      expect(accountSubline("ready", status({ configured: false, source }), null)).toBe(
         "Acting as the account of whoever runs this server",
       );
     }
@@ -75,13 +169,46 @@ describe("accountSubline says which tier actually answers", () => {
   // this value would send an operator chasing spend to the wrong account.
   it("claims no payer, in any state it can reach", () => {
     for (const source of ["company", "attested", "static", "none"] as const) {
-      const line = accountSubline("ready", status({ source }));
-      expect(line.toLowerCase()).not.toContain("billed");
-      expect(line.toLowerCase()).not.toContain("pays");
-      expect(line.toLowerCase()).not.toContain("paying");
+      for (const money of [null, answered(), refused("rejected"), refused("unreachable")]) {
+        const line = accountSubline("ready", status({ source }), money).toLowerCase();
+        expect(line).not.toContain("billed");
+        expect(line).not.toContain("pays");
+        expect(line).not.toContain("paying");
+      }
     }
-    expect(accountSubline("loading", null).toLowerCase()).not.toContain("billed");
-    expect(accountSubline("error", null).toLowerCase()).not.toContain("billed");
+    expect(accountSubline("loading", null, null).toLowerCase()).not.toContain("billed");
+    expect(accountSubline("error", null, null).toLowerCase()).not.toContain("billed");
+  });
+
+  // The defect this page's pass exists to remove: the row said "Acting as this
+  // company's own TinyHumans account" directly above the hub's refusal of that
+  // same key. `source` says which tier is stored; only the billing read has
+  // ever presented the key to anyone.
+  it("stops claiming the company is acting as its own account once the key is refused", () => {
+    const line = accountSubline("ready", status({ source: "company" }), refused("rejected"));
+    expect(line).not.toContain("Acting as this company's own");
+    expect(line).toContain("set");
+    expect(line).toContain("refus");
+    expect(line).toBe(REJECTED_SUBLINE);
+  });
+
+  // "is set", not "is connected": the key exists, so the move is to replace it
+  // rather than to set a first one — which is what separates this row from the
+  // empty state.
+  it("keeps the refused row apart from having no key at all", () => {
+    expect(REJECTED_SUBLINE).not.toContain("No TinyHumans account");
+    expect(accountSubline("ready", status({ source: "company" }), refused("unreachable"))).toContain(
+      "Acting as this company's own",
+    );
+  });
+
+  // Nothing the hub returned reaches the row.
+  it("puts none of the hub's own words in the line", () => {
+    const body = '{"success":false,"error":"Invalid API key"}';
+    const line = accountSubline("ready", status({ source: "company" }), refused("rejected", body));
+    expect(line).not.toContain(body);
+    expect(line).not.toContain("{");
+    expect(line).not.toContain("success");
   });
 
   // Narrow on purpose. "Agents cannot think" is what this line said first, and
@@ -90,28 +217,28 @@ describe("accountSubline says which tier actually answers", () => {
   // the absence; the empty state carries the consequence with its exception
   // named.
   it("states the absence without claiming the company has stopped", () => {
-    const line = accountSubline("ready", status({ configured: false, source: "none" }));
+    const line = accountSubline("ready", status({ configured: false, source: "none" }), null);
     expect(line).toBe("No TinyHumans account for this company");
   });
 
   it("never claims agents cannot think, in any state", () => {
     for (const load of ["ready", "error", "loading"] as const) {
       for (const source of ["company", "attested", "static", "none"] as const) {
-        const line = accountSubline(load, status({ source })).toLowerCase();
+        const line = accountSubline(load, status({ source }), null).toLowerCase();
         expect(line, `${load}/${source}`).not.toContain("cannot think");
       }
     }
   });
 
   it("does not claim there is no key when the host could not answer", () => {
-    const line = accountSubline("error", null);
+    const line = accountSubline("error", null, null);
     expect(line).toContain("not the same as having no key");
     expect(line).not.toContain("No TinyHumans account");
   });
 
   it("falls back to what the row is when a host names an unknown tier", () => {
     const unknown = status({ source: "something-new" as CompanyCredentialStatus["source"] });
-    expect(accountSubline("ready", unknown)).toBe(
+    expect(accountSubline("ready", unknown, null)).toBe(
       "The account this company acts and spends through",
     );
   });
@@ -205,11 +332,42 @@ describe("balanceLine", () => {
   // "We could not ask" and "there is nothing left" look identical on a row and
   // call for opposite actions, so the figure is dropped rather than invented.
   it("does not render an unanswered hub as a zero balance", () => {
-    const line = balanceLine(billing({ unavailable: "the hub timed out" }));
+    const line = balanceLine(billing({ unavailable: "x", unavailableReason: "unreachable" }));
     expect(line?.amount).toBeNull();
     expect(line?.low).toBe(false);
-    expect(line?.detail).toContain("the hub timed out");
     expect(line?.detail).toContain("The key is set");
+  });
+
+  // The defect that put `{"success":false,"error":"Invalid API key",…}` under
+  // somebody's balance. Asserted as substrings rather than against one body, so
+  // it fails for ANY interpolation of what the hub returned.
+  it("interpolates nothing the hub said", () => {
+    const body = '{"success":false,"error":"Invalid API key","statusCode":401}';
+    for (const reason of ["rejected", "unreachable", "noHub", "unknown", undefined] as const) {
+      const line = balanceLine(billing({ unavailable: body, unavailableReason: reason }));
+      expect(line?.detail, `${reason}`).not.toContain(body);
+      expect(line?.detail, `${reason}`).not.toContain("{");
+      expect(line?.detail, `${reason}`).not.toContain("success");
+    }
+  });
+
+  // One sentence per reason, each naming a different next move — which is the
+  // only thing that makes the classification worth carrying.
+  it("says something different for each reason, and stays cautious where none was given", () => {
+    const say = (reason: CompanyBilling["unavailableReason"]) =>
+      balanceLine(billing({ unavailable: "x", unavailableReason: reason }))?.detail ?? "";
+
+    expect(say("rejected")).toContain("refused it");
+    expect(say("rejected")).toContain("replace");
+    expect(say("unreachable")).toContain("could not be reached");
+    expect(say("unreachable")).not.toContain("refused");
+    expect(say("noHub")).toContain("not part of a TinyHumans ecosystem");
+    expect(say("unknown")).toContain("could not be read");
+
+    // An older host that classified nothing gets the cautious line, never the
+    // one that tells somebody their key is dead.
+    expect(say(undefined)).toBe(say("unknown"));
+    expect(say(undefined)).not.toContain("refused");
   });
 });
 

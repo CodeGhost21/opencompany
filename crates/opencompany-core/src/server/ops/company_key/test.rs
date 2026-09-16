@@ -2170,6 +2170,178 @@ async fn a_member_can_read_billing_without_admin_rights() {
     assert_eq!(dto["configured"], false, "{raw}");
 }
 
+/// A key the hub refuses is reported as refused — by a `reason` the console
+/// switches on and a `code`, never by the hub's response body.
+///
+/// The body is what a card cannot render: it is JSON written for a log, and it
+/// says nothing an operator can act on. What is actionable is the one bit "this
+/// key is dead", and that has to travel as a field rather than as prose a
+/// console would have to parse.
+#[tokio::test]
+async fn a_refused_key_travels_as_a_reason_and_a_code_never_as_the_hubs_body() {
+    let home_dir = home();
+    // A hub with no billing seeded for this key answers exactly as one that has
+    // revoked it: `http_401`.
+    let state = state_with_hub(home_dir.path(), "acme").await;
+
+    let (status, _, raw) = send_as(
+        &state,
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+        crate::server::test_support::fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, dto, raw) = send(
+        &state,
+        "acme",
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], true, "{raw}");
+    assert!(dto["summary"].is_null(), "{raw}");
+    assert_eq!(dto["unavailableReason"], "rejected", "{raw}");
+    assert_eq!(dto["unavailableCode"], "http_401", "{raw}");
+    assert!(
+        !raw.contains("did not recognize"),
+        "the hub's own words reached the wire: {raw}"
+    );
+}
+
+/// A hub that cannot be reached is never reported as a refused key.
+///
+/// The two call for opposite actions — replace the credential, or wait — and a
+/// console told "rejected" during an outage sends somebody to revoke and re-mint
+/// a key that was working.
+#[tokio::test]
+async fn an_unreachable_hub_is_not_a_refused_key() {
+    use crate::server::hub_identity::MockHubIdentityExchange;
+
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "acme", GRANTED)
+        .await
+        .with_hub_identity(std::sync::Arc::new(MockHubIdentityExchange::unreachable()));
+
+    let (status, _, raw) = send_as(
+        &state,
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+        crate::server::test_support::fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, dto, raw) = send(
+        &state,
+        "acme",
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], true, "{raw}");
+    assert_eq!(dto["unavailableReason"], "unreachable", "{raw}");
+    assert_ne!(dto["unavailableReason"], "rejected", "{raw}");
+}
+
+/// A build with no hub blames the build, not the key.
+#[tokio::test]
+async fn a_host_with_no_hub_says_so_rather_than_blaming_the_key() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "acme", GRANTED).await;
+
+    let (status, _, raw) = send_as(
+        &state,
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+        crate::server::test_support::fixed_cookie("acme"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, dto, raw) = send(
+        &state,
+        "acme",
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["unavailableReason"], "noHub", "{raw}");
+    assert!(dto["unavailableCode"].is_null(), "{raw}");
+}
+
+/// No key means no verdict about a key: every reason field is absent.
+///
+/// A console that read a missing reason as "fine" and a present one as "broken"
+/// would be right here only because nothing is claimed.
+#[tokio::test]
+async fn a_company_with_no_key_offers_no_reason_to_judge_one_by() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "acme").await;
+
+    let (status, dto, raw) = send(
+        &state,
+        "acme",
+        "GET",
+        "/api/v1/company/credential/billing",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(dto["configured"], false, "{raw}");
+    assert!(dto["unavailable"].is_null(), "{raw}");
+    assert!(dto["unavailableReason"].is_null(), "{raw}");
+    assert!(dto["unavailableCode"].is_null(), "{raw}");
+}
+
+/// The classification table itself, away from any route.
+///
+/// `401` alone earns `rejected`. A `403` is a key the hub knows and will not
+/// let through, so it waits with the outages rather than telling its owner to
+/// replace something that works. A code this build has never seen is `unknown`,
+/// because the reasons differ in what they ask a person to do.
+#[test]
+fn only_a_401_is_a_refused_key() {
+    use crate::error::OpenCompanyError;
+
+    let tinyhumans = |code: &str| OpenCompanyError::TinyHumans {
+        code: code.to_string(),
+        message: "{\"success\":false,\"error\":\"Invalid API key\"}".to_string(),
+    };
+
+    let (reason, sentence, code) = super::billing_unavailable(&tinyhumans("http_401"));
+    assert_eq!(reason, "rejected");
+    assert_eq!(code.as_deref(), Some("http_401"));
+    assert!(!sentence.contains("success"), "{sentence}");
+    assert!(!sentence.contains('{'), "{sentence}");
+
+    for code in ["unreachable", "decode", "http_403", "http_429", "http_502"] {
+        let (reason, _, echoed) = super::billing_unavailable(&tinyhumans(code));
+        assert_eq!(reason, "unreachable", "{code}");
+        assert_eq!(echoed.as_deref(), Some(code));
+    }
+
+    let (reason, _, _) = super::billing_unavailable(&tinyhumans("teapot"));
+    assert_eq!(reason, "unknown");
+
+    // Not a hub failure at all — nothing here knows what the hub would have
+    // said, so nothing is claimed about the key.
+    let (reason, _, code) =
+        super::billing_unavailable(&OpenCompanyError::Store("store unreadable".to_string()));
+    assert_eq!(reason, "unknown");
+    assert!(code.is_none());
+}
+
 // ---------------------------------------------------------------------------
 // KR-ACCT-01 (2026-09-15): the wire spellings `frontend/src/api/credential.ts`
 // reads — `CompanyCredentialMutation.restartRequired` and
