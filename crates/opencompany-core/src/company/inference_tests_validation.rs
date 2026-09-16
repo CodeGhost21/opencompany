@@ -373,7 +373,7 @@ fn setup_normalisation_reads_an_uppercase_scheme_as_a_scheme() {
 
 // ---- first-run probe (decl_for_probe) ----------------------------------
 
-fn managed_env() -> EnvDefault {
+pub(super) fn managed_env() -> EnvDefault {
     EnvDefault {
         base_url: "https://env.example/openai/v1".into(),
         credential: Credential::from_value("platform-key"),

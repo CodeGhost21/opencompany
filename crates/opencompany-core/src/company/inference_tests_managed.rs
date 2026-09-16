@@ -3,6 +3,7 @@
 //! (split out of `inference_tests.rs`).
 
 use super::inference_tests_support::*;
+use super::tests_validation::managed_env;
 use super::*;
 
 // ---- the managed credential chain (issue #2266) -------------------------
@@ -249,7 +250,7 @@ fn an_env_default_that_would_yield_nothing_is_not_availability() {
 // These write a provider through the store with NO legacy blob anywhere and
 // assert a turn resolves to it.
 
-async fn add_indexed(secrets: &MemSecrets, slug: &str, key: &str) {
+pub(super) async fn add_indexed(secrets: &MemSecrets, slug: &str, key: &str) {
     let company = CompanyId::new("acme");
     store::put_provider(
         &company,

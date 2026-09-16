@@ -2,6 +2,7 @@
 //! resolver (split out of `inference_tests.rs`).
 
 use super::inference_tests_support::*;
+use super::tests_managed::add_indexed;
 use super::*;
 
 // ---- the routing table actually reaches the resolver ---------------------
@@ -15,11 +16,11 @@ use super::*;
 // the harder one to find because nothing looks wrong.
 
 /// The route a tier resolves to, as the wire model the plan would carry.
-fn wire_model(decl: &InferenceDecl, tier: &str) -> String {
+pub(super) fn wire_model(decl: &InferenceDecl, tier: &str) -> String {
     model_on_the_wire(decl, tier).expect("a real model id")
 }
 
-async fn route(secrets: &MemSecrets, tier: &str, raw: &str) {
+pub(super) async fn route(secrets: &MemSecrets, tier: &str, raw: &str) {
     let company = CompanyId::new("acme");
     let mut routes = store::load_routes(&company, secrets).await.unwrap();
     routes.insert(tier.to_string(), resolve::ProviderRef::parse(raw));
