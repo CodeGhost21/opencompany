@@ -28,7 +28,7 @@ fn reaction(seq: u64, message: u64, emoji: &str, on: bool, by: Option<Actor>) ->
     )
 }
 
-fn labels() -> HashMap<String, String> {
+pub(super) fn labels() -> HashMap<String, String> {
     HashMap::from([
         ("u1".to_string(), "Ada".to_string()),
         ("u2".to_string(), "Grace".to_string()),
