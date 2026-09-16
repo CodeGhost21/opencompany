@@ -24,6 +24,17 @@ use crate::server::webhook::DefaultHashSigner;
 use crate::server::webhook::WebhookSigner;
 use crate::{AppConfig, AppState};
 
+fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("opencompany-ops-")
+        .tempdir()
+        .expect("tempdir")
+}
+
+fn manifest() -> CompanyManifest {
+    toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
+}
+
 /// Builds state holding one running company `acme`, with `connections` injected.
 async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> AppState {
     state_with_secrets(home, connections, None).await
