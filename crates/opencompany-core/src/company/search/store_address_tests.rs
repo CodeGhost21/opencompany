@@ -52,7 +52,6 @@ fn stored_index(secrets: &MemSecrets) -> serde_json::Value {
 }
 
 #[tokio::test]
-
 async fn a_blank_address_in_the_index_row_reads_as_absent() {
     let secrets = MemSecrets::default();
     seed(
@@ -373,3 +372,4 @@ async fn an_unreadable_index_is_reported_rather_than_read_as_empty() {
     seed(&secrets, &[(PROVIDER_INDEX_KEY, "{not json")]).await;
     assert!(list_providers(&company(), &secrets).await.is_err());
 }
+
