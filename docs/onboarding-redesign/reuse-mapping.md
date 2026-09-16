@@ -79,17 +79,32 @@ slice 4a's grant-landing code — see [open-questions.md](open-questions.md).
 
 ## §2 Self-managed step 1 — Provider + Composio
 
-**Reuse:** the real Connections → LLM page's provider list and the real
-Connections → Composio page, both simplified/condensed for the wizard
-context, each with its own "set this up later" skip. Not a cascade — no
-fan-out involved, since neither credential comes from a TinyHumans key here.
+**Reuse, real and available today — literal, not simplified:**
 
-**Scope note:** "simplified view" is a UI-layer decision (fewer fields shown,
-fewer affordances), not a new backend surface — the same `PUT
-/inference/providers`-style endpoints and Composio's own connect flow back
-both, unchanged. If the simplified view turns out to need a capability the
-real pages don't expose (e.g. a combined "connect and skip" single action),
-that is a stop point, not something to build ad hoc in the wizard.
+- **Provider.** The exact LLM page's add-provider sequence. `ProvidersTab.tsx`
+  opens `AddProviderDialog` (pick a provider from the catalogue) then
+  `ProviderConnectDialog` (the BYOK form — key, base URL, model, live probe;
+  `ProvidersTab.tsx:14-17`). Submit calls `actions.add({...})`
+  (`ProvidersTab.tsx:311-316`) — `useInference`'s `add` (`use-inference.ts:173`)
+  → `addProvider(client, company, input)` → `POST …/inference/providers`
+  (`api/inference.ts:538-540`). Same two dialogs, same handler, same endpoint,
+  mounted inside the wizard.
+- **Composio.** The exact Composio page's credential dialog —
+  `ComposioSection.tsx`'s inline `Dialog` (`:811` on), backed by
+  `useComposioCredential` (`use-composio-credential.ts:90`). Its `submit()`
+  (`ComposioSection.tsx:576-590`) calls `setComposioApiKey(client, company,
+  value, skipVerify, true)` or `setComposioToken(client, company, value)`
+  depending on `form.credential` (`api/composio.ts:439`, `:402`). Same dialog,
+  same hook, same two calls.
+
+Each mounted **as-is** — not rebuilt, not trimmed, not a condensed variant —
+each independently skippable via its own "set this up later." No fan-out
+involved on this branch: neither credential comes from a TinyHumans key.
+
+**Correction:** an earlier draft of this file called these "simplified
+Provider + Composio views." That was wrong — there is no simplified version
+to build. The wizard step mounts the same components Connections → LLM and
+Connections → Composio already ship.
 
 ## §3 Step 2 — Name the company + pick a template
 

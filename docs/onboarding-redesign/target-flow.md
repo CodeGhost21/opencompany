@@ -16,9 +16,9 @@ implementing any step below.
    ┌───────────────────────────────┐         ┌───────────────────────────────┐
    │ 1. Login to TinyHumans         │         │ 1. Provider  (skip for later)  │
    │    "Login with TinyHumans"     │         │    Composio  (skip for later)  │
-   │    button — or paste a key     │         │    simplified views, reused    │
-   │                                 │         │    from Connections > LLM /    │
-   │    sets tinyhumans/key, then    │         │    Connections > Composio      │
+   │    button — or paste a key     │         │    same dialogs as Connections │
+   │    (= ApiKeyView, verbatim)    │         │    > LLM / > Composio, verbatim│
+   │    sets tinyhumans/key, then    │         │                                 │
    │    cascades:                   │         │                                 │
    │      provider/tinyhumans/key   │         │    each independently          │
    │      composio/managed/key      │         │    skippable                   │
@@ -69,10 +69,11 @@ overwriting a slot that already holds its own key.
 
 ## Self-managed · step 1 — Provider + Composio
 
-Simplified views of the real Connections → LLM and Connections → Composio
-pages, each independently skippable via "set this up later." Not a cascade —
-two separate credentials, set (or deferred) independently. See
-reuse-mapping.md §2.
+The real Connections → LLM add-provider dialogs and the real Connections →
+Composio credential dialog, mounted verbatim — not simplified, not
+rebuilt — each independently skippable via "set this up later." Not a
+cascade: two separate credentials, set (or deferred) independently. See
+reuse-mapping.md §2 for the exact component/handler/endpoint chain for each.
 
 ## Step 2 — Name the company + pick a template
 

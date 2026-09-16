@@ -62,8 +62,8 @@ Self-managed step 1 offers "set this up later" independently for Provider
 and Composio. Composio's own connect flow today is effectively all-or-nothing
 per company (one key, one connection) — it's not confirmed whether Composio's
 existing UI already has a clean "not connected yet, connect later" resting
-state that the wizard's simplified view can just reuse, or whether it needs
-new UI to represent "explicitly deferred" as distinct from "never tried."
+state the wizard's mounted dialog can just surface, or whether it needs new
+UI to represent "explicitly deferred" as distinct from "never tried."
 Check against the real Connections → Composio page's current empty/disconnected
 state before assuming it maps cleanly.
 

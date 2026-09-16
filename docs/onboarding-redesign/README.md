@@ -30,8 +30,9 @@ execute a slice exactly from what's written here.
    step calls the same fan-out `ApiKeyView.tsx` already calls
    (`setCompanyCredential` / `setCompanyCredentialModel`), not the wizard's
    own separate `company::inference::store_key`. Self-managed's provider and
-   Composio steps are simplified views of the real Connections → LLM and
-   Connections → Composio pages, not new components.
+   Composio steps mount the real Connections → LLM add-provider dialogs and
+   the real Connections → Composio credential dialog verbatim — not
+   simplified, not new components.
 3. **One company-level TinyHumans key fills three surfaces, not two.**
    Provider, Composio, and (once #2342 lands) Search — see
    [reuse-mapping.md](reuse-mapping.md) part 2 for exactly what's missing
@@ -78,7 +79,7 @@ branch. Do them top to bottom; each depends on the ones above it.
 | 2b | `search/resolve.rs` reads the company tier | 2a | `active()` checks `search/managed/key` before the bare instance-operator env credential |
 | 3 | wizard step 0: the setup-way choice | — | new `SetupWayStep` component + `STEPS` reorder; no backend change |
 | 4a | Managed step 1: reuse the real fan-out | 1, 2a | `PowerStep`'s TinyHumans path replaced by a call to `setCompanyCredential`/`setCompanyCredentialModel`, not `inference::store_key` |
-| 4b | Self-managed step 1: simplified Provider + Composio views | 1 | condensed `ProviderList`/Composio views, each independently skippable |
+| 4b | Self-managed step 1: mount the real Provider + Composio dialogs | 1 | `AddProviderDialog`+`ProviderConnectDialog` and `ComposioSection`'s credential dialog, verbatim, each independently skippable |
 | 5 | move company naming to step 2 | — | `BusinessStep` gains the name field; `ReviewStep` drops its own |
 | 6 | remove the post-build checklist | — | delete the "Let's get your company running" screen and its route; land straight into `AppShell` |
 | 7 | rebuild-in-place for the wizard's key-save | 4a | wizard's key-save path gets the same `rebuild_if_pending` treatment `set_key`/`set_model`/`finish_link` already have |
