@@ -201,7 +201,7 @@ async fn approving_the_first_card_of_a_multi_call_node_does_not_complete_the_bat
 ///
 /// `with_gate` selects whether a `parking` sink is wired, which is the axis
 /// the guard-order test needs.
-async fn overflowing_runner_notices(
+pub(super) async fn overflowing_runner_notices(
     count: usize,
     with_gate: bool,
 ) -> (Vec<String>, crate::harness::policy::ApprovalRequestQueue) {
