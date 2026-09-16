@@ -4,6 +4,14 @@ use std::sync::Arc;
 use crate::ports::tasks::TaskTitle;
 use super::CompanyEvent;
 
+/// Issue #1852 Part 1 — the discard bug and its fix, proven directly on
+/// `run_dispatch_cycle` rather than on any one `Brain`'s output shape.
+///
+/// `RelayBrain` answers a `TaskDispatched` event with exactly the shape
+/// `relay_reply` (`harness::built_in::lifecycle`) produces: a bubble whose
+/// `reply_to` names the origin thread and whose `task_id` names the card
+/// — without standing up a real harness or LLM. Before this fix,
+
 /// `run_dispatch_cycle` discarded the `CycleReport` carrying it (`let
 /// Err(err) = self.run_cycle(...).await else { return; }`), which is the
 /// generic bug underneath #1852, independent of which `Brain` produced

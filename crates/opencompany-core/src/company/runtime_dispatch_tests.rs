@@ -632,11 +632,3 @@ async fn a_dispatch_refused_by_a_quiescing_runtime_settles_its_attempt() {
     assert!(abandoned.finished_at_millis.is_some());
 }
 
-/// Issue #1852 Part 1 — the discard bug and its fix, proven directly on
-/// `run_dispatch_cycle` rather than on any one `Brain`'s output shape.
-///
-/// `RelayBrain` answers a `TaskDispatched` event with exactly the shape
-/// `relay_reply` (`harness::built_in::lifecycle`) produces: a bubble whose
-/// `reply_to` names the origin thread and whose `task_id` names the card
-/// — without standing up a real harness or LLM. Before this fix,
-
