@@ -1052,32 +1052,8 @@ async fn probe_transport(_api_key: &str) -> Result<(), String> {
 /// them race. `#[cfg(test)]` throughout — there is no seam here in a shipped
 /// build.
 #[cfg(test)]
-mod probe_override {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    type Outcome = Result<(), String>;
-
-    fn map() -> &'static Mutex<HashMap<String, Outcome>> {
-        static MAP: OnceLock<Mutex<HashMap<String, Outcome>>> = OnceLock::new();
-        MAP.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-
-    pub(super) fn set(company: &str, outcome: Outcome) {
-        map()
-            .lock()
-            .expect("composio probe override")
-            .insert(company.to_string(), outcome);
-    }
-
-    pub(super) fn get(company: &str) -> Option<Outcome> {
-        map()
-            .lock()
-            .expect("composio probe override")
-            .get(company)
-            .cloned()
-    }
-}
+#[path = "composio_probe_override.rs"]
+mod probe_override;
 
 /// `POST …/composio/api-key/test` — check the **stored** Composio API key and
 /// report the verdict. Changes nothing.
