@@ -208,7 +208,7 @@ impl Brain for EffectBrain {
 
 #[derive(Default)]
 pub(super) struct ExplicitExpiryBrain {
-    decisions: std::sync::atomic::AtomicUsize,
+    pub(super) decisions: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
