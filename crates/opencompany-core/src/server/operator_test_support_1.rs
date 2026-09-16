@@ -16,7 +16,14 @@ use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
 
-pub(super) fn the_folded_aside_reaches_the_wire_as_camel_case() {
+/// The wire shape the console binds to.
+///
+/// `fold_asides` is worthless if the field reaches the browser under a
+/// different name, and `tsc` cannot catch that: the DTO is Rust, the
+/// interface is hand-written TypeScript, and nothing checks one against the
+/// other. This is that check.
+#[test]
+fn the_folded_aside_reaches_the_wire_as_camel_case() {
     use crate::server::chat_history::{AsideConversation, AsideLine};
 
     let aside = AsideConversation {
