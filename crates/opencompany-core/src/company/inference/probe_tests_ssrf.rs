@@ -6,7 +6,7 @@ use super::*;
 
 // ---- the SSRF guard -----------------------------------------------------
 
-const LOCAL_OFFERED: ProbePolicy = ProbePolicy {
+pub(super) const LOCAL_OFFERED: ProbePolicy = ProbePolicy {
     allow_loopback: true,
 };
 const SERVER_SIDE: ProbePolicy = ProbePolicy {

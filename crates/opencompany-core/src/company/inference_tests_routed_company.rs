@@ -2,6 +2,8 @@
 //! configured company (split out of `inference_tests.rs`).
 
 use super::inference_tests_support::*;
+use super::tests_managed::add_indexed;
+use super::tests_routing::{route, wire_model};
 use super::*;
 
 // ---- a routed-managed company is a configured company ---------------------
