@@ -269,7 +269,26 @@ pub async fn build_capabilities(
     // operator's, which is the disagreement `effective_policy` exists to prevent.
     let mode = PolicyMode::parse(&record.effective_policy().mode);
     let grants = record.manifest.tools.allow.clone();
-    let wiring = workflow_tool_wiring(&deps);
+    // The process-wide handle may intentionally be present without a
+    // deployment credential so a company key added later inherits its shared
+    // ledger. Resolve the effective credential before using presence as the
+    // workflow-wiring verdict.
+    let managed_search = match (&deps.search, &deps.secrets) {
+        (Some(backend), Some(secrets)) => {
+            let company_key =
+                crate::company::search::load_managed_key(&company, secrets.as_ref()).await?;
+            (backend.credential.configured() || company_key.is_some()).then(|| {
+                backend
+                    .clone()
+                    .with_company_credential(company.clone(), secrets.clone())
+            })
+        }
+        (Some(backend), None) if backend.credential.configured() => Some(backend.clone()),
+        _ => None,
+    };
+    let mut wiring_deps = deps.clone();
+    wiring_deps.search = managed_search.clone();
+    let wiring = workflow_tool_wiring(&wiring_deps);
 
     // sub_workflow-by-id resolves children from the union of the company's seed
     // `workflows/` directory and the record's runtime-authored bodies — so a
@@ -349,24 +368,6 @@ pub async fn build_capabilities(
             company: company.clone(),
             agent: format!("workflow:{workflow_id}"),
             meter: deps.meter.clone(),
-        };
-        // The process-wide handle owns the shared ledger. Decorate its clone
-        // with this company's live secret source so workflow calls follow the
-        // same company-first credential order as roster agents. If neither
-        // tier exists, keep the tool absent rather than wiring a guaranteed
-        // authentication failure.
-        let managed_search = match (&deps.search, &deps.secrets) {
-            (Some(backend), Some(secrets)) => {
-                let company_key =
-                    crate::company::search::load_managed_key(&company, secrets.as_ref()).await?;
-                (backend.credential.configured() || company_key.is_some()).then(|| {
-                    backend
-                        .clone()
-                        .with_company_credential(company.clone(), secrets.clone())
-                })
-            }
-            (Some(backend), None) if backend.credential.configured() => Some(backend.clone()),
-            _ => None,
         };
         // Issue #775: the host-owned shell audit sink, keyed per WORKFLOW (not
         // per run) under `companies/<slug>/audit/_workflow-<id>/`. Per-workflow
