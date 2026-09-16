@@ -37,10 +37,24 @@ mod blocked_node_pure_tests;
 mod board_turn_tests;
 pub mod caps;
 pub mod checkpoint_store;
+#[cfg(test)]
+mod checkpoint_store_tests;
 pub mod delivery;
+#[cfg(test)]
+mod delivery_channel_grants_tests;
+#[cfg(test)]
+mod delivery_dry_and_park_tests;
+#[cfg(test)]
+mod delivery_owner_routing_tests;
+#[cfg(test)]
+mod delivery_owner_setup_tests;
+#[cfg(test)]
+mod delivery_unwired_dedup_tests;
 /// Issue #460: the company's `ApprovalPolicy` decides which `tool_call` nodes
 /// stop for an operator, before the run reaches them.
 pub mod gate;
+#[cfg(test)]
+mod gate_tests;
 /// Issue #460: end-to-end proof that a `tool_call` node the company's policy
 /// stops does not execute, and leaves a decidable card.
 #[cfg(test)]
