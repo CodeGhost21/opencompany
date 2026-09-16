@@ -1,6 +1,7 @@
 use super::tests::store;
 use super::*;
 use crate::store::conformance;
+use futures::StreamExt;
 
 #[tokio::test]
 async fn conformance_run_store_workflow_join() {
