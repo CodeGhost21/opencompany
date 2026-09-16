@@ -36,7 +36,7 @@ impl MemoryLog {
     }
 
     /// Every `AgentReply` on `chat`, as `(author, text)` in journal order.
-    pub(super) fn replies(&self, chat: &str) -> Vec<(String, String)> {
+    pub(crate) fn replies(&self, chat: &str) -> Vec<(String, String)> {
         self.rows()
             .into_iter()
             .filter_map(|stored| match stored.event {
@@ -55,7 +55,7 @@ impl MemoryLog {
     ///
     /// Separate from [`Self::replies`] rather than a widening of it: most tests
     /// are not about audience and reading a three-tuple would make them say so.
-    pub(super) fn addressed_replies(&self, chat: &str) -> Vec<(String, String, Vec<String>)> {
+    pub(crate) fn addressed_replies(&self, chat: &str) -> Vec<(String, String, Vec<String>)> {
         self.rows()
             .into_iter()
             .filter_map(|stored| match stored.event {
