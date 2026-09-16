@@ -314,6 +314,12 @@ pub fn build_agent_with_model(
     routed_context: &[(String, String)],
     instructions: Option<&str>,
     is_orchestrator: bool,
+    // The `## Your team` section for this agent, pre-rendered by the caller
+    // with `company::team_brief::team_section` over the live record, or `""`
+    // for a roster of one. A string rather than the record itself on the
+    // `is_orchestrator` precedent: this function builds one agent from parts
+    // the caller decided, and the roster is one of them.
+    team_section: &str,
     // Whether this company's `[speech]` block turns talking into a tool call.
     //
     // A `bool` resolved by the caller rather than a `&CompanyManifest` read
@@ -927,6 +933,11 @@ pub fn build_agent_with_model(
     // static-before-volatile is what keeps an operator editing a workspace note
     // from invalidating the briefing behind it.
     persona.push_str(&crate::company::prompt::bundle_section(manifest_agent));
+    // The roster and desks, and who this agent may hand work to — rendered by
+    // the caller from the live company record, which is the only place the
+    // effective roster (overlay teammates and desks included) is known. Static
+    // for the life of the belt: the belt is rebuilt when the roster changes.
+    persona.push_str(team_section);
 
     // Every agent, granted tools or not: an `@` is something any of them can
     // write, and what it does is not guessable from the fact that it renders.
@@ -1177,24 +1188,22 @@ pub fn build_agent_with_model(
             deps.notifications.clone(),
         ));
     }
-    // Recursive desk delegation (issue #176): a NON-orchestrator agent whose
-    // manifest entry names a `delegates_to` allowlist gets exactly the two
-    // hand-off tools — `spawn_task` and a `delegate_to_desk` narrowed to that
-    // allowlist — and nothing else from the orchestrator's set. It is what lets
-    // a desk lead pull in a specialist for one slice instead of handing the
-    // whole thing back to the CEO.
+    // Every OTHER roster agent gets the three hand-off tools — `spawn_task`,
+    // `delegate_to_desk` and `delegate_to_teammate` — and the brief that goes
+    // with them, whatever its manifest entry says. Issue #176 wired these only
+    // onto a member that opted in with a `delegates_to` allowlist, so a desk
+    // lead or a specialist with no such line had no way to reach the colleague
+    // sitting beside it, and no way to track anything either; the runtime
+    // covered the second gap by carding every message for it, which is how
+    // the board filled with cards nobody asked for. Now the reach is decided
+    // by the list (empty = everyone, see
+    // `delegation_tools::reach_is_unrestricted`) and the tool is always there.
     //
-    // `else if` rather than a second `if`: the orchestrator already has both
-    // tools from `orchestrator_tools` above, and wiring a second, narrowed
-    // `delegate_to_desk` beside its unrestricted one would put two tools with
-    // the same name on one belt.
-    //
-    // An empty allowlist wires nothing, which is the pre-#176 belt exactly — so
-    // this whole block is inert for every manifest that has not opted in.
-    else if !manifest_agent.delegates_to.is_empty() {
-        persona.push_str(&orchestrator::member_delegation_brief(
-            &manifest_agent.delegates_to,
-        ));
+    // `else`, not a second `if`: the orchestrator already has all three from
+    // `orchestrator_tools` above, and wiring a second, scoped copy beside its
+    // unrestricted one would put two tools with the same name on one belt.
+    else {
+        persona.push_str(&orchestrator::member_delegation_brief());
         tools.extend(orchestrator::member_delegation_tools(
             &deps.delegations,
             company.clone(),
@@ -1455,6 +1464,9 @@ pub fn build_agent(
         routed_context,
         instructions,
         is_orchestrator,
+        // Test-only wrapper; the roster section is the caller's to render, and
+        // every caller of this wrapper is exercising something else.
+        "",
         speech_enabled,
     )
     .map(|(agent, _chat_model)| agent)
