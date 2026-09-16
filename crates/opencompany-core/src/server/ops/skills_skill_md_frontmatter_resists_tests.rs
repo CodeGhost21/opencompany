@@ -37,7 +37,7 @@ fn list(source_dir: Option<&FsPath>, deltas: &[SkillState]) -> Vec<InstalledSkil
         .collect()
 }
 
-fn global_slug() -> String {
+pub(super) fn global_slug() -> String {
     crate::globals::skills()[0].slug.clone()
 }
 
