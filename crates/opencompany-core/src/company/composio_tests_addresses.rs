@@ -25,7 +25,7 @@ fn the_endpoint_reported_is_the_host_the_calls_reach() {
 
 /// Fails every `get` for one chosen key, so a test can prove a read error
 /// propagates instead of being swallowed into a fallback tier.
-struct SecretsFailingToRead {
+pub(super) struct SecretsFailingToRead {
     inner: MemSecrets,
     blocked_key: &'static str,
 }
