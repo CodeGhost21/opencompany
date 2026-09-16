@@ -20,6 +20,7 @@ pub mod hooks_chargebee;
 pub mod hub_account;
 pub mod hub_identity;
 pub mod hub_link;
+pub mod hub_link_callback;
 pub(crate) mod inference_models;
 // Console MCP OAuth callback (issue #90): the unauthenticated browser-redirect
 // landing route. Gated on `mcp` (it needs the OAuth token-exchange path).

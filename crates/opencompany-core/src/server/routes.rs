@@ -129,7 +129,10 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::feedback_board::router())
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
-        .merge(crate::server::graphql::router());
+        .merge(crate::server::graphql::router())
+        // Unauthenticated TinyHumans key-grant return leg, for a host with no
+        // console at its own origin (the desktop). Trust is the parked state.
+        .merge(crate::server::hub_link_callback::router());
     #[cfg(feature = "acp")]
     let router = router.merge(crate::server::acp::router());
     // tiny.place A2A inbound + discovery routes, only when the feature is on.
