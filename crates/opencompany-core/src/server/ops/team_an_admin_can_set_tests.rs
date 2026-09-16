@@ -22,18 +22,6 @@ async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> App
     state_with(home, toml::from_str(manifest_toml).unwrap()).await
 }
 
-/// As above, but with the **global baseline merged in** — the roster every
-/// company actually boots with (`docs/spec/runtime/globals.md`).
-///
-/// Kept apart from `state_with_manifest` on purpose: most tests here are
-/// about one hand-written teammate and are clearer without four extra rows,
-/// while the provenance tests are meaningless without them.
-async fn state_with_globals(home: &std::path::Path, manifest_toml: &str) -> AppState {
-    let mut manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
-    manifest.apply_globals();
-    state_with(home, manifest).await
-}
-
 async fn state_with(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
