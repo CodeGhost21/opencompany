@@ -106,6 +106,22 @@ implementation.
   depending on `form.credential` (`api/composio.ts:439`, `:402`). Same dialog,
   same hook, same two calls.
 
+  **Corrected while implementing 4b-ii.** Two more:
+
+  - **The dialog was not a component.** It was inline JSX closing over seven of
+    the page's locals, so "mount it" was not an available move until it was
+    lifted into `ComposioCredentialDialog.tsx` — JSX moved, not rewritten, with
+    the eight `composio-*` unit files untouched as the evidence.
+  - **`useComposioCredential` is not mounted and must not be.** It opens with
+    `GET {scope}/composio` and a `GET …/auth/me`, neither of which a
+    pre-company host can answer. The form's shape comes from the pure pair
+    instead: `composioRows(null)` (which tolerates a null status — `modeOf`
+    reads it as `managed`) and `composioForm(pending, rows)`. The real
+    `ComposioRowList` renders over those, so the card is the Connections card.
+  - **The secret keys are `composio/byok/key` and `composio/tinyhumans/key`.**
+    This folder's "no new keys" list named `composio/managed/key`, which does
+    not exist anywhere in the crate; every mention is corrected.
+
 Each mounted **as-is** — not rebuilt, not trimmed, not a condensed variant —
 each independently skippable via its own "set this up later." No fan-out
 involved on this branch: neither credential comes from a TinyHumans key.

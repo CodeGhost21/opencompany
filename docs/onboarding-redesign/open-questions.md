@@ -47,16 +47,32 @@ specifically asking: does making this the *default* path (via onboarding)
 change the risk calculus versus it being an opt-in a company reaches later
 via Connections → Account?
 
-## Composio's skip-for-later state, self-managed branch
+## Answered: Composio's skip-for-later state, self-managed branch
 
-Self-managed step 1 offers "set this up later" independently for Provider
-and Composio. Composio's own connect flow today is effectively all-or-nothing
-per company (one key, one connection) — it's not confirmed whether Composio's
-existing UI already has a clean "not connected yet, connect later" resting
-state the wizard's mounted dialog can just surface, or whether it needs new
-UI to represent "explicitly deferred" as distinct from "never tried."
-Check against the real Connections → Composio page's current empty/disconnected
-state before assuming it maps cleanly.
+**Skipping records nothing, on either half of the step.** There is no
+"explicitly deferred" state to store and none is added.
+
+Composio's card already has the resting state, and it is the honest one:
+`composioRows(null)` returns both rows for a company with no status at all —
+`modeOf` reads a missing mode as `managed`, which is where a company with
+nothing configured genuinely is — with a token to add on the managed route and
+the own-account route offering to be chosen. That is the same card Connections
+draws, so the wizard mounts it rather than inventing an empty state for it.
+
+What is *not* stored is the distinction between "deferred" and "never tried".
+`null` is the truth about a company minutes old, and nothing downstream could
+act on the difference: no surface reads it, no later prompt is gated on it, and
+a company that skipped and a company that has not got there yet want exactly the
+same thing offered next. So the reassurance is shown while the operator is
+standing on the step — "you can add this later under Connections" — and
+forgotten when they press Next, which is what the step component unmounting does
+for free.
+
+One shape was deliberately not reused: the old model step's `tested =
+{kind:"skipped"}`. That is a single verdict slot read by the step gate *and* by
+the design pass's `modelless`, so recording a Composio skip in it would have
+suppressed the roster design brief — a real bug, from an operator saying "later"
+to their integrations.
 
 ## Whether `visibleSteps`' hide-conditions still make sense with a branch point
 
