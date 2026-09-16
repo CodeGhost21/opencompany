@@ -1435,13 +1435,14 @@ impl<'a> DelegationRunner<'a> {
             && !crate::company::copilot::is_copilot_thread(chat_id);
         // Issue #463: did the REST chat handler already card this message?
         //
-        // Two ways it does, and until #1035 this saw only the first. The triage
-        // naming a title is one; the operator asking for a workflow is the
-        // other, and the handler takes it as an override — `workflow_requested`
-        // supplies a title through `or_else` when the triage declined to. A
-        // message that went down that second road arrived here looking uncarded,
-        // and the paths below opened a card beside the one it already had.
-        let carded_by_handler = triage.title().is_some() || workflow_requested;
+        // One way it does, now: the operator asking for a workflow from the
+        // composer. The triage naming a title used to be the other, and the
+        // handler minted a card on it — that road is closed (tracking is a
+        // tool call, see `open_work_card`), so the triage's title is no longer
+        // evidence of a card. A message that arrives here carded any other way
+        // was carded by an agent's own `spawn_task`, which the drain below
+        // reports as this turn's card on its own.
+        let carded_by_handler = workflow_requested;
         // Issue #1152: the mirror image of `workflow_requested` — the operator
         // said this message is not a request for work at all.
         //
@@ -1493,16 +1494,14 @@ impl<'a> DelegationRunner<'a> {
             true => self.chat_handler_card().await?,
             false => None,
         };
-        // Issue #442, path one: a desk lead or teammate asked DIRECTLY carries
-        // no delegation tools — the card-opening tools are wired only onto the
-        // orchestrator — so it has no way to open a card even if it wanted one
-        // and does the only thing available: the work itself, inline, untracked.
-        // Opening the card here, before their turn, is what closes that path:
-        // the tracking decision stops depending on which agent answered or which
-        // tools it happens to carry.
-        let mut direct_card = self
-            .open_direct_work_card(responder, message, chat_id, ctx)
-            .await?;
+        // A desk lead or teammate asked DIRECTLY opens no card by construction.
+        // Issue #442 used to card anything "substantial" said to one here,
+        // before their turn, because a non-orchestrator carried no tool that
+        // could — and the result was that every message typed into a desk
+        // became a board card nobody had asked for. Every roster agent now
+        // carries `spawn_task` (and the hand-off tools) itself, so whether an
+        // ask is tracked is the answering agent's decision, made with a tool
+        // call, exactly as it is for the orchestrator.
         // Same discipline `run_task` keeps on the dispatched-card path: only
         // what *this* turn stages can be attributed to this turn's card, so
         // anything a previous turn left staged is dropped before the model runs
@@ -1625,30 +1624,6 @@ impl<'a> DelegationRunner<'a> {
         // inference budget/credits must survive the relay turn replacing the
         // reply text, exactly like a spend halt.
         let mut budget_paused = outcome.budget_paused;
-        // Settle the direct-answer card from the turn that just ran. Done before
-        // the delegation drain because a direct responder queues nothing — it
-        // has no delegation tools — so there is no relay turn coming that could
-        // change the answer this card records.
-        //
-        // Issue #1846 review (Codex #3865395873): `budget_paused` (captured
-        // above, right beside `halted_for_spend`) has to gate the terminal
-        // state here too, exactly as it already does for the top-level
-        // orchestrator's own dispatched turn (`HarnessBrain::run_task`).
-        // Without this check a responder that paused for lack of credits
-        // still settled `Completed` — the operator read the pause notice
-        // while the card moved to In Review with that notice as though it
-        // were a finished answer.
-        let mut direct_card_id = None;
-        if let Some(card) = direct_card.as_mut() {
-            let end = if budget_paused.is_some() {
-                TaskRunEnd::Paused
-            } else {
-                TaskRunEnd::Completed
-            };
-            self.settle_work_card(card, responder, end, parked, &operator_reply)
-                .await?;
-            direct_card_id = Some(card.id.clone());
-        }
         // A `spawn_task` opens a card silently; a `delegate_to_desk` runs the desk
         // lead and hands its answer back to RELAY rather than surfacing as a
         // disconnected sibling bubble. Any future delegation that surfaces its own
@@ -1678,7 +1653,7 @@ impl<'a> DelegationRunner<'a> {
         // Cloned rather than moved: the workflow drain below settles *this*
         // card, and it has to still be readable after `spawned_task` takes it
         // (issue #678).
-        let mut spawned_task: Option<String> = handler_card.clone().or(direct_card_id);
+        let mut spawned_task: Option<String> = handler_card.clone();
         let drained = self.drain_and_execute(chat_id, ctx, HandOffs::Run).await?;
         if let Some(id) = drained.spawned_task {
             spawned_task.get_or_insert(id);
@@ -2909,77 +2884,6 @@ impl<'a> DelegationRunner<'a> {
             return Ok(None);
         }
         self.open_work_card(member, instruction, chat_id, ctx).await
-    }
-
-    /// The card for a **desk lead or teammate asked directly** (issue #442,
-    /// path one), or `None` when this turn is not that.
-    ///
-    /// The orchestrator's own chat turn is deliberately excluded. It is the
-    /// operator's front door — every message arrives there, most of them are
-    /// answered in a line, and tracking all of them would bury the board. What
-    /// the orchestrator does with work is *hand it off*, and each hand-off opens
-    /// its own card in [`run_delegation`](Self::run_delegation). A desk thread
-    /// or a teammate DM is the opposite case: nothing downstream of it opens a
-    /// card, because the agent answering carries no tool that could.
-    ///
-    /// # It defers to the card the chat handler already opened
-    ///
-    /// The REST chat handler runs
-    /// [`detect_task_intent`](crate::company::task_intent::detect_task_intent)
-    /// over the same message **before** the cycle starts, and opens a To-do card
-    /// when it reads as a leading imperative ("draft the launch plan"). That is
-    /// the deterministic half that already existed; #442 is about everything it
-    /// does not catch. So when it has already fired, this opens nothing — one
-    /// message must not become two cards.
-    ///
-    /// Found live: without this, three consecutive desk messages opened four
-    /// cards, one of them a duplicate of the request beside it. The two
-    /// detectors are deliberately not merged — they answer different questions
-    /// with opposite defaults (that one asks "is this unambiguously an
-    /// instruction?", this one asks "is there any reason NOT to track it?") —
-    /// but exactly one of them may open the card.
-    ///
-    /// The stand-down itself now lives in
-    /// [`open_work_card`](Self::open_work_card), reached through
-    /// `carded_by_handler`, because the hand-off path needed the same guard and
-    /// only [`handle_operator_message`](Self::handle_operator_message) can
-    /// answer the question (issue #463).
-    /// # It also stands down on a question (issue #267)
-    ///
-    /// This is the **third** card path, and it is the one a triage layer would
-    /// miss if it only looked at the orchestrator: asking a desk lead "what did
-    /// you ship this week?" runs their turn directly, and [`is_trackable_work`]
-    /// — whose default is `true` by design — reads a sentence that long as work
-    /// and cards it. `answering` is the operator's own message triaged as
-    /// [`MessageTriage::Answer`](crate::company::task_intent::MessageTriage),
-    /// which is a positive statement that the message was a read, so it
-    /// outranks that default.
-    ///
-    /// Deliberately narrower than the queue claim above: this suppresses a card,
-    /// it does not take any tool away, and the desk lead still answers exactly
-    /// as before. Since #267's review it is no longer the odd one out —
-    /// [`open_hand_off_work_card`](Self::open_hand_off_work_card) stands down
-    /// the same way, so every card path treats a question identically and the
-    /// tool set is narrowed in exactly one place.
-    async fn open_direct_work_card(
-        &self,
-        responder: &str,
-        message: &str,
-        chat_id: Option<&str>,
-        ctx: MessageContext,
-    ) -> Result<Option<TaskRecord>> {
-        if responder == self.orchestrator_id() {
-            return Ok(None);
-        }
-        if ctx.answering {
-            tracing::debug!(
-                company = %self.company,
-                responder = %responder,
-                "[delegation] not opening a direct card: the operator asked a question"
-            );
-            return Ok(None);
-        }
-        self.open_work_card(responder, message, chat_id, ctx).await
     }
 
     /// The card the REST chat handler opened for this message, when it opened
