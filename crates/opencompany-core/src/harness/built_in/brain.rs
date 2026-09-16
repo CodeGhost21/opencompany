@@ -3527,7 +3527,7 @@ impl HarnessBrain {
                     selector_candidate(&record, &agent.id).map(|candidate| {
                         tinyhivemind::responder::SelectorCandidate {
                             id: candidate.id,
-                            label: candidate.label,
+                            label: agent.name.clone().unwrap_or_else(|| agent.role.clone()),
                             role: candidate.role,
                             description: candidate.description,
                         }
@@ -3595,9 +3595,9 @@ impl tinyhivemind::responder::Selector for TinyHiveSelector<'_> {
                 .iter()
                 .map(|candidate| crate::harness::selector::SelectorCandidate {
                     id: candidate.id.clone(),
-                    label: candidate.label.clone(),
                     role: candidate.role.clone(),
                     description: candidate.description.clone(),
+                    tools: Vec::new(),
                 })
                 .collect::<Vec<_>>();
             match self.0.select(&request.message, &candidates).await {
