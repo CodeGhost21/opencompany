@@ -53,7 +53,7 @@ pub(super) fn file(id: &str, name: &str, parent: Option<&str>) -> WorkspaceNode 
 
 /// A live `FsOps`-backed workspace seeded with a small tree, plus the
 /// tempdir keeping it alive.
-async fn seeded(company: &str) -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
+pub(super) async fn seeded(company: &str) -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let ops: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
     let id = CompanyId::new(company);
