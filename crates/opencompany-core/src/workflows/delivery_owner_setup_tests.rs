@@ -79,7 +79,7 @@ pub(super) fn reached_output() -> Value {
 }
 
 /// A company record whose `[tools].allow` is exactly `grants`.
-fn record(grants: &[&str]) -> CompanyRecord {
+pub(super) fn record(grants: &[&str]) -> CompanyRecord {
     let allow = grants
         .iter()
         .map(|g| format!("\"{g}\""))
