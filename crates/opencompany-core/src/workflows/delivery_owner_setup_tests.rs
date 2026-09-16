@@ -434,7 +434,7 @@ admins = [{list}]
     /// test that needs to tell an owner-fallback report apart from an
     /// ordinary one rather than just counting them (issue #1781 review,
     /// Codex P1).
-    async fn operator_report_authors(&self) -> Vec<(String, String)> {
+    pub(super) async fn operator_report_authors(&self) -> Vec<(String, String)> {
         self.events
             .read_from(
                 &self.company,
@@ -458,7 +458,7 @@ admins = [{list}]
 
     /// Swaps the delivery bundle's event journal for one whose every append
     /// **fails**, for the "a journal failure does not fail delivery" case.
-    fn with_failing_events(mut self) -> Self {
+    pub(super) fn with_failing_events(mut self) -> Self {
         self.deps.events = Arc::new(FailingEventLog);
         self
     }
@@ -469,7 +469,7 @@ admins = [{list}]
     /// refuses it outright, which lands the caller in the refusal branch
     /// before the behaviour under test is reached. Anything that asserts
     /// what follows a successful send needs this instead.
-    fn with_recording_channel(mut self, id: &str) -> Self {
+    pub(super) fn with_recording_channel(mut self, id: &str) -> Self {
         let channel = crate::runtime::channel::RecordingChannel::new(id);
         self.deps.channels.push(Arc::new(channel.clone()));
         self.recording = Some(channel);
@@ -477,7 +477,7 @@ admins = [{list}]
     }
 
     /// The channel [`with_recording_channel`](Harness::with_recording_channel) wired.
-    fn recording(&self) -> &crate::runtime::channel::RecordingChannel {
+    pub(super) fn recording(&self) -> &crate::runtime::channel::RecordingChannel {
         self.recording
             .as_ref()
             .expect("with_recording_channel was not called")
