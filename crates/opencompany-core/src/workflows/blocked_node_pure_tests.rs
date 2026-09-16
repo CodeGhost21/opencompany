@@ -53,7 +53,7 @@ fn only_a_drain_that_gated_nothing_leaves_the_node_alone() {
 /// moment somebody approves one of the cards.
 #[test]
 fn the_operator_sentence_is_a_receipt_not_a_snapshot() {
-    let notice = super::super::runner::blocked_notice(&WorkflowBlockedNode {
+    let notice = super::runner::blocked_notice(&WorkflowBlockedNode {
         node_id: "spec".to_string(),
         tools: vec!["publish_artifact".to_string()],
         approval_ids: vec!["appr-1".to_string(), "appr-2".to_string()],
@@ -77,7 +77,7 @@ fn the_operator_sentence_is_a_receipt_not_a_snapshot() {
 /// Approvals would send them to an empty page.
 #[test]
 fn an_unparkable_call_is_not_worded_as_something_to_approve() {
-    let notice = super::super::runner::blocked_notice(&WorkflowBlockedNode {
+    let notice = super::runner::blocked_notice(&WorkflowBlockedNode {
         node_id: "spec".to_string(),
         tools: vec!["publish_artifact".to_string()],
         approval_ids: Vec::new(),
@@ -99,7 +99,7 @@ fn an_unparkable_call_is_not_worded_as_something_to_approve() {
 /// what the host actually accepts or from the diagnosis the run logs.
 #[test]
 fn a_blocker_node_offers_the_four_verdicts_instead_of_an_automatic_continue() {
-    let notice = super::super::runner::blocked_notice(&WorkflowBlockedNode {
+    let notice = super::runner::blocked_notice(&WorkflowBlockedNode {
         node_id: "draft".to_string(),
         tools: Vec::new(),
         approval_ids: vec!["appr-1".to_string()],
@@ -116,7 +116,7 @@ fn a_blocker_node_offers_the_four_verdicts_instead_of_an_automatic_continue() {
         "all four verdicts are reachable, so all four have to be named: {notice}"
     );
 
-    let mixed = super::super::runner::blocked_notice(&WorkflowBlockedNode {
+    let mixed = super::runner::blocked_notice(&WorkflowBlockedNode {
         node_id: "draft".to_string(),
         tools: vec!["publish_artifact".to_string()],
         approval_ids: vec!["appr-1".to_string(), "appr-2".to_string()],
@@ -131,7 +131,7 @@ fn a_blocker_node_offers_the_four_verdicts_instead_of_an_automatic_continue() {
          {mixed}"
     );
 
-    let gated = super::super::runner::blocked_notice(&WorkflowBlockedNode {
+    let gated = super::runner::blocked_notice(&WorkflowBlockedNode {
         node_id: "draft".to_string(),
         tools: vec!["publish_artifact".to_string()],
         approval_ids: vec!["appr-1".to_string()],
