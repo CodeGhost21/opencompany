@@ -45,6 +45,11 @@ function status(over: Record<string, unknown> = {}) {
     hubLink: false,
     inferenceHasOwnKey: false,
     composioHasOwnKey: false,
+    // This suite covers the pre-existing LLM and Composio fan-out matrix. Keep
+    // the newer managed Search slot occupied unless a case explicitly tests it,
+    // so `accountFills` has a complete status shape without changing each
+    // sentence's intended two-slot assertion.
+    searchHasOwnKey: true,
     defaultSet: false,
     ...over,
   };
