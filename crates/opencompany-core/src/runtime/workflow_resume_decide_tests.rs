@@ -148,10 +148,7 @@ async fn runtime(
 }
 
 /// Parks a gate card the way the workflow runner does, returning its id.
-async fn park_gate(
-    rt: &Arc<crate::company::runtime::CompanyRuntime>,
-    input: Value,
-) -> ApprovalId {
+async fn park_gate(rt: &Arc<crate::company::runtime::CompanyRuntime>, input: Value) -> ApprovalId {
     park_gate_after(rt, input, &[]).await
 }
 

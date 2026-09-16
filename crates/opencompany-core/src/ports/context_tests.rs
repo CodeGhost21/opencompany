@@ -32,12 +32,7 @@ impl ContextStore for LegacyStore {
             })
             .collect())
     }
-    async fn peek(
-        &self,
-        _: &CompanyId,
-        _: &ChunkAddr,
-        _: Option<Range<usize>>,
-    ) -> Result<String> {
+    async fn peek(&self, _: &CompanyId, _: &ChunkAddr, _: Option<Range<usize>>) -> Result<String> {
         Ok(String::new())
     }
     async fn search(&self, _: &CompanyId, _: &str, _: usize) -> Result<Vec<ChunkHit>> {

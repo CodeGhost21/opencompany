@@ -239,4 +239,3 @@ pub struct MoveViolation {
     /// The kind it reached for, without the `!`.
     pub attempted: String,
 }
-

@@ -21,8 +21,7 @@ fn a_move_line_reads_as_english() {
 #[test]
 fn only_the_head_tokens_are_grammar() {
     assert_eq!(
-        readable("!evidence #perf ^2 the p95 is > 400ms and #2 in the list is worse")
-            .as_deref(),
+        readable("!evidence #perf ^2 the p95 is > 400ms and #2 in the list is worse").as_deref(),
         Some("the p95 is > 400ms and #2 in the list is worse")
     );
 }

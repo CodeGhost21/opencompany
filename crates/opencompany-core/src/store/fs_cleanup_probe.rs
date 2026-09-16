@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use tokio::sync::Notify;
 
-static GATES: LazyLock<Mutex<HashMap<PathBuf, ()>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GATES: LazyLock<Mutex<HashMap<PathBuf, ()>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static BLOCKED: LazyLock<Notify> = LazyLock::new(Notify::new);
 
 fn key(dir: &Path) -> PathBuf {
