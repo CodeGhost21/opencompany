@@ -32,7 +32,7 @@ struct StoredEvent {
 
 /// State shared by the mock's handlers.
 #[derive(Default)]
-struct MockState {
+pub(super) struct MockState {
     events: Mutex<Vec<StoredEvent>>,
     /// The only (token, actor) pair the mock accepts; anything else is a 401,
     /// exactly like a real CortexDB instance.
