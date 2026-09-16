@@ -2,7 +2,7 @@
 use serde_json::json;
 
 use super::workspace_turn_helpers_tests::*;
-use crate::ports::workspace::{WorkspaceOrigin, WorkspaceStore};
+use crate::ports::workspace::WorkspaceOrigin;
 
 /// The headline proof: a model, driving a real turn, discovers the workspace,
 /// reads a note, and revises it — with the revision token making the full
