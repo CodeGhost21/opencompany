@@ -293,147 +293,31 @@ async fn a_workflow_the_handler_already_carded_opens_no_second_card() {
     assert_eq!(turn.spawned_task, None, "and nothing is linked to one");
 }
 
-/// **Issue #1152, the direct path.** The operator said this message is not
-/// work, so the runtime opens no card for it either.
+/// **Issue #465, the reported card**, on the path that still opens one: a
+/// hand-off whose delegate ran clean lands in In Review, and one whose
+/// delegate's first tool call parked for approval does not — it produced
+/// nothing to review, so its card parks where the operator can see it is
+/// blocked and the console offers the Resume.
 ///
-/// A handler-only fix would pass every REST test and still be wrong here.
-/// The chat route is not the only thing that cards a chat message: this seam
-/// opens one *by construction* whenever work is handed to an agent, and
-/// [`is_trackable_work`]'s default is "everything is work". So "Just
-/// chatting" would hold on an unaddressed message and fail on a message to a
-/// desk — a label the company keeps only sometimes, which is worse than not
-/// shipping the control.
-///
-/// The fixture is the residue `the_same_message_without_a_composer_choice_still_cards`
-/// drives, and that pairing is what makes this non-vacuous: the same words
-/// with `None` and with `Once` open exactly one card there, so a run that
-/// opens none here is the operator's statement doing the work rather than
-/// the message being unremarkable.
+/// Paired so a fix that simply stopped writing In Review would fail here.
 #[tokio::test]
-async fn a_message_the_operator_sent_as_chat_opens_no_direct_card() {
-    let residue = "the pricing page copy, before Friday if you can";
-    assert!(
-        crate::company::task_intent::triage_message_detailed(residue)
-            .triage
-            .title()
-            .is_none(),
-        "fixture must be a message the handler did NOT card on the triage, \
-         or `carded_by_handler` would suppress this path anyway"
-    );
-    assert!(
-        is_trackable_work(residue),
-        "and one the card detector would otherwise track, or this proves nothing"
-    );
-
-    let fx = Fixture::new();
-    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
-    let turn = fx
-        .runner(&turns)
-        .requested(Some(crate::ports::types::MessageIntent::Chat))
-        .handle_operator_message("engineer", residue, Some("eng_desk"))
-        .await
-        .expect("operator message handled");
-
-    assert_eq!(
-        turn.reply, "noted",
-        "the message is still answered — withholding a card is not silence"
-    );
-    assert!(
-        fx.cards().await.is_empty(),
-        "a message the operator sent as chat opens no card"
-    );
-    assert_eq!(turn.spawned_task, None, "and nothing is linked to one");
-}
-
-/// **Issue #1152, and it outranks the model too.** A `Work` verdict from the
-/// triage escalation does not resurrect the card.
-///
-/// The two facts are peers, not a hierarchy the model sits on top of:
-/// [`MessageContext::chatter`] is the model's reading of words it was shown,
-/// and `not_work` is the author of those words saying what they meant. Where
-/// they disagree the person wins. Without this, "Just chatting" would be
-/// advisory on exactly the companies that wire an escalation — the ones
-/// paying for a second opinion — and nothing would report the difference.
-#[tokio::test]
-async fn a_work_verdict_does_not_override_the_operators_own_statement() {
-    let residue = "the pricing page copy, before Friday if you can";
-    let fx = Fixture::new();
-    let escalation = ScriptedTriage::new(crate::harness::triage::TriageVerdict::Work);
-    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
-    fx.runner(&turns)
-        .with_triage(&escalation)
-        .requested(Some(crate::ports::types::MessageIntent::Chat))
-        .handle_operator_message("engineer", residue, Some("eng_desk"))
-        .await
-        .expect("operator message handled");
-
-    assert!(
-        fx.cards().await.is_empty(),
-        "the operator's own statement outranks a `work` verdict about their words"
-    );
-}
-
-/// **Issue #465, the reported card.** A desk asked directly, whose first
-/// tool call parks for approval, produced nothing — so its card must not
-/// present as reviewable work.
-///
-/// This path settled with a hardcoded [`TaskRunEnd::Completed`] and never
-/// consulted the approval queue, so the card landed in In Review announcing
-/// a result to check on work that had not started. It now parks, which is
-/// where the operator can see it is blocked and where the console offers the
-/// Resume that puts it back in flight once the call is authorised.
-#[tokio::test]
-async fn a_desk_whose_first_call_parks_leaves_its_card_blocked_not_reviewable() {
+async fn a_hand_off_that_finished_cleanly_lands_in_review() {
     let fx = Fixture::new();
     let turns = ScriptedTurns::new(
         &fx,
-        vec![Turn::parked(
-            "I need approval before I can read the repo",
-            "fs_read",
-        )],
+        vec![
+            Turn::queueing("on it", vec![handoff("read the pricing repo")]),
+            Turn::reply("modules.md is written"),
+            Turn::reply("relayed"),
+        ],
     );
     fx.runner(&turns)
-        .handle_operator_message(
-            "frontend_engineer",
-            "read the pricing repo and write modules.md",
-            Some("eng_desk"),
-        )
+        .handle_operator_message("chief", "map out the pricing repo", Some("general"))
         .await
         .expect("operator message handled");
 
     let cards = fx.cards().await;
     assert_eq!(cards.len(), 1, "{cards:?}");
-    assert_eq!(
-        cards[0].column, COLUMN_PAUSED,
-        "a turn that parked its first call produced nothing to review"
-    );
-    assert_ne!(
-        cards[0].column, COLUMN_IN_REVIEW,
-        "In Review is what a review verdict approves straight to Done — \
-         unstarted work must never sit there"
-    );
-}
-
-/// The other half of the same decision: parking is what moves the landing,
-/// not the mere presence of an approval queue. A turn that ran clean still
-/// reaches the reviewer.
-///
-/// Paired with the test above so a fix that simply stopped writing In Review
-/// would fail here.
-#[tokio::test]
-async fn a_desk_that_finished_cleanly_still_lands_in_review() {
-    let fx = Fixture::new();
-    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("modules.md is written")]);
-    fx.runner(&turns)
-        .handle_operator_message(
-            "frontend_engineer",
-            "read the pricing repo and write modules.md",
-            Some("eng_desk"),
-        )
-        .await
-        .expect("operator message handled");
-
-    let cards = fx.cards().await;
     assert_eq!(cards[0].column, COLUMN_IN_REVIEW, "{cards:?}");
     assert_eq!(fx.approvals.queued(), 0, "nothing was parked");
 }
@@ -460,13 +344,16 @@ async fn an_approval_parked_before_this_turn_does_not_park_its_card() {
         },
     });
 
-    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("modules.md is written")]);
+    let turns = ScriptedTurns::new(
+        &fx,
+        vec![
+            Turn::queueing("on it", vec![handoff("read the pricing repo")]),
+            Turn::reply("modules.md is written"),
+            Turn::reply("relayed"),
+        ],
+    );
     fx.runner(&turns)
-        .handle_operator_message(
-            "frontend_engineer",
-            "read the pricing repo and write modules.md",
-            Some("eng_desk"),
-        )
+        .handle_operator_message("chief", "map out the pricing repo", Some("general"))
         .await
         .expect("operator message handled");
 
@@ -477,9 +364,8 @@ async fn an_approval_parked_before_this_turn_does_not_park_its_card() {
     );
 }
 
-/// A desk **hand-off** whose turn parks has the same shape as the direct
-/// path, and settles the same way — the delegate stopped at an unauthorised
-/// call, so its card is blocked rather than reviewable.
+/// A desk **hand-off** whose turn parks: the delegate stopped at an
+/// unauthorised call, so its card is blocked rather than reviewable.
 #[tokio::test]
 async fn a_hand_off_whose_turn_parks_also_leaves_its_card_blocked() {
     let fx = Fixture::new();
@@ -504,32 +390,26 @@ async fn a_hand_off_whose_turn_parks_also_leaves_its_card_blocked() {
     );
 }
 
-/// One message, one card. The REST chat handler already opens a To-do card
-/// for a leading-imperative message before the cycle starts, so this path
-/// must stand down for exactly those — otherwise "draft the launch plan"
-/// lands on the board twice.
-///
-/// Found on a live host, not here: the unit tests above all used requests
-/// the other detector is silent on, so nothing caught the overlap.
+/// One message, one card. When the REST chat handler has opened a card for
+/// this message (it does so for the composer's explicit workflow request),
+/// this path adopts it rather than opening another — and, since a direct
+/// ask opens nothing here anyway, the turn simply links to the handler's.
 #[tokio::test]
 async fn a_message_the_chat_handler_already_carded_opens_no_second_card() {
-    // A leading imperative — `detect_task_intent` fires on this, so the REST
-    // layer has already opened its card by the time the cycle runs.
-    let imperative = "draft the launch plan for next quarter";
-    assert!(
-        crate::company::task_intent::detect_task_intent(imperative).is_some(),
-        "fixture must be a message the chat handler cards, or this proves nothing"
-    );
     let fx = Fixture::new();
+    fx.seed_handler_card("handler-card", EventSeq::new(41)).await;
     let turns = ScriptedTurns::new(&fx, vec![Turn::reply("planned")]);
     let turn = fx
         .runner(&turns)
-        .handle_operator_message("engineer", imperative, Some("eng_desk"))
+        .answering(Some(EventSeq::new(41)))
+        .requested(Some(crate::ports::types::MessageIntent::Workflow))
+        .handle_operator_message("engineer", "draft the launch plan for next quarter", Some("eng_desk"))
         .await
         .expect("operator message handled");
-    assert!(
-        fx.cards().await.is_empty(),
+    assert_eq!(
+        fx.cards().await.len(),
+        1,
         "the chat handler's card is the card; this path opens none"
     );
-    assert!(turn.spawned_task.is_none());
+    assert_eq!(turn.spawned_task.as_deref(), Some("handler-card"));
 }
