@@ -863,11 +863,45 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the orchestration API base URL used to build the networked
-    /// transport under the `medulla` feature.
+    /// Sets the TinyHumans platform API base URL this runtime is on — the
+    /// host's resolved `api_url`. It builds the networked transport under the
+    /// `medulla` feature, and it is what the managed inference endpoint is
+    /// derived from when no explicit default was attached
+    /// ([`platform_default`](Self::platform_default)).
     pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
         self.api_url = Some(api_url.into());
         self
+    }
+
+    /// The managed default every resolver on this runtime shares: the attached
+    /// harness inference (endpoint + instance credential) when there is one,
+    /// else the TinyHumans proxy on [`with_api_url`](Self::with_api_url)'s
+    /// platform (production when none was given) with no credential.
+    ///
+    /// Never `None`. The endpoint is a fact about the deployment; whether a
+    /// company can think on it is the credential's `configured()`, which the
+    /// managed gates test — so a credential-less default routes nowhere on its
+    /// own, exactly as an absent one did, but a company key stored under it is
+    /// presented to the platform that minted it rather than to production.
+    fn platform_default(&self) -> EnvDefault {
+        #[cfg(feature = "openhuman")]
+        if let Some((config, _)) = self.harness_inference.as_ref() {
+            return EnvDefault {
+                base_url: config.base_url.clone(),
+                // A handle, not a value: the managed credential may be a
+                // platform token that rotates in place, so it is read per
+                // request.
+                credential: config.credential.clone(),
+            };
+        }
+        EnvDefault {
+            base_url: inference::catalogue::tinyhumans_proxy_url(
+                self.api_url
+                    .as_deref()
+                    .unwrap_or(crate::app::config::DEFAULT_API_URL),
+            ),
+            credential: crate::company::Credential::None,
+        }
     }
 
     /// Injects a [`MedullaTransport`] for the hosted brain to drive.
@@ -3058,6 +3092,15 @@ impl RuntimeBuilder {
         }
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
+        // The platform managed default this runtime resolves managed inference
+        // against — endpoint always, credential when the deployment has one.
+        // `app::harness::attach` seeds it from the host's `api_url`; a builder
+        // that was never attached (a test, an embedder that skipped `attach`)
+        // derives the endpoint from `with_api_url` or the production default,
+        // and carries no credential. Computed once here so the brain, the
+        // harness lanes and the runtime's own reads all see the same answer.
+        let platform_default = self.platform_default();
+
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
             None => {
@@ -3067,18 +3110,12 @@ impl RuntimeBuilder {
                 #[cfg(feature = "openhuman")]
                 let harness_brain: Option<Arc<dyn Brain>> = match self.harness.clone() {
                     Some(pool) => {
-                        // The platform-injected managed default (endpoint +
-                        // credential) is the lowest-precedence inference source.
-                        let env_default =
-                            self.harness_inference
-                                .as_ref()
-                                .map(|(config, _)| EnvDefault {
-                                    base_url: config.base_url.clone(),
-                                    // A handle, not a value: the managed
-                                    // credential may be a platform token that
-                                    // rotates in place, so it is read per request.
-                                    credential: config.credential.clone(),
-                                });
+                        // The platform managed default (endpoint + credential)
+                        // is the lowest-precedence inference source. Always
+                        // present now — see `platform_default` above — so the
+                        // managed chain's endpoint follows `api_url` even when
+                        // the credential it would ride is the company's own.
+                        let env_default = Some(platform_default.clone());
                         // An explicit `OPENCOMPANY_INFERENCE_MODEL` flattens the
                         // whole roster to one workload; otherwise each agent keeps
                         // its tier-derived model and the tenant
@@ -4056,6 +4093,7 @@ impl RuntimeBuilder {
         );
         runtime.set_memory_decorators(scratch_context, memory_scopes);
         runtime.set_tracker(tracker);
+        runtime.set_platform_default(platform_default);
 
         // The seed dir is the company's on-disk source directory
         // (`companies/<name>`); record it so read resolvers can find committed
