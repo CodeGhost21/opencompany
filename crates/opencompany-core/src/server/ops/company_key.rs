@@ -297,12 +297,14 @@ fn prober_for(runtime: &CompanyRuntime) -> Box<dyn company_key::InferenceProber>
 /// clear an entry between tests, so a later test reusing a company id would
 /// silently inherit an earlier test's forced answer. `thread_local!` sidesteps
 /// that rather than relying on every test to remember a teardown call: every
-/// test in this file uses the default (single-threaded) `#[tokio::test]`
-/// runtime, so a test's own body and every future it drives — including the
-/// router call this override answers — run on that one OS thread, and libtest
-/// gives each test function its own thread. A fresh, empty map per thread
-/// means a fresh map per test, with no entry able to outlive the test that
-/// wrote it.
+/// caller uses the default (single-threaded) `#[tokio::test]` runtime — the
+/// tests beside this module and, since the onboarding redesign, the setup
+/// apply's own group — so a test's own body and every future it drives,
+/// including the router call this override answers, run on that one OS thread,
+/// and libtest gives each test function its own thread. A fresh, empty map per
+/// thread means a fresh map per test, with no entry able to outlive the test
+/// that wrote it. A teardown call would be the thing that can be forgotten;
+/// this cannot.
 #[cfg(test)]
 #[path = "company_key_prober_override.rs"]
 pub(crate) mod prober_override;
