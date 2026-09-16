@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { ReferralConversationDto } from "@/api/types";
 import { type ChatMessage, reconcileTranscript } from "@/lib/chat";
 
 /**
@@ -26,19 +27,35 @@ describe("reconcileTranscript", () => {
   it("applies a fold that landed on a row already held", () => {
     const asked = row("h12");
     const existing = [row("h11"), asked];
-    const folded = row("h12", {
-      referralConversation: { target: "sre", messages: 4 },
-    } as Partial<ChatMessage>);
+    const crossing: ReferralConversationDto = {
+      askerId: "planner",
+      otherId: "sre",
+      otherDeskId: "eng",
+      otherDeskName: "Engineering",
+      direct: true,
+      lines: [
+        {
+          authorId: "planner",
+          authorLabel: "",
+          text: "what is the lag budget?",
+          outbound: true,
+        },
+        {
+          authorId: "sre",
+          authorLabel: "sre",
+          text: "which path?",
+          outbound: false,
+        },
+      ],
+    };
+    const folded = row("h12", { referralConversation: crossing });
 
     const merged = reconcileTranscript(existing, [row("h11"), folded]);
 
     expect(merged).not.toBe(existing);
     expect(merged).toHaveLength(2);
     expect(merged[1]).toBe(folded);
-    expect(
-      (merged[1] as ChatMessage & { referralConversation?: unknown })
-        .referralConversation,
-    ).toEqual({ target: "sre", messages: 4 });
+    expect(merged[1].referralConversation).toEqual(crossing);
   });
 
   it("still appends rows the transcript has never seen", () => {
