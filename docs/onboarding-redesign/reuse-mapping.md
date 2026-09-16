@@ -42,40 +42,31 @@ one secret (`inference/key`) plus the manifest's `inference` block
 onboarding" and "connecting TinyHumans on the Account page" are two different
 features that happen to look similar.
 
-**Not reuse — does not exist yet:** a real one-click "Login with TinyHumans"
-button. Traced directly: `ApiKeyView.tsx` has exactly one entry point today,
-"Connect to TinyHumans," which opens the paste-a-key dialog. The actual
-"Sign in with TinyHumans" button was removed from that page on 2026-09-14
-(`account.ts:119-120`). The **only** place that phrase exists anywhere in the
-app is a plain external link in the *current* wizard's `PowerStep`
-(`SetupWizard.tsx:1886-1894`, `<a href={keySource.url}>`) — and its own
-comment says what it is: "the operator signs in as themselves, creates the
-key on their own dashboard, and brings it back to the field above." That's a
-link-out to copy-paste a key manually, not an OAuth grant.
+**Out of scope for this implementation — descoped, not missing:** a real
+one-click "Login with TinyHumans" button. Managed step 1 is the existing
+"Connect to TinyHumans" dialog exactly as it stands today — an API-key
+input, a plain external "Get an API key ↗" link to the TinyHumans dashboard,
+and the "saving also adds this key to the LLM page… and connects it for
+Composio" copy. No OAuth grant button is being added in this pass.
 
-The grant machinery is real and working — `POST /api/v1/company/credential
-/link/start` returns a real `authorizeUrl`, the hub's consent page is real,
-`finishCredentialLink`/`useRedeemKeyGrant` genuinely redeem it (proven by
-`frontend/test/e2e/tinyhumans-key-link.spec.ts`, added by #2338). But
-**nothing in the console calls `link/start`.** Grepped the whole frontend:
-zero call sites. So "reuse the login button" is not possible — there is no
-button to reuse, only a redemption path waiting for one. Building the button
-is slice 4a's real scope, not a subtraction from it.
+For the record, since it was traced before being descoped: `ApiKeyView.tsx`
+has exactly one entry point today, this same "Connect to TinyHumans" dialog.
+An actual "Sign in with TinyHumans" button was removed from that page on
+2026-09-14 (`account.ts:119-120`). The only place that phrase exists
+anywhere in the app is a plain external link in the *current* wizard's
+`PowerStep` (`SetupWizard.tsx:1886-1894`, `<a href={keySource.url}>`) — a
+link-out to copy-paste a key manually, not an OAuth grant, and that's fine:
+it's the same shape as the "Get an API key ↗" link this dialog already has.
 
-**The landing-page constraint, if the button is built:** the redeemed grant's
-code is stashed in a **module-level JS variable**
-(`frontend/src/lib/pending-key-link.ts:20`, `let pending: PendingKeyLink |
-null = null`), deliberately not `sessionStorage` — a redeemable credential
-sitting in browser storage is exactly what the URL-stripping dance exists to
-avoid. `App.tsx:109-119` parses the redirect params, `:148-159`
-(`clearKeyLinkFromUrl`) strips them via `history.replaceState` (not a reload,
-which would reset the module and lose the code), and `:513` writes the stash
-once at boot. **Only one reader exists today**: `useRedeemKeyGrant`, called
-from `ApiKeyView.tsx` alone. If the wizard needs to catch this same
-redirect, it has two options, both real work: mount inside the same
-`App.tsx` boot sequence so it shares the stash, or relocate the stash
-somewhere both the wizard and `ApiKeyView` can reach. Pick one before writing
-slice 4a's grant-landing code — see [open-questions.md](open-questions.md).
+The grant machinery (`POST /api/v1/company/credential/link/start`,
+`useRedeemKeyGrant`, `pending-key-link.ts`'s module-level stash) is real and
+working — nothing about it is broken — but nothing in the console calls
+`link/start` today, and this redesign is not adding a caller for it. It
+stays exactly as reachable as it is right now. If a one-click grant button
+becomes worth building later, the landing-page constraint (the stash is a
+module-level variable only `ApiKeyView.tsx` reads today, via
+`useRedeemKeyGrant`) is the first thing to resolve — not a concern for this
+implementation.
 
 ## §2 Self-managed step 1 — Provider + Composio
 

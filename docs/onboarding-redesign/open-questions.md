@@ -3,27 +3,18 @@
 Not decided. Each needs a real answer before or during its slice, not an
 assumption baked into the implementation.
 
-## The grant-landing relocation problem
+## Deferred: the grant-landing relocation problem
 
-[reuse-mapping.md](reuse-mapping.md) §1 traces this in full: the redeemed
-grant's one-time code lives in a module-level variable
-(`pending-key-link.ts:20`) written once at `App.tsx` boot and read by exactly
-one caller, `useRedeemKeyGrant` inside `ApiKeyView.tsx`. If Managed step 1
-needs to catch a grant redirect (for the real "Login with TinyHumans" button
-this redesign wants), it needs one of:
-
-1. Mount the wizard's login step inside the same boot sequence `App.tsx`
-   already runs, so it can call `takeKeyLink()`/`takeKeyLinkRefusal()`
-   directly.
-2. Relocate the stash to somewhere both `ApiKeyView` and the wizard can
-   reach — a shared context/provider above both mount points.
-
-Option 1 is smaller but couples the wizard's mount timing to `App.tsx`'s own
-boot order in a way that isn't true today. Option 2 touches a mechanism
-that's deliberately minimal (a plain module variable, chosen specifically to
-avoid persistence) and any change to it needs the same care the original
-design put into "why not `sessionStorage`." Neither is free. Pick one before
-slice 4a's grant-landing code is written, not during.
+A one-click "Login with TinyHumans" OAuth grant button was considered for
+Managed step 1 and explicitly descoped from this implementation — the
+existing "Connect to TinyHumans" paste-a-key dialog is Managed step 1
+instead, verbatim. The relocation problem this would have raised (the
+redeemed grant's one-time code lives in a module-level variable,
+`pending-key-link.ts:20`, read today by exactly one caller,
+`useRedeemKeyGrant` inside `ApiKeyView.tsx` — a new caller in the wizard
+would need to either share `App.tsx`'s boot sequence or a relocated stash)
+is not this implementation's concern. Recorded here only so it isn't
+re-discovered from scratch if a login button is built later.
 
 ## Does a freshly-registered company ever need `rebuild_if_pending`?
 

@@ -30,13 +30,16 @@ files — read that folder before starting any slice in the table below.
    first screen (`PowerStep`, provider dropdown + raw API key field) is not
    what a new operator should see before they've said which kind of setup
    they want.
-2. **Both branches reuse the real Connections mechanisms.** Managed's login
-   step calls the same fan-out `ApiKeyView.tsx` already calls
-   (`setCompanyCredential` / `setCompanyCredentialModel`), not the wizard's
-   own separate `company::inference::store_key`. Self-managed's provider and
-   Composio steps mount the real Connections → LLM add-provider dialogs and
-   the real Connections → Composio credential dialog verbatim — not
-   simplified, not new components.
+2. **Both branches reuse the real Connections mechanisms.** Managed's connect
+   step is today's "Connect to TinyHumans" dialog, verbatim, calling the same
+   fan-out `ApiKeyView.tsx` already calls (`setCompanyCredential` /
+   `setCompanyCredentialModel`), not the wizard's own separate
+   `company::inference::store_key`. A one-click "Login with TinyHumans" OAuth
+   grant button was considered and is explicitly **out of scope** for this
+   implementation — see [reuse-mapping.md](reuse-mapping.md) §1. Self-managed's
+   provider and Composio steps mount the real Connections → LLM add-provider
+   dialogs and the real Connections → Composio credential dialog verbatim —
+   not simplified, not new components.
 3. **One company-level TinyHumans key fills three surfaces, not two.**
    Provider, Composio, and (once #2342 lands) Search — see
    [reuse-mapping.md](reuse-mapping.md) part 2 for exactly what's missing
@@ -90,9 +93,7 @@ branch. Do them top to bottom; each depends on the ones above it.
 
 **Stop points — report instead of guessing:** #2342 is not yet implemented,
 so slice 4a cannot ship until 2a/2b land; a slice needs a new secret-store key
-beyond `search/managed/key`; the grant-landing relocation in
-[open-questions.md](open-questions.md) turns out to need moving
-`pending-key-link.ts`'s stash rather than just mounting inside it.
+beyond `search/managed/key`.
 
 ## Decisions (taken; do not re-open)
 
@@ -117,8 +118,9 @@ beyond `search/managed/key`; the grant-landing relocation in
   harness without a restart.
 - **Grant** — the PKCE-style hub login (`link/start` → hub consent →
   `link/finish`), distinct from paste-a-key. Exists in the backend and in
-  `useRedeemKeyGrant`; has no working start button in the console today (see
-  [reuse-mapping.md](reuse-mapping.md) part 2).
+  `useRedeemKeyGrant`; has no working start button in the console today, and
+  this implementation isn't adding one — see
+  [reuse-mapping.md](reuse-mapping.md) §1.
 
 ## Rules for the implementer
 

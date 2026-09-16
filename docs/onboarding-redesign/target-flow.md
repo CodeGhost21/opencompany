@@ -14,10 +14,11 @@ implementing any step below.
                  ┌───────────────────────┴───────────────────────┐
                  ▼ MANAGED                             SELF-MANAGED ▼
    ┌───────────────────────────────┐         ┌───────────────────────────────┐
-   │ 1. Login to TinyHumans         │         │ 1. Provider  (skip for later)  │
-   │    "Login with TinyHumans"     │         │    Composio  (skip for later)  │
-   │    button — or paste a key     │         │    same dialogs as Connections │
-   │    (= ApiKeyView, verbatim)    │         │    > LLM / > Composio, verbatim│
+   │ 1. Connect to TinyHumans        │         │ 1. Provider  (skip for later)  │
+   │    paste a key, or get one via │         │    Composio  (skip for later)  │
+   │    the external "Get an API    │         │    same dialogs as Connections │
+   │    key" link (= today's dialog,│         │    > LLM / > Composio, verbatim│
+   │    verbatim)                   │         │                                 │
    │    sets tinyhumans/key, then    │         │                                 │
    │    cascades:                   │         │                                 │
    │      provider/tinyhumans/key   │         │    each independently          │
@@ -47,23 +48,22 @@ No network call. Purely picks which step-1 component renders next. New
 component `SetupWayStep`, added to `STEPS` ahead of `power`
 (`SetupWizard.tsx:105-111`).
 
-## Managed · step 1 — Login to TinyHumans
+## Managed · step 1 — Connect to TinyHumans
 
 Reuses the real Connections → Account mechanism (`ApiKeyView.tsx`), not the
-wizard's own `inference::store_key`. See reuse-mapping.md §1 for the two
-gaps this exposes (no working "Login with TinyHumans" button anywhere yet;
-the grant-landing stash is scoped to wherever `useRedeemKeyGrant` mounts).
+wizard's own `inference::store_key`. This is today's "Connect to TinyHumans"
+dialog, verbatim — an API-key input, an external "Get an API key ↗" link,
+and Save. See reuse-mapping.md §1 for the pre-company-scoping question this
+exposes.
 
-Two entry points, matching what `ApiKeyView.tsx`/`AccountKeyDialog` already
-offer:
+**A one-click "Login with TinyHumans" OAuth grant button is explicitly out
+of scope for this implementation** — deferred, not missing. The grant
+machinery works today; this redesign isn't adding a new caller for it.
 
 - Paste a key → `setCompanyCredential` (`PUT …/credential`) → on
   `needsModel`, `setCompanyCredentialModel` (`PUT …/credential/model`).
-- "Login with TinyHumans" (grant) → **new work**, not reuse: needs a real
-  `link/start` caller wired into this step, and the redirect landing needs to
-  reach the same in-memory stash `ApiKeyView` reads from.
 
-Either path fires the same fan-out: `provider/tinyhumans/key`,
+This fires the same fan-out: `provider/tinyhumans/key`,
 `composio/managed/key`, and (once #2342 lands) `search/managed/key` — never
 overwriting a slot that already holds its own key.
 
