@@ -277,8 +277,8 @@ async fn answer(rt: &Arc<CompanyRuntime>, id: &str, intent: BlockerReplyIntent, 
 /// The acceptance headline: a workflow parked at a failed node and
 /// answered `retry` re-runs, and the answer is on the trigger input the
 /// re-run carries — not banked in the DM and dropped.
+/// The reserved key is never written for a verdict that starts no run.
 #[tokio::test]
-
 async fn a_cancelled_answer_never_reaches_a_trigger_input() {
     let home = seed_home();
     let (rt, runner) = runtime(home.path(), true).await;

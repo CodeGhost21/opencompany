@@ -534,5 +534,3 @@ async fn a_batch_follow_up_continues_past_one_members_failure() {
     );
 }
 
-/// The reserved key is never written for a verdict that starts no run.
-#[tokio::test]
