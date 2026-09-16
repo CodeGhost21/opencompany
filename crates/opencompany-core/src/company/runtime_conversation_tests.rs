@@ -573,15 +573,15 @@ async fn a_relayed_card_answers_in_the_thread_that_raised_it() {
     );
 }
 
-/// Issue #435: the guard that decides whether a remembered thread root is
-/// still usable, and the direction it fails in.
-///
-/// Every arm here degrades to `None`, which means "answer in the channel".
-/// That is the issue's stated requirement and it is not merely tidy: the
-/// console drops a reply whose parent it cannot resolve in the channel
-/// rather than rendering it flat, so a stale root would make the
-/// continuation invisible — strictly worse than the bug being fixed, since
-/// today's answer at least reaches the channel.
+// Issue #435: the guard that decides whether a remembered thread root is
+// still usable, and the direction it fails in.
+//
+// Every arm here degrades to `None`, which means "answer in the channel".
+// That is the issue's stated requirement and it is not merely tidy: the
+// console drops a reply whose parent it cannot resolve in the channel
+// rather than rendering it flat, so a stale root would make the
+// continuation invisible — strictly worse than the bug being fixed, since
+// today's answer at least reaches the channel.
 
 /// A runtime whose one agent is allowed to refer to the `design` desk, so a
 /// forward reaches the width bound instead of stopping at authorization.
