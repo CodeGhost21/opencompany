@@ -76,7 +76,7 @@ pub(super) struct FarDesk {
 }
 
 impl FarDesk {
-    fn answering(answer: &str) -> Self {
+    pub(super) fn answering(answer: &str) -> Self {
         Self {
             answer: answer.to_owned(),
             asked: Mutex::new(Vec::new()),
@@ -84,7 +84,7 @@ impl FarDesk {
         }
     }
 
-    fn broken() -> Self {
+    pub(super) fn broken() -> Self {
         Self {
             answer: String::new(),
             asked: Mutex::new(Vec::new()),
@@ -152,7 +152,7 @@ impl Room {
         }
     }
 
-    fn broken() -> Self {
+    pub(super) fn broken() -> Self {
         Self {
             conclusion: None,
             broken: true,
