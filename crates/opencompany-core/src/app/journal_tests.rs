@@ -6,7 +6,7 @@ fn scratch_root(tag: &str) -> PathBuf {
 
 /// The child test the seam test re-invokes this binary to run.
 #[cfg(feature = "openhuman")]
-const SEAM_CHILD_TEST: &str = "app::journal::test::vendored_seam_child";
+const SEAM_CHILD_TEST: &str = "app::journal::tests::vendored_seam_child";
 
 /// Which half of the seam the child should assert.
 #[cfg(feature = "openhuman")]
@@ -18,7 +18,7 @@ const SEAM_DATA_DIR_ENV: &str = "OC_JOURNAL_SEAM_DATA_DIR";
 
 /// The child test the keyring-pin test re-invokes this binary to run.
 #[cfg(feature = "openhuman")]
-const KEYRING_CHILD_TEST: &str = "app::journal::test::keyring_pin_child";
+const KEYRING_CHILD_TEST: &str = "app::journal::tests::keyring_pin_child";
 
 /// The data dir the keyring-pin child pins against.
 #[cfg(feature = "openhuman")]
