@@ -38,14 +38,6 @@ async fn runtime() -> (Arc<CompanyRuntime>, TempDir) {
     (runtime, home)
 }
 
-async fn runtime_with_harness() -> (Arc<CompanyRuntime>, TempDir) {
-    let (mut runtime, home) = runtime().await;
-    Arc::get_mut(&mut runtime)
-        .expect("runtime is not shared yet")
-        .set_harness(Arc::new(crate::harness::HarnessPool::new()));
-    (runtime, home)
-}
-
 fn blocker(task_id: &str) -> BlockerPayload {
     BlockerPayload {
         kind: BlockerKind::Infrastructure,
