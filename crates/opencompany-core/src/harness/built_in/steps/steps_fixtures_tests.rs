@@ -3,7 +3,7 @@ use oh::tools::status::FailureCategory;
 
 /// An obvious fake, in the same shape `approval_display`'s tests use. Never
 /// a credential pattern that could be mistaken for a real one in a diff.
-const FAKE_SECRET: &str = "NOT-A-REAL-KEY-planted-for-tests";
+pub(crate) const FAKE_SECRET: &str = "NOT-A-REAL-KEY-planted-for-tests";
 
 /// The refusal OpenHuman hands the model when *our* approval policy parks a
 /// call, reproduced in the shape `PolicyDenial::ApprovalRequired::render`
@@ -11,7 +11,7 @@ const FAKE_SECRET: &str = "NOT-A-REAL-KEY-planted-for-tests";
 /// which is exactly why
 /// [`approval_needle_still_appears_in_the_vendored_denial_render`] pins the
 /// needle against the real source.
-fn approval_refusal(tool: &str) -> String {
+pub(crate) fn approval_refusal(tool: &str) -> String {
     format!(
         "Blocked: Tool '{tool}' requires approval under policy '{POLICY_NAME}'. \
          Reason: '{tool}' has an external effect and this company runs supervised. \
@@ -124,7 +124,7 @@ fn a_non_intrinsic_tools_output_is_still_collapsed_to_its_class() {
 /// nothing and the canary fires as though the *behaviour* changed. Reading
 /// the siblings keeps the coupling honest across a split: what these tests
 /// pin is the needle, not the file it lives in.
-fn vendored(relative: &str) -> String {
+pub(crate) fn vendored(relative: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(relative);
@@ -152,7 +152,7 @@ fn vendored(relative: &str) -> String {
     all
 }
 
-fn read_vendored(path: &std::path::Path, relative: &str) -> String {
+pub(crate) fn read_vendored(path: &std::path::Path, relative: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| {
         let basename = relative.rsplit('/').next().unwrap_or(relative);
         panic!(
@@ -167,7 +167,7 @@ fn read_vendored(path: &std::path::Path, relative: &str) -> String {
     })
 }
 
-fn started(call_id: &str, tool: &str, label: Option<&str>) -> AgentProgress {
+pub(crate) fn started(call_id: &str, tool: &str, label: Option<&str>) -> AgentProgress {
     AgentProgress::ToolCallStarted {
         call_id: call_id.to_string(),
         tool_name: tool.to_string(),
@@ -179,7 +179,7 @@ fn started(call_id: &str, tool: &str, label: Option<&str>) -> AgentProgress {
     }
 }
 
-fn completed(
+pub(crate) fn completed(
     call_id: &str,
     tool: &str,
     success: bool,
@@ -200,21 +200,21 @@ fn completed(
     }
 }
 
-fn thinking(delta: &str) -> AgentProgress {
+pub(crate) fn thinking(delta: &str) -> AgentProgress {
     AgentProgress::ThinkingDelta {
         delta: delta.to_string(),
         iteration: 1,
     }
 }
 
-fn text(delta: &str) -> AgentProgress {
+pub(crate) fn text(delta: &str) -> AgentProgress {
     AgentProgress::TextDelta {
         delta: delta.to_string(),
         iteration: 1,
     }
 }
 
-fn classified(class: ToolFailureClass, cause: &str) -> ClassifiedFailure {
+pub(crate) fn classified(class: ToolFailureClass, cause: &str) -> ClassifiedFailure {
     ClassifiedFailure {
         class,
         category: FailureCategory::Recoverable,
@@ -225,7 +225,7 @@ fn classified(class: ToolFailureClass, cause: &str) -> ClassifiedFailure {
 }
 
 /// Folds a single completed call and hands back its step.
-fn one(tool: &str, success: bool, output: &str, arguments: Option<Value>) -> TurnStep {
+pub(crate) fn one(tool: &str, success: bool, output: &str, arguments: Option<Value>) -> TurnStep {
     let steps = fold_steps(vec![completed(
         "c1", tool, success, output, arguments, None,
     )]);
