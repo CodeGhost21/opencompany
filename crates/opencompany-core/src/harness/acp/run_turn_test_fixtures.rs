@@ -13,7 +13,7 @@ use super::*;
 /// ever runs, and the cancel path goes unexercised. `cancel_hangs` makes
 /// `cancel` never answer (the bounded-RPC path).
 pub(super) struct Scripted {
-    turn: AcpTurn,
+    pub(super) turn: AcpTurn,
     /// Milliseconds to hold the turn open before answering — how a test
     /// owns the session's slot for a *bounded* window, so a second turn
     /// genuinely queues and then genuinely gets in.
@@ -23,7 +23,7 @@ pub(super) struct Scripted {
     pub(super) cancel_hangs: bool,
     pub(super) cancel_fails: bool,
     pub(super) cancels: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    cancel_started: tokio::sync::Notify,
+    pub(super) cancel_started: tokio::sync::Notify,
 }
 
 impl Scripted {
