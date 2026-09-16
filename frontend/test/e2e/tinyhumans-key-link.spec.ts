@@ -127,7 +127,13 @@ test("a key grant from the hub sets up TinyHumans without the console ever seein
   await option.click();
   await page.getByTestId("account-key-model-save").click();
 
-  const saved = toasts(page).filter({ hasText: /Key saved/ }).first();
+  // Not `/Key saved/`: the redeem's own toast note already says "Key saved.
+  // Composio now uses this key…", and matching it would read the status
+  // before step two has landed. The model-step note is the one that names the
+  // model.
+  const saved = toasts(page)
+    .filter({ hasText: `TinyHumans is set up for LLM with ${MODEL}` })
+    .first();
   await expect(saved).toBeVisible({ timeout: 30_000 });
   await expect(saved).not.toContainText("restart required");
 
