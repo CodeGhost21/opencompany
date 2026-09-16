@@ -420,7 +420,7 @@ async fn search_credential_source(runtime: &CompanyRuntime) -> Option<Credential
             Ok(Some(_)) => Some(CredentialSource::Company),
             Ok(None) => Some(
                 crate::company::TinyhumansTokenSource::from_env(&crate::app::config::ProcessEnv)
-                    .map(|source| source.source())
+                .map(|source| source.credential_source())
                     .unwrap_or(CredentialSource::None),
             ),
             Err(err) => {
