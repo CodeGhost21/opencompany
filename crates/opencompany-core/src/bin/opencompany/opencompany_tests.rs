@@ -104,8 +104,10 @@ fn no_command_resolves_a_home_without_migrating_it() {
     // would catch it, because the defect is a call that never happens. The
     // needle is split so this assertion does not match its own source line.
     let needle = concat!("store::", "resolve_home(");
-    let source = include_str!("opencompany.rs");
-    let production = source.split("\nmod test {").next().unwrap_or(source);
+    let source = include_str!("../opencompany.rs");
+    // The test module now lives in this sibling file rather than inline, so
+    // production code is everything before its `#[cfg(test)]` declaration.
+    let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
 
     let direct: Vec<&str> = production
         .lines()
