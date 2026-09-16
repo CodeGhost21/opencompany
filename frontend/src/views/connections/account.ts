@@ -211,11 +211,7 @@ export function balanceLine(billing: CompanyBilling | null): BalanceLine | null 
   if (billing?.configured !== true) return null;
 
   if (billing.unavailable !== undefined) {
-    return {
-      amount: null,
-      detail: `The key is set; the hub said: ${billing.unavailable}`,
-      low: false,
-    };
+    return { amount: null, detail: unavailableDetail(billing.unavailableReason), low: false };
   }
 
   const summary = billing.summary;
@@ -229,4 +225,29 @@ export function balanceLine(billing: CompanyBilling | null): BalanceLine | null 
     }`,
     low: usd !== null && usd <= 0,
   };
+}
+
+/**
+ * The one line under "Balance unknown", chosen from the host's classification.
+ *
+ * Every sentence is written here. Nothing the hub returned is interpolated: its
+ * failure bodies are JSON meant for a log, they can carry anything, and a card
+ * that renders one puts a machine's punctuation under somebody's balance while
+ * telling them nothing they can act on.
+ *
+ * An absent reason is an older host that did not classify the failure, and it
+ * gets the cautious sentence — the same one an unclassifiable failure gets.
+ * "Said nothing" is not evidence of any particular cause.
+ */
+function unavailableDetail(reason: CompanyBilling["unavailableReason"]): string {
+  switch (reason) {
+    case "rejected":
+      return "The key is set, but TinyHumans refused it — replace it to reconnect.";
+    case "unreachable":
+      return "The key is set; TinyHumans could not be reached just now.";
+    case "noHub":
+      return "The key is set; this host is not part of a TinyHumans ecosystem.";
+    default:
+      return "The key is set; the balance could not be read just now.";
+  }
 }

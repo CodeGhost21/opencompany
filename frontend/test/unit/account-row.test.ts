@@ -205,11 +205,42 @@ describe("balanceLine", () => {
   // "We could not ask" and "there is nothing left" look identical on a row and
   // call for opposite actions, so the figure is dropped rather than invented.
   it("does not render an unanswered hub as a zero balance", () => {
-    const line = balanceLine(billing({ unavailable: "the hub timed out" }));
+    const line = balanceLine(billing({ unavailable: "x", unavailableReason: "unreachable" }));
     expect(line?.amount).toBeNull();
     expect(line?.low).toBe(false);
-    expect(line?.detail).toContain("the hub timed out");
     expect(line?.detail).toContain("The key is set");
+  });
+
+  // The defect that put `{"success":false,"error":"Invalid API key",…}` under
+  // somebody's balance. Asserted as substrings rather than against one body, so
+  // it fails for ANY interpolation of what the hub returned.
+  it("interpolates nothing the hub said", () => {
+    const body = '{"success":false,"error":"Invalid API key","statusCode":401}';
+    for (const reason of ["rejected", "unreachable", "noHub", "unknown", undefined] as const) {
+      const line = balanceLine(billing({ unavailable: body, unavailableReason: reason }));
+      expect(line?.detail, `${reason}`).not.toContain(body);
+      expect(line?.detail, `${reason}`).not.toContain("{");
+      expect(line?.detail, `${reason}`).not.toContain("success");
+    }
+  });
+
+  // One sentence per reason, each naming a different next move — which is the
+  // only thing that makes the classification worth carrying.
+  it("says something different for each reason, and stays cautious where none was given", () => {
+    const say = (reason: CompanyBilling["unavailableReason"]) =>
+      balanceLine(billing({ unavailable: "x", unavailableReason: reason }))?.detail ?? "";
+
+    expect(say("rejected")).toContain("refused it");
+    expect(say("rejected")).toContain("replace");
+    expect(say("unreachable")).toContain("could not be reached");
+    expect(say("unreachable")).not.toContain("refused");
+    expect(say("noHub")).toContain("not part of a TinyHumans ecosystem");
+    expect(say("unknown")).toContain("could not be read");
+
+    // An older host that classified nothing gets the cautious line, never the
+    // one that tells somebody their key is dead.
+    expect(say(undefined)).toBe(say("unknown"));
+    expect(say(undefined)).not.toContain("refused");
   });
 });
 
