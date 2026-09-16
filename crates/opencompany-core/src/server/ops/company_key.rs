@@ -837,7 +837,8 @@ async fn journal_fan_out(
 }
 
 #[cfg(test)]
-mod test;
+#[path = "company_key_tests.rs"]
+mod tests;
 
 /// `GET …/credential/billing` — what the account behind this company's key has
 /// left to spend, and on which plan.

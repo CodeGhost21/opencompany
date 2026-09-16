@@ -473,8 +473,8 @@ fn auth_from_headers(name: &str, headers: &Map<String, Value>) -> Result<AuthMat
 }
 
 #[cfg(test)]
-#[path = "mcp_config/test.rs"]
-mod test;
+#[path = "mcp_config_tests.rs"]
+mod tests;
 
 #[cfg(test)]
 #[path = "mcp_config_http_tests.rs"]
