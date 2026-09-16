@@ -273,3 +273,6 @@ pub const AGENT_QUESTION_BLOCKER: BlockerClass = BlockerClass {
 #[cfg(test)]
 #[path = "blockers_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "blockers_tool_test_tests.rs"]
+mod tool_test;
