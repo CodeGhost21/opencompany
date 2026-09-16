@@ -1,5 +1,7 @@
 //! Runtime tests: parked-approval discrimination, continuation replies, pause/resume, planning and dispatch column transitions, and workflow-harness wiring reports.
 
+use super::tests_dispatch::runtime_and_record;
+
 /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
 /// every append once armed — a full or read-only data volume, which is the
 /// failure mode `park_blocker`'s rollback exists for.
