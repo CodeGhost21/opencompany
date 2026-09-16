@@ -151,6 +151,29 @@ export type CompanyStreamEvent =
   //   orchestrator's relay bubble, so the host stopped projecting it rather
   //   than leave a second copy on the wire for a future reader to render.
   //   Nothing in this console read it.
+  // **A crossing landed; the thread it folds onto has changed.**
+  //
+  // A crossing renders as a collapsed `referralConversation` on the asking row,
+  // and only `chat/history` builds that — so a crossing was invisible until
+  // something re-read the thread. For a desk crossing that meant waiting for
+  // settle; for a pair DM it meant never, because the exchange is journaled in
+  // the pair's own `dm:<a>+<b>` conversation that no desk view subscribes to.
+  //
+  // Carries no crossing content by design: the host does not rebuild the fold
+  // on this path, it says which thread to ask about. See the frame's comment in
+  // `operator.rs`.
+  | {
+      type: "referral";
+      seq: number;
+      atMillis: number;
+      /** The desk whose transcript gains the fold — the desk that ASKED. */
+      chatId: string;
+      /** The row the crossing folds onto. */
+      sequence: number;
+      toDesk: string;
+      /** A return is the leg that completes the exchange. */
+      returning: boolean;
+    }
   | {
       type: "desk_task_completed";
       seq: number;
@@ -801,6 +824,15 @@ interface Options {
    */
   onRunEvent?: (event: CompanyStreamEvent) => void;
   /**
+   * Called for each `referral` frame so the shell can re-read the thread the
+   * crossing folds onto.
+   *
+   * The frame is a signal, not a payload: `chat/history` is the only place the
+   * fold is built, and re-reading it is what makes a crossing appear live
+   * instead of at settle.
+   */
+  onReferral?: (event: Extract<CompanyStreamEvent, { type: "referral" }>) => void;
+  /**
    * Called for each `desk_task_completed` frame (issue #377) so the shell can
    * post a card-linked system marker into the channel the card was raised in.
    *
@@ -946,6 +978,7 @@ export function useEvents(
     onAgentReply,
     onTaskEvent,
     onRunEvent,
+    onReferral,
     onDispatchTerminal,
     isViewingTaskOrigin,
     onWorkspaceEvent,
@@ -970,6 +1003,10 @@ export function useEvents(
   useEffect(() => {
     onTaskEventRef.current = onTaskEvent;
   }, [onTaskEvent]);
+  const onReferralRef = useRef(onReferral);
+  useEffect(() => {
+    onReferralRef.current = onReferral;
+  }, [onReferral]);
   const onRunEventRef = useRef(onRunEvent);
   useEffect(() => {
     onRunEventRef.current = onRunEvent;
@@ -1102,6 +1139,7 @@ export function useEvents(
             onAgentReply: onAgentReplyRef.current,
             onTaskEvent: onTaskEventRef.current,
             onRunEvent: onRunEventRef.current,
+            onReferral: onReferralRef.current,
             onDispatchTerminal: onDispatchTerminalRef.current,
             isViewingTaskOrigin: isViewingTaskOriginRef.current,
             onWorkspaceEvent: onWorkspaceEventRef.current,
@@ -1158,6 +1196,7 @@ export function handleEvent(
     onAgentReply,
     onTaskEvent,
     onRunEvent,
+    onReferral,
     onDispatchTerminal,
     isViewingTaskOrigin,
     onWorkspaceEvent,
@@ -1245,6 +1284,9 @@ export function handleEvent(
     // The origin channel's inline marker remains the notification while it is
     // on screen. Away from that exact channel, #1758 adds one linked toast so a
     // background turn cannot finish silently while the operator works elsewhere.
+    case "referral":
+      onReferral?.(event);
+      break;
     case "desk_task_completed":
       onTaskEvent?.(event);
       onDispatchTerminal?.(event);

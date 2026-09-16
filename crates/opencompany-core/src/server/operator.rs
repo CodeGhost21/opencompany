@@ -1806,6 +1806,43 @@ fn project_event_for_viewer(
         // the projection — the one place that can guarantee no later reader
         // reintroduces the duplicate. Nothing in the console read it. `desk`
         // stays for wire compatibility.
+        // **A crossing happened; the thread it belongs to must be re-read.**
+        //
+        // A crossing renders as a collapsed `referralConversation` folded onto
+        // the asking row, and `attach_referral_origins` — which builds it — runs
+        // in `history_for_desk` and nowhere else. So a crossing was invisible
+        // live and appeared only once something re-read the thread, which for a
+        // desk crossing meant waiting for the turn to settle and for a pair DM
+        // meant never: its rows are journaled in the pair's own `dm:<a>+<b>`
+        // conversation, which no desk view is watching.
+        //
+        // This frame carries no crossing content, on purpose. Rebuilding the
+        // fold here would be a second implementation of a rule this subsystem
+        // has already had to fix in two places four separate times; the reload
+        // projection is the authority and this only tells the console to ask it
+        // again. Same shape as #2329's remedy for the grammar split: add to the
+        // stream rather than teach it to recompute.
+        CompanyEvent::ReferralEnqueued {
+            from_desk,
+            trigger_sequence,
+            to_desk,
+            returning,
+            ..
+        } => {
+            let mut o = envelope("referral");
+            // The desk whose transcript gains the fold: the crossing is folded
+            // onto the ASKING row, which lives on the desk the question left.
+            o["chatId"] = json!(from_desk);
+            // The row it folds onto, so a console need not re-read a whole desk
+            // to find what changed.
+            o["sequence"] = json!(trigger_sequence);
+            o["toDesk"] = json!(to_desk);
+            // Which leg this is, read the same way `ReferredFrom::returning`
+            // is: a return is the one that completes the exchange, so a console
+            // that only wants to re-read once can wait for it.
+            o["returning"] = json!(returning);
+            o
+        }
         CompanyEvent::DeskTaskCompleted {
             task_id,
             desk,
@@ -14591,6 +14628,51 @@ mode = "full"
     ///
     /// Pinned now, while the two are equal, so the step that rewrites `text`
     /// cannot quietly take `cueText` with it.
+    /// **A crossing tells the live stream which thread to re-read.**
+    ///
+    /// The fold that renders a crossing is built by `attach_referral_origins`,
+    /// which runs in `history_for_desk` and nowhere else — so a crossing was
+    /// invisible live and appeared only once something re-read the thread. For
+    /// a desk crossing that meant waiting for settle; for a pair DM it meant
+    /// never, since its rows are journaled in the pair's own `dm:<a>+<b>`
+    /// conversation that no desk view subscribes to.
+    ///
+    /// The frame carries no crossing content on purpose. Rebuilding the fold on
+    /// this path would be a second implementation of a rule this subsystem has
+    /// already had to fix in two places, four separate times.
+    #[test]
+    fn a_crossing_names_the_thread_whose_fold_changed() {
+        let v = super::project_event(&stored(CompanyEvent::ReferralEnqueued {
+            conversation: None,
+            answers: None,
+            from_desk: "engineering".into(),
+            from_desk_name: "Engineering".into(),
+            asker: "software_engineer".into(),
+            asker_label: "software_engineer".into(),
+            trigger_sequence: 41,
+            to_desk: "design".into(),
+            target: "product_designer".into(),
+            returning: false,
+        }))
+        .expect("a crossing is projected at all");
+
+        assert_eq!(v["type"], "referral");
+        assert_eq!(
+            v["chatId"], "engineering",
+            "the desk that ASKED is the one whose transcript gains the fold"
+        );
+        assert_eq!(v["sequence"], 41, "and the row it folds onto");
+        assert_eq!(v["toDesk"], "design");
+        assert_eq!(
+            v["returning"], false,
+            "which leg, read as `ReferredFrom` is"
+        );
+        assert!(
+            v.get("lines").is_none() && v.get("referralConversation").is_none(),
+            "no crossing content travels on this frame: {v}"
+        );
+    }
+
     #[test]
     fn projects_the_agents_own_body_beside_the_operators() {
         let stored = stored(CompanyEvent::AgentReply {

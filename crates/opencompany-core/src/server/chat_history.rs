@@ -1813,8 +1813,34 @@ async fn attach_referral_origins(
         // `conversation.is_some()` below), which is what makes the console
         // label it `@name` rather than `#desk`.
         if let Some(pair) = conversation.as_deref() {
+            // **This crossing's exchange, not every exchange this pair ever
+            // had.**
+            //
+            // `pair_conversation` is deterministic — the same two agents always
+            // produce the same `dm:<a>+<b>` key — so collecting to the end of
+            // the page gave the FIRST crossing every row the pair went on to
+            // exchange, the second all but the first, and so on. One live
+            // episode rendered the same conversation five times in one thread,
+            // labelled 20, 16, 12, 8 and 4 messages; only the last was true
+            // (Codex, #2332).
+            //
+            // Bounded at the next crossing into the SAME pair thread, which is
+            // where this one's exchange ends by construction: the rows between
+            // two markers are the rows that marker caused.
+            let next_for_pair = page[index + 1..]
+                .iter()
+                .position(|later| {
+                    matches!(
+                        &later.event,
+                        CompanyEvent::ReferralEnqueued {
+                            conversation: Some(next),
+                            ..
+                        } if next == pair
+                    )
+                })
+                .map_or(page.len(), |at| index + 1 + at);
             let mut lines = Vec::new();
-            for later in &page[index + 1..] {
+            for later in &page[index + 1..next_for_pair] {
                 let CompanyEvent::AgentReply {
                     chat_id, agent_id, ..
                 } = &later.event
@@ -4870,6 +4896,132 @@ mod referral_origin_test {
         assert_eq!(
             crossing.lines[1].text,
             "error messages look like a copy task and are not one"
+        );
+    }
+
+    /// **Repeated crossings to the same person do not swallow each other.**
+    ///
+    /// `pair_conversation` is deterministic, so two questions to the same
+    /// teammate share one `dm:<a>+<b>` thread. Collecting to the end of the
+    /// page gave the FIRST crossing every row the pair went on to exchange: one
+    /// live episode rendered the same conversation five times in a single
+    /// thread, labelled 20, 16, 12, 8 and 4 messages, and only the last was
+    /// true.
+    #[tokio::test]
+    async fn two_crossings_to_one_person_each_fold_their_own_exchange() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let runtime = runtime(home.path()).await;
+        let id = CompanyId::new("acme");
+        let pair = crate::hivemind::referral::pair_conversation("software_engineer", "researcher");
+
+        let ask = |text: &str| CompanyEvent::AgentReply {
+            chat_id: "engineering".to_string(),
+            agent_id: "software_engineer".to_string(),
+            text: text.to_string(),
+            steps: Vec::new(),
+            task_id: None,
+            outputs: Vec::new(),
+            parent: None,
+            mentions: Vec::new(),
+            mention_depth: 0,
+            audience: Vec::new(),
+        };
+        let pair_row = |who: &str, text: &str| CompanyEvent::AgentReply {
+            chat_id: pair.clone(),
+            agent_id: who.to_string(),
+            text: text.to_string(),
+            steps: Vec::new(),
+            task_id: None,
+            outputs: Vec::new(),
+            parent: None,
+            mentions: Vec::new(),
+            mention_depth: 0,
+            audience: Vec::new(),
+        };
+        // The marker names the row its crossing folds onto, so each points at
+        // its own ask rather than a constant.
+        let marker = |trigger: EventSeq| CompanyEvent::ReferralEnqueued {
+            conversation: Some(pair.clone()),
+            answers: None,
+            from_desk: "engineering".to_string(),
+            from_desk_name: "Engineering".to_string(),
+            asker: "software_engineer".to_string(),
+            asker_label: "software_engineer".to_string(),
+            trigger_sequence: trigger.value(),
+            to_desk: "engineering".to_string(),
+            target: "researcher".to_string(),
+            returning: false,
+        };
+
+        // Two crossings to the same person, each with its own two-row exchange.
+        let first_ask = runtime
+            .events()
+            .append(&id, ask("!question do we have latency numbers?"))
+            .await
+            .expect("journal");
+        for event in [
+            marker(first_ask),
+            pair_row("software_engineer", "do we have latency numbers?"),
+            pair_row("researcher", "p99 is 400ms"),
+        ] {
+            runtime.events().append(&id, event).await.expect("journal");
+        }
+        let second_ask = runtime
+            .events()
+            .append(&id, ask("!question and the write path?"))
+            .await
+            .expect("journal");
+        for event in [
+            marker(second_ask),
+            pair_row("software_engineer", "and the write path?"),
+            pair_row("researcher", "unmeasured so far"),
+        ] {
+            runtime.events().append(&id, event).await.expect("journal");
+        }
+
+        let history = history_for_desk(
+            &runtime,
+            "engineering",
+            "engineering",
+            &Viewer::Operator,
+            None,
+            50,
+            true,
+        )
+        .await
+        .expect("history");
+        let fold = |seq: EventSeq| {
+            history
+                .iter()
+                .find(|m| m.id == seq.value().to_string())
+                .and_then(|m| m.referral_conversation.as_ref())
+                .unwrap_or_else(|| panic!("a crossing folds onto {seq:?}"))
+        };
+
+        let first = fold(first_ask);
+        assert_eq!(
+            first.lines.len(),
+            2,
+            "the first crossing holds only its own exchange: {:?}",
+            first.lines
+        );
+        assert!(
+            first
+                .lines
+                .iter()
+                .all(|line| !line.text.contains("write path")),
+            "a later question is not part of an earlier crossing: {:?}",
+            first.lines
+        );
+        let second = fold(second_ask);
+        assert_eq!(second.lines.len(), 2, "{:?}", second.lines);
+        assert!(
+            second
+                .lines
+                .iter()
+                .any(|line| line.text.contains("write path")),
+            "{:?}",
+            second.lines
         );
     }
 
