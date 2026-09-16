@@ -2079,7 +2079,7 @@ export interface CapabilityStatusDto {
    * CI actually compiles and tests it.
    */
   searchInBuild?: boolean;
-  /** Whether a managed search credential is configured on this build (env-only). */
+  /** Whether managed search resolves from the company's key or deployment fallback. */
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;

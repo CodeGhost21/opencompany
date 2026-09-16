@@ -572,10 +572,11 @@ pub struct HarnessDeps {
     /// construction site but the production runtime builder) **fails closed** —
     /// no `web_search` tool is wired and agents behave exactly as before.
     ///
-    /// Set by the runtime builder from
-    /// [`search_backend_from_env`](crate::harness::provider::search_backend_from_env)
-    /// (env-only — never a tenant secret) with the company's
-    /// `[tools].search_daily_calls` cap applied. When `Some` **and** a company
+    /// The runtime builder supplies the deployment fallback from
+    /// [`search_backend_from_env`](crate::harness::provider::search_backend_from_env),
+    /// and [`HarnessPool::ensure`] attaches the company's `search/managed/key`
+    /// as the request-time first tier. It also applies the company's
+    /// `[tools].search_daily_calls` cap. When `Some` **and** a company
     /// **explicitly** grants `search` (never via `*`), [`build::build_agent`]
     /// wires [`search::search_tools`]; a grant with no credential wires nothing
     /// and warns, media's shape exactly.
@@ -2746,6 +2747,11 @@ pub struct HarnessPool {
     /// again to notice it. That was live for both integrations until the tools
     /// were observed missing from an agent whose settings page said "Connected".
     billing_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Stable company-only managed Search backends for deployments with no
+    /// environment credential. Keeping the backend (and therefore its shared
+    /// daily-call ledger) here prevents an unrelated roster rebuild from
+    /// resetting that company's cap.
+    managed_search_backends: RwLock<HashMap<CompanyId, search::SearchBackend>>,
     /// Fingerprint of the operator skill-delta set the cached roster was built
     /// from, keyed by company (issue #41). Drives skill-delta freshness:
     /// [`ensure`](Self::ensure) re-fetches the deltas from the
@@ -3008,6 +3014,7 @@ impl HarnessPool {
             capability_fingerprints: RwLock::new(HashMap::new()),
             composio_fingerprints: RwLock::new(HashMap::new()),
             billing_fingerprints: RwLock::new(HashMap::new()),
+            managed_search_backends: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
             override_fingerprints: RwLock::new(HashMap::new()),
@@ -3299,6 +3306,9 @@ impl HarnessPool {
         let tenant_search_config = self
             .resolve_tenant_search(company, deps, overlay.tool_grants.as_ref())
             .await;
+        let managed_search_config = self
+            .resolve_managed_search(company, deps, overlay.tool_grants.as_ref())
+            .await;
         // A build without either feature has no billing axis to go stale on, so
         // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
@@ -3311,6 +3321,7 @@ impl HarnessPool {
             hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
             hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
             hasher.write_u64(search_byo::TenantSearch::fingerprint(&tenant_search_config));
+            hasher.write_u8(managed_search_config.is_some() as u8);
             hasher.finish()
         };
 
@@ -3408,6 +3419,7 @@ impl HarnessPool {
         // And the company's own search provider, so a key pasted (or cleared) in
         // the console decides what the rebuilt agents search through.
         fresh_deps.tenant_search = tenant_search_config;
+        fresh_deps.search = managed_search_config;
         // Same treatment for the overlay-agent set: `company` may be a stale
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
@@ -3819,6 +3831,82 @@ impl HarnessPool {
                 deps.tenant_search.clone()
             }
         }
+    }
+
+    /// Managed Search with the company's copied TinyHumans key as the first
+    /// tier and the deployment credential as the fallback. The backend reads
+    /// the company tier again for every request, so rotations need no roster
+    /// rebuild; this resolver only ensures a backend exists when a previously
+    /// uncredentialed deployment receives its first company key.
+    async fn resolve_managed_search(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+        overlay_tool_grants: Option<&crate::ports::types::ToolGrantsOverride>,
+    ) -> Option<search::SearchBackend> {
+        let effective_allow = crate::ports::types::effective_tool_allow(
+            &company.manifest.tools.allow,
+            overlay_tool_grants,
+        );
+        if !crate::company::grants_search_explicit(&effective_allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.search.clone();
+        };
+        let company_key = match crate::company::search::load_managed_key(
+            &company.id,
+            secrets.as_ref(),
+        )
+        .await
+        {
+            Ok(key) => key,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[search] could not read the managed company credential; keeping the deployment fallback: {err}"
+                );
+                return deps.search.clone();
+            }
+        };
+        let backend = match (&deps.search, company_key) {
+            (Some(backend), _) => backend.clone(),
+            (None, Some(_)) => match {
+                self.managed_search_backends
+                    .read()
+                    .await
+                    .get(&company.id)
+                    .cloned()
+            } {
+                Some(backend) => backend,
+                None => {
+                    use crate::app::config::ProcessEnv;
+                    let backend = search::SearchBackend::new(
+                        provider::search_backend_url_from_env(&ProcessEnv),
+                        crate::company::credentials::Credential::None,
+                        crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+                    );
+                    self.managed_search_backends
+                        .write()
+                        .await
+                        .entry(company.id.clone())
+                        .or_insert_with(|| backend.clone())
+                        .clone()
+                }
+            },
+            (None, None) => return None,
+        };
+        Some(
+            backend
+                .with_daily_call_cap(
+                    company
+                        .manifest
+                        .tools
+                        .search_daily_calls
+                        .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
+                )
+                .with_company_credential(company.id.clone(), secrets.clone()),
+        )
     }
 
     /// The PayPal equivalent (issue #789), for the same reasons.
@@ -10669,6 +10757,40 @@ description = "Builds the product."
     // --- Bound-repository freshness (issue #245) ----------------------------
 
     // --- Billing-credential freshness (issues #788, #789) -------------------
+
+    /// A company-only managed backend has no deployment handle to clone. The
+    /// pool must therefore retain its base handle so roster rebuilds keep the
+    /// same daily-call ledger instead of reopening the cap.
+    #[tokio::test]
+    async fn company_only_managed_search_keeps_its_ledger_across_resolution() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let dir = tempfile::tempdir().unwrap();
+        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        deps.secrets = Some(secrets.clone());
+        let mut rec = record();
+        rec.manifest.tools.allow = vec!["search".to_string()];
+        secrets
+            .set(
+                &rec.id,
+                crate::company::search::MANAGED_KEY_SECRET,
+                crate::ports::types::SecretValue("company-key".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let pool = HarnessPool::new();
+        let first = pool
+            .resolve_managed_search(&rec, &deps, None)
+            .await
+            .expect("company key creates a managed backend");
+        first.ledger().try_reserve(&rec.id, 10, 1).unwrap();
+
+        let second = pool
+            .resolve_managed_search(&rec, &deps, None)
+            .await
+            .expect("same backend resolves again");
+        assert_eq!(second.ledger().used_today(&rec.id, 1), 1);
+    }
 
     /// Saving or rotating a key in Settings → Billing must reach the agent on
     /// its next turn.

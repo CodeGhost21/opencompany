@@ -30,6 +30,7 @@ import { SearchView } from "@/views/SearchView";
 interface Fixture {
   providers: unknown[];
   managedConfigured: boolean;
+  managedKeyConfigured?: boolean;
   inBuild?: boolean;
 }
 
@@ -46,7 +47,7 @@ const BRAVE = {
   isDefault: true,
 };
 
-function status({ providers, managedConfigured, inBuild = true }: Fixture) {
+function status({ providers, managedConfigured, managedKeyConfigured = false, inBuild = true }: Fixture) {
   return {
     provider: "brave",
     effectiveProvider: providers.length > 0 ? "brave" : "managed",
@@ -58,6 +59,7 @@ function status({ providers, managedConfigured, inBuild = true }: Fixture) {
     granted: true,
     inBuild,
     managedConfigured,
+    managedKeyConfigured,
     managedDailyCallCap: 250,
     supportedProviders: ["managed", "brave", "exa", "querit", "searxng"],
   };
@@ -162,6 +164,14 @@ describe("the Managed row on Connections → Search", () => {
     );
     expect(at("search-provider-empty")).not.toBeNull();
     expect(at("search-provider-dead-end")).toBeNull();
+  });
+
+  it("offers replacement only for a company-owned managed key", async () => {
+    await render({ providers: [], managedConfigured: true, managedKeyConfigured: true });
+    expect(at("search-provider-managed-menu")).not.toBeNull();
+
+    await render({ providers: [], managedConfigured: true, managedKeyConfigured: false });
+    expect(at("search-provider-managed-menu")).toBeNull();
   });
 
   it("renders above a connected provider, and drops the notice", async () => {

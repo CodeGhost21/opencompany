@@ -267,7 +267,7 @@ describe("ApiKeyView never overstates what a missing account breaks", () => {
       "One key for the apps your agents act through and the models they think with.",
     );
     expect(container.textContent ?? "").toContain(
-      "Saving copies it to the LLM and Composio pages wherever they hold no key of their own.",
+      "Saving copies it to the LLM, Composio, and Search pages wherever they hold no key of their own.",
     );
     expect(container.textContent ?? "").not.toContain("keeps precedence");
   });

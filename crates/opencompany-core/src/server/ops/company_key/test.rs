@@ -128,6 +128,22 @@ async fn send(
     .await
 }
 
+async fn set_custom_search_key(state: &AppState, company: &str) {
+    let id = CompanyId::new(company);
+    state
+        .registry()
+        .get(&id)
+        .expect("registered")
+        .secrets()
+        .set(
+            &id,
+            crate::company::search::MANAGED_KEY_SECRET,
+            crate::ports::types::SecretValue("custom-search-key".to_string()),
+        )
+        .await
+        .unwrap();
+}
+
 /// The core round trip: an admin sets the key, the read plane reports it as the
 /// company's own identity, and the value never comes back out.
 #[tokio::test]
@@ -1269,6 +1285,7 @@ async fn clearing_when_nothing_depends_on_it_needs_no_confirmation() {
         Some(json!({ "key": KEY })),
     )
     .await;
+    set_custom_search_key(&state, "fanclean").await;
     // A custom key pasted directly on both the Composio and LLM pages, which
     // the fan-out never overwrites (Q7) and which the guard must not treat as
     // still depending on the account key.
@@ -1338,6 +1355,7 @@ async fn status_reports_used_by_when_a_clear_would_strand_dependents() {
         .collect();
     assert!(surfaces.contains(&"llm"), "{raw}");
     assert!(surfaces.contains(&"composio"), "{raw}");
+    assert!(surfaces.contains(&"search"), "{raw}");
 }
 
 /// The other half: nothing set, or nothing left depending on the account key
@@ -1366,6 +1384,7 @@ async fn status_reports_no_used_by_when_nothing_depends_on_it() {
         Some(json!({ "key": KEY })),
     )
     .await;
+    set_custom_search_key(&state, "statusnousedby").await;
     send(
         &state,
         "statusnousedby",
@@ -1393,7 +1412,7 @@ async fn status_reports_no_used_by_when_nothing_depends_on_it() {
     .await;
     assert!(
         dto.get("usedBy").is_none(),
-        "both slots hold their own key, not the account key's copy: {raw}"
+        "all derived slots hold their own key, not the account key's copy: {raw}"
     );
 }
 
@@ -1438,6 +1457,7 @@ async fn p1_1_byok_mode_with_a_matching_composio_copy_needs_no_confirmation() {
         )
         .await
         .unwrap();
+    set_custom_search_key(&state, "p11byok").await;
 
     let (status, resp, raw) = send(
         &state,
@@ -1469,6 +1489,7 @@ async fn p1_1_managed_mode_with_a_matching_composio_copy_is_refused() {
         Some(json!({ "key": KEY })),
     )
     .await;
+    set_custom_search_key(&state, "p11managed").await;
 
     let (status, body, raw) = send(
         &state,

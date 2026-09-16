@@ -40,13 +40,16 @@ export interface SearchStatus {
   /** Whether the running host has the search tools compiled in. */
   inBuild: boolean;
   /**
-   * Whether the platform's own managed search credential resolves here.
+   * Whether managed search resolves from this company's TinyHumans key or the
+   * deployment fallback.
    *
    * The Managed row is rendered from this rather than from a permanent
    * "Always on" badge: managed search is always the *fallback*, which is a
    * different claim from always *working*.
    */
   managedConfigured: boolean;
+  /** Whether this company has its own editable Managed key. */
+  managedKeyConfigured: boolean;
   /** The company's daily managed-search ceiling. */
   managedDailyCallCap: number;
   /** The providers this build can search through. */

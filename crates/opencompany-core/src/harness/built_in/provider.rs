@@ -330,18 +330,26 @@ pub const DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL: &str = "https://api.tinyhumans.
 ///    no roster rebuild. Media flattens to a `String` at build time; that is a
 ///    known rough edge there, not a pattern worth copying.
 ///
-/// **Security**: consults ONLY the environment — never a tenant secret store —
-/// so a company can never point search at a key it controls.
+/// This function still consults only the environment. The request-time Search
+/// backend may prepend the company's own `search/managed/key`; that credential
+/// is billed to the same company and therefore does not create the ambient-
+/// credential problem the environment-only boundary was written to prevent.
 pub fn search_backend_from_env(env: &dyn EnvSource) -> Option<super::search::SearchBackend> {
     let credential = Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?));
-    let backend_url = env
-        .get("OPENCOMPANY_SEARCH_BACKEND_URL")
-        .unwrap_or_else(|| DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL.to_string());
+    let backend_url = search_backend_url_from_env(env);
     Some(super::search::SearchBackend::new(
         backend_url,
         credential,
         crate::company::DEFAULT_SEARCH_DAILY_CALLS,
     ))
+}
+
+/// The managed-search endpoint, independent of whether the deployment has a
+/// credential. Company-scoped credentials use the same proxy and need this
+/// answer even on a host with no platform identity.
+pub fn search_backend_url_from_env(env: &dyn EnvSource) -> String {
+    env.get("OPENCOMPANY_SEARCH_BACKEND_URL")
+        .unwrap_or_else(|| DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL.to_string())
 }
 
 /// Which managed-platform surfaces resolved a credential at boot (issue #879).

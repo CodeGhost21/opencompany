@@ -563,7 +563,7 @@ export function ApiKeyView({ client, company }: Props) {
                   fill; this sentence states the general rule. */}
               <p className="text-xs text-muted-foreground">
                 One key for the apps your agents act through and the models they think with.
-                Saving copies it to the LLM and Composio pages wherever they hold no key of their
+                Saving copies it to the LLM, Composio, and Search pages wherever they hold no key of their
                 own.
               </p>
             </div>

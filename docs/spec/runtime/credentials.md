@@ -446,13 +446,11 @@ running.
   `hosted_endpoint_from_env`. Moving them onto this seam is issue #585; when it
   lands they inherit the rotation guarantee by construction, because the seam is
   already here.
-- **Media generation and managed `web_search`.** Deliberately environment-only:
-  those run on the *platform's* managed credential, never a company-controlled
-  one. Search additionally has a **company-controlled** surface beside it — a
-  BYO provider key in that company's own secret store, which replaces the
-  managed tool for that company and is billed to its own account. It is a
-  separate credential with separate rules, not a tier of this seam; see
-  [search.md](search.md).
+- **Media generation.** Deliberately environment-only: it runs on the
+  *platform's* managed credential, never a company-controlled one. Managed
+  `web_search` now reads the company's copied TinyHumans key first and the
+  environment credential second. A separate BYO search-provider key still
+  replaces the managed tool entirely; see [search.md](search.md).
 
 ## Known limits, recorded deliberately
 

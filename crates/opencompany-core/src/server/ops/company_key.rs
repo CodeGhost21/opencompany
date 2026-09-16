@@ -66,7 +66,7 @@ use crate::server::users::token::OsTokens;
 /// states it conditionally, because it is conditional twice over. This notice
 /// is returned by [`set_key`] *and* [`finish_link`] *and* [`get_status`], and
 /// the two write paths do different amounts: a paste fans the key out to
-/// Composio and the LLM TinyHumans slots
+/// Composio, LLM TinyHumans, and managed Search slots
 /// ([`company_key::fan_out`](crate::company::company_key::fan_out), keys
 /// rework #2306, slice 4a) and stops there, while the grant runs the same
 /// fan-out and declares no provider of its own (Q10). And the managed chain
@@ -80,8 +80,8 @@ const CONSEQUENCE: &str = "This is the company's TinyHumans account key — the 
      connects providers like Gmail or Slack on your behalf. Every member's agents act and spend \
      through it, and a provider connected with it belongs to the company rather than to the \
      person who connected it. Spend arrives as one account, so it cannot be attributed per \
-     member. Saving it also copies it to TinyHumans on the LLM page and to Composio wherever \
-     those hold no key of their own, and makes TinyHumans the default only when no default is \
+     member. Saving it also copies it to TinyHumans on the LLM, Composio, and Search pages \
+     wherever those hold no key of their own, and makes TinyHumans the default only when no default is \
      set. It is not a model provider's own key: an OpenRouter key, or your own endpoint's, \
      belongs on the LLM page and will not serve as an identity here.";
 
@@ -876,7 +876,7 @@ async fn finish_link(
     // the whole flow again, and the one they just minted would linger in
     // their account doing nothing. A grant never names a model, so it never
     // creates a `tinyhumans` row or a default on its own (Q10) — only the key
-    // itself, and its Composio/LLM copies.
+    // itself, and its Composio/LLM/Search copies.
     let prober = prober_for(runtime);
     let report = company_key::fan_out(
         runtime.id(),
@@ -974,6 +974,7 @@ async fn journal_fan_out(
         let slot_name = match slot_report.slot {
             company_key::Slot::Composio => "composio",
             company_key::Slot::Inference => "inference",
+            company_key::Slot::Search => "search",
             company_key::Slot::Provider => "provider",
             company_key::Slot::Default => "default",
             company_key::Slot::Health => continue,

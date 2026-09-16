@@ -2,12 +2,11 @@
 //! search connection (the follow-up issue #238 deferred).
 //!
 //! Managed search — `web_search` over the platform's backend, metered and
-//! daily-capped — needs no configuration: it rides the instance's platform
-//! identity and is the effective default. What it cannot do is let a company
-//! bring its *own* search account. That is what this surface adds: an operator
-//! opens Settings → Search, picks a provider, pastes the key, and every agent
-//! that already holds the `search` grant gets that provider's tools on its next
-//! turn.
+//! daily-capped — uses the company's copied TinyHumans key before the instance
+//! identity and is the effective default. A company can instead bring its own
+//! search-provider account: an operator opens Settings → Search, picks a
+//! provider, pastes the key, and every agent that already holds the `search`
+//! grant gets that provider's tools on its next turn.
 //!
 //! The keys live here, always compiled, rather than beside the harness wiring in
 //! [`crate::harness::search_byo`]: that module is gated on the `openhuman`
@@ -16,14 +15,13 @@
 //! a 404. It is the same split — and the same argument — as
 //! [`crate::company::hosting`].
 //!
-//! # Why the key is per company and never from the environment
+//! # Why credentials are company-scoped before the environment fallback
 //!
-//! A BYO search key is billed to the company that pasted it. An environment
-//! fallback would let one company's searches ride on an ambient credential
-//! somebody else pays for, so there is deliberately none: with no stored key the
-//! company falls back to [`MANAGED_PROVIDER`], which is metered against the
-//! platform and capped per day. That mirrors OpenHuman's own rule, where a BYO
-//! engine with no key falls back to the managed surface.
+//! A BYO provider key is billed directly by that provider. Managed search may
+//! instead use [`MANAGED_KEY_SECRET`], a copy of the company's own TinyHumans
+//! account key, before falling through to the instance identity. That does not
+//! reintroduce an ambient credential paid for by somebody else: the company key
+//! belongs to, and is billed to, the same company whose agents present it.
 
 pub mod catalogue;
 pub mod copy;
@@ -50,9 +48,30 @@ pub mod store;
 /// provider fails in a way that reads like a bad key.
 pub const PROVIDER_SECRET: &str = "search/provider";
 
-/// Holds the company's BYO search API key, written by the console's Search
-/// settings and read only to authenticate a call. Never echoed back.
+/// Deprecated flat entry-zero search key. New writes converge onto
+/// `search/provider/{slug}/key`; this fallback remains readable until a
+/// dedicated migration can prove every company has converged, so an untouched
+/// pre-provider-list company does not silently lose search.
 pub const API_KEY_SECRET: &str = "search/api_key";
+
+/// The company's managed-search TinyHumans credential.
+///
+/// Filled by the account-key fan-out and intentionally not indexed as a search
+/// provider: Managed is the fallback row, has no company-owned endpoint, and
+/// always proxies through the TinyHumans backend.
+pub const MANAGED_KEY_SECRET: &str = "search/managed/key";
+
+/// Reads the company-scoped managed-search key, treating blank as unset.
+pub async fn load_managed_key(
+    company: &crate::ports::types::CompanyId,
+    secrets: &dyn crate::ports::SecretStore,
+) -> crate::Result<Option<String>> {
+    Ok(secrets
+        .get(company, MANAGED_KEY_SECRET)
+        .await?
+        .map(|value| value.0.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
 
 /// Holds the provider's base URL, for the one provider that is an address
 /// rather than an account: a self-hosted SearXNG instance. Not a secret — a

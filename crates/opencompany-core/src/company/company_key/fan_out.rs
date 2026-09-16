@@ -1,5 +1,6 @@
 //! The account-key fan-out (keys rework, issue #2306, slice 4a): one
-//! `PUT …/credential` copies [`super::KEY_KEY`] into the Composio and LLM
+//! `PUT …/credential` copies [`super::KEY_KEY`] into the Composio, LLM, and
+//! managed Search
 //! TinyHumans slots (Q7), adds the `tinyhumans` provider row when a model is
 //! known, sets the company default only when none is set, and checks health —
 //! all under a per-company lock so two concurrent saves cannot leave one slot
@@ -16,6 +17,7 @@ use async_trait::async_trait;
 use crate::Result;
 use crate::company::composio;
 use crate::company::inference::{self, catalogue, probe, store as inference_store};
+use crate::company::search;
 use crate::error::{OpenCompanyError, UsedBy, UsedBySurface};
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
@@ -163,6 +165,9 @@ pub async fn account_key_used_by(
         .await?
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
+    let search_now = search::load_managed_key(company, secrets)
+        .await?
+        .unwrap_or_default();
     let inference_now =
         inference::load_managed_key(company, secrets, &inference::HarnessScope::default())
             .await?
@@ -193,6 +198,15 @@ pub async fn account_key_used_by(
     }
     if clears(&composio_now) && composio_mode == composio::ComposioMode::Managed {
         surfaces.push(UsedBySurface::Composio);
+    }
+    // Managed is Search's fallback whenever no complete BYO provider is
+    // active. Only then would clearing this copied key strand Search.
+    let search_candidates = search::candidates(company, secrets).await?;
+    let search_default = search::store::load_default_slug(company, secrets).await?;
+    let search_uses_managed =
+        search::resolve::active(&search_candidates, search_default.as_deref()).is_none();
+    if clears(&search_now) && search_uses_managed {
+        surfaces.push(UsedBySurface::Search);
     }
 
     if surfaces.is_empty() {
@@ -394,7 +408,7 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
 // value (P2-1, keys rework #2306 review)
 // ---------------------------------------------------------------------------
 
-/// Everything [`fan_out`] needs to decide the Composio/LLM/provider/health
+/// Everything [`fan_out`] needs to decide the Composio/LLM/Search/provider/health
 /// slots, read as one batch — always AFTER the account key itself is already
 /// safely stored, never before (see [`fan_out`]'s own step 3/4).
 ///
@@ -409,6 +423,7 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
 /// to stay accurate.
 struct ReadSlots {
     composio_now: String,
+    search_now: String,
     legacy_managed: bool,
     inference_key_key: String,
     inference_raw_new: Option<String>,
@@ -425,6 +440,9 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
     let composio_now = composio::load_tinyhumans_key(company, secrets)
         .await?
         .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let search_now = search::load_managed_key(company, secrets)
+        .await?
         .unwrap_or_default();
     let providers = inference_store::list_providers(company, secrets).await?;
     let legacy_managed = providers.iter().any(|p| {
@@ -452,6 +470,7 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
 
     Ok(ReadSlots {
         composio_now,
+        search_now,
         legacy_managed,
         inference_key_key,
         inference_raw_new,
@@ -620,6 +639,7 @@ pub async fn fan_out(
     // bubbled `Err`.
     let ReadSlots {
         composio_now,
+        search_now,
         legacy_managed,
         inference_key_key,
         inference_raw_new,
@@ -632,7 +652,7 @@ pub async fn fan_out(
             tracing::error!(
                 company = %company,
                 error = %err,
-                "keys rework: fan_out could not read Composio/LLM/provider state after \
+                "keys rework: fan_out could not read Composio/LLM/Search/provider state after \
                  storing the account key; every derived slot is reported as failed",
             );
             return Ok(FanOutReport {
@@ -643,6 +663,10 @@ pub async fn fan_out(
                     },
                     SlotReport {
                         slot: Slot::Inference,
+                        outcome: SlotOutcome::Failed,
+                    },
+                    SlotReport {
+                        slot: Slot::Search,
                         outcome: SlotOutcome::Failed,
                     },
                     SlotReport {
@@ -681,6 +705,38 @@ pub async fn fan_out(
             Err(_) => SlotOutcome::Failed,
         },
         CopyDecision::Clear => match write_composio_slot(company, secrets, "").await {
+            Ok(()) => SlotOutcome::Cleared,
+            Err(_) => SlotOutcome::Failed,
+        },
+        CopyDecision::Keep(reason) => SlotOutcome::Kept(reason),
+        CopyDecision::Skip(reason) => SlotOutcome::Skipped(reason),
+    };
+
+    // 5b. Managed Search. This is a bare secret-store write under the existing
+    // slot guard: it is not a provider record, so no search index lock applies.
+    // Search deliberately has no save-time health marker; reachability is
+    // learnt on first use, and the endpoint remains the fixed managed backend.
+    let search_outcome = match decide_copy(&search_now, &old_account, &new) {
+        CopyDecision::Write => match secrets
+            .set(
+                company,
+                search::MANAGED_KEY_SECRET,
+                SecretValue(new.clone()),
+            )
+            .await
+        {
+            Ok(()) if search_now.is_empty() => SlotOutcome::Filled,
+            Ok(()) => SlotOutcome::Rotated,
+            Err(_) => SlotOutcome::Failed,
+        },
+        CopyDecision::Clear => match secrets
+            .set(
+                company,
+                search::MANAGED_KEY_SECRET,
+                SecretValue(String::new()),
+            )
+            .await
+        {
             Ok(()) => SlotOutcome::Cleared,
             Err(_) => SlotOutcome::Failed,
         },
@@ -775,6 +831,10 @@ pub async fn fan_out(
                 SlotReport {
                     slot: Slot::Inference,
                     outcome: inference_outcome,
+                },
+                SlotReport {
+                    slot: Slot::Search,
+                    outcome: search_outcome,
                 },
                 SlotReport {
                     slot: Slot::Provider,
@@ -934,6 +994,10 @@ pub async fn fan_out(
                     SlotReport {
                         slot: Slot::Inference,
                         outcome: inference_outcome,
+                    },
+                    SlotReport {
+                        slot: Slot::Search,
+                        outcome: search_outcome,
                     },
                     SlotReport {
                         slot: Slot::Provider,
@@ -1156,6 +1220,10 @@ pub async fn fan_out(
                 outcome: inference_outcome,
             },
             SlotReport {
+                slot: Slot::Search,
+                outcome: search_outcome,
+            },
+            SlotReport {
                 slot: Slot::Provider,
                 outcome: provider_outcome,
             },
@@ -1189,6 +1257,7 @@ pub fn fan_out_note(clearing: bool, report: &FanOutReport, model: Option<&str>) 
     let slot = |s: Slot| report.slots.iter().find(|r| r.slot == s).map(|r| r.outcome);
     let composio = slot(Slot::Composio);
     let inference = slot(Slot::Inference);
+    let search = slot(Slot::Search);
     let provider = slot(Slot::Provider);
     let default = slot(Slot::Default);
     let health = slot(Slot::Health);
@@ -1218,6 +1287,12 @@ pub fn fan_out_note(clearing: bool, report: &FanOutReport, model: Option<&str>) 
     }
     if matches!(inference, Some(SlotOutcome::Kept(SkipReason::CustomKey))) {
         sentences.push("LLM keeps the TinyHumans key set on its own page.".to_string());
+    }
+    if matches!(search, Some(SlotOutcome::Kept(SkipReason::CustomKey))) {
+        sentences.push("Search keeps the TinyHumans key set on its own page.".to_string());
+    }
+    if matches!(search, Some(SlotOutcome::Cleared)) {
+        sentences.push("Search's copy was removed too.".to_string());
     }
     if let (Some(SlotOutcome::Filled), Some(m)) = (provider, model) {
         sentences.push(format!("TinyHumans is set up for LLM with {m}."));

@@ -761,7 +761,8 @@ pub fn build_agent_with_model(
     //     catch-all `*` does NOT confer it, following `media` / `composio`,
     //     because each call is a priced request on the managed platform.
     //  2. a MANAGED backend credential on the deps (`deps.search`), resolved
-    //     env-only by the runtime builder — never a tenant secret.
+    //     from the company's copied TinyHumans key first and the deployment
+    //     credential second.
     //
     // Granted-but-uncredentialed wires nothing and warns (fail-closed), which
     // is the state the skills' degradation clause is written for.
