@@ -8,7 +8,12 @@ use super::*;
 // --- output destinations (issue #981) ------------------------------------
 
 /// [`valid_draft`] with the `output` node routed to `kind` / `target`.
-pub(super) fn draft_with_destination(id: &str, name: &str, kind: &str, target: Option<&str>) -> RawWorkflow {
+pub(super) fn draft_with_destination(
+    id: &str,
+    name: &str,
+    kind: &str,
+    target: Option<&str>,
+) -> RawWorkflow {
     let mut draft = valid_draft(id, name);
     let output = draft
         .nodes

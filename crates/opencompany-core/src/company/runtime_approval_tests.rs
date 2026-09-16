@@ -70,7 +70,8 @@ async fn an_unauthorized_forward_is_refused_and_leaves_no_marker() {
 
 /// A runtime with a live event log, for the thread-root tests. Returns the
 /// tempdir too: dropping it deletes the log the runtime is reading.
-pub(super) async fn runtime_with_events() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
+pub(super) async fn runtime_with_events()
+-> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
     let home_dir = tempfile::Builder::new()
         .prefix("opencompany-parent-")
         .tempdir()
