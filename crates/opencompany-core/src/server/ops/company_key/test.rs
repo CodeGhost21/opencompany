@@ -1604,6 +1604,7 @@ async fn status_reports_no_own_keys_on_an_empty_company() {
     .await;
     assert_eq!(dto["inferenceHasOwnKey"], false, "{raw}");
     assert_eq!(dto["composioHasOwnKey"], false, "{raw}");
+    assert_eq!(dto["searchHasOwnKey"], false, "{raw}");
     assert_eq!(dto["defaultSet"], false, "{raw}");
 }
 
@@ -1637,6 +1638,10 @@ async fn a_copy_equal_to_the_account_key_is_not_an_own_key() {
     assert_eq!(
         dto["composioHasOwnKey"], false,
         "the fan-out's own copy is not an own key: {raw}"
+    );
+    assert_eq!(
+        dto["searchHasOwnKey"], false,
+        "the fan-out's own Search copy is not an own key: {raw}"
     );
 }
 
@@ -2234,6 +2239,7 @@ fn minimal_status() -> super::CredentialStatusDto {
         hub_link: false,
         inference_has_own_key: false,
         composio_has_own_key: false,
+        search_has_own_key: false,
         default_set: false,
         inference_has_model: false,
         used_by: None,

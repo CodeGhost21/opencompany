@@ -41,12 +41,15 @@ describe("accountFills", () => {
   });
 
   it("reads true HasOwnKey as a slot this save would leave alone", () => {
-    expect(accountFills(status({ inferenceHasOwnKey: true, composioHasOwnKey: true }))).toEqual({
-      llm: false,
-      composio: false,
-      search: true,
-      llmHasModel: false,
-    });
+    expect(
+      accountFills(
+        status({
+          inferenceHasOwnKey: true,
+          composioHasOwnKey: true,
+          searchHasOwnKey: true,
+        }),
+      ),
+    ).toEqual({ llm: false, composio: false, search: false, llmHasModel: false });
   });
 
   it("mixes the two independently", () => {
@@ -164,7 +167,7 @@ describe("modelStepTitle", () => {
   });
 });
 
-describe("the dialog's two links", () => {
+describe("the dialog's three links", () => {
   it("point at the LLM, Composio, and Search connection pages", () => {
     expect(LLM_PAGE_HREF).toBe("#/connections/inference");
     expect(COMPOSIO_PAGE_HREF).toBe("#/connections/composio");
