@@ -1201,4 +1201,16 @@ fn parse_model_ids(body: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
+#[path = "probe_tests_classify.rs"]
+mod tests_classify;
+#[cfg(test)]
+#[path = "probe_tests_catalog.rs"]
+mod tests_catalog;
+#[cfg(test)]
+#[path = "probe_tests_ssrf.rs"]
+mod tests_ssrf;
+#[cfg(test)]
+#[path = "probe_tests_auth_wire.rs"]
+mod tests_auth_wire;
 
