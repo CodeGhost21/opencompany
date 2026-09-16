@@ -8,7 +8,7 @@ use super::*;
 
 /// A PNG whose header announces the given size — the signature and IHDR
 /// that carry width and height, plus the IHDR fields that follow them.
-fn png(w: u32, h: u32) -> Vec<u8> {
+pub(super) fn png(w: u32, h: u32) -> Vec<u8> {
     let mut v = PNG_SIGNATURE.to_vec();
     v.extend_from_slice(&13u32.to_be_bytes());
     v.extend_from_slice(b"IHDR");
@@ -19,7 +19,7 @@ fn png(w: u32, h: u32) -> Vec<u8> {
 }
 
 /// A GIF whose logical screen announces the given size.
-fn gif(w: u16, h: u16) -> Vec<u8> {
+pub(super) fn gif(w: u16, h: u16) -> Vec<u8> {
     let mut v = GIF_SIGNATURE_89.to_vec();
     v.extend_from_slice(&w.to_le_bytes());
     v.extend_from_slice(&h.to_le_bytes());
