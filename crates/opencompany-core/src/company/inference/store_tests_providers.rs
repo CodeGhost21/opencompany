@@ -2,9 +2,8 @@
 //! deleting providers, slug derivation, and the index blob (split out
 //! of `store_tests.rs`).
 
-use super::*;
 use super::store_tests_support::*;
-
+use super::*;
 
 #[tokio::test]
 async fn a_company_with_nothing_configured_has_no_providers() {

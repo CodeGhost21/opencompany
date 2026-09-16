@@ -1,7 +1,7 @@
 //! Routes and health tests (split out of `store_tests.rs`).
 
-use super::*;
 use super::store_tests_support::*;
+use super::*;
 
 // ---- routes -------------------------------------------------------------
 
@@ -212,4 +212,3 @@ async fn a_dropped_routing_write_is_visible_on_the_read_back() {
     let stored = load_routes(&company, &secrets).await.unwrap();
     assert!(stored.is_empty());
 }
-

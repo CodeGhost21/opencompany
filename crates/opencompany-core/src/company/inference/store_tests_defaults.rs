@@ -1,8 +1,8 @@
 //! Default-choice tests: the new JSON default shape, the lenient
 //! reader, and model collapsing (split out of `store_tests.rs`).
 
-use super::*;
 use super::store_tests_support::*;
+use super::*;
 
 // ---- the default's new shape (keys rework, issue #2306, slice 2b) ------
 
@@ -13,9 +13,7 @@ async fn a_json_default_reads_provider_and_model() {
         .set(
             &company(),
             DEFAULT_PROVIDER_KEY,
-            SecretValue(
-                "  {\"provider\":\" acme \",\"model\":\" acme/other-model \"}\n".into(),
-            ),
+            SecretValue("  {\"provider\":\" acme \",\"model\":\" acme/other-model \"}\n".into()),
         )
         .await
         .unwrap();

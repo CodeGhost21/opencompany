@@ -8,7 +8,6 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-
 #[derive(Default)]
 pub(super) struct MemSecrets {
     pub(super) map: Mutex<HashMap<String, String>>,
