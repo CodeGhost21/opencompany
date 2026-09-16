@@ -41,32 +41,32 @@ pub(super) fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
 }
 
 pub(super) const DEMO: &str = r#"
-    id = "demo"
-    name = "Demo flow"
-    description = "A tiny trigger → agent → output graph."
-    [[node]]
-    id = "start"
-    kind = "trigger"
-    name = "Start"
-    summary = "Kicks it off."
-    [[node]]
-    id = "worker"
-    kind = "agent"
-    name = "Worker"
-    summary = "Does the thing."
-    agent = "assistant"
-    [[node]]
-    id = "done"
-    kind = "output"
-    name = "Report"
-    [[edge]]
-    from = "start"
-    to = "worker"
-    [[edge]]
-    from = "worker"
-    to = "done"
-    label = "ok"
-"#;
+        id = "demo"
+        name = "Demo flow"
+        description = "A tiny trigger → agent → output graph."
+        [[node]]
+        id = "start"
+        kind = "trigger"
+        name = "Start"
+        summary = "Kicks it off."
+        [[node]]
+        id = "worker"
+        kind = "agent"
+        name = "Worker"
+        summary = "Does the thing."
+        agent = "assistant"
+        [[node]]
+        id = "done"
+        kind = "output"
+        name = "Report"
+        [[edge]]
+        from = "start"
+        to = "worker"
+        [[edge]]
+        from = "worker"
+        to = "done"
+        label = "ok"
+    "#;
 
 /// Writes `DEMO` to `<dir>/workflows/demo.toml` and returns `dir`.
 pub(super) fn seed_demo() -> tempfile::TempDir {
