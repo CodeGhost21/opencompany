@@ -1,6 +1,7 @@
 //! Runtime tests: blocker claim release on journal/settle failure, and banked blockers driven on boot.
 
 use super::tests_approval::{RefusingExtendStore, runtime_with_events, seed_parked};
+#[cfg(feature = "openhuman")]
 use super::tests_core::RefusingJournalStore;
 use super::{CompanyEvent, continuation_failure_notice};
 
