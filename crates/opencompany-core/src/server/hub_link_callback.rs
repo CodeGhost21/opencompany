@@ -107,7 +107,7 @@ async fn callback(State(state): State<AppState>, Query(query): Query<CallbackQue
     };
     match redeem_link(&state, &runtime, &actor, link_state, code).await {
         Ok(done) => {
-            log::info!(
+            tracing::info!(
                 "[hub-link] key grant redeemed on the host's return route company={}",
                 runtime.id().as_ref()
             );
@@ -117,7 +117,7 @@ async fn callback(State(state): State<AppState>, Query(query): Query<CallbackQue
             // The message never carries the key — `redeem_key_grant` reports
             // the hub's status, and the fan-out reports slot names — but it
             // is shown in a bare tab, so it is escaped like anything else.
-            log::warn!(
+            tracing::warn!(
                 "[hub-link] key grant failed on the host's return route company={}: {}",
                 runtime.id().as_ref(),
                 error.0
