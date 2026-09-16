@@ -2555,3 +2555,49 @@ async fn the_wizards_account_key_rebuilds_the_company_it_just_seeded() {
     assert_eq!(dto["restartRequired"], false, "{dto}");
     assert_eq!(dto["defaultChoice"]["provider"], "tinyhumans", "{dto}");
 }
+
+/// The other branch, and the reason it owes no rebuild at all: a wizard that
+/// brought its own provider writes `[inference].provider` onto the manifest
+/// **before** the company is seeded, so the company boots already configured
+/// instead of onto echo.
+///
+/// Pinned rather than left to inspection because the whole two-branch answer
+/// rests on this ordering. Move the provider write to after the seed — or drop
+/// it — and the managed branch's rebuild silently becomes owed here too, on a
+/// path nothing calls it from.
+#[tokio::test]
+async fn a_wizard_company_that_brought_its_own_provider_boots_ready() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+    let mut company = designed_company(None);
+    company["inference"] = serde_json::json!({
+        "provider": "openrouter",
+        "model": "acme/test-model",
+        "key": ACCOUNT_KEY,
+    });
+
+    let (status, body) = post_setup(state.clone(), serde_json::json!({ "company": company })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded = body["seeded_company"].as_str().expect("seeded");
+
+    assert_eq!(
+        seeded_manifest(home_dir.path(), seeded)
+            .await
+            .inference
+            .provider
+            .as_deref(),
+        Some("openrouter"),
+        "the manifest this company booted from must already name its provider"
+    );
+
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new(seeded))
+        .expect("the seeded company is registered");
+    assert!(
+        crate::company::inference::key_configured(runtime.id(), runtime.secrets().as_ref(), None)
+            .await
+            .unwrap(),
+        "and hold the key the wizard collected for it"
+    );
+}
