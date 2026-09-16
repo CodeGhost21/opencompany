@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::content_tests_support::*;
 use super::workflow_file::WorkflowNodeKind;
-use crate::runtime::builder::{agent_scoped_grants, effective_grants};
+use crate::runtime::builder::agent_scoped_grants;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
     grants_media_explicit, grants_paypal_explicit, grants_search_explicit,
