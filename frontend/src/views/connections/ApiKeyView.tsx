@@ -8,7 +8,9 @@ import {
   getCompanyBilling,
   getCompanyCredential,
   setCompanyCredential,
+  setCompanyCredentialModel,
   type CompanyBilling,
+  type CompanyCredentialMutation,
   type CompanyCredentialStatus,
 } from "@/api/credential";
 import { restartInference } from "@/api/inference";
