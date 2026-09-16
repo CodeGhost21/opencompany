@@ -1010,12 +1010,8 @@ pub async fn fan_out(
                     error = %err,
                     "keys rework: could not migrate tinyhumans provider endpoint",
                 );
-                if let Err(forget_err) = inference_store::forget_health(
-                    company,
-                    secrets,
-                    inference::MANAGED_SLUG,
-                )
-                .await
+                if let Err(forget_err) =
+                    inference_store::forget_health(company, secrets, inference::MANAGED_SLUG).await
                 {
                     tracing::warn!(
                         company = %company,

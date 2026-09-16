@@ -231,15 +231,13 @@ pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credentia
         Some(key) => Credential::from_value(key),
         None => Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?)),
     };
-    let base_url = env
-        .get("OPENCOMPANY_INFERENCE_URL")
-        .unwrap_or_else(|| {
-            crate::company::inference::catalogue::tinyhumans_proxy_url(
-                &crate::company::composio::backend_url_or_default(
-                    env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
-                ),
-            )
-        });
+    let base_url = env.get("OPENCOMPANY_INFERENCE_URL").unwrap_or_else(|| {
+        crate::company::inference::catalogue::tinyhumans_proxy_url(
+            &crate::company::composio::backend_url_or_default(
+                env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
+            ),
+        )
+    });
     Some((credential, base_url))
 }
 
