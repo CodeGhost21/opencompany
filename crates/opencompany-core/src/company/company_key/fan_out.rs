@@ -994,9 +994,21 @@ pub async fn fan_out(
         .await
         {
             Ok(_) => SlotOutcome::Kept(SkipReason::RowExists),
-            // The row still exists and still routes on its old endpoint; a
-            // failed migration is not this save's failure to report as such.
-            Err(_) => SlotOutcome::Kept(SkipReason::RowExists),
+            // Unlike a successful migration, a failed one must not read as
+            // `Kept` — the account/inference keys are already updated and the
+            // health probe already checked the *new* endpoint, so a `Kept`
+            // here would report a clean save while the stored row keeps
+            // routing turns to the old one, with nothing on the response or
+            // in the journal saying the migration didn't land (Codex P1 /
+            // CodeRabbit review).
+            Err(err) => {
+                tracing::warn!(
+                    company = %company,
+                    error = %err,
+                    "keys rework: could not migrate tinyhumans provider endpoint",
+                );
+                SlotOutcome::Failed
+            }
         }
     } else if row.is_some() {
         SlotOutcome::Kept(SkipReason::RowExists)
