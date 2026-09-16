@@ -2922,9 +2922,11 @@ impl<'a> DelegationRunner<'a> {
     /// message, or when nothing matches — the honest answer for a handler write
     /// that failed (it is best-effort there), for a card written before this
     /// field existed, and for every non-REST caller of this seam, none of which
-    /// have a chat handler in front of them. Callers must not read `None` as
-    /// "the handler did not fire": the stand-down is keyed on the detector, not
-    /// on this.
+    /// have a chat handler in front of them. `None` therefore reads as "no card
+    /// to adopt", which — now that the handler cards on the operator's explicit
+    /// workflow request alone — is also how `carded_by_handler` is decided,
+    /// together with that request itself (a copilot thread suppresses the card
+    /// but not the signal).
     async fn chat_handler_card(&self) -> Result<Option<String>> {
         let Some(tasks) = self.tasks else {
             return Ok(None);
