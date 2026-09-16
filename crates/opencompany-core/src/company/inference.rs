@@ -1354,13 +1354,30 @@ async fn resolve_legacy_scoped(
         let provider = normalize_provider(declared).to_string();
         reject_unknown_provider(&provider, "`[inference].provider`")?;
         let raw = manifest.provider.as_deref().unwrap_or_default();
+        // Trimmed and blank-filtered once, up front: `resolve_endpoint` itself
+        // already treats a blank override as absent, but the two decisions
+        // below (whether the row/default may inherit the company-wide key, and
+        // which spelling of the provider reaches `resolve_endpoint`) used to
+        // check `manifest.base_url.is_some()` directly — a `base_url = ""` or
+        // whitespace-only manifest value read as "an endpoint was named" to
+        // both, which sent `credential_slug`'s lookup to `tinyhumans` while the
+        // endpoint side used the *normalized* `openrouter` spelling and skipped
+        // the managed branch entirely: a manifest `managed` with a blank
+        // `base_url` and a stored key resolved straight to `openrouter.ai`,
+        // reproducing the same 401 the raw/normalized split below exists to
+        // prevent (tinysweeper/CodeRabbit review).
+        let manifest_base_url = manifest
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
         let key = load_inference_key_for(
             company,
             secrets,
             credential_slug(raw),
             manifest.api_key_secret.as_deref(),
             scope,
-            manifest.base_url.is_none(),
+            manifest_base_url.is_none(),
         )
         .await?;
         let had_key = !key.trim().is_empty();
@@ -1377,7 +1394,7 @@ async fn resolve_legacy_scoped(
         // first-run wizard's TinyHumans card writes precisely that — resolved to
         // `openrouter.ai` carrying the TinyHumans key. The e2e symptom was a
         // wizard-built company answering every turn with a 401 from OpenRouter.
-        let endpoint_kind = if manifest.base_url.is_some() {
+        let endpoint_kind = if manifest_base_url.is_some() {
             provider.as_str()
         } else {
             declared
