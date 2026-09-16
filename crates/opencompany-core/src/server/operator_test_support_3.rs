@@ -215,7 +215,10 @@ pub(super) fn stored(event: CompanyEvent) -> StoredEvent {
 }
 
 // ---- issue #228: the workflow-run outcome projection ----
-pub(super) fn delivery_row(node: &str, status: crate::ports::DeliveryStatus) -> crate::ports::DeliveryReport {
+pub(super) fn delivery_row(
+    node: &str,
+    status: crate::ports::DeliveryStatus,
+) -> crate::ports::DeliveryReport {
     crate::ports::DeliveryReport {
         node: node.into(),
         kind: "email".into(),

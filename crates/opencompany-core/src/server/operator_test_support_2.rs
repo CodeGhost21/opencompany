@@ -522,7 +522,11 @@ pub(super) async fn assert_refused(body: serde_json::Value, expect_in_error: &st
 /// controllable instant — the gate is what `extend_approval` asks whether an
 /// id is live, and the journal is what projects the deadline, so an extend
 /// test needs both seeded exactly as a real park leaves them.
-pub(super) async fn park_for_extend(runtime: &Arc<CompanyRuntime>, id: &str, at_millis: u64) -> ApprovalId {
+pub(super) async fn park_for_extend(
+    runtime: &Arc<CompanyRuntime>,
+    id: &str,
+    at_millis: u64,
+) -> ApprovalId {
     use crate::runtime::journal::{ApprovalConversation, TaskLink};
     let approval = ApprovalId::new(id);
     let effect = crate::ports::types::Effect {
