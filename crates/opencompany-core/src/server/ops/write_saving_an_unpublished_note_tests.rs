@@ -574,7 +574,7 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
 /// Seeds a card sitting In Review with a `workflow` deliverable and the given
 /// proposal graph, straight through the task store (the builder pass that would
 /// normally mint it is behind the `openhuman` feature). Returns the card id.
-async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
+pub(super) async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
     seed_proposal_card_assigned(state, ops, "ceo").await
 }
 
@@ -582,7 +582,7 @@ async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
 /// passes rather than the hardcoded `"ceo"` — for proving the owning-desk
 /// default against a card assigned directly to a desk (issue #1882 review),
 /// where `assignee` is the desk's own canonical id rather than a teammate's.
-async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &str) -> String {
+pub(super) async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &str) -> String {
     let runtime = state
         .registry()
         .get(&CompanyId::new("acme"))
@@ -623,7 +623,7 @@ async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &st
 
 /// A valid two-node graph (trigger → agent) whose agent names a real roster
 /// teammate. `schedule` arms the trigger when `Some`.
-fn digest_ops(schedule: Option<&str>) -> Value {
+pub(super) fn digest_ops(schedule: Option<&str>) -> Value {
     let mut trigger = json!({ "id": "start", "kind": "trigger", "name": "Start" });
     if let Some(cron) = schedule {
         trigger["schedule"] = json!(cron);

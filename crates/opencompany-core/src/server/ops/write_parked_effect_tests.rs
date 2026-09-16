@@ -210,7 +210,7 @@ async fn send_auth(
 
 /// A parked effect to journal. Its content is irrelevant to the join — only the
 /// id and the instant matter.
-fn parked_effect() -> crate::ports::types::Effect {
+pub(super) fn parked_effect() -> crate::ports::types::Effect {
     use crate::ports::types::{Effect, EffectGroup};
     Effect {
         kind: "filing.submit".into(),

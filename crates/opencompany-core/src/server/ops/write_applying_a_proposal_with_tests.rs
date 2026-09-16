@@ -418,7 +418,7 @@ async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
 /// A company with one desk, so its runtime deliverable set is exactly
 /// `["engineering"]` — enough to tell a channel target that works from one that
 /// does not (issue #1191).
-fn desk_manifest() -> CompanyManifest {
+pub(super) fn desk_manifest() -> CompanyManifest {
     toml::from_str(
         "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
          [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n\
@@ -672,7 +672,7 @@ async fn a_card_can_be_created_as_a_workflow_deliverable() {
 /// Sends a `multipart/form-data` upload with one file part and an optional
 /// `parentId`, hand-rolling the body so the test exercises the real
 /// `Multipart` extractor rather than a stub.
-async fn upload_file(
+pub(super) async fn upload_file(
     state: &AppState,
     filename: &str,
     content_type: Option<&str>,

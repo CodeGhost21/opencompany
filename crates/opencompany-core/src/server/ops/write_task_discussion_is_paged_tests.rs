@@ -660,7 +660,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
 
 /// Parks an approval in the journal and seeds a card + its dispatch anchor.
 /// Returns `(runtime, dispatched_at_millis)`.
-async fn dispatched_task(
+pub(super) async fn dispatched_task(
     state: &AppState,
     company: &CompanyId,
 ) -> (std::sync::Arc<crate::CompanyRuntime>, u64) {

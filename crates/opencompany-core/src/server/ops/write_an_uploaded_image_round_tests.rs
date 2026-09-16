@@ -690,7 +690,7 @@ async fn an_upload_can_target_a_parent_folder() {
 // ---------------------------------------------------------------------------
 
 /// The boundary the raw-body helpers below agree on.
-const OVERSIZE_BOUNDARY: &str = "----opencompany647boundary";
+pub(super) const OVERSIZE_BOUNDARY: &str = "----opencompany647boundary";
 
 /// Posts an already-built body at the upload route.
 ///
@@ -698,7 +698,7 @@ const OVERSIZE_BOUNDARY: &str = "----opencompany647boundary";
 /// tests cannot do: the smallest of them weighs 65 MiB and two of them have to
 /// out-weigh a 256 MiB limit. Taking a `Body` lets the caller stream one — or
 /// malform one on purpose.
-async fn post_upload(state: &AppState, body: Body) -> (StatusCode, Value) {
+pub(super) async fn post_upload(state: &AppState, body: Body) -> (StatusCode, Value) {
     let request = Request::builder()
         .method("POST")
         .uri("/api/v1/company/workspace/upload")

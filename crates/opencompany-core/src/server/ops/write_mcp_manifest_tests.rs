@@ -210,7 +210,7 @@ async fn send_auth(
 
 /// A manifest that declares one committed `[[mcp_server]]` — used to assert the
 /// manifest-server guards (cannot delete; overridable).
-fn mcp_manifest() -> CompanyManifest {
+pub(super) fn mcp_manifest() -> CompanyManifest {
     toml::from_str(
         "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n[[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
     )
@@ -219,13 +219,13 @@ fn mcp_manifest() -> CompanyManifest {
 
 /// Boots an fs-backed company from a caller-supplied manifest (mirrors
 /// `state_with_company`, which pins the default manifest).
-async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
+pub(super) async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
     state_with_manifest_and_defaults(home, manifest, Vec::new()).await
 }
 
 /// Like [`state_with_manifest`], but with install-wide default MCP servers
 /// configured (issue #527), for asserting the default-override guards.
-async fn state_with_manifest_and_defaults(
+pub(super) async fn state_with_manifest_and_defaults(
     home: &std::path::Path,
     manifest: CompanyManifest,
     defaults: Vec<crate::company::McpServer>,

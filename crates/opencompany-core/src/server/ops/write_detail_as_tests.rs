@@ -624,7 +624,7 @@ async fn setup_is_reachable_under_both_scope_forms() {
 /// Uploads one file to the chat-attachment route, hand-rolling the multipart
 /// body so the test drives the real `Multipart` extractor rather than a stub —
 /// the same shape as `upload_file`, pointed at `/chat/upload`.
-async fn chat_upload(
+pub(super) async fn chat_upload(
     state: &AppState,
     filename: &str,
     content_type: Option<&str>,

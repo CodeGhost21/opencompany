@@ -610,7 +610,7 @@ async fn inflight_read_is_not_shadowed_by_task_detail() {
 }
 
 /// Seeds a board card for the discussion tests (#335).
-fn discussion_card(id: &str, title: &str) -> TaskRecord {
+pub(super) fn discussion_card(id: &str, title: &str) -> TaskRecord {
     TaskRecord {
         id: id.into(),
         title: TaskTitle::authored(title),
