@@ -2333,5 +2333,20 @@ async fn build_draft(
 }
 
 #[cfg(test)]
-#[path = "team_agent_tests.rs"]
-mod tests;
+#[path = "team_agent_a_company_past_its_tests.rs"]
+mod tests_a_company_past_its;
+#[cfg(test)]
+#[path = "team_agent_a_manifest_teammates_tools_tests.rs"]
+mod tests_a_manifest_teammates_tools;
+#[cfg(test)]
+#[path = "team_agent_a_member_may_change_tests.rs"]
+mod tests_a_member_may_change;
+#[cfg(test)]
+#[path = "team_agent_harness_and_model_persist_tests.rs"]
+mod tests_harness_and_model_persist;
+#[cfg(test)]
+#[path = "team_agent_requested_grants_reads_overlay_tests.rs"]
+mod tests_requested_grants_reads_overlay;
+#[cfg(test)]
+#[path = "team_agent_the_roster_list_carries_tests.rs"]
+mod tests_the_roster_list_carries;
