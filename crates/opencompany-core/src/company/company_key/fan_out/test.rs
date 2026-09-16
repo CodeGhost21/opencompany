@@ -103,6 +103,7 @@ impl SecretStore for SlowSecrets {
 struct FakeProber {
     answer: std::result::Result<Vec<String>, probe::ProbeClass>,
     calls: AtomicUsize,
+    last_base_url: Mutex<Option<String>>,
 }
 
 impl FakeProber {
@@ -110,6 +111,7 @@ impl FakeProber {
         Self {
             answer: Ok(ids.iter().map(|s| s.to_string()).collect()),
             calls: AtomicUsize::new(0),
+            last_base_url: Mutex::new(None),
         }
     }
 
@@ -117,7 +119,15 @@ impl FakeProber {
         Self {
             answer: Err(class),
             calls: AtomicUsize::new(0),
+            last_base_url: Mutex::new(None),
         }
+    }
+
+    /// The `base_url` the most recent [`InferenceProber::probe`] call
+    /// received, so a test can assert *what* was probed, not merely that
+    /// something was.
+    fn last_base_url(&self) -> Option<String> {
+        self.last_base_url.lock().unwrap().clone()
     }
 }
 
@@ -125,10 +135,11 @@ impl FakeProber {
 impl InferenceProber for FakeProber {
     async fn probe(
         &self,
-        _base_url: &str,
+        base_url: &str,
         _key: &str,
     ) -> std::result::Result<Vec<String>, probe::ProbeFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_base_url.lock().unwrap() = Some(base_url.to_string());
         match &self.answer {
             Ok(ids) => Ok(ids.clone()),
             Err(class) => Err(probe::ProbeFailure {
