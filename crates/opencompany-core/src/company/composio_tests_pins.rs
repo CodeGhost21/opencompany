@@ -5,8 +5,8 @@
 use super::*;
 
 #[derive(Default)]
-struct MemSecrets {
-    map: std::sync::Mutex<std::collections::HashMap<String, String>>,
+pub(super) struct MemSecrets {
+    pub(super) map: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
 #[async_trait::async_trait]
@@ -27,7 +27,7 @@ impl SecretStore for MemSecrets {
 
 /// Raw slot contents, blank-or-absent collapsed to `""`, so an assertion holds
 /// on a backend that stores `""` and on one that treats it as absent.
-async fn raw(secrets: &dyn SecretStore, company: &CompanyId, key: &str) -> String {
+pub(super) async fn raw(secrets: &dyn SecretStore, company: &CompanyId, key: &str) -> String {
     secrets
         .get(company, key)
         .await
@@ -196,9 +196,9 @@ async fn storing_a_key_selects_byok_and_clearing_it_gives_the_managed_route_back
 /// Wraps [`MemSecrets`] and fails every `set` for one chosen key, so a test
 /// can land a `store_api_key` call exactly at its second write and inspect
 /// what the first one left behind.
-struct SecretsFailingToWrite {
-    inner: MemSecrets,
-    blocked_key: &'static str,
+pub(super) struct SecretsFailingToWrite {
+    pub(super) inner: MemSecrets,
+    pub(super) blocked_key: &'static str,
 }
 
 #[async_trait::async_trait]
