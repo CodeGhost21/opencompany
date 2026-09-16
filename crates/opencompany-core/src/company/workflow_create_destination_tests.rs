@@ -1,7 +1,8 @@
 //! workflow_create: output destinations (issue #981) and issue #813's required config.args.
 
 use super::test_support::*;
-use super::tests_tool_call::tool_call_draft;
+use super::tests_problems::problems_of;
+use super::tests_tool_call::{tool_call_draft, tool_call_draft_args};
 #[cfg(feature = "openhuman")]
 use super::tests_tool_call::{manifest_with_allow, tool_call_draft_args};
 use super::*;

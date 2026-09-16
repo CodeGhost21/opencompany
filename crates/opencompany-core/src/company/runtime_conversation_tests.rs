@@ -1,5 +1,9 @@
 //! Runtime tests: cross-desk conversation width limits and gated-node approval expiry.
 
+use super::CompanyEvent;
+use super::tests_approval::runtime_with_events;
+use crate::ports::tasks::TaskTitle;
+use std::sync::Arc;
 
 /// Issue #1852 Part 1 — the discard bug and its fix, proven directly on
 /// `run_dispatch_cycle` rather than on any one `Brain`'s output shape.

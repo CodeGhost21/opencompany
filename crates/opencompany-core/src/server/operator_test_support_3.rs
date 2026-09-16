@@ -1,4 +1,5 @@
 use super::*;
+use crate::ports::tasks::TaskTitle;
 use crate::ports::types::{EventSeq, StoredEvent};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::server::router;

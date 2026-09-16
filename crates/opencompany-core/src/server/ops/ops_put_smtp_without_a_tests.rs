@@ -18,6 +18,8 @@ use crate::runtime::RuntimeBuilder;
 use crate::server::ops::ConnectionsRuntime;
 use crate::server::ops::mailer::RecordingMailSender;
 use crate::server::router;
+#[cfg(not(feature = "webhooks"))]
+use crate::server::webhook::DefaultHashSigner;
 use crate::{AppConfig, AppState};
 
 fn home() -> tempfile::TempDir {

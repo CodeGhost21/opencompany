@@ -1,6 +1,7 @@
 //! Runtime tests: approval extension, retirement failures, and thread-root resolution.
 
 use super::CompanyEvent;
+use std::sync::Arc;
 
 /// **Fail-closed, and leave nothing behind.** The fixture roster declares
 /// no `delegates_to`, so an agent may not cause a turn on another desk —

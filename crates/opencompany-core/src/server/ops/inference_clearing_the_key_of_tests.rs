@@ -3,6 +3,9 @@ use serde_json::json;
 
 use super::inference_test_support::*;
 
+use crate::ports::types::CompanyId;
+use crate::runtime::RuntimeBuilder;
+use crate::{AppConfig, AppState};
 
 #[tokio::test]
 async fn clearing_the_key_of_the_default_provider_is_refused_without_confirmation() {
