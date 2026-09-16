@@ -1,6 +1,7 @@
 //! workflow_create: issue #259's delete path and the version token.
 
 use super::test_support::*;
+use super::tests_schedule_update::with_one_workflow;
 use super::*;
 
 // --- #259: delete ------------------------------------------------------
