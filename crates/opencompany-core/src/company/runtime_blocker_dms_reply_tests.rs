@@ -309,7 +309,7 @@ async fn park_thread_less_blocker(runtime: &Arc<CompanyRuntime>, task_id: &str) 
         .record_parked(
             &id,
             &effect,
-            super::super::now_millis(),
+            super::now_millis(),
             TaskLink::from_task_id(Some(task_id)),
             ApprovalConversation::default(),
             None,
