@@ -25,17 +25,56 @@ export type AccountLoad = "loading" | "ready" | "error";
 /**
  * What the account row is.
  *
- * Three, not two, and the third is the point. `company_key::resolve` propagates
- * a store read error rather than falling through to the instance identity,
- * because "we cannot read the store" and "no key is set" are different answers
- * that call for opposite actions — and a console that renders the first as the
- * second would tell an admin to set a key they have already set. The host went
- * to some trouble to keep them apart; the page has to spend a state on it.
+ * `unknown` is not `empty`, and that is the distinction the host paid for.
+ * `company_key::resolve` propagates a store read error rather than falling
+ * through to the instance identity, because "we cannot read the store" and "no
+ * key is set" are different answers that call for opposite actions — and a
+ * console that renders the first as the second would tell an admin to set a key
+ * they have already set. The page has to spend a state on it.
+ *
+ * `rejected` is the same argument one step further out: a key that is stored is
+ * not a key that works, and the two look identical to everything except the one
+ * call that presents it. See {@link keyVerdict}.
  */
-export type AccountShape = "unknown" | "empty" | "connected";
+export type AccountShape = "unknown" | "empty" | "connected" | "rejected";
 
 /**
- * Which of the three states the row is in.
+ * Whether the stored credential actually works, as far as anything on this page
+ * has been told.
+ *
+ * `source` cannot answer this. It reports which credential tier is **stored**,
+ * which is a fact about the secret store and not about the account behind it —
+ * a revoked key resolves to `company` for as long as its characters sit in the
+ * store. The one call on this page that presents the key to the hub is the
+ * billing read, so that read is the only evidence there is either way.
+ *
+ * Both non-`unknown` verdicts are earned, and neither is inferred from the
+ * other's absence:
+ *
+ * - `working` needs a summary to have come back. A key with no failure reported
+ *   against it is not a key known to work — the hub may simply not have been
+ *   asked, on a host with no hub, or on an older host that says nothing.
+ * - `rejected` needs the host to have said `rejected` **and** the tier to be
+ *   this company's own. A refusal against a fallback platform identity is not
+ *   this company's key to replace, and a row telling its admin to replace one
+ *   would send them to rotate a credential they do not hold.
+ */
+export type KeyVerdict = "unknown" | "working" | "rejected";
+
+/** @see {@link KeyVerdict} */
+export function keyVerdict(
+  status: CompanyCredentialStatus | null,
+  billing: CompanyBilling | null,
+): KeyVerdict {
+  if (billing?.summary !== undefined) return "working";
+  if (status?.source === "company" && billing?.unavailableReason === "rejected") {
+    return "rejected";
+  }
+  return "unknown";
+}
+
+/**
+ * Which of the four states the row is in.
  *
  * Keyed on `source`, which is what
  * [`resolve`](../../../../src/company/company_key.rs) returned — not on
@@ -44,11 +83,34 @@ export type AccountShape = "unknown" | "empty" | "connected";
  * exists to describe: a hosted tenant with no key of its own still has a
  * working identity, and a row built on `configured` would call that
  * "not configured" while the server's account quietly pays for every turn.
+ *
+ * `source` alone cannot separate a stored key from a working one, which is what
+ * `billing` is here for — a third argument rather than an optional one, so that
+ * no call site can leave the evidence out and get a confident answer back. The
+ * load guards still outrank it: a page that does not know whose account this is
+ * has nothing to say about whether the account works.
  */
-export function accountShape(load: AccountLoad, status: CompanyCredentialStatus | null): AccountShape {
+export function accountShape(
+  load: AccountLoad,
+  status: CompanyCredentialStatus | null,
+  billing: CompanyBilling | null,
+): AccountShape {
   if (load !== "ready" || status === null) return "unknown";
-  return status.source === "none" ? "empty" : "connected";
+  if (status.source === "none") return "empty";
+  return keyVerdict(status, billing) === "rejected" ? "rejected" : "connected";
 }
+
+/**
+ * What the row says where the stored key is this company's own and the hub
+ * refused it.
+ *
+ * "is set" rather than "is connected": the key exists, which is what separates
+ * this from the empty state and tells its admin that replacing is the move
+ * rather than setting one for the first time. No payer is named, for the reason
+ * {@link accountSubline} gives, and the hub's own words are nowhere in it.
+ */
+export const REJECTED_SUBLINE =
+  "This company's key is set, but TinyHumans is refusing it — replace it to reconnect.";
 
 /**
  * The one sub-line the account row shows: which tier actually answers.
@@ -69,11 +131,23 @@ export function accountShape(load: AccountLoad, status: CompanyCredentialStatus 
  * which is the same overclaim this page's pass exists to remove, one row down.
  * The billing move is stated where it is conditional and true: on the header
  * card beside the Connect button, and in {@link REMOVAL_AND_THINKING}.
+ *
+ * **A verdict outranks the tier.** Where {@link keyVerdict} has evidence the
+ * stored key is refused, that is what the row says — an identity claim built on
+ * `source` describes a credential that no longer acts as anything.
  */
-export function accountSubline(load: AccountLoad, status: CompanyCredentialStatus | null): string {
+export function accountSubline(
+  load: AccountLoad,
+  status: CompanyCredentialStatus | null,
+  billing: CompanyBilling | null,
+): string {
   if (load !== "ready" || status === null) {
     return "The host could not say — this is not the same as having no key";
   }
+  // Before the switch, not after it: `source` answers "which tier is stored"
+  // and would otherwise claim this company is acting as its own account while
+  // the only call that presented the key came back refused.
+  if (keyVerdict(status, billing) === "rejected") return REJECTED_SUBLINE;
   switch (status.source) {
     case "company":
       return "Acting as this company's own TinyHumans account";
