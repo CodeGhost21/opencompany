@@ -820,4 +820,5 @@ async fn apply(
 }
 
 #[cfg(test)]
-mod test;
+#[path = "memory_engine_tests.rs"]
+mod tests;

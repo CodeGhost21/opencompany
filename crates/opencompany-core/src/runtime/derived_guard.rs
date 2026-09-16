@@ -309,5 +309,5 @@ impl WorkspaceStore for DerivedGuardWorkspace {
 }
 
 #[cfg(test)]
-#[path = "derived_guard_test.rs"]
-mod test;
+#[path = "derived_guard_tests.rs"]
+mod tests;

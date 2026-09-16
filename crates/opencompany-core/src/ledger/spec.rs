@@ -713,5 +713,5 @@ pub(super) fn invalid(message: impl Into<String>) -> OpenCompanyError {
 }
 
 #[cfg(test)]
-#[path = "spec_test.rs"]
-mod test;
+#[path = "spec_tests.rs"]
+mod tests;

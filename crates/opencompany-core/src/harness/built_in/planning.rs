@@ -2400,4 +2400,17 @@ fn ambiguity_reason(candidates: &[AssigneeCandidate]) -> String {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "planning/planning_fixtures_tests.rs"]
+mod planning_fixtures_tests;
+#[cfg(test)]
+#[path = "planning/planning_whole_pass_tests.rs"]
+mod planning_whole_pass_tests;
+#[cfg(test)]
+#[path = "planning/planning_ambiguous_ownership_tests.rs"]
+mod tests_ambiguous_ownership;
+#[cfg(test)]
+#[path = "planning/planning_credential_resolver_tests.rs"]
+mod tests_credential_resolver;
+#[cfg(test)]
+#[path = "planning/planning_native_first_tests.rs"]
+mod tests_native_first;

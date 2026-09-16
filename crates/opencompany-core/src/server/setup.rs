@@ -1185,7 +1185,20 @@ fn parse_value(spec: &FieldSpec, raw: Option<&str>) -> Result<ConfigValue, OpenC
 }
 
 #[cfg(test)]
-mod test;
+#[path = "setup/setup_test_group_1.rs"]
+mod setup_test_group_1;
+#[cfg(test)]
+#[path = "setup/setup_test_group_2.rs"]
+mod setup_test_group_2;
+#[cfg(test)]
+#[path = "setup/setup_test_group_3.rs"]
+mod setup_test_group_3;
+#[cfg(test)]
+#[path = "setup/setup_test_group_4.rs"]
+mod setup_test_group_4;
+#[cfg(test)]
+#[path = "setup/setup_test_support_1.rs"]
+mod setup_test_support_1;
 
 // ---------------------------------------------------------------------------
 // The roster proposal, before any company exists
