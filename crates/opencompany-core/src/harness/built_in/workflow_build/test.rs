@@ -48,7 +48,7 @@ use openhuman_core::tools::traits::Tool;
 /// script drives the create-time copilot's draft→correct loop (issue #813): a
 /// `bad → good` script proves the retry recovers, a single `bad` proves a second
 /// failure folds to not-automatable.
-struct ScriptedModel {
+pub(crate) struct ScriptedModel {
     replies: Vec<String>,
     /// When true the model errors instead of answering — the brain being down.
     fail: bool,
@@ -59,13 +59,13 @@ struct ScriptedModel {
 }
 
 impl ScriptedModel {
-    fn replying(reply: impl Into<String>) -> Arc<Self> {
+    pub(crate) fn replying(reply: impl Into<String>) -> Arc<Self> {
         Self::scripting(vec![reply.into()])
     }
 
     /// A model that answers each call with the next reply in `replies`, repeating
     /// the last once the script runs out.
-    fn scripting(replies: Vec<String>) -> Arc<Self> {
+    pub(crate) fn scripting(replies: Vec<String>) -> Arc<Self> {
         assert!(
             !replies.is_empty(),
             "a scripted model needs at least one reply"
@@ -78,7 +78,7 @@ impl ScriptedModel {
         })
     }
 
-    fn failing() -> Arc<Self> {
+    pub(crate) fn failing() -> Arc<Self> {
         Arc::new(Self {
             replies: Vec::new(),
             fail: true,
@@ -87,7 +87,7 @@ impl ScriptedModel {
         })
     }
 
-    fn calls(&self) -> usize {
+    pub(crate) fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
 }
@@ -145,7 +145,7 @@ pub(crate) struct NativeStep {
 
 impl NativeStep {
     /// A turn that calls one tool with the given arguments.
-    fn call(tool: &str, args: Value) -> Self {
+    pub(crate) fn call(tool: &str, args: Value) -> Self {
         Self {
             text: String::new(),
             calls: vec![(tool.to_string(), args)],
@@ -219,7 +219,7 @@ impl NativeCopilotModel {
 
     /// Attaches per-call token usage and a backend-charged USD amount to every
     /// reply — the managed-backend metering signal.
-    fn with_charge(self: Arc<Self>, input: u64, output: u64, usd: f64) -> Arc<Self> {
+    pub(crate) fn with_charge(self: Arc<Self>, input: u64, output: u64, usd: f64) -> Arc<Self> {
         // The model is built before it is shared; mutate through a fresh Arc.
         let mut model = Arc::try_unwrap(self).ok().expect("uniquely held at setup");
         model.usage = Some(Usage {
@@ -231,21 +231,21 @@ impl NativeCopilotModel {
         Arc::new(model)
     }
 
-    fn calls(&self) -> usize {
+    pub(crate) fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
 
     /// The `request.messages` recorded for each invoke so far, in call order.
-    fn seen_messages(&self) -> Vec<Vec<Message>> {
+    pub(crate) fn seen_messages(&self) -> Vec<Vec<Message>> {
         self.seen_messages.lock().unwrap().clone()
     }
 
     /// The `request.tools` names recorded for each invoke so far, in call order.
-    fn seen_tool_names(&self) -> Vec<Vec<String>> {
+    pub(crate) fn seen_tool_names(&self) -> Vec<Vec<String>> {
         self.seen_tool_names.lock().unwrap().clone()
     }
 
-    fn next_step(&self) -> NativeStep {
+    pub(crate) fn next_step(&self) -> NativeStep {
         let mut steps = self.steps.lock().unwrap();
         if let Some(step) = steps.pop_front() {
             step
@@ -320,12 +320,12 @@ impl HarnessModel for NativeCopilotModel {
 /// A usage meter that keeps every recorded sample, so a test can assert what the
 /// copilot's turn metered (or that a zero-usage turn metered nothing).
 #[derive(Default)]
-struct RecordingUsageMeter {
+pub(crate) struct RecordingUsageMeter {
     samples: StdMutex<Vec<UsageSample>>,
 }
 
 impl RecordingUsageMeter {
-    fn samples(&self) -> Vec<UsageSample> {
+    pub(crate) fn samples(&self) -> Vec<UsageSample> {
         self.samples.lock().unwrap().clone()
     }
 }
@@ -350,7 +350,7 @@ impl UsageMeter for RecordingUsageMeter {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const MANIFEST: &str = r#"
+pub(crate) const MANIFEST: &str = r#"
 [company]
 name = "Acme"
 
@@ -366,11 +366,11 @@ mode = "full"
 allow = ["docs", "web"]
 "#;
 
-fn manifest() -> CompanyManifest {
+pub(crate) fn manifest() -> CompanyManifest {
     toml::from_str(MANIFEST).expect("the fixture manifest parses")
 }
 
-struct EmptyUsageMeter;
+pub(crate) struct EmptyUsageMeter;
 
 #[async_trait]
 impl UsageMeter for EmptyUsageMeter {
@@ -388,7 +388,7 @@ impl UsageMeter for EmptyUsageMeter {
 }
 
 /// A valid answer: a two-node scheduled graph whose agent is on the roster.
-const VALID_GRAPH: &str = r#"```json
+pub(crate) const VALID_GRAPH: &str = r#"```json
 {
   "automatable": true,
   "summary": "Email the weekly digest every Monday",

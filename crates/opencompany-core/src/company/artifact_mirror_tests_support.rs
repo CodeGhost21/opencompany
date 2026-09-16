@@ -460,7 +460,7 @@ impl WorkspaceStore for PausedSwap {
 /// calls the barrier is bypassed, so a publisher that fails early (which is
 /// exactly what the *unfixed* code does) cannot strand its partner waiting
 /// for a rendezvous that will never come.
-struct PausedTreeRead {
+pub(super) struct PausedTreeRead {
     inner: Arc<FsOps>,
     barrier: Arc<tokio::sync::Barrier>,
     arrivals: std::sync::atomic::AtomicUsize,
