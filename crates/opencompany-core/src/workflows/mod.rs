@@ -79,12 +79,5 @@ pub fn tinyflows_engine_name() -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The tinyflows engine is linked and its API answers — the P0 link proof.
-    #[test]
-    fn tinyflows_engine_is_linked() {
-        assert_eq!(tinyflows_engine_name(), "tinyflows");
-    }
-}
+#[path = "workflows_tests.rs"]
+mod tests;
