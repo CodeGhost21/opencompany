@@ -1,8 +1,12 @@
 //! Runtime tests: cross-desk conversation width limits and gated-node approval expiry.
 
+#[cfg(feature = "openhuman")]
 use super::CompanyEvent;
+#[cfg(feature = "openhuman")]
 use super::tests_approval::runtime_with_events;
+#[cfg(feature = "openhuman")]
 use crate::ports::tasks::TaskTitle;
+#[cfg(all(feature = "openhuman", feature = "hivemind"))]
 use std::sync::Arc;
 
 /// Issue #1852 Part 1 — the discard bug and its fix, proven directly on
