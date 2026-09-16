@@ -1390,12 +1390,8 @@ async fn resolve_legacy_scoped(
         } else {
             runtime.provider.as_str()
         };
-        let (base_url, credential, proxied) = resolve_endpoint(
-            endpoint_kind,
-            runtime.base_url.as_deref(),
-            key,
-            env_default,
-        );
+        let (base_url, credential, proxied) =
+            resolve_endpoint(endpoint_kind, runtime.base_url.as_deref(), key, env_default);
         let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider,
