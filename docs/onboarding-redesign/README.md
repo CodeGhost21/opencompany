@@ -5,12 +5,11 @@ raw model-picker, both branches reusing the real Connections mechanisms
 instead of a separate wizard-only path, and a straight landing in the console
 instead of a second post-build checklist screen.
 
-This is a direct continuation of [keys rework](../key-reworks/README.md)
-(#2306, merged) and depends on issue
+Depends on issue
 [#2342](https://github.com/tinyhumansai/opencompany/issues/2342) (the
-search-managed-key fan-out slot). This folder is written the same way that
-one is: a plan **and** an implementation brief, so an implementer with no
-other context can execute a slice exactly.
+search-managed-key fan-out slot). This folder is a plan **and** an
+implementation brief — an implementer with no other context should be able to
+execute a slice exactly from what's written here.
 
 - **Requested by:** the operator, 2026-09-16, worked out turn-by-turn across a
   design conversation, not a written brief. This folder is that conversation's
@@ -117,8 +116,6 @@ beyond `search/managed/key`; the grant-landing relocation in
   [reuse-mapping.md](reuse-mapping.md) part 2).
 
 ## Rules for the implementer
-
-Same as [key-reworks](../key-reworks/README.md#rules-for-the-implementer):
 
 - Rust: `cargo fmt --all -- --check` locally; clippy/tests on CI, verified by
   head SHA, zero failures **and** zero pending.

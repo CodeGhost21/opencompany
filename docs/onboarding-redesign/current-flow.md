@@ -22,10 +22,15 @@ with neither `account` nor `advanced` needed shows four — which is what the
 
 **1. Model (`power`, `PowerStep`, `:1506-1889`).** "What should your team
 think with?" — provider dropdown, API key field, Test connection button, a
-"Sign in with TinyHumans" link-out. Full trace of this step (Test connection,
-the live probe, the Next gate) is in the parent conversation this folder
-comes from; short version: `tested.kind` must be `ok`, `skipped`, or `hosted`
-to advance (`problem()`, `:998-1027`).
+"Sign in with TinyHumans" link-out. Clicking Test connection sets
+`tested = { kind: "testing" }`, then `POST /api/v1/setup/inference/test`
+(handler `test_inference`, `server/setup.rs`) makes a **live probe call** —
+one real chat turn sent through the actual provider path — and returns
+`ok`/`model` or a summarized error; the raw key is used and discarded, never
+stored by this call. `tested.kind` must land on `ok`, `skipped` (the "no
+model" choice), or `hosted` (the host already supplies inference) to advance
+— `problem()` (`:998-1027`) blocks Next otherwise, with "test the connection
+first" or "that connection did not work" depending on which.
 
 **2. Business (`BusinessStep`, `:2362`).** "What kind of company are you
 setting up?" — a template `<select>` if the host has any, else free-text
