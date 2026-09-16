@@ -267,7 +267,12 @@ async fn park_node_blocker_on_run(
     id.to_string()
 }
 
-async fn answer(rt: &Arc<CompanyRuntime>, id: &str, intent: BlockerReplyIntent, text: &str) {
+async fn answer(
+    rt: &Arc<CompanyRuntime>,
+    id: &str,
+    intent: BlockerReplyIntent,
+    text: &str,
+) {
     let ids = vec![crate::ports::types::ApprovalId::from(id.to_string())];
     rt.apply_blocker_reply(&ids, intent, text, None)
         .await
@@ -277,6 +282,8 @@ async fn answer(rt: &Arc<CompanyRuntime>, id: &str, intent: BlockerReplyIntent, 
 /// The acceptance headline: a workflow parked at a failed node and
 /// answered `retry` re-runs, and the answer is on the trigger input the
 /// re-run carries — not banked in the DM and dropped.
+#[tokio::test]
+
 /// The reserved key is never written for a verdict that starts no run.
 #[tokio::test]
 async fn a_cancelled_answer_never_reaches_a_trigger_input() {
@@ -428,7 +435,8 @@ async fn a_cancelled_answer_retires_the_stash_and_prunes_its_checkpoint() {
 /// checkpoint lineage too, not only release the stash.
 #[cfg(feature = "openhuman")]
 #[tokio::test]
-async fn reconcile_stranded_blocked_nodes_prunes_checkpoint_lineage_for_an_unapproved_stash() {
+async fn reconcile_stranded_blocked_nodes_prunes_checkpoint_lineage_for_an_unapproved_stash()
+ {
     use tinyflows::graph::Checkpointer;
 
     let home = seed_home();

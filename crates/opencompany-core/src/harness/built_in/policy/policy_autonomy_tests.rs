@@ -700,4 +700,3 @@ async fn media_generate_parks_supervised_and_denies_readonly_but_list_is_read_on
     );
 }
 
-/// Paid generation classifies as a spend effect (issue #109).
