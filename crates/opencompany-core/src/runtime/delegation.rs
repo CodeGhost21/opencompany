@@ -2656,7 +2656,7 @@ impl<'a> DelegationRunner<'a> {
         // orchestrator turn (the CEO-relay hand-back). Their steps ride
         // along and get folded onto the relayed operator bubble.
         Ok(DelegationOutcome {
-            bubble: None,
+            bubbles: Vec::new(),
             // Not a board write; see `DelegationOutcome::assigned`.
             assigned: false,
             desk_reply: Some(DeskReply {
@@ -3236,6 +3236,56 @@ impl<'a> DelegationRunner<'a> {
                     ctx,
                 ))
                 .await
+            }
+            Delegation::ConversationDispatch {
+                source,
+                target,
+                message,
+                chat_id,
+                trigger_sequence,
+                child_hop,
+            } => {
+                let _scope = self
+                    .queue
+                    .enter_scope(delegation_tools::teammate_scope_key(&target));
+                let prompt = format!("@{source} sent you this direct message:\n\n{message}");
+                let outcome = self
+                    .run_turn
+                    .run(
+                        self.company,
+                        &target,
+                        &prompt,
+                        ChatTarget::channel(Some(&chat_id))
+                            .answering(Some(EventSeq::new(trigger_sequence))),
+                    )
+                    .await?;
+                let nested = Box::pin(self.drain_and_execute(
+                    Some(&chat_id),
+                    MessageContext::default(),
+                    HandOffs::Run,
+                ))
+                .await?;
+                let mut bubbles = vec![OutboundMessage {
+                    message_id: None,
+                    task_id: None,
+                    outputs: Vec::new(),
+                    channel: chat_id,
+                    agent: Some(target),
+                    text: outcome.reply,
+                    steps: outcome.steps,
+                    reply_to: None,
+                    mentions: Vec::new(),
+                }];
+                bubbles.extend(nested.bubbles);
+                tracing::debug!(
+                    company = %self.company,
+                    hop = child_hop,
+                    "[tinyhivemind] completed a bounded agent-to-agent DM turn"
+                );
+                Ok(DelegationOutcome {
+                    bubbles,
+                    ..DelegationOutcome::default()
+                })
             }
             // ── Issue #186 part b: orchestrator lifecycle authority ─────────
             //
