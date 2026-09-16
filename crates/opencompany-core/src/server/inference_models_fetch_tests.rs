@@ -102,8 +102,7 @@ fn spawn_proxy_catalog(
                     .unwrap_or(0);
                 let (status, body) = respond(offset);
                 let status = StatusCode::from_u16(status).unwrap();
-                (status, [("content-type", "application/json")], body).into_response()
-                    as Response
+                (status, [("content-type", "application/json")], body).into_response() as Response
             }
         }),
     );

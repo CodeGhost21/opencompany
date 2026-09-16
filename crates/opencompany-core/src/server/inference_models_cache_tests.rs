@@ -274,12 +274,9 @@ fn rotating_a_credential_evicts_only_that_companys_authenticated_catalogs() {
     let acme_console = "rot-acme".to_string();
     let acme_harness = format!("rot-acme\u{1}{}", "research");
 
-    catalog_cache_scoped(ENDPOINT, Some(&acme_console))
-        .store(vec![model("old/entitlement")], now);
-    catalog_cache_scoped(ENDPOINT, Some(&acme_harness))
-        .store(vec![model("old/entitlement")], now);
-    catalog_cache_scoped(ENDPOINT, Some("rot-other"))
-        .store(vec![model("other/entitlement")], now);
+    catalog_cache_scoped(ENDPOINT, Some(&acme_console)).store(vec![model("old/entitlement")], now);
+    catalog_cache_scoped(ENDPOINT, Some(&acme_harness)).store(vec![model("old/entitlement")], now);
+    catalog_cache_scoped(ENDPOINT, Some("rot-other")).store(vec![model("other/entitlement")], now);
     catalog_cache_scoped(ENDPOINT, None).store(vec![model("public/model")], now);
 
     evict_company_catalogs("rot-acme");
@@ -445,11 +442,7 @@ async fn a_queued_caller_never_waits_longer_than_the_catalog_timeout() {
     let bound = Duration::from_millis(120);
     let fetch_delay = Duration::from_millis(80);
 
-    async fn bounded_miss(
-        cache: Arc<ModelCatalogCache>,
-        bound: Duration,
-        fetch_delay: Duration,
-    ) {
+    async fn bounded_miss(cache: Arc<ModelCatalogCache>, bound: Duration, fetch_delay: Duration) {
         let _ = tokio::time::timeout(bound, async {
             let _fetch_guard = cache.fetch_lock.lock().await;
             let now = Instant::now();

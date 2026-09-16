@@ -542,8 +542,7 @@ async fn spec_never_leaks_a_configured_host_path() {
     );
 
     let unset =
-        spec_body(AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf()))
-            .await;
+        spec_body(AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf())).await;
     assert_eq!(unset["openhuman_configured"].as_bool(), Some(false));
 }
 
