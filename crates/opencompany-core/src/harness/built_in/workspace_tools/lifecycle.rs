@@ -726,11 +726,11 @@ impl Tool for WorkspaceRenameTool {
 #[path = "lifecycle/lifecycle_fixtures_tests.rs"]
 mod lifecycle_fixtures_tests;
 #[cfg(test)]
+#[path = "lifecycle/lifecycle_declared_surface_tests.rs"]
+mod tests_declared_surface;
+#[cfg(test)]
 #[path = "lifecycle/lifecycle_delete_tests.rs"]
 mod tests_delete;
 #[cfg(test)]
 #[path = "lifecycle/lifecycle_rename_tests.rs"]
 mod tests_rename;
-#[cfg(test)]
-#[path = "lifecycle/lifecycle_declared_surface_tests.rs"]
-mod tests_declared_surface;

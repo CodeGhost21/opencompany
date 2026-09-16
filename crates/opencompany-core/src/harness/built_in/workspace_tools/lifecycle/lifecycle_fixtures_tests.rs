@@ -228,4 +228,3 @@ impl ArtifactStore for FailingArtifacts {
         unreachable!("history_of only lists")
     }
 }
-

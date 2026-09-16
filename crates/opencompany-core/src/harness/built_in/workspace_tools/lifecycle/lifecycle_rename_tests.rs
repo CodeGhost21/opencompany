@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::lifecycle_fixtures_tests::*;
 use super::*;
 use crate::company::workspace_scaffold::{ensure_agent_folder, ensure_workspace_scaffold};
 use crate::harness::workspace_tools::tests::{TEST_AGENT, agent_origin, file, folder, text, ws};
@@ -9,7 +10,6 @@ use crate::ports::workspace::{
     BlobStream, FolderClaim, WorkspaceNode, WorkspaceOrigin, WorkspaceStore,
 };
 use crate::store::FsOps;
-use super::lifecycle_fixtures_tests::*;
 
 // ---------------------------------------------------------------------------
 // workspace_rename
@@ -442,4 +442,3 @@ async fn tenancy_a_borrowed_node_id_cannot_be_renamed_by_another_company() {
     );
     assert_eq!(home.node("n-draft").await.name, "Draft.md");
 }
-
