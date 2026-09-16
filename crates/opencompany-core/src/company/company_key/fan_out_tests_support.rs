@@ -101,14 +101,14 @@ pub(super) struct FakeProber {
 }
 
 impl FakeProber {
-    fn ok(ids: &[&str]) -> Self {
+    pub(super) fn ok(ids: &[&str]) -> Self {
         Self {
             answer: Ok(ids.iter().map(|s| s.to_string()).collect()),
             calls: AtomicUsize::new(0),
         }
     }
 
-    fn failing(class: probe::ProbeClass) -> Self {
+    pub(super) fn failing(class: probe::ProbeClass) -> Self {
         Self {
             answer: Err(class),
             calls: AtomicUsize::new(0),
