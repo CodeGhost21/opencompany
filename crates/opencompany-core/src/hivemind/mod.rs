@@ -73,6 +73,7 @@ pub mod prompt;
 pub mod referral;
 pub mod scope;
 pub mod types;
+
 #[cfg(test)]
 mod aside_test;
 #[cfg(test)]
@@ -99,14 +100,74 @@ mod referral_prompt_tests;
 mod round_tests;
 #[cfg(test)]
 pub(crate) mod test;
-
-
 pub use aside::{ASIDE_MARKER, AsideConfig, SURFACE_MARKER};
 pub use episode::{EpisodeDriver, HiveTurnRunner};
 pub use log::EventLogSessionLog;
 pub use memory::{
+    HIVE_MEMORY_LABEL_PREFIX, HiveMemory, HiveMemoryHit, HiveMemoryNote, NullHiveMemory,
+    desk_prefix, note_label,
+};
 pub use moves::{MOVE_KINDS, MoveViolation, UNGATED_KINDS, line_kind, readable};
 pub use prompt::{EpisodePrompt, canonical_topic, marker_line};
 pub use referral::{
+    AskedQuestion, EpisodeReferrals, FederationDesk, HiveFederation, HiveReferralRunner,
+    REACH_WORDS, ReferralConfig, ReferralLedger,
+};
 pub use scope::EpisodeScope;
 pub use types::{
+    EpisodeEnding, EpisodeOutcome, HiveConfig, HiveDesk, HiveMember, HivePolicy, company_desks,
+    desk_episode, desk_federation, effective_hive_config,
+};
+
+/// The `agent_id` an episode's closing outcome row is journaled under.
+///
+/// Hyphenated on purpose, exactly as
+/// [`WORKFLOW_REPLY_AUTHOR`](crate::runtime::channel::WORKFLOW_REPLY_AUTHOR)
+/// is: `agent_slug` (console-minted teammates) and `is_snake_case`
+/// (manifest-declared ones) both reject a hyphen, so no roster id — minted
+/// before this constant existed or after — can ever equal it. A company that
+/// happened to name a teammate "Hive" therefore cannot have the room's own
+/// summary misattributed to it, and the read path can tell an unauthored
+/// outcome row from a teammate's line without consulting a roster.
+pub const HIVE_REPORT_AUTHOR: &str = "hive-report";
+
+/// The `agent_id` a failed turn's notice is journaled under.
+///
+/// Hyphenated for the same reason [`HIVE_REPORT_AUTHOR`] is, and read back as
+/// a system row on the same terms — but a DIFFERENT id, because the two rows
+/// answer to different readers.
+///
+/// The closing report restates a tally whose inputs are already on screen as
+/// the turns that produced them, so a console may reasonably decline to draw
+/// it. A failure notice is the opposite: the turn it describes does not exist,
+/// so there is no gap for a reader to notice and nothing else records that a
+/// seat was asked and could not answer. Sharing one id forced the two to be
+/// shown or hidden together, and hiding this one leaves "a transcript with a
+/// hole in it that nothing accounts for".
+pub const HIVE_FAILURE_AUTHOR: &str = "hive-failure";
+
+/// The `agent_id` an answer carried back from another desk is journaled under.
+///
+/// Hyphenated for exactly the reason [`HIVE_REPORT_AUTHOR`] is — no roster id
+/// can spell it — but a **second** reserved id rather than a reuse of that one,
+/// because the two rows say different things and a reader that cannot tell them
+/// apart is a reader that has been told a peer desk's answer is this room's own
+/// summary. Both fold as system rows, so neither can ever be counted as a
+/// supporter; only this one may appear more than once in an episode.
+pub const HIVE_REFERRAL_AUTHOR: &str = "hive-referral";
+
+/// Whether an `agent_id` is one of this module's reserved system authors rather
+/// than a teammate.
+///
+/// Three ids now say "the room, not a member" — the closing report, a failed
+/// turn's notice, and an answer carried back from another desk — and a caller
+/// that wants "the lines members actually said" has to exclude all three. Every
+/// one is hyphenated so no roster id can equal it, which is what makes this a
+/// safe test rather than a guess.
+#[must_use]
+pub fn is_hive_author(agent_id: &str) -> bool {
+    matches!(
+        agent_id,
+        HIVE_REPORT_AUTHOR | HIVE_FAILURE_AUTHOR | HIVE_REFERRAL_AUTHOR
+    )
+}
