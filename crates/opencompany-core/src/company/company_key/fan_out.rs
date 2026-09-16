@@ -619,7 +619,6 @@ pub async fn fan_out(
     let ReadSlots {
         composio_now,
         legacy_managed,
-        row,
         inference_key_key,
         inference_raw_new,
         legacy_owned,
