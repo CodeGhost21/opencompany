@@ -1,4 +1,5 @@
 use super::provider_test_helpers_tests::*;
+use super::provider_tenant_tests::MemSecrets;
 use super::*;
 use crate::app::config::MapEnv;
 use crate::company::Inference;

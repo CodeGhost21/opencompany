@@ -2552,4 +2552,4 @@ mod tests_credential_3;
 mod tests_early;
 #[cfg(test)]
 #[path = "provider/provider_tenant_tests.rs"]
-mod tests_tenant;
+mod provider_tenant_tests;
