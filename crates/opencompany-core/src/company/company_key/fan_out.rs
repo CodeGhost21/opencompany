@@ -962,6 +962,36 @@ pub async fn fan_out(
             SlotOutcome::Kept(SkipReason::CustomKey) => SlotOutcome::Skipped(SkipReason::CustomKey),
             _ => SlotOutcome::Skipped(SkipReason::InferenceNotWritten),
         }
+    } else if let Some(existing) = row.as_ref().filter(|r| r.base_url != proxy_base_url) {
+        // The row already exists, but its stored endpoint predates (or was
+        // minted under) a different `TINYHUMANS_API_URL` than the one this
+        // instance is configured for now — a non-production deployment that
+        // already had a `tinyhumans` row before this instance started
+        // following its own platform, say. Left alone, every future save and
+        // health probe keeps reading and writing through the stale endpoint
+        // (Codex review). Refresh only `base_url`; every other field (model,
+        // enabled state, label) is the operator's and this save never
+        // touched it, so it is carried over from the existing row rather than
+        // reset to this call's own (often absent) `model`/`enabled` inputs.
+        match inference_store::put_provider(
+            company,
+            secrets,
+            inference_store::ProviderDraft {
+                slug: existing.slug.clone(),
+                label: existing.label.clone(),
+                kind: existing.kind.clone(),
+                base_url: proxy_base_url.clone(),
+                models: existing.models.clone(),
+                enabled: existing.enabled,
+            },
+        )
+        .await
+        {
+            Ok(_) => SlotOutcome::Kept(SkipReason::RowExists),
+            // The row still exists and still routes on its old endpoint; a
+            // failed migration is not this save's failure to report as such.
+            Err(_) => SlotOutcome::Kept(SkipReason::RowExists),
+        }
     } else if row.is_some() {
         SlotOutcome::Kept(SkipReason::RowExists)
     } else if let Some(chosen) = model.as_deref() {
