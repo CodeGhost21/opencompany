@@ -1,6 +1,7 @@
 //! workflow_create: undeliverable-schedule refusal (issue #1046) and issue #259's update path.
 
 use super::test_support::*;
+use super::tests_destination::draft_with_destination;
 use super::*;
 
 // --- Undeliverable-schedule refusal (issue #1046) ------------------------
