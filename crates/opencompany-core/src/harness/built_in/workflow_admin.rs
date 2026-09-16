@@ -931,4 +931,11 @@ fn create_graph_schema() -> Value {
 }
 
 #[cfg(test)]
-mod tests;
+#[path = "workflow_admin/workflow_admin_crud_tests.rs"]
+mod tests_crud;
+#[cfg(test)]
+#[path = "workflow_admin/workflow_admin_lifecycle_tests.rs"]
+mod tests_lifecycle;
+#[cfg(test)]
+#[path = "workflow_admin/workflow_admin_fixtures_tests.rs"]
+mod workflow_admin_fixtures_tests;
