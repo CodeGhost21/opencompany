@@ -129,8 +129,8 @@ pub(super) fn scheduled_manifest_supervised() -> CompanyManifest {
 /// A brain that parks inside its first cycle until released, so a test can
 /// deliver a shutdown while a tick is provably in flight.
 pub(super) struct BlockingBrain {
-    started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub(super) started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    pub(super) release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 #[async_trait]
