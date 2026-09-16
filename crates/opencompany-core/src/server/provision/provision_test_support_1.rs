@@ -245,7 +245,7 @@ pub(super) struct FlakyOwnership {
 }
 
 impl FlakyOwnership {
-    fn new(fail_first: usize) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    pub(super) fn new(fail_first: usize) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         (
             Self {
