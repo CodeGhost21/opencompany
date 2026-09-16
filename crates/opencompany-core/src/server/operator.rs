@@ -4196,9 +4196,9 @@ pub(crate) async fn journal_chat_replies(
             continue;
         }
         let response_desk = if response.channel == crate::runtime::OPERATOR_CHANNEL {
-            desk
+            desk.to_string()
         } else {
-            response.channel.as_str()
+            response.channel.clone()
         };
         let response_parent = (response.channel == crate::runtime::OPERATOR_CHANNEL)
             .then_some(parent)
@@ -4245,7 +4245,7 @@ pub(crate) async fn journal_chat_replies(
                     // which is the lineage an operator wants and costs no
                     // schema change.
                     task_id: response.task_id.clone(),
-                    chat_id: response_desk.to_string(),
+                    chat_id: response_desk.clone(),
                     // Issue #885: the author, falling back to the channel only
                     // when the producer did not name one. `agent_id`'s contract
                     // is "the agent that produced the reply"; `channel` is the
@@ -4280,7 +4280,7 @@ pub(crate) async fn journal_chat_replies(
                 // offline when the reply lands.
                 if !reply_mentions.is_empty() {
                     runtime
-                        .notify_mentions(id, &reply_mentions, &seq, None, response_desk)
+                        .notify_mentions(id, &reply_mentions, &seq, None, &response_desk)
                         .await;
                 }
             }
