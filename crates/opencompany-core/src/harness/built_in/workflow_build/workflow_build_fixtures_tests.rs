@@ -404,4 +404,3 @@ pub(crate) const VALID_GRAPH: &str = r#"```json
   }
 }
 ```"#;
-

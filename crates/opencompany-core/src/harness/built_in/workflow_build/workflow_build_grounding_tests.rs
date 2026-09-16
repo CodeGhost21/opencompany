@@ -14,6 +14,8 @@ use super::tools::{
     AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
     ProposeWorkflowTool,
 };
+use super::workflow_build_fixtures_tests::*;
+use super::workflow_build_shared_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
@@ -21,8 +23,6 @@ use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
-use super::workflow_build_fixtures_tests::*;
-use super::workflow_build_shared_tests::*;
 
 // ---------------------------------------------------------------------------
 // Grounding & gates (issue #813) — unit tier over the pure helpers
@@ -304,4 +304,3 @@ async fn a_once_card_is_not_built() {
     assert_eq!(model.calls(), 0, "no model call for a non-workflow card");
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Cancelled);
 }
-

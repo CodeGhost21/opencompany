@@ -14,6 +14,7 @@ use super::tools::{
     AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
     ProposeWorkflowTool,
 };
+use super::workflow_build_fixtures_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
@@ -21,7 +22,6 @@ use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
-use super::workflow_build_fixtures_tests::*;
 
 // ---------------------------------------------------------------------------
 // Unit tier
@@ -394,4 +394,3 @@ fn a_spec_rebuilds_the_expected_raw_workflow() {
     assert_eq!(raw.nodes[1].agent.as_deref(), Some("maya"));
     assert_eq!(raw.edges.len(), 1);
 }
-

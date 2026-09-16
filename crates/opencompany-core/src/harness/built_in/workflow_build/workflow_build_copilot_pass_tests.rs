@@ -14,6 +14,8 @@ use super::tools::{
     AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
     ProposeWorkflowTool,
 };
+use super::workflow_build_fixtures_tests::*;
+use super::workflow_build_shared_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
@@ -21,13 +23,10 @@ use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
-use super::workflow_build_fixtures_tests::*;
-use super::workflow_build_shared_tests::*;
 
 // ---------------------------------------------------------------------------
 // The copilot agent — pass tier over the native tool-calling loop (issue #840)
 // ---------------------------------------------------------------------------
-
 
 /// The fixture's canonical good graph: a scheduled trigger → `maya` drafts.
 fn good_workflow() -> Value {
@@ -547,4 +546,3 @@ async fn the_description_prompt_names_an_empty_roster_and_toolset() {
     assert!(prompt.contains("no callable tools are wired"), "{prompt}");
     assert!(prompt.contains("(none yet)"), "{prompt}");
 }
-

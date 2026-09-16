@@ -14,6 +14,8 @@ use super::tools::{
     AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
     ProposeWorkflowTool,
 };
+use super::workflow_build_fixtures_tests::*;
+use super::workflow_build_shared_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
@@ -21,14 +23,10 @@ use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
-use super::workflow_build_fixtures_tests::*;
-use super::workflow_build_shared_tests::*;
 
 // ---------------------------------------------------------------------------
 // Pass tier
 // ---------------------------------------------------------------------------
-
-
 
 /// A [`HarnessDeps`] wiring the copilot agent onto `model` — everything else is
 /// inert fixture wiring reusing the runtime's own context/store. The copilot path
@@ -94,11 +92,6 @@ pub(crate) fn agent_deps(
         deep_trace: None,
     }
 }
-
-
-
-
-
 
 /// The happy path: a valid graph lands a proposal In Review, the card carries it,
 /// the attempt settles Succeeded, and the stored `ops` carries the host-assigned
@@ -321,4 +314,3 @@ async fn a_genuine_build_failure_still_fails_and_stays_builder_routed() {
     );
     assert_eq!(after.column, COLUMN_TODO);
 }
-

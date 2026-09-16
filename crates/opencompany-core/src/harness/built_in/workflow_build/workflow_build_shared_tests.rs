@@ -14,6 +14,7 @@ use super::tools::{
     AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
     ProposeWorkflowTool,
 };
+use super::workflow_build_fixtures_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
@@ -21,7 +22,6 @@ use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
-use super::workflow_build_fixtures_tests::*;
 
 /// [`MANIFEST`] plus one desk, so the runtime's deliverable channel set is
 /// exactly `["engineering"]` (issue #1191). The default fixture declares no
@@ -49,7 +49,9 @@ allow = ["docs", "web"]
 "#;
 
 /// [`runtime_with`], on a company that has a desk to deliver to.
-pub(crate) async fn runtime_with_desk(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+pub(crate) async fn runtime_with_desk(
+    model: Arc<ScriptedModel>,
+) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
     let home = tempfile::Builder::new()
         .prefix("opencompany-builder-desk-")
         .tempdir()
@@ -71,7 +73,9 @@ pub(crate) async fn runtime_with_desk(model: Arc<ScriptedModel>) -> (tempfile::T
     (home, Arc::new(runtime))
 }
 
-pub(crate) async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+pub(crate) async fn runtime_with(
+    model: Arc<ScriptedModel>,
+) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
     let home = tempfile::Builder::new()
         .prefix("opencompany-builder-")
         .tempdir()
@@ -206,4 +210,3 @@ pub(crate) fn propose_step(summary: &str, workflow: Value) -> NativeStep {
         json!({ "summary": summary, "workflow": workflow }),
     )
 }
-

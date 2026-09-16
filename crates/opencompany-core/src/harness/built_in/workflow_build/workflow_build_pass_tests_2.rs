@@ -14,6 +14,8 @@ use super::tools::{
     AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
     ProposeWorkflowTool,
 };
+use super::workflow_build_fixtures_tests::*;
+use super::workflow_build_shared_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
@@ -21,8 +23,6 @@ use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
-use super::workflow_build_fixtures_tests::*;
-use super::workflow_build_shared_tests::*;
 
 /// An unparseable answer returns the card to To-do with no proposal; the attempt
 /// settles Failed. Prose or nothing — a graph guessed from prose is exactly the
@@ -434,4 +434,3 @@ async fn an_operator_move_mid_build_is_discarded() {
     );
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Cancelled);
 }
-
