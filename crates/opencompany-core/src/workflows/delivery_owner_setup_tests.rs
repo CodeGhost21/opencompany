@@ -124,7 +124,7 @@ allow = [{allow}]
     }
 }
 
-fn smtp_creds() -> SmtpCredentials {
+pub(super) fn smtp_creds() -> SmtpCredentials {
     SmtpCredentials {
         host: "smtp.example.test".into(),
         port: 587,
