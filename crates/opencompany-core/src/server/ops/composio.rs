@@ -1738,9 +1738,6 @@ async fn connections_impl(_runtime: &CompanyRuntime) -> Result<Json<Vec<Connecti
 #[path = "composio_test_support.rs"]
 mod composio_test_support;
 #[cfg(test)]
-#[path = "composio_test_support.rs"]
-mod composio_test_support;
-#[cfg(test)]
 #[path = "composio_an_empty_toolkit_list_tests.rs"]
 mod tests_an_empty_toolkit_list;
 #[cfg(test)]
