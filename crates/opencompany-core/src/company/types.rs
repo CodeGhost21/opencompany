@@ -748,16 +748,24 @@ pub struct Agent {
     pub tools: Option<Vec<String>>,
     /// Desks this agent may hand work on to (issue #176).
     ///
-    /// Empty (the default) means **no delegation tools at all** — the behaviour
-    /// every manifest had before this field existed, and the reason adding it is
-    /// a no-op for an existing company. A non-empty list wires
-    /// `spawn_task` + `delegate_to_desk` + `delegate_to_teammate` (issue #884)
-    /// onto this agent (never the orchestrator's roster/workflow/lifecycle
-    /// authority), narrows `delegate_to_desk` to the desks named here, and lets
-    /// `delegate_to_teammate` reach any member of any desk this agent sits on
-    /// (deliberately unconditional — the enable switch is opting in at all, not
-    /// which desk is named) plus every member of the desks named here. `"*"` is
-    /// a wildcard for "every desk the company has" on both tools.
+    /// Every roster agent carries `spawn_task` + `delegate_to_desk` +
+    /// `delegate_to_teammate` (issue #884) — never the orchestrator's
+    /// roster/workflow/lifecycle authority — and this list is what **narrows**
+    /// where the two hand-off tools may reach. Empty (the default, and every
+    /// manifest written before it existed) is **unrestricted**, on the same
+    /// convention as an omitted [`tools`](Self::tools) grant or an omitted
+    /// `ledgers` list: `delegate_to_teammate` reaches everybody on the roster
+    /// and `delegate_to_desk` every desk. A non-empty list narrows
+    /// `delegate_to_desk` to the desks named here, and `delegate_to_teammate`
+    /// to any member of any desk this agent sits on plus every member of the
+    /// desks named here. `"*"` is a wildcard for "every desk the company has"
+    /// on both tools, and so equivalent to leaving the list empty.
+    ///
+    /// It used to be an opt-in — empty meant no hand-off tool at all — which
+    /// left a specialist with no line unable to reach the colleague beside it,
+    /// and left the runtime carding every message on its behalf because it
+    /// could not track anything itself. See `company::team_brief` for what
+    /// each agent is now told about its reach.
     ///
     /// Entries are **desk** ids or names, not teammate ids: desks are
     /// OpenCompany's delegation address space, and `delegate_to_desk` already

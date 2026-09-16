@@ -1,31 +1,34 @@
-//! Triage an operator chat message **before** anything is written to the board:
-//! is this a question to answer, work to track, or neither?
+//! Triage an operator chat message: is this a question to answer, an
+//! instruction, or neither?
 //!
-//! # Two doors, not one (issue #267)
+//! # What the answer is used for — and what it no longer is
 //!
-//! Cards reach the board through two independent paths, and a fix on one leaves
-//! the other open:
+//! **It mints nothing.** A [`MessageTriage::Track`] verdict used to open a
+//! `todo` card from the REST chat handler before the turn ran, and the runtime
+//! had a twin (`DelegationRunner::open_direct_work_card`) that carded anything
+//! "substantial" said to a desk lead or a teammate. Between them, nearly every
+//! message typed into a desk became a board card nobody had commissioned, and
+//! the agent answering it had no say. Both paths are gone: a card now exists
+//! because an agent called `spawn_task` (or handed the work off, which opens
+//! the card that tracks the hand-off), or because a person opened one from the
+//! console or the composer's "Build me the workflow" control.
 //!
-//! 1. **Deterministic** — the REST chat handler runs [`triage_message`] over the
-//!    operator's words and opens a `todo` card on [`MessageTriage::Track`]. This
-//!    is the path that produced five of the six dead `backlog` cards observed on
-//!    a live company ("Call the composio_authorize tool …", four × "Create a
-//!    workflow …"), because every one of them leads with an action verb.
-//! 2. **The model's own** — the orchestrator calls `spawn_task` /
-//!    `delegate_to_desk` / `assign_task` / `review_task`. That is where the
-//!    sixth card came from ("Tell what is there in the tasks list" — no action
-//!    verb, no request frame, so this module never saw it as work).
+//! What the triage still decides, one layer down in
+//! `DelegationRunner::handle_operator_message`:
 //!
-//! [`triage_message`] is **Layer A**: it lives in the REST chat handler, is
-//! compiled into every build, and fronts both cognition brains. Its answer is
-//! also what the harness delegation seam uses to gate door 2 (Layer B) — an
-//! [`MessageTriage::Answer`] turn claims the delegation queue for *answering
-//! only*, so the model's board-writing tools refuse in its own turn.
+//! * an [`MessageTriage::Answer`] turn claims the delegation queue for
+//!   *answering only* (issue #267, Layer B), so the model's own board-writing
+//!   tools refuse in a turn that was a question — the gate is a narrowing, not
+//!   a withdrawal: `delegate_to_desk` still runs, because consulting a desk is
+//!   how a question the orchestrator cannot answer alone gets answered;
+//! * a lexically matched [`MessageTriage::Chatter`] (a bare greeting or
+//!   acknowledgement) takes the cheap chat-only turn (issue #1725), and
+//!   [`small_talk`] answers the barest of them with no turn at all.
 //!
-//! The gate is a narrowing, not a withdrawal. `delegate_to_desk` still runs on
-//! an `Answer` turn — it is how a question the orchestrator cannot answer alone
-//! reaches a desk that can — and what stands down is its *card*. So the layer
-//! removes the ability to write and never the ability to reply.
+//! `Track` is therefore a verdict with no consumer of its own any more; it is
+//! kept as the third leg because the classifier's tie-breakers are written
+//! against it, and because "this is an instruction" is what the other two are
+//! being told apart from.
 //!
 //! # Positive triage, and a deliberate lean toward answering
 //!
