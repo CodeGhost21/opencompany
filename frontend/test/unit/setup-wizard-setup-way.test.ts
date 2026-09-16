@@ -226,6 +226,37 @@ describe("the setup-way choice", () => {
     await next();
     expect(find("setup-problem"), "an untested connection must hold the step").toBeTruthy();
   });
+
+  it("ignores a connection test that settles after the way has changed", async () => {
+    // The test is asked under Self-managed, the operator backs out and picks
+    // Managed before it settles, and only then does the response arrive. The
+    // verdict is about a branch the operator already left, so it must not
+    // apply to the one they are on now.
+    let resolveTest!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      resolveTest = resolve;
+    });
+    await show(clientWith(status(), () => pending));
+    await click("setup-way-self-managed");
+    await next();
+    await fill("setup-field-key", "th-not-a-real-key");
+    await click("setup-test-connection");
+
+    await back();
+    await click("setup-way-managed");
+    await next();
+
+    await act(async () => {
+      resolveTest({ ok: true, baseUrl: "https://api.example/v1", model: "m" });
+      await pending;
+    });
+    await settle();
+
+    expect(
+      find("setup-test-ok"),
+      "a verdict asked under the abandoned branch must not land on this one",
+    ).toBeNull();
+  });
 });
 
 describe("a host the managed way cannot be completed on", () => {

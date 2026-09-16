@@ -456,6 +456,14 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   const [roster, setRoster] = useState<SetupRoster | null>(null);
   const [designing, setDesigning] = useState(false);
   const [designError, setDesignError] = useState<string | null>(null);
+  /**
+   * Bumped whenever the setup way changes. A test verdict or a designed
+   * roster that resolves after the branch it was asked under has been left
+   * carries this number from the render that started it, so a stale one can
+   * be told apart from a current one even after the step that requested it
+   * has unmounted.
+   */
+  const setupWayGenerationRef = useRef(0);
   /** How many teammates have landed, once the apply is building them. */
   const [built, setBuilt] = useState<number | null>(null);
   /**
@@ -716,6 +724,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    */
   const chooseSetupWay = (way: SetupWay) => {
     if (chosenWay !== null && chosenWay !== way) {
+      setupWayGenerationRef.current += 1;
       set("tinyhumans_api_key", "");
       setTested({ kind: "untested" });
       setRoster(null);
@@ -815,6 +824,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * imperfect team.
    */
   const design = useCallback(async () => {
+    const generation = setupWayGenerationRef.current;
     setDesigning(true);
     setDesignError(null);
     try {
@@ -843,6 +853,9 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       if (!Array.isArray(proposed?.agents) || proposed.agents.length === 0) {
         throw new Error("The host answered without a team to review.");
       }
+      // A design asked under a setup way the operator has since left must not
+      // land on the one they switched to — see `setupWayGenerationRef`.
+      if (generation !== setupWayGenerationRef.current) return;
       setRoster(proposed);
       setRosterEdited(false);
       // Suggested, never imposed: the field is editable and this only fills a
@@ -860,8 +873,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         );
       }
     } catch (err: unknown) {
-      setDesignError(err instanceof Error ? err.message : String(err));
-      setRoster(null);
+      if (generation === setupWayGenerationRef.current) {
+        setDesignError(err instanceof Error ? err.message : String(err));
+        setRoster(null);
+      }
     } finally {
       setDesigning(false);
     }
@@ -1335,7 +1350,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
               setTested({ kind: "untested" });
             }}
             tested={tested}
-            onTested={setTested}
+            onTested={((generation) => (t: TestState) => {
+              // A verdict asked under a setup way the operator has since left
+              // must not land on the one they switched to — see
+              // `setupWayGenerationRef`.
+              if (generation === setupWayGenerationRef.current) setTested(t);
+            })(setupWayGenerationRef.current)}
           />
         )}
 
