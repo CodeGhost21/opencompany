@@ -2413,6 +2413,64 @@ mod tests {
         assert!(!decl.is_proxied());
     }
 
+    /// The runtime-override arm makes the identical "named a gateway or not"
+    /// choice the manifest arm above does, and for the same reason:
+    /// `validate_runtime` accepts `provider: "managed"` with a valid non-blank
+    /// `base_url`, so a console `PUT` naming a gateway is exactly as valid a
+    /// runtime config as a manifest one — `resolve_endpoint`'s managed branch
+    /// must not silently discard it for the platform's own endpoint
+    /// (CodeRabbit review).
+    #[tokio::test]
+    async fn a_managed_runtime_override_with_a_gateway_keeps_it() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        store_key(&company, &secrets, "th-not-a-real-key")
+            .await
+            .unwrap();
+
+        // No endpoint named: stays on the platform proxy, same as the
+        // manifest arm.
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: LEGACY_MANAGED.into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.source, InferenceSource::Runtime);
+        assert_eq!(decl.base_url, platform_base_url());
+        assert!(decl.is_proxied());
+
+        // A runtime config that ALSO names an endpoint is a gateway the
+        // operator chose on purpose, and keeps resolving to it as a vendor —
+        // not the platform's own endpoint with the gateway silently dropped.
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: LEGACY_MANAGED.into(),
+                base_url: Some("https://gateway.example/v1".into()),
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://gateway.example/v1");
+        assert!(!decl.is_proxied());
+    }
+
     /// A blank or whitespace-only `base_url` is not "the operator named a
     /// gateway" — it must resolve exactly like naming none at all, staying on
     /// the platform proxy with the stored key (tinysweeper/CodeRabbit review:
