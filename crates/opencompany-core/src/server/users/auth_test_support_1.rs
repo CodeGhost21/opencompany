@@ -152,7 +152,7 @@ pub(super) fn headers_with_cookie(company: &str, token: &str) -> axum::http::Hea
 // re-pinned rather than assumed to carry over. The dangerous outcome is not the
 // header failing, it is the header succeeding somewhere the cookie would not.
 // ---------------------------------------------------------------------------
-fn session_header_value(company: &str, token: &str) -> String {
+pub(super) fn session_header_value(company: &str, token: &str) -> String {
     format!("{company}.{token}")
 }
 

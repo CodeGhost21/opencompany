@@ -398,9 +398,9 @@ pub(super) struct RevokingMailSender {
     /// Filled once the state exists, since the runtime this revokes through is
     /// the one the state owns — and the state cannot be built until the sender
     /// it borrows is already wired into its connections.
-    runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::CompanyRuntime>>>,
-    revoke_for: String,
-    accepted: RecordingMailSender,
+    pub(super) runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::CompanyRuntime>>>,
+    pub(super) revoke_for: String,
+    pub(super) accepted: RecordingMailSender,
 }
 
 #[async_trait::async_trait]
@@ -470,7 +470,7 @@ pub(super) async fn invite_as(state: &AppState, admin: &str, email: &str) -> (St
 // The profile: naming yourself and choosing your own face
 // (docs/spec/runtime/avatars.md)
 // ---------------------------------------------------------------------------
-fn patch_with_cookie(uri: &str, body: serde_json::Value, cookie: &str) -> Request<Body> {
+pub(super) fn patch_with_cookie(uri: &str, body: serde_json::Value, cookie: &str) -> Request<Body> {
     Request::builder()
         .method("PATCH")
         .uri(uri)
@@ -504,7 +504,7 @@ pub(super) async fn patch_me(
 /// A runtime over a company with no `[users] admins`, which is all these need:
 /// `local_owner_record` answers a mode question nobody asks it, so the manifest
 /// only has to produce a store.
-async fn users_runtime(home: &std::path::Path) -> Arc<crate::CompanyRuntime> {
+pub(super) async fn users_runtime(home: &std::path::Path) -> Arc<crate::CompanyRuntime> {
     let (connections, _sender) = mail_connections();
     let state = state_from(
         home,
