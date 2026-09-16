@@ -13,7 +13,7 @@ use super::*;
 /// without the gate the helper is dead code at default features and trips
 /// `-D warnings` in the default `Rust` CI lane.
 #[cfg(feature = "openhuman")]
-fn manifest_with_allow(allow: &[&str]) -> CompanyManifest {
+pub(super) fn manifest_with_allow(allow: &[&str]) -> CompanyManifest {
     let list = allow
         .iter()
         .map(|grant| format!("\"{grant}\""))
@@ -31,7 +31,7 @@ fn manifest_with_allow(allow: &[&str]) -> CompanyManifest {
 /// (issue #813), so a positive-control slug clears the required-args arm — the
 /// arm checks only presence, so the extra keys are harmless and this stays
 /// feature-agnostic (no catalogue reference).
-fn tool_call_draft(id: &str, name: &str, slug: Option<&str>) -> RawWorkflow {
+pub(super) fn tool_call_draft(id: &str, name: &str, slug: Option<&str>) -> RawWorkflow {
     let mut args = toml::map::Map::new();
     for key in [
         "command",
@@ -51,7 +51,7 @@ fn tool_call_draft(id: &str, name: &str, slug: Option<&str>) -> RawWorkflow {
 /// A `trigger → tool_call` draft with explicit control over `config.args` —
 /// used to exercise the #813 required-args arm (absent args, present args)
 /// directly. `args` of `None` omits the `args` table entirely.
-fn tool_call_draft_args(
+pub(super) fn tool_call_draft_args(
     id: &str,
     name: &str,
     slug: Option<&str>,

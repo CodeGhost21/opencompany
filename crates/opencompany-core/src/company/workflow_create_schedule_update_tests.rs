@@ -300,7 +300,7 @@ async fn no_company_record_is_not_found() {
 
 /// Seeds a company with one created workflow and hands back the store plus
 /// the version token a `GET` would have returned for it.
-async fn with_one_workflow(
+pub(super) async fn with_one_workflow(
     company: &CompanyId,
     id: &str,
     name: &str,

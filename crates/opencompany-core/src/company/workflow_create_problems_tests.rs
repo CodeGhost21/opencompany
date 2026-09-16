@@ -43,7 +43,7 @@ fn one_node_draft(node: RawNode) -> RawWorkflow {
     }
 }
 
-fn problems_of(err: &OpenCompanyError) -> &[WorkflowProblem] {
+pub(super) fn problems_of(err: &OpenCompanyError) -> &[WorkflowProblem] {
     match err {
         OpenCompanyError::WorkflowInvalid { problems } => problems,
         other => panic!("expected WorkflowInvalid, got {other:?}"),
