@@ -418,7 +418,7 @@ pub(super) struct FlakyLoadStoreOnCalls {
 }
 
 impl FlakyLoadStoreOnCalls {
-    fn new(inner: Arc<dyn CompanyStore>, fail_on: impl IntoIterator<Item = usize>) -> Self {
+    pub(super) fn new(inner: Arc<dyn CompanyStore>, fail_on: impl IntoIterator<Item = usize>) -> Self {
         Self {
             inner,
             fail_on: fail_on.into_iter().collect(),
