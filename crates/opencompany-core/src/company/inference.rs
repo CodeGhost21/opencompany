@@ -196,36 +196,12 @@ pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/agent-integration
 /// harmless", because none of those other configs feed `platform_base_url()`
 /// for their own purposes — only a caller resolving *managed* inference does,
 /// and no such caller runs inside `hub_test.rs` or `desktop.rs`'s own tests.
-static PLATFORM_API_URL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
-
-/// Records the platform `api_url` this instance talks to. Called from
-/// [`AppState::new`](crate::AppState::new); idempotent, and the first call
-/// wins — see [`PLATFORM_API_URL`]'s doc for why that is the safe direction
-/// for a process-wide value rather than a bug to route around.
-pub fn set_platform_api_url(api_url: &str) {
-    let trimmed = api_url.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return;
-    }
-    if let Ok(mut slot) = PLATFORM_API_URL.write()
-        && slot.is_none()
-    {
-        *slot = Some(trimmed.to_string());
-    }
-}
-
-/// The TinyHumans OpenRouter proxy base this instance resolves managed
-/// inference against: `{api_url}/agent-integrations/openrouter` for the
-/// configured platform, which with the default `api_url` is exactly
-/// [`PLATFORM_BASE_URL`]. This — not the constant — is what a fallback must
-/// use, or a staging or local platform's key is presented to production.
+/// The production TinyHumans OpenRouter proxy base used when a caller has no
+/// explicit [`EnvDefault`]. Deployments with a configured platform pass that
+/// default through their own resolution path; this fallback intentionally
+/// carries no process-global AppState configuration.
 pub fn platform_base_url() -> String {
-    PLATFORM_API_URL
-        .read()
-        .ok()
-        .and_then(|slot| slot.clone())
-        .map(|api_url| catalogue::tinyhumans_proxy_url(&api_url))
-        .unwrap_or_else(|| PLATFORM_BASE_URL.to_string())
+    PLATFORM_BASE_URL.to_string()
 }
 
 /// The provider kind removed when OpenCompany stopped exposing its own model
