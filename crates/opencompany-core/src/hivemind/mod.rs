@@ -77,20 +77,15 @@ pub mod types;
 #[cfg(test)]
 mod aside_test;
 #[cfg(test)]
-#[path = "concurrency_tests.rs"]
-mod concurrency_test;
+mod concurrency_tests;
 #[cfg(test)]
-#[path = "deliberation_tests.rs"]
-mod deliberation_test;
+mod deliberation_tests;
 #[cfg(test)]
-#[path = "moves_tests.rs"]
-mod moves_test;
+mod moves_tests;
 #[cfg(test)]
-#[path = "referral_tests.rs"]
-mod referral_test;
+mod referral_tests;
 #[cfg(test)]
-#[path = "round_tests.rs"]
-mod round_test;
+mod round_tests;
 #[cfg(test)]
 #[path = "hivemind_tests.rs"]
 pub(crate) mod test;
