@@ -67,8 +67,8 @@ pub(super) async fn park_one_past_its_deadline(
 /// A brain that reports a fixed [`TokenUsage`] for every cycle — the shape
 /// hosted Medulla cognition produces once its `orch:usage` frames land.
 pub(super) struct MeteredBrain {
-    usage: TokenUsage,
-    metering: UsageMetering,
+    pub(super) usage: TokenUsage,
+    pub(super) metering: UsageMetering,
 }
 
 impl MeteredBrain {
@@ -122,8 +122,8 @@ pub(super) fn reported_usage(cost_usd: f64) -> TokenUsage {
 
 /// A brain that tracks the peak number of concurrently-active cycles.
 pub(super) struct ConcurrencyBrain {
-    active: Arc<AtomicUsize>,
-    peak: Arc<AtomicUsize>,
+    pub(super) active: Arc<AtomicUsize>,
+    pub(super) peak: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -211,7 +211,7 @@ pub(super) fn desk_manifest() -> CompanyManifest {
 /// A brain that records the text of every operator message it is handed, so
 /// a test can assert what awareness the kernel folded in before the brain.
 pub(super) struct CapturingBrain {
-    seen: Arc<StdMutex<Vec<String>>>,
+    pub(super) seen: Arc<StdMutex<Vec<String>>>,
 }
 
 #[async_trait]
