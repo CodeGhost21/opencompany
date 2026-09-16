@@ -1,13 +1,13 @@
 use super::super::*;
 use super::*;
+use crate::company::steer::{InflightKind, InflightRegistry};
+use crate::ports::TaskStore;
 use crate::ports::tasks::TaskTitle;
+use std::collections::VecDeque;
+use std::sync::Mutex as StdMutex;
 use tinyinference::Result as TaResult;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
-use crate::ports::TaskStore;
-use crate::company::steer::{InflightKind, InflightRegistry};
-use std::collections::VecDeque;
-use std::sync::Mutex as StdMutex;
 
 use crate::company::CompanyManifest;
 use crate::harness::provider::{HarnessModel, MockProvider};
@@ -272,7 +272,10 @@ pub(super) fn brain_with_tasks_and_events(
 /// notification store (issue #1865, PR #1883 review comment 3878668326):
 /// [`FsOps`] implements both, so a test can seed a card, drive a cycle,
 /// and then read back any `dispatch_failed` row a refusal filed.
-pub(super) fn brain_with_tasks_notified(dir: &std::path::Path, notify: bool) -> (HarnessBrain, Arc<FsOps>) {
+pub(super) fn brain_with_tasks_notified(
+    dir: &std::path::Path,
+    notify: bool,
+) -> (HarnessBrain, Arc<FsOps>) {
     brain_with_tasks_notified_logging(dir, notify, None)
 }
 
@@ -488,11 +491,16 @@ pub(super) fn brain_with_artifacts(dir: &std::path::Path) -> (HarnessBrain, Arc<
 /// `brain_with_artifacts` workspace-less is what keeps every pre-existing
 /// publish test on the artifact-only path, which is the guarantee that an
 /// unwired workspace behaves exactly as it did before this cell.
-pub(super) fn brain_with_artifacts_and_workspace(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+pub(super) fn brain_with_artifacts_and_workspace(
+    dir: &std::path::Path,
+) -> (HarnessBrain, Arc<FsOps>) {
     brain_with_stores(dir, true)
 }
 
-pub(super) fn brain_with_stores(dir: &std::path::Path, with_workspace: bool) -> (HarnessBrain, Arc<FsOps>) {
+pub(super) fn brain_with_stores(
+    dir: &std::path::Path,
+    with_workspace: bool,
+) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let artifacts = ops.clone() as Arc<dyn crate::ports::artifacts::ArtifactStore>;
     brain_with_injected_artifacts(dir, ops, artifacts, with_workspace)
@@ -571,4 +579,3 @@ pub(super) fn brain_with_injected_artifacts(
         ops,
     )
 }
-

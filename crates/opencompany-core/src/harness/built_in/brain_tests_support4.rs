@@ -1,13 +1,13 @@
 use super::super::*;
 use super::*;
+use crate::company::steer::{InflightKind, InflightRegistry};
+use crate::ports::TaskStore;
 use crate::ports::tasks::TaskTitle;
+use std::collections::VecDeque;
+use std::sync::Mutex as StdMutex;
 use tinyinference::Result as TaResult;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
-use crate::ports::TaskStore;
-use crate::company::steer::{InflightKind, InflightRegistry};
-use std::collections::VecDeque;
-use std::sync::Mutex as StdMutex;
 
 /// A `FixedOutcomeTurn` whose single turn reports a budget pause — the
 /// account itself is out of inference credits, so `outcome.reply` is
@@ -583,4 +583,3 @@ pub(super) fn brain_that_delegates_with(
         provider,
     )
 }
-

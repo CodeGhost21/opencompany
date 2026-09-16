@@ -1,13 +1,13 @@
 use super::*;
 use super::*;
+use crate::company::steer::{InflightKind, InflightRegistry};
+use crate::ports::TaskStore;
 use crate::ports::tasks::TaskTitle;
+use std::collections::VecDeque;
+use std::sync::Mutex as StdMutex;
 use tinyinference::Result as TaResult;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
-use crate::ports::TaskStore;
-use crate::company::steer::{InflightKind, InflightRegistry};
-use std::collections::VecDeque;
-use std::sync::Mutex as StdMutex;
 
 #[path = "brain_tests_support1.rs"]
 mod support1;
@@ -24,7 +24,6 @@ use support4::*;
 #[path = "brain_tests_support5.rs"]
 mod support5;
 use support5::*;
-
 
 #[path = "brain_tests_part1.rs"]
 mod tests_part1;

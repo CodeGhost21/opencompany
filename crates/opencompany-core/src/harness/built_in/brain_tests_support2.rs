@@ -1,13 +1,13 @@
 use super::super::*;
 use super::*;
+use crate::company::steer::{InflightKind, InflightRegistry};
+use crate::ports::TaskStore;
 use crate::ports::tasks::TaskTitle;
+use std::collections::VecDeque;
+use std::sync::Mutex as StdMutex;
 use tinyinference::Result as TaResult;
 use tinyinference::message::Message;
 use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
-use crate::ports::TaskStore;
-use crate::company::steer::{InflightKind, InflightRegistry};
-use std::collections::VecDeque;
-use std::sync::Mutex as StdMutex;
 
 // -- issue #552: the write ordering, proven by failure injection ---------
 
@@ -80,7 +80,11 @@ pub(super) fn publish_of(source: &str, body: &str) -> crate::harness::publish::P
 
 /// The named node under `agents/maya/t-1/`, with its body — the tree's own
 /// answer, read without going through the artifact chain at all.
-pub(super) async fn note_in_tree(ops: &FsOps, company: &CompanyId, name: &str) -> Option<(String, String)> {
+pub(super) async fn note_in_tree(
+    ops: &FsOps,
+    company: &CompanyId,
+    name: &str,
+) -> Option<(String, String)> {
     use crate::ports::workspace::WorkspaceStore;
     let nodes = WorkspaceStore::tree(ops, company).await.unwrap();
     let found = nodes.iter().find(|n| n.name == name)?;
@@ -252,7 +256,10 @@ members = ["chief"]
 }
 
 /// A brain over `record`, wired to a real task store.
-pub(super) fn brain_over(dir: &std::path::Path, record: CompanyRecord) -> (HarnessBrain, Arc<FsOps>) {
+pub(super) fn brain_over(
+    dir: &std::path::Path,
+    record: CompanyRecord,
+) -> (HarnessBrain, Arc<FsOps>) {
     let tasks = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
         emergency_gate: None,
@@ -565,4 +572,3 @@ pub(super) fn brain_with_approval_queue(
     };
     HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
 }
-
