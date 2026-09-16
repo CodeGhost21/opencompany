@@ -2,7 +2,6 @@ use axum::http::StatusCode;
 use serde_json::json;
 
 use super::inference_test_support::*;
-use super::*;
 
 use crate::ports::types::CompanyId;
 use crate::runtime::RuntimeBuilder;
