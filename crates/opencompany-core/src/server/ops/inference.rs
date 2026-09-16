@@ -1110,8 +1110,8 @@ async fn effective_status_with(
 /// again being told Managed on a company where managed resolves to nothing.
 async fn managed_resolves(runtime: &CompanyRuntime) -> Result<bool, ApiError> {
     Ok(managed_state(runtime, platform_default(runtime).as_ref())
-    .await?
-    .configured)
+        .await?
+        .configured)
 }
 
 /// What the managed brain would resolve to for this company.
@@ -3008,7 +3008,9 @@ base_url = "https://byo.example/v1"
         );
         let runtime = builder.build().await.unwrap();
         let state = AppState::new(config);
-        state.registry().insert(id.clone(), std::sync::Arc::new(runtime));
+        state
+            .registry()
+            .insert(id.clone(), std::sync::Arc::new(runtime));
         crate::server::test_support::seed_fixed_admin(&state, "acme").await;
 
         let expected = format!("{STAGING_API}/agent-integrations/openrouter");

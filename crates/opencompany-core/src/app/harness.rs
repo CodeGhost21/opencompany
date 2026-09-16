@@ -83,7 +83,8 @@ pub fn attach(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
     // so a company key minted on staging is presented to staging. Before this
     // an absent credential meant an absent default, and an absent default
     // meant the production constant.
-    let (inference, model_override) = platform_inference_default_at(&ProcessEnv, Some(&config.api_url));
+    let (inference, model_override) =
+        platform_inference_default_at(&ProcessEnv, Some(&config.api_url));
     builder
         .with_api_url(config.api_url.clone())
         .with_harness_inference(inference, model_override)

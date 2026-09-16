@@ -1360,7 +1360,9 @@ async fn test_inference(
     Json(req): Json<InferenceTestRequest>,
 ) -> Result<Json<InferenceTestDto>, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
-    Ok(Json(probe_inference(&req, &ProcessEnv, &state.config().api_url).await))
+    Ok(Json(
+        probe_inference(&req, &ProcessEnv, &state.config().api_url).await,
+    ))
 }
 
 /// Runs the probe against the resolved config.
@@ -1373,8 +1375,7 @@ async fn probe_inference<E: EnvSource + Sync>(
     // The endpoint follows the host's `api_url` with or without an instance
     // credential — the same default the runtime builder attaches — so a key
     // typed into the wizard on a staging host is probed against staging.
-    let (config, _) =
-        crate::harness::provider::platform_inference_default_at(env, Some(api_url));
+    let (config, _) = crate::harness::provider::platform_inference_default_at(env, Some(api_url));
     let env_default = Some(crate::company::inference::EnvDefault {
         base_url: config.base_url,
         credential: config.credential,
