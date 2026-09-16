@@ -614,7 +614,7 @@ mod node_blocker_answer {
 /// question about a customer's renewal, so [`pick_peer`] has somebody to
 /// choose. The node itself runs as `researcher`, which is deliberately not
 /// on the roster.
-fn record_with_peer() -> CompanyRecord {
+pub(super) fn record_with_peer() -> CompanyRecord {
     let mut record = crate::workflows::gated_tool_turn_tests::record();
     record.manifest = toml::from_str(
         "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"cfo\"\nrole = \"Chief Financial \
