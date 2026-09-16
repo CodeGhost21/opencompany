@@ -295,7 +295,7 @@
         assert_eq!(redact_credentials("localhost:27017"), "localhost:27017");
     }
 
-    async fn store() -> Option<Arc<MongoStore>> {
+    pub(super) async fn store() -> Option<Arc<MongoStore>> {
         let uri = match std::env::var("OPENCOMPANY_TEST_MONGODB_URI") {
             Ok(uri) => uri,
             Err(_) => {
@@ -545,7 +545,7 @@
         drop_db(&store).await;
     }
 
-    async fn drop_db(store: &MongoStore) {
+    pub(super) async fn drop_db(store: &MongoStore) {
         let _ = store.db.drop().await;
     }
 
@@ -555,7 +555,7 @@
     /// uploads bytes and reboots in the same millisecond is staging an
     /// *in-flight* upload, not an orphaned one. Rewriting `uploadDate` is how a
     /// test says "and then an hour passed" without sleeping for one.
-    async fn age_blobs_past_the_sweep_threshold(store: &MongoStore) {
+    pub(super) async fn age_blobs_past_the_sweep_threshold(store: &MongoStore) {
         let old = mongodb::bson::DateTime::from_millis(
             now_millis() as i64 - ORPHAN_BLOB_MIN_AGE_MS - 60_000,
         );
