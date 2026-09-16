@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(feature = "openhuman")]
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::{EventSeq, StoredEvent};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
