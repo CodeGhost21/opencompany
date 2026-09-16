@@ -257,7 +257,7 @@ fn dump_agent(manifest: &CompanyManifest, agent: &Agent, orchestrator: bool) -> 
         });
     }
 
-    harness_sections(&grants, agent, orchestrator, &mut sections, &mut deferred);
+    harness_sections(&grants, orchestrator, &mut sections, &mut deferred);
 
     deferred.push(Deferred {
         title: "Working documents".to_string(),
@@ -308,7 +308,6 @@ fn context_paths(context: &[ContextEntry]) -> Vec<String> {
 #[cfg(feature = "openhuman")]
 fn harness_sections(
     grants: &[String],
-    agent: &Agent,
     orchestrator: bool,
     sections: &mut Vec<Section>,
     deferred: &mut Vec<Deferred>,
@@ -437,7 +436,6 @@ fn harness_sections(
 #[cfg(not(feature = "openhuman"))]
 fn harness_sections(
     _grants: &[String],
-    _agent: &Agent,
     _orchestrator: bool,
     _sections: &mut Vec<Section>,
     deferred: &mut Vec<Deferred>,
