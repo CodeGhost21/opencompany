@@ -77,16 +77,22 @@ pub mod types;
 #[cfg(test)]
 mod aside_test;
 #[cfg(test)]
+#[path = "concurrency_tests.rs"]
 mod concurrency_test;
 #[cfg(test)]
+#[path = "deliberation_tests.rs"]
 mod deliberation_test;
 #[cfg(test)]
+#[path = "moves_tests.rs"]
 mod moves_test;
 #[cfg(test)]
+#[path = "referral_tests.rs"]
 mod referral_test;
 #[cfg(test)]
+#[path = "round_tests.rs"]
 mod round_test;
 #[cfg(test)]
+#[path = "hivemind_tests.rs"]
 pub(crate) mod test;
 
 pub use aside::{ASIDE_MARKER, AsideConfig, SURFACE_MARKER};
