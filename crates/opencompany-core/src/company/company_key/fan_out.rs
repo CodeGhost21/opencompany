@@ -808,10 +808,17 @@ pub async fn fan_out(
             _ => SlotOutcome::Skipped(SkipReason::InferenceNotWritten),
         }
     } else {
-        let base = row
-            .as_ref()
-            .map(|r| r.base_url.clone())
-            .unwrap_or_else(|| proxy_base_url.clone());
+        // Always the freshly derived proxy, never `row.base_url` — the
+        // `tinyhumans` row's slug is reserved (no add-provider path can point
+        // a second row at it), so an existing row's endpoint is either this
+        // same value already or a stale one an earlier boot minted under a
+        // different `TINYHUMANS_API_URL`. Step 10 below is about to rewrite a
+        // stale row to this value anyway; probing it first is what makes the
+        // probe (and the row it corrects) agree, instead of health-checking
+        // an endpoint the save is already in the middle of migrating away
+        // from (Codex review: "migrate existing TinyHumans rows to the
+        // configured platform").
+        let base = proxy_base_url.clone();
         match prober.probe(&base, &new).await {
             Ok(ids) => {
                 if let Err(err) = inference_store::record_health(
