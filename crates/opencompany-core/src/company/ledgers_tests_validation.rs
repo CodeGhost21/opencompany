@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::json;
 use tokio::sync::Notify;
 
-use super::super::*;
+use super::*;
 use crate::company::runtime::CompanyRuntime;
 use crate::ledger::LedgerAuthor;
 use crate::ports::ledgers::LedgerStore;
