@@ -46,7 +46,7 @@ pub(super) fn company() -> CompanyId {
     CompanyId::new("acme")
 }
 
-async fn decide(gate: &ManifestApprovalGate, effect: &Effect) -> PolicyDecision {
+pub(super) async fn decide(gate: &ManifestApprovalGate, effect: &Effect) -> PolicyDecision {
     gate.evaluate(&company(), effect).await.unwrap()
 }
 
