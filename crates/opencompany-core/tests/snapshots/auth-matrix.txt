@@ -2854,6 +2854,13 @@ PUT /api/v1/companies/{id}/credential must-change-password-admin refused:403:pas
 PUT /api/v1/companies/{id}/credential platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/credential tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/credential tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/credential/model admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/credential/model anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/credential/model member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/credential/model must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/credential/model platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/credential/model tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/credential/model tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/desks/{desk_id}/hive admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
 PUT /api/v1/companies/{id}/desks/{desk_id}/hive anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
 PUT /api/v1/companies/{id}/desks/{desk_id}/hive member permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
@@ -3099,6 +3106,13 @@ PUT /api/v1/company/credential must-change-password-admin refused:403:password_c
 PUT /api/v1/company/credential platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/credential tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/credential tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/credential/model admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/credential/model anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/credential/model member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/credential/model must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/credential/model platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/credential/model tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/credential/model tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/desks/{desk_id}/hive admin permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
 PUT /api/v1/company/desks/{desk_id}/hive anonymous refused:401:unauthorized source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
 PUT /api/v1/company/desks/{desk_id}/hive member permitted source=operator access=scoped features=openhuman blast=authority note="Members may install or replace a desk's move grammar." wait=-
