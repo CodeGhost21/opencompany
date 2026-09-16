@@ -1010,6 +1010,23 @@ pub async fn fan_out(
                     error = %err,
                     "keys rework: could not migrate tinyhumans provider endpoint",
                 );
+                // The probe above recorded health `ok` for `proxy_base_url` —
+                // the endpoint this row was *supposed* to end up on. That
+                // record is now a lie: the row still points at its old
+                // endpoint, so a reader trusting the health marker would
+                // think turns are reaching a platform they are not. Forget
+                // it rather than leave a stale "ok" behind (CodeRabbit
+                // review).
+                if let Err(forget_err) =
+                    inference_store::forget_health(company, secrets, inference::MANAGED_SLUG).await
+                {
+                    tracing::warn!(
+                        company = %company,
+                        error = %forget_err,
+                        "keys rework: could not clear tinyhumans health after a failed endpoint migration",
+                    );
+                }
+                health_outcome = SlotOutcome::Failed;
                 SlotOutcome::Failed
             }
         }
