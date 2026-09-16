@@ -96,6 +96,10 @@ fn scaffold_paths() -> Vec<&'static str> {
     ]
 }
 
+/// The scaffold has an empty agent root plus the operator-only secrets
+/// folder and its explanatory note. It never creates roster member folders
+/// or the unused `desks/` root.
+#[tokio::test]
 async fn it_provisions_one_empty_system_root() {
     let (_dir, ws) = store().await;
     let company = CompanyId::new("acme");
