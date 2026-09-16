@@ -999,11 +999,7 @@ async fn call_handler_rejects_a_body_that_is_not_valid_json() {
 
 /// Mints a real, HTTP-carriable admin session for `acp_state`'s "acme"
 /// company, returning its `Cookie` header value.
-async fn seed_admin_session_cookie(
-    state: &AppState,
-    company: &CompanyId,
-    user_id: &str,
-) -> String {
+async fn seed_admin_session_cookie(state: &AppState, company: &CompanyId, user_id: &str) -> String {
     let runtime = state.registry().get(company).expect("company");
     let now = crate::ports::now_millis();
     runtime
@@ -1138,8 +1134,7 @@ async fn call_handler_lets_only_one_of_two_concurrent_openers_win_a_connection()
     let request_b = session_new_request(&cookie_b, "conn-http-race", 2);
     let app_a = app.clone();
     let app_b = app.clone();
-    let (response_a, response_b) =
-        tokio::join!(app_a.oneshot(request_a), app_b.oneshot(request_b));
+    let (response_a, response_b) = tokio::join!(app_a.oneshot(request_a), app_b.oneshot(request_b));
 
     let value_a: Value = serde_json::from_slice(
         &axum::body::to_bytes(response_a.unwrap().into_body(), usize::MAX)
@@ -1188,8 +1183,7 @@ async fn call_handler_none_mode_owner_is_unreachable_once_a_second_company_exist
     // below is shown to depend on the second company, not on some other
     // difference between the two tests' fixtures.
     let control_app = router().with_state(state.clone());
-    let control_body =
-        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {} });
+    let control_body = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {} });
     let control_response = control_app
         .oneshot(acp_call_request(control_body))
         .await
@@ -1231,13 +1225,12 @@ async fn call_handler_none_mode_owner_is_unreachable_once_a_second_company_exist
         })
         .await
         .unwrap();
-    let globex_runtime =
-        crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
-            .with_id(globex.clone())
-            .with_brain(std::sync::Arc::new(SilentBrain))
-            .build()
-            .await
-            .unwrap();
+    let globex_runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+        .with_id(globex.clone())
+        .with_brain(std::sync::Arc::new(SilentBrain))
+        .build()
+        .await
+        .unwrap();
     state
         .registry()
         .insert(globex, std::sync::Arc::new(globex_runtime));
@@ -1270,8 +1263,7 @@ async fn call_handler_none_mode_refuses_a_forwarded_request() {
     // Control: the identical request, minus the forwarding header,
     // succeeds on this exact app — so the refusal below is shown to
     // depend on the header, not on some other difference in the fixture.
-    let control_body =
-        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {} });
+    let control_body = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {} });
     let control_response = app
         .clone()
         .oneshot(acp_call_request(control_body))

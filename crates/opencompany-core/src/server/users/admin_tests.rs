@@ -43,11 +43,7 @@ async fn state_with(home: &std::path::Path) -> AppState {
     state
 }
 
-async fn get_with_cookie(
-    app: axum::Router,
-    uri: &str,
-    cookie: &str,
-) -> axum::response::Response {
+async fn get_with_cookie(app: axum::Router, uri: &str, cookie: &str) -> axum::response::Response {
     app.oneshot(
         Request::builder()
             .method("GET")

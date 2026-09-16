@@ -63,10 +63,7 @@ fn seeded_board() -> Vec<BoardItem> {
 }
 
 /// A single-company host, optionally provisioned with a hub serving `board`.
-async fn state_with(
-    home: &std::path::Path,
-    hub: Option<Arc<MockTinyHumansClient>>,
-) -> AppState {
+async fn state_with(home: &std::path::Path, hub: Option<Arc<MockTinyHumansClient>>) -> AppState {
     let id = CompanyId::new("acme");
     let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest()).with_id(id.clone());
     if let Some(hub) = hub {
@@ -148,8 +145,7 @@ async fn lists_filters_votes_and_comments() {
     assert_eq!(value["items"][0]["id"], "one");
 
     // Paging past the end is an empty page, not an error.
-    let (status, value) =
-        call(&app, "GET", "/api/v1/company/feedback/board?page=9", None).await;
+    let (status, value) = call(&app, "GET", "/api/v1/company/feedback/board?page=9", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["items"].as_array().unwrap().len(), 0);
     assert_eq!(value["total"], 2);

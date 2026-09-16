@@ -30,8 +30,7 @@ fn platform_secret_grants_platform_scope() {
 #[test]
 fn unsigned_codec_round_trips_for_the_gate_suites() {
     let verifier = UnsignedTenantVerifier::new("top-secret");
-    let token =
-        UnsignedTenantVerifier::tenant_token(&tenant_claims("tenant:acme", &["operator"]));
+    let token = UnsignedTenantVerifier::tenant_token(&tenant_claims("tenant:acme", &["operator"]));
     let claims = verifier.verify(&token).unwrap();
     assert_eq!(claims.tenant, "tenant:acme");
     assert!(!claims.has_platform_scope());

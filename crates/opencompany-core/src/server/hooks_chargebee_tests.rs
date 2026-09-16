@@ -178,8 +178,7 @@ async fn a_company_with_no_stored_credential_accepts_nothing() {
     let home = tempfile::tempdir().expect("tempdir");
     let (state, runtime, _delivered) = state_with(home.path(), None).await;
 
-    let (status, _) =
-        post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
+    let (status, _) = post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "nothing stored");
 
     // And an EMPTY stored value counts as unconfigured, which is how the
@@ -193,8 +192,7 @@ async fn a_company_with_no_stored_credential_accepts_nothing() {
         )
         .await
         .expect("clear");
-    let (status, _) =
-        post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
+    let (status, _) = post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "cleared to empty");
 }
 
@@ -211,8 +209,7 @@ async fn a_verified_delivery_is_accepted_and_actually_raises_the_event() {
     let home = tempfile::tempdir().expect("tempdir");
     let (state, _runtime, delivered) = state_with(home.path(), Some("cbuser:cbpass")).await;
 
-    let (status, body) =
-        post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
+    let (status, body) = post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["ok"], true);
     assert_eq!(

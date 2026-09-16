@@ -45,8 +45,7 @@ fn the_origin_is_never_a_wildcard() {
     // one would silently break the console rather than loosen it — but the
     // deeper point is that we must never echo an origin we were not told
     // about.
-    let headers =
-        cfg(&["http://localhost:5173"]).headers_for(&with_origin("https://evil.test"));
+    let headers = cfg(&["http://localhost:5173"]).headers_for(&with_origin("https://evil.test"));
     assert!(
         headers.is_empty(),
         "an unlisted origin must get no CORS headers at all"
