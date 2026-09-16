@@ -2,6 +2,7 @@
 //! the `ScriptedStore` fake used to exercise every referent outcome
 //! (split out of `avatar_tests.rs`).
 
+use super::tests_formats::{gif, png};
 use super::*;
 
 // ——— resolve's referent rule ———————————————————————————————

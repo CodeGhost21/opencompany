@@ -3,6 +3,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
+use super::tests_a_company_on_the::{BrokenSecrets, GRANTS_COMPOSIO, platform_identity};
 use super::{CredentialSource, TinyhumansTokenSource};
 use crate::company::CompanyManifest;
 use crate::ports::types::{CompanyId, CompanyRecord};
