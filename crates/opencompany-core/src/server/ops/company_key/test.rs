@@ -900,6 +900,75 @@ async fn put_credential_that_configures_inference_rebuilds_the_runtime_in_place(
     assert_eq!(dto["restartRequired"], false, "{raw}");
 }
 
+/// `PUT …/credential/model` finishes a key the console cannot resend — the
+/// key-grant case, where `finish_link` stored it and answered `needsModel`.
+/// The row and the default land off the stored key; nothing else moves.
+#[tokio::test]
+async fn put_credential_model_completes_the_row_from_the_stored_key() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanmodel", GRANTED).await;
+
+    // Nothing stored yet: nothing to finish.
+    let (status, _, raw) = send(
+        &state,
+        "fanmodel",
+        "PUT",
+        "/api/v1/company/credential/model",
+        Some(json!({ "model": "acme/test-model" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+
+    // The key arrives without a model (what a grant does).
+    let (status, resp, raw) = send(
+        &state,
+        "fanmodel",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(resp["needsModel"], true, "{raw}");
+
+    let (status, resp, raw) = send(
+        &state,
+        "fanmodel",
+        "PUT",
+        "/api/v1/company/credential/model",
+        Some(json!({ "model": "acme/test-model" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(*slot_outcome(&resp, "composio"), json!("kept"), "{raw}");
+    assert_eq!(*slot_outcome(&resp, "inference"), json!("kept"), "{raw}");
+    assert_eq!(*slot_outcome(&resp, "provider"), json!("filled"), "{raw}");
+    assert_eq!(*slot_outcome(&resp, "default"), json!("filled"), "{raw}");
+    assert_eq!(resp["needsModel"], false);
+    assert!(!raw.contains(KEY), "response leaked the key: {raw}");
+
+    let (_, inference, raw) = send(&state, "fanmodel", "GET", "/api/v1/company/inference", None).await;
+    assert_eq!(inference["defaultChoice"]["provider"], "tinyhumans", "{raw}");
+    assert_eq!(inference["defaultChoice"]["model"], "acme/test-model", "{raw}");
+}
+
+/// A member may not finish the model any more than set the key.
+#[tokio::test]
+async fn a_member_cannot_finish_the_model() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "fanmodelm", GRANTED).await;
+    let cookie = crate::server::test_support::member_cookie(&state, "fanmodelm").await;
+    let (status, _, _) = send_as(
+        &state,
+        "PUT",
+        "/api/v1/company/credential/model",
+        Some(json!({ "model": "acme/test-model" })),
+        cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 /// Q6: a probe classified `auth` rolls the LLM copy back and never touches
 /// the account key or the Composio copy.
 #[tokio::test]
