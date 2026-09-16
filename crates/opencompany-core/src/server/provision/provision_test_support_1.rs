@@ -4,11 +4,11 @@
 use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::Brain;
-use crate::ports::{CompanyStore, CycleHost, EventLog};
 pub(super) use crate::ports::types::{
     CompanyEvent, CompanyId, CompanyRecord, CompanySummary, CompressedTrace, CycleRequest,
     CycleResult, Effect, EffectGroup, EventSeq, LedgerEntry, OutboundMessage, TokenUsage,
 };
+use crate::ports::{CompanyStore, CycleHost, EventLog};
 use crate::runtime::RuntimeBuilder;
 use crate::server::graphql::auth::GqlAuth;
 use crate::server::platform_auth::{PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier};
@@ -418,7 +418,10 @@ pub(super) struct FlakyLoadStoreOnCalls {
 }
 
 impl FlakyLoadStoreOnCalls {
-    pub(super) fn new(inner: Arc<dyn CompanyStore>, fail_on: impl IntoIterator<Item = usize>) -> Self {
+    pub(super) fn new(
+        inner: Arc<dyn CompanyStore>,
+        fail_on: impl IntoIterator<Item = usize>,
+    ) -> Self {
         Self {
             inner,
             fail_on: fail_on.into_iter().collect(),
