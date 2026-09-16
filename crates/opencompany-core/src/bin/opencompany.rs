@@ -583,10 +583,10 @@ fn company_builder(
     discoverable: bool,
 ) -> Result<RuntimeBuilder> {
     let mut builder = attach_tinyhumans_feedback(
-        attach_harness(attach_openhuman(RuntimeBuilder::new(
-            home.to_path_buf(),
-            manifest,
-        )), state.config()),
+        attach_harness(
+            attach_openhuman(RuntimeBuilder::new(home.to_path_buf(), manifest)),
+            state.config(),
+        ),
         state.config(),
     )
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())

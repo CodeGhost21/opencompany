@@ -49,7 +49,9 @@ pub fn attach(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
     // healthy and only reveals the gap when an agent is built or a workflow node
     // 500s. Say it once, here, where an operator reading the first lines of the
     // log will see it.
-    if let Some(warning) = PlatformCredentialStatus::resolve_at(&ProcessEnv, Some(&config.api_url)).boot_warning() {
+    if let Some(warning) =
+        PlatformCredentialStatus::resolve_at(&ProcessEnv, Some(&config.api_url)).boot_warning()
+    {
         tracing::warn!("[boot] {warning}");
     }
 

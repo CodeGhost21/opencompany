@@ -2712,11 +2712,9 @@ mod tests {
     #[tokio::test]
     async fn env_config_uses_resolved_host_api_url_when_environment_omits_it() {
         let env = MapEnv::new([("TINYHUMANS_API_KEY", "sk-platform")]);
-        let (cfg, _) = harness_inference_from_env_at(
-            &env,
-            Some("https://config-api.tinyhumans.example/"),
-        )
-        .expect("configured");
+        let (cfg, _) =
+            harness_inference_from_env_at(&env, Some("https://config-api.tinyhumans.example/"))
+                .expect("configured");
         assert_eq!(
             cfg.base_url,
             "https://config-api.tinyhumans.example/agent-integrations/openrouter"
