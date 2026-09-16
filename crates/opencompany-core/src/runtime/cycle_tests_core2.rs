@@ -1,3 +1,6 @@
+pub(super) use super::*;
+pub(super) use crate::ports::tasks::TaskTitle;
+
 /// Parks one harness tool call behind a **zero-TTL** gate, so it is past its
 /// deadline the instant it lands — the state an operator meets when they get
 /// to the queue late (issue #1449).
