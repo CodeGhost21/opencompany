@@ -50,9 +50,10 @@ use crate::ports::SecretStore;
 use crate::ports::types::CompanyId;
 
 /// Default hosted inference endpoint when only a bare `TINYHUMANS_API_KEY` is
-/// supplied — the OpenAI-compatible surface a company agent's `chat-v1` /
-/// `reasoning-v1` / … workloads resolve against.
-pub const DEFAULT_TINYHUMANS_INFERENCE_URL: &str = "https://api.tinyhumans.ai/openai/v1";
+/// supplied: the TinyHumans OpenRouter proxy, the same endpoint as
+/// [`inference::PLATFORM_BASE_URL`]. Production value; fallbacks use
+/// [`inference::platform_base_url`] so a configured `TINYHUMANS_API_URL` wins.
+pub const DEFAULT_TINYHUMANS_INFERENCE_URL: &str = inference::PLATFORM_BASE_URL;
 
 /// Default hosted model/tier when none is configured.
 pub const DEFAULT_HOSTED_MODEL: &str = "chat-v1";
@@ -231,7 +232,7 @@ pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credentia
     };
     let base_url = env
         .get("OPENCOMPANY_INFERENCE_URL")
-        .unwrap_or_else(|| DEFAULT_TINYHUMANS_INFERENCE_URL.to_string());
+        .unwrap_or_else(inference::platform_base_url);
     Some((credential, base_url))
 }
 

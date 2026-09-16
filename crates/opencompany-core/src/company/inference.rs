@@ -146,13 +146,50 @@ impl Default for HarnessScope {
     }
 }
 
-/// The platform's OpenAI-compatible endpoint — the subscription proxy an
-/// `openrouter` company with **no** key of its own resolves against.
+/// The platform's OpenAI-compatible endpoint — the TinyHumans OpenRouter proxy
+/// that the legacy managed chain and an `openrouter` company with **no** key of
+/// its own resolve against. The production value; see [`platform_base_url`] for
+/// the one this instance actually uses.
 ///
-/// The proxy fronts OpenRouter upstream and meters the spend against the
-/// tenant's subscription, so from the workload's point of view this and
-/// [`OPENROUTER_BASE_URL`] serve the same catalogue; only who pays differs.
-pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/openai/v1";
+/// Keys rework (#2306), slice 2a "commit 5": this used to be
+/// `https://api.tinyhumans.ai/openai/v1`, the curated surface that takes tier
+/// names (`chat-v1`). Every path that resolves here now sends a real model id
+/// (2d), and the first-run wizard's `managed` provider probes and stores the id
+/// it discovered — so the proxy, which lists real ids and rejects tier names, is
+/// the right endpoint for all of them, and the same one the `tinyhumans`
+/// provider row uses. The proxy fronts OpenRouter upstream and meters the spend
+/// against the tenant's subscription, so from the workload's point of view this
+/// and [`OPENROUTER_BASE_URL`] serve the same catalogue; only who pays differs.
+pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/agent-integrations/openrouter";
+
+/// The TinyHumans platform this process was configured for (`AppConfig::api_url`,
+/// from `TINYHUMANS_API_URL` / `config.toml`), recorded once at boot so the
+/// managed chain follows it without every resolver growing an `api_url`
+/// parameter. Unset (tests, early boot) reads as the production default.
+static PLATFORM_API_URL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Records the platform `api_url` this instance talks to. Called from
+/// [`AppState::new`](crate::AppState::new); idempotent, and a later call wins.
+pub fn set_platform_api_url(api_url: &str) {
+    let trimmed = api_url.trim().trim_end_matches('/');
+    if let Ok(mut slot) = PLATFORM_API_URL.write() {
+        *slot = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    }
+}
+
+/// The TinyHumans OpenRouter proxy base this instance resolves managed
+/// inference against: `{api_url}/agent-integrations/openrouter` for the
+/// configured platform, which with the default `api_url` is exactly
+/// [`PLATFORM_BASE_URL`]. This — not the constant — is what a fallback must
+/// use, or a staging or local platform's key is presented to production.
+pub fn platform_base_url() -> String {
+    PLATFORM_API_URL
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .map(|api_url| catalogue::tinyhumans_proxy_url(&api_url))
+        .unwrap_or_else(|| PLATFORM_BASE_URL.to_string())
+}
 
 /// The provider kind removed when OpenCompany stopped exposing its own model
 /// SKUs. A manifest or stored runtime blob still naming it aliases to
@@ -453,7 +490,7 @@ fn resolve_endpoint(
         // else the injected managed one.
         let base_url = env_default
             .map(|e| e.base_url.clone())
-            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+            .unwrap_or_else(platform_base_url);
         let credential = if has_key {
             Credential::from_value(key)
         } else {
@@ -474,7 +511,7 @@ fn resolve_endpoint(
         }
         let base_url = env_default
             .map(|e| e.base_url.clone())
-            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+            .unwrap_or_else(platform_base_url);
         let credential = env_default
             .map(|e| e.credential.clone())
             .unwrap_or(Credential::None);

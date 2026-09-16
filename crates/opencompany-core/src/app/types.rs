@@ -711,6 +711,10 @@ impl std::fmt::Debug for AppState {
 impl AppState {
     /// Builds state from runtime configuration with an empty company registry.
     pub fn new(config: AppConfig) -> Self {
+        // The managed inference chain resolves its endpoint from the platform
+        // this instance is configured for; record it once here rather than
+        // threading `api_url` through every resolver.
+        crate::company::inference::set_platform_api_url(&config.api_url);
         let auth_mode_override = Arc::new(RwLock::new(config.auth_mode_override));
         Self {
             config,

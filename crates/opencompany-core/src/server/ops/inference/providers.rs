@@ -2106,7 +2106,7 @@ async fn test_managed(
     let base_url = platform
         .as_ref()
         .map(|p| p.base_url.clone())
-        .unwrap_or_else(|| inference::PLATFORM_BASE_URL.to_string());
+        .unwrap_or_else(inference::platform_base_url);
     let subject = catalogue::endpoint_host(&base_url).unwrap_or_else(|| "the managed brain".into());
 
     match probe::probe_models(
