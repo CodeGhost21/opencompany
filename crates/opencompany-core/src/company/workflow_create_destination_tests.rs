@@ -2,6 +2,7 @@
 
 use super::test_support::*;
 use super::tests_problems::problems_of;
+#[cfg(feature = "openhuman")]
 use super::tests_tool_call::{manifest_with_allow, tool_call_draft, tool_call_draft_args};
 use super::*;
 
