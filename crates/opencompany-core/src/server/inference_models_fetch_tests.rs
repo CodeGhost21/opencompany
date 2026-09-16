@@ -71,6 +71,8 @@ async fn a_cache_written_catalog_failure_never_names_the_endpoint_credential() {
     );
 }
 
+// ---- the paged catalog (keys rework, issue #2306, slice 2a) ------------
+
 /// Serves `/agent-integrations/openrouter/models`, calling `respond(offset)`
 /// for each request to build the `(status, body)` it answers, and recording
 /// every query string it was called with.
