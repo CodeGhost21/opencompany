@@ -5,6 +5,13 @@ use crate::harness::provider::MockProvider;
 use crate::ports::run_output::WorkflowRunOutputStore;
 use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
+/// Deps whose `DeliveryParking` journals over a caller-supplied store,
+/// otherwise wired exactly like [`deps_with_parking`] — a real gate, a
+/// fresh [`BlockedNodeQueue`], no continuations/gates state this test
+/// needs.
+fn deps_with_parking_over(
+    dir: &std::path::Path,
+    store: Arc<dyn crate::ports::JournalStore>,
 ) -> super::super::delivery::WorkflowDeliveryDeps {
     let policy = toml::from_str("mode = \"full\"\n").expect("valid [policy] block");
     let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));

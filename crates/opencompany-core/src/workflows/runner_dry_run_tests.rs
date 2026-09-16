@@ -632,11 +632,3 @@ impl crate::ports::JournalStore for GatedJournalStore {
         self.inner.complete_import(id, lines).await
     }
 }
-
-/// Deps whose `DeliveryParking` journals over a caller-supplied store,
-/// otherwise wired exactly like [`deps_with_parking`] — a real gate, a
-/// fresh [`BlockedNodeQueue`], no continuations/gates state this test
-/// needs.
-fn deps_with_parking_over(
-    dir: &std::path::Path,
-    store: Arc<dyn crate::ports::JournalStore>,
