@@ -375,6 +375,9 @@ summarize it or pass it along. Do not delegate again; just relay what came back.
 /// message directly.
 #[derive(Default)]
 pub(crate) struct DelegationOutcome {
+    /// Legacy single standalone bubble slot. Existing delegation kinds leave
+    /// it empty; retained for the stable test seam.
+    pub(crate) bubble: Option<OutboundMessage>,
     /// Chat bubbles to surface as-is. Conversation dispatch uses this for the
     /// recipient's DM reply and any bounded child replies it caused.
     pub(crate) bubbles: Vec<OutboundMessage>,
@@ -2070,6 +2073,9 @@ impl<'a> DelegationRunner<'a> {
             if let Some(id) = out.spawned_task {
                 drained.spawned_task.get_or_insert(id);
             }
+            if let Some(bubble) = out.bubble {
+                drained.bubbles.push(bubble);
+            }
             drained.bubbles.extend(out.bubbles);
             if let Some(desk) = out.desk_reply {
                 drained.desk_replies.push(desk);
@@ -2656,6 +2662,7 @@ impl<'a> DelegationRunner<'a> {
         // orchestrator turn (the CEO-relay hand-back). Their steps ride
         // along and get folded onto the relayed operator bubble.
         Ok(DelegationOutcome {
+            bubble: None,
             bubbles: Vec::new(),
             // Not a board write; see `DelegationOutcome::assigned`.
             assigned: false,
