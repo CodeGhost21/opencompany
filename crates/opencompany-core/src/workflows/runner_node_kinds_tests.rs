@@ -564,4 +564,3 @@ impl crate::harness::provider::HarnessModel for RecordingSlowProvider {
         "recording-slow".to_string()
     }
 }
-

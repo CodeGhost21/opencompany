@@ -241,11 +241,12 @@ async fn a_peer_answer_the_judge_rejects_parks_an_information_blocker() {
         .prefix("oc-1866-peer-rejected-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) = crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"retry\"}"),
-    ])
-    .await;
+    let (base_url, _script) =
+        crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"retry\"}"),
+        ])
+        .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(base_url, dir.path());
     let runs: Arc<dyn crate::ports::RunStore> =
         Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
@@ -298,11 +299,12 @@ async fn a_peer_answer_the_judge_accepts_still_fails_its_postcondition() {
         .prefix("oc-1866-peer-postcondition-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) = crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"continue\"}"),
-    ])
-    .await;
+    let (base_url, _script) =
+        crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"continue\"}"),
+        ])
+        .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(base_url, dir.path());
     let runs: Arc<dyn crate::ports::RunStore> =
         Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
@@ -357,11 +359,12 @@ async fn a_consultation_that_stages_board_work_leaves_nothing_behind() {
         .prefix("oc-1866-peer-no-authority-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) = crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"continue\"}"),
-    ])
-    .await;
+    let (base_url, _script) =
+        crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"continue\"}"),
+        ])
+        .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(base_url, dir.path());
     let queues = deps.clone();
     let turn = Arc::new(ConsultedPeerTurn::staging(
@@ -503,11 +506,12 @@ async fn a_consultation_cannot_re_enter_the_recovery_ladder() {
         .prefix("oc-1866-peer-reentrant-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) = crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
-    ])
-    .await;
+    let (base_url, _script) =
+        crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
+        ])
+        .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(base_url, dir.path());
     let turn = Arc::new(ReentrantPeerTurn {
         consults: std::sync::atomic::AtomicUsize::new(0),

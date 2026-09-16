@@ -128,4 +128,3 @@ fn the_plan_field_is_additive_on_the_wire() {
     let back: TaskRecord = serde_json::from_str(&json).expect("round trip");
     assert_eq!(back, planned);
 }
-

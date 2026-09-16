@@ -335,4 +335,3 @@ async fn a_spent_total_ceiling_skips_the_judge_call_entirely() {
         "a budget-refused verify must not be accepted as sufficient"
     );
 }
-

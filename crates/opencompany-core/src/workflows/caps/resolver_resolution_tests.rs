@@ -364,4 +364,3 @@ async fn a_seed_file_shadows_an_overlay_of_the_same_id() {
         "the seed leaf must win over the overlay parent"
     );
 }
-

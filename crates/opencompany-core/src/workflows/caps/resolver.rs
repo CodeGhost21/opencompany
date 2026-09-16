@@ -466,8 +466,8 @@ fn is_safe_workflow_id(id: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "resolver_resolution_tests.rs"]
-mod tests_resolution;
-#[cfg(test)]
 #[path = "resolver_gating_tests.rs"]
 mod tests_gating;
+#[cfg(test)]
+#[path = "resolver_resolution_tests.rs"]
+mod tests_resolution;

@@ -557,4 +557,3 @@ fn a_recorded_expression_string_is_not_evaluated() {
     assert!(!encoded.starts_with('='), "{encoded}");
     assert_eq!(replayed_result(REPLAY_SLUG, args), Some(hostile));
 }
-

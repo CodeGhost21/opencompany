@@ -304,4 +304,3 @@ async fn a_rambling_ask_is_named_after_the_work() {
     );
     assert!(!title.as_str().ends_with('…'));
 }
-

@@ -496,4 +496,3 @@ async fn build_capabilities_dry_ignores_an_impossible_workspace_root() {
 }
 
 // ---- the transcript fold (the record a workflow node now leaves) -------
-

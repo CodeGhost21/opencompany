@@ -217,4 +217,3 @@ fn cap_discussion_is_codepoint_safe() {
     assert_eq!(cap_discussion("looks good to me"), "looks good to me");
     assert_eq!(cap_discussion(""), "");
 }
-

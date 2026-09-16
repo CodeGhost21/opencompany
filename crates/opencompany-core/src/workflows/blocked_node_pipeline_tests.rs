@@ -643,7 +643,6 @@ async fn a_blocked_run_persists_the_partial_output_it_reached() {
     );
 }
 
-
 // ── a graph with nothing to run (issue #976) ────────────────────────────────
 
 /// The `campaign` / `QA Test Pipeline` shape from staging: a graph whose only

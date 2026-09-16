@@ -619,4 +619,3 @@ async fn a_cancelled_run_settles_fast_keeping_only_its_completed_nodes() {
     };
     assert_eq!(run_id, &ctx.run_id);
 }
-

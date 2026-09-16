@@ -630,4 +630,3 @@ struct ConsultedPeerTurn {
     node_turns: std::sync::atomic::AtomicUsize,
     stage: Option<HarnessDeps>,
 }
-

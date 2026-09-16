@@ -607,4 +607,3 @@ async fn a_crashed_runs_delivery_is_not_repeated_on_an_independent_re_run() {
         crate::ports::DeliveryReason::AlreadyDelivered
     );
 }
-

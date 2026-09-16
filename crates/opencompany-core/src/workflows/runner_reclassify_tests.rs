@@ -666,4 +666,3 @@ impl crate::runtime::delegation::RunTurn for HaltOkTurn {
         unreachable!("not exercised by this test")
     }
 }
-

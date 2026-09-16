@@ -651,4 +651,3 @@ to = "done"
 /// to stand in for the full workflow-node dispatch path, not only the
 /// direct chat one.
 struct StructuredJsonReplyTurn;
-

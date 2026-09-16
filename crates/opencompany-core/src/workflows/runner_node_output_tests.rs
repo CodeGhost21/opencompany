@@ -637,4 +637,3 @@ async fn a_dry_run_persists_no_output() {
         "a dry run must persist nothing durable"
     );
 }
-
