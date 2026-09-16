@@ -1,6 +1,6 @@
-//! Offline tests for `HostedMedullaBrain` over the in-memory
-//! `MockTransport`. See `hosted_e2e_tests.rs` for the end-to-end half that
-//! drives a real `CompanyRuntime`.
+//! Offline tests for [`HostedMedullaBrain`] over the in-memory
+//! [`MockTransport`]. See `hosted_e2e_tests.rs` for the end-to-end half
+//! that drives a real [`CompanyRuntime`](crate::company::runtime::CompanyRuntime).
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,7 +15,7 @@ use crate::brain::medulla::wire::{
 use crate::ports::types::{
     ApprovalId, ChunkAddr, ChunkHit, CompanyEvent, ContextOp, ContextOpResult, Effect,
     EffectDisposition, ToolResult,
-
+};
 
 // ---------------------------------------------------------------------------
 // Test host
