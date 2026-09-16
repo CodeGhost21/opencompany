@@ -99,7 +99,7 @@ import { HOST_SETTINGS_HIDDEN } from "@/product-scope";
 const STEPS: readonly (Step & { fields: readonly string[] })[] = [
   { id: "setup-way", label: "Setup", fields: [] },
   { id: "managed-login", label: "Connect", fields: ["tinyhumans_api_key"] },
-  { id: "self-managed-connect", label: "Model", fields: ["tinyhumans_api_key"] },
+  { id: "self-managed-connect", label: "Connect", fields: ["tinyhumans_api_key"] },
   { id: "business", label: "Business", fields: [] },
   { id: "signin", label: "Sign-in", fields: ["auth_mode"] },
   { id: "account", label: "You", fields: [] },

@@ -210,6 +210,10 @@ async function connectProvider() {
   // is the cheapest honest route through the same `onChoose`.
   await clickId("inference-add-custom");
   expect(anywhere("inference-connect-provider"), "the real connect dialog should open").toBeTruthy();
+  expect(
+    anywhere("inference-add-provider"),
+    "and the picker must close underneath it (KR-L1-02)",
+  ).toBeNull();
 
   await typeInto("#inference-connect-name", "Acme");
   await typeInto("#inference-connect-url", "https://acme.test/v1");
