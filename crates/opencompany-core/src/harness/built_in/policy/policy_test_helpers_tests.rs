@@ -283,4 +283,3 @@ pub(crate) fn standing_verdict(
         scope: None,
     }
 }
-

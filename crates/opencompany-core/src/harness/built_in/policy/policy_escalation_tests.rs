@@ -6,12 +6,12 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 // Issue #470: the `composio_execute` fixtures are built here, from the same
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
+use super::policy_test_helpers_tests::*;
 use crate::policy::test_support::{
     COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
     composio_read_args, composio_send_args, composio_unclassified_args,
     composio_unclassified_args_numbered,
 };
-use super::policy_test_helpers_tests::*;
 
 #[tokio::test]
 async fn escalate_to_human_sets_the_turn_boundary_and_explicitly_refuses_overflow() {
@@ -295,10 +295,8 @@ async fn a_blocker_duplicate_outside_the_drain_budget_is_refused() {
                 queue.push(request);
             }
         }
-        let tool = super::super::blockers::EscalateToHumanTool::new(
-            queue.clone(),
-            "engineer".to_string(),
-        );
+        let tool =
+            super::super::blockers::EscalateToHumanTool::new(queue.clone(), "engineer".to_string());
         let asked = if existing_in_cycle {
             cycle
                 .scoped(async {
@@ -409,9 +407,7 @@ async fn escalate_to_human_refuses_a_sibling_gated_call_in_the_same_turn() {
         "escalation must refuse later calls in the same turn: {later_call:?}"
     );
     let next_turn = claim
-        .scoped(
-            queue.turn_scoped(policy.check(&request("composio_execute", composio_send_args()))),
-        )
+        .scoped(queue.turn_scoped(policy.check(&request("composio_execute", composio_send_args()))))
         .await;
     assert!(matches!(
         next_turn,
@@ -506,4 +502,3 @@ async fn the_turn_boundary_reads_as_not_pending_outside_any_turn_scope() {
          refuse a sibling call: {decision:?}"
     );
 }
-

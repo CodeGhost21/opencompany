@@ -6,12 +6,12 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 // Issue #470: the `composio_execute` fixtures are built here, from the same
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
+use super::policy_test_helpers_tests::*;
 use crate::policy::test_support::{
     COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
     composio_read_args, composio_send_args, composio_unclassified_args,
     composio_unclassified_args_numbered,
 };
-use super::policy_test_helpers_tests::*;
 
 use super::*;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
@@ -26,8 +26,6 @@ use crate::policy::test_support::{
     composio_read_args, composio_send_args, composio_unclassified_args,
     composio_unclassified_args_numbered,
 };
-
-
 
 #[tokio::test]
 async fn an_explicit_request_refuses_later_calls_in_the_same_turn() {
@@ -394,8 +392,7 @@ async fn concurrent_calls_against_a_readonly_denied_grant_never_consume_it() {
     let call = |policy: Arc<ApprovalPolicy>, args: serde_json::Value, gate: Arc<Barrier>| {
         tokio::task::spawn_blocking(move || {
             gate.wait();
-            tokio::runtime::Handle::current()
-                .block_on(policy.check(&request("payment.send", args)))
+            tokio::runtime::Handle::current().block_on(policy.check(&request("payment.send", args)))
         })
     };
     let a = call(locked_down.clone(), args.clone(), gate.clone());
@@ -622,4 +619,3 @@ async fn full_allows_but_always_approve_still_parks() {
         ToolPolicyDecision::RequireApproval { .. }
     ));
 }
-

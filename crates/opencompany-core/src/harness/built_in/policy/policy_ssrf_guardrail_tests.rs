@@ -6,17 +6,16 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 // Issue #470: the `composio_execute` fixtures are built here, from the same
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
+use super::policy_test_helpers_tests::*;
 use crate::policy::test_support::{
     COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
     composio_read_args, composio_send_args, composio_unclassified_args,
     composio_unclassified_args_numbered,
 };
-use super::policy_test_helpers_tests::*;
 
 // -----------------------------------------------------------------------
 // The S2 http_request deflection guardrail (issue #1759)
 // -----------------------------------------------------------------------
-
 
 /// The headline case: `http_request` to `api.github.com` when `github` is
 /// connected is denied, and the refusal names the Composio path.
@@ -318,7 +317,6 @@ async fn the_deflection_outranks_a_grant() {
 
 use crate::harness::built_in::run_origin::{DispatchSource, RunOrigin, claim};
 
-
 #[tokio::test]
 async fn an_unlabelled_turn_decides_exactly_as_before() {
     let p = policy("supervised", &[], None).with_agent("ops");
@@ -520,7 +518,6 @@ async fn a_dispatched_origin_still_parks_every_floor_covered_tool() {
     }
 }
 
-
 #[tokio::test]
 async fn a_scope_matched_call_inside_a_trusted_run_is_admitted() {
     let p = policy("supervised", &[], None).with_agent("ops");
@@ -674,4 +671,3 @@ async fn the_arm_is_inert_under_full_and_readonly() {
         );
     }
 }
-

@@ -6,12 +6,12 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 // Issue #470: the `composio_execute` fixtures are built here, from the same
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
+use super::policy_test_helpers_tests::*;
 use crate::policy::test_support::{
     COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
     composio_read_args, composio_send_args, composio_unclassified_args,
     composio_unclassified_args_numbered,
 };
-use super::policy_test_helpers_tests::*;
 
 // --- The per-agent daily spend cap (issue #304) ---------------------------
 
@@ -69,20 +69,12 @@ impl UsageMeter for FailingMeter {
     async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
         Ok(())
     }
-    async fn query(
-        &self,
-        _company: &CompanyId,
-        _since: u64,
-    ) -> crate::Result<Vec<UsageSample>> {
+    async fn query(&self, _company: &CompanyId, _since: u64) -> crate::Result<Vec<UsageSample>> {
         Err(crate::error::OpenCompanyError::Store(
             "meter unavailable".into(),
         ))
     }
 }
-
-
-
-
 
 /// Production disables policy-generated approvals, which puts the daily cap
 /// below the `Allow` that `check` returns first — so a manifest cap does not
@@ -469,4 +461,3 @@ async fn a_failing_meter_parks_priced_calls_and_leaves_free_ones_alone() {
         "a free call never reaches the budget arm, so a meter outage cannot gate it"
     );
 }
-

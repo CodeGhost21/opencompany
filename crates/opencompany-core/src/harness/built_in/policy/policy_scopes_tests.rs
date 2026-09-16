@@ -6,15 +6,14 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 // Issue #470: the `composio_execute` fixtures are built here, from the same
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
+use super::policy_test_helpers_tests::*;
 use crate::policy::test_support::{
     COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
     composio_read_args, composio_send_args, composio_unclassified_args,
     composio_unclassified_args_numbered,
 };
-use super::policy_test_helpers_tests::*;
 
 // --- scopes: a turn's entries are its own, and nobody else's (#439) ------
-
 
 /// The regression #395 narrowed and #439 removes: a workflow node parks its
 /// gated calls while a chat cycle is part-way through its own turn.
@@ -313,7 +312,6 @@ async fn a_standing_deny_is_not_advertised_for_a_workflow_subject() {
     );
 }
 
-
 /// INPUT-axis (TOOL-006): `standing_deny_applies` derives the call's own
 /// scope from its arguments (`standing_scope_of`) before matching it
 /// against the grant's stored scope. A call with no `url` at all — a
@@ -467,4 +465,3 @@ async fn a_standing_deny_expires_exactly_at_its_deadline_not_after() {
          `check` reads the clock) the denial must already read as expired"
     );
 }
-
