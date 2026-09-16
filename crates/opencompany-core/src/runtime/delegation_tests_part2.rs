@@ -102,56 +102,54 @@ async fn a_hand_off_inside_a_dispatched_card_opens_no_second_card() {
 
 // ── path one: a desk asked directly ─────────────────────────────────────
 
-/// Asking a desk lead directly used to be the one path with no way to reach
-/// the board at all: the card-opening tools are wired only onto the
-/// orchestrator, so the desk did the work inline and nothing tracked it.
+/// Asking a desk lead directly opens **no** card by itself. Issue #442 carded
+/// anything "substantial" said to one here — before the turn, because a
+/// non-orchestrator carried no tool that could — and every desk message
+/// became a work item nobody had asked for. The board is a tool call now:
+/// the message below is exactly what the old detector tracked, and nothing
+/// is opened for it, linked to it, or on the board while the desk works.
 #[tokio::test]
-async fn a_desk_asked_directly_opens_its_own_card() {
+async fn a_desk_asked_directly_opens_no_card_by_itself() {
+    let request = "read the pricing repo and write modules.md";
+    assert!(
+        is_trackable_work(request),
+        "fixture must be a message the old detector carded, or this proves nothing"
+    );
     let fx = Fixture::new();
     let turns = ScriptedTurns::new(&fx, vec![Turn::reply("modules.md is written")]);
     let turn = fx
         .runner(&turns)
-        .handle_operator_message(
-            "engineer",
-            "read the pricing repo and write modules.md",
-            Some("eng_desk"),
-        )
+        .handle_operator_message("engineer", request, Some("eng_desk"))
         .await
         .expect("operator message handled");
 
-    // The issue's requirement is that the tracking decision is settled
-    // BEFORE the work starts, so this reads the board from inside the desk's
-    // own turn rather than only afterwards.
-    assert_eq!(
-        turns.board_at_turn(0),
-        vec![("engineer".to_string(), COLUMN_IN_PROGRESS.to_string())],
-        "the card is open before the desk begins working"
+    assert!(
+        turns.board_at_turn(0).is_empty(),
+        "nothing is on the board while the desk works"
     );
-    let cards = fx.cards().await;
-    assert_eq!(cards.len(), 1, "{cards:?}");
-    assert_eq!(cards[0].assignee, "engineer");
-    assert_eq!(cards[0].column, COLUMN_IN_REVIEW);
-    assert_eq!(cards[0].origin_chat_id(), Some("eng_desk"));
-    assert_eq!(
-        cards[0].origin_parent(),
-        None,
-        "an unthreaded turn raises a card on the channel-level conversation",
-    );
-    assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    assert!(fx.cards().await.is_empty(), "and nothing after");
+    assert_eq!(turn.spawned_task, None, "and the reply links to no card");
 }
 
-/// Issue #1890 B — the card records **which thread** asked, not only which
-/// channel.
-///
-/// Without this the settle marker lands flat in the channel, so an operator
-/// who asked inside a thread watches their own thread never report the work
-/// finishing. The runner is already bound to the raising turn's root (A's
-/// `in_thread` builder); this is that root reaching the board.
+/// The desk's **own** `spawn_task` is how a direct ask gets tracked: the
+/// card it opens is this turn's card, assigned as the agent said, raised in
+/// the conversation the ask came from, and reported on the operator bubble.
 #[tokio::test]
-async fn a_card_raised_inside_a_thread_records_its_root() {
+async fn a_desk_asked_directly_tracks_the_ask_with_its_own_spawn_task() {
     let fx = Fixture::new();
-    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("modules.md is written")]);
-    fx.runner(&turns)
+    let turns = ScriptedTurns::new(
+        &fx,
+        vec![Turn::queueing(
+            "on it — tracked",
+            vec![Delegation::SpawnTask {
+                title: "Write modules.md".to_string(),
+                note: Some("read the pricing repo first".to_string()),
+                assignee: Some("engineer".to_string()),
+            }],
+        )],
+    );
+    let turn = fx
+        .runner(&turns)
         .in_thread(Some(EventSeq::new(41)))
         .handle_operator_message(
             "engineer",
@@ -163,16 +161,15 @@ async fn a_card_raised_inside_a_thread_records_its_root() {
 
     let cards = fx.cards().await;
     assert_eq!(cards.len(), 1, "{cards:?}");
-    assert_eq!(
-        cards[0].origin_chat_id(),
-        Some("eng_desk"),
-        "the channel half is unchanged",
-    );
+    assert_eq!(cards[0].assignee, "engineer");
+    assert_eq!(cards[0].title, "Write modules.md");
+    assert_eq!(cards[0].origin_chat_id(), Some("eng_desk"));
     assert_eq!(
         cards[0].origin_parent(),
         Some(EventSeq::new(41)),
-        "and the thread half is the root the turn was bound to",
+        "raised in the thread the ask came from"
     );
+    assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
 }
 
 /// The same, for the card a `spawn_task` queues rather than the one a
@@ -253,42 +250,6 @@ async fn a_desk_asked_something_the_model_calls_chatter_opens_no_card() {
     assert_eq!(turn.spawned_task, None, "and nothing is linked to one");
 }
 
-/// The other direction, which is the one that must not regress: the model
-/// says `work`, and the card is opened exactly as before.
-///
-/// This is what makes the change subtractive-only. `Work` and `Unavailable`
-/// both leave the deterministic decision alone, so an escalation that is
-/// slow, unreachable or unparseable cannot cost a card — only an explicit
-/// `chatter` can.
-#[tokio::test]
-async fn a_non_chatter_verdict_still_opens_the_direct_card() {
-    let residue = "the pricing page copy, before Friday if you can";
-    assert!(
-        crate::company::task_intent::triage_message_detailed(residue).abstained(),
-        "fixture must be a message no lexical rule decides"
-    );
-    for verdict in [
-        crate::harness::triage::TriageVerdict::Work,
-        crate::harness::triage::TriageVerdict::Unavailable,
-    ] {
-        let fx = Fixture::new();
-        let escalation = ScriptedTriage::new(verdict);
-        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
-        fx.runner(&turns)
-            .with_triage(&escalation)
-            .handle_operator_message("engineer", residue, Some("eng_desk"))
-            .await
-            .expect("operator message handled");
-        let cards = fx.cards().await;
-        assert_eq!(
-            cards.len(),
-            1,
-            "{verdict:?} must leave the card the abstention would have opened"
-        );
-        assert_eq!(cards[0].assignee, "engineer");
-    }
-}
-
 /// One message, one card — including the road #463 could not see (issue #1035).
 ///
 /// The REST chat handler opens a card on **two** signals: the triage naming
@@ -330,59 +291,6 @@ async fn a_workflow_the_handler_already_carded_opens_no_second_card() {
          runtime must not open a second one"
     );
     assert_eq!(turn.spawned_task, None, "and nothing is linked to one");
-}
-
-/// The same message with no composer choice still cards, so the test above
-/// is not passing because the fixture stopped being trackable.
-///
-/// Without this pair the fix is unfalsifiable in the direction that matters:
-/// a bug that suppressed *every* card would satisfy the assertion above and
-/// fail nothing.
-#[tokio::test]
-async fn the_same_message_without_a_composer_choice_still_cards() {
-    let residue = "the pricing page copy, before Friday if you can";
-    for choice in [None, Some(crate::ports::types::MessageIntent::Once)] {
-        let fx = Fixture::new();
-        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
-        fx.runner(&turns)
-            .requested(choice)
-            .handle_operator_message("engineer", residue, Some("eng_desk"))
-            .await
-            .expect("operator message handled");
-        assert_eq!(
-            fx.cards().await.len(),
-            1,
-            "{choice:?} is not a workflow request, so the handler opened \
-             nothing and this path still owes a card"
-        );
-    }
-}
-
-/// A copilot thread is the one surface where the deliverable must NOT be
-/// read as "the handler carded it" (issue #1035).
-///
-/// The handler's condition is `!confined && deliverable == Workflow`, and
-/// reproducing only the second half inverts this fix exactly here: a
-/// conversation ABOUT one graph is not a request to build one, so the
-/// handler deliberately cards nothing — and a runtime that concluded
-/// otherwise would stand down the only paths left to open one.
-#[tokio::test]
-async fn a_workflow_request_on_a_copilot_thread_still_cards() {
-    let residue = "the pricing page copy, before Friday if you can";
-    let fx = Fixture::new();
-    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
-    fx.runner(&turns)
-        .requested(Some(crate::ports::types::MessageIntent::Workflow))
-        .handle_operator_message("engineer", residue, Some("workflow-copilot:weekly_report"))
-        .await
-        .expect("operator message handled");
-
-    assert_eq!(
-        fx.cards().await.len(),
-        1,
-        "the handler suppresses its override on a copilot thread, so this \
-         message has no card yet and the runtime still owes one"
-    );
 }
 
 /// **Issue #1152, the direct path.** The operator said this message is not
@@ -462,30 +370,6 @@ async fn a_work_verdict_does_not_override_the_operators_own_statement() {
     assert!(
         fx.cards().await.is_empty(),
         "the operator's own statement outranks a `work` verdict about their words"
-    );
-}
-
-/// With **no escalation wired** — the default build, and any host without a
-/// triage model — the behaviour is byte-identical to before issue #984.
-///
-/// Named because it is the property that makes this safe to ship: the fix
-/// consults a model that most deployments do not have, and where it is
-/// absent nothing about the board changes.
-#[tokio::test]
-async fn without_an_escalation_the_probe_still_cards_exactly_as_before() {
-    let probe = "verifying the Send button responds to a real mouse click. \
-                 No action needed from anyone.";
-    let fx = Fixture::new();
-    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("ack")]);
-    fx.runner(&turns)
-        .handle_operator_message("engineer", probe, Some("eng_desk"))
-        .await
-        .expect("operator message handled");
-    assert_eq!(
-        fx.cards().await.len(),
-        1,
-        "no model, no change — the bug is still here, and that is the point: \
-         this path was not touched"
     );
 }
 
