@@ -53,6 +53,7 @@ fn stored_index(secrets: &MemSecrets) -> serde_json::Value {
     serde_json::from_str(&raw).expect("index is JSON")
 }
 
+#[tokio::test]
 async fn a_company_with_nothing_configured_has_no_providers() {
     let secrets = MemSecrets::default();
     assert!(
