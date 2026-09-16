@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 // ---- agent pin: `pinned` / `AgentPin` (keys rework, issue #2306, slice 3a) ----
 
-/// Each request's `(model, Authorization header)`, in arrival order, as
-/// [`spawn_capturing_stub`] records them.
+// Each request's `(model, Authorization header)`, in arrival order, as
+// [`spawn_capturing_stub`] records them.
 
 /// Two agents pinned to two different providers reach two different
 /// endpoints with their own chosen models and their own keys, from one
