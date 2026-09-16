@@ -29,12 +29,12 @@ use crate::ports::workflow_revisions::WorkflowRevisionRecord;
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct MemStore {
+pub(crate) struct MemStore {
     record: StdMutex<Option<CompanyRecord>>,
 }
 
 impl MemStore {
-    fn seeded(record: CompanyRecord) -> Self {
+    pub(crate) fn seeded(record: CompanyRecord) -> Self {
         Self {
             record: StdMutex::new(Some(record)),
         }
@@ -68,13 +68,13 @@ impl CompanyStore for MemStore {
 /// company-disabled global slip through a fallback that turned that second
 /// load's failure into an empty (not-disabled) list.
 #[derive(Default)]
-struct FailsAfterFirstLoadStore {
+pub(crate) struct FailsAfterFirstLoadStore {
     inner: MemStore,
     calls: StdMutex<u32>,
 }
 
 impl FailsAfterFirstLoadStore {
-    fn seeded(record: CompanyRecord) -> Self {
+    pub(crate) fn seeded(record: CompanyRecord) -> Self {
         Self {
             inner: MemStore::seeded(record),
             calls: StdMutex::new(0),
@@ -109,7 +109,7 @@ impl CompanyStore for FailsAfterFirstLoadStore {
 }
 
 #[derive(Default)]
-struct MemLog {
+pub(crate) struct MemLog {
     events: StdMutex<Vec<CompanyEvent>>,
 }
 
@@ -137,7 +137,7 @@ impl EventLog for MemLog {
 }
 
 #[derive(Default)]
-struct MemRevisions {
+pub(crate) struct MemRevisions {
     rows: StdMutex<Vec<WorkflowRevisionRecord>>,
 }
 
@@ -192,7 +192,7 @@ impl WorkflowRevisionStore for MemRevisions {
 // ---------------------------------------------------------------------------
 
 /// A harness holding every double, so a test can read back what the tools wrote.
-struct Fixture {
+pub(crate) struct Fixture {
     company: CompanyId,
     dir: tempfile::TempDir,
     store: Arc<MemStore>,
@@ -201,7 +201,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let company = CompanyId::new("acme");
         let manifest: CompanyManifest = toml::from_str(
             "[company]\nname = \"Acme\"\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n",
@@ -240,11 +240,11 @@ impl Fixture {
         }
     }
 
-    fn source_dir(&self) -> &Path {
+    pub(crate) fn source_dir(&self) -> &Path {
         self.dir.path()
     }
 
-    fn admin(&self) -> WorkflowAdmin {
+    pub(crate) fn admin(&self) -> WorkflowAdmin {
         let store: Arc<dyn CompanyStore> = self.store.clone();
         let revisions: Arc<dyn WorkflowRevisionStore> = self.revisions.clone();
         let events: Arc<dyn EventLog> = self.log.clone();
@@ -258,7 +258,7 @@ impl Fixture {
     }
 
     /// The same handle with no revision store, for the degraded-deployment case.
-    fn admin_without_revisions(&self) -> WorkflowAdmin {
+    pub(crate) fn admin_without_revisions(&self) -> WorkflowAdmin {
         let store: Arc<dyn CompanyStore> = self.store.clone();
         WorkflowAdmin::new(
             self.company.clone(),
@@ -272,7 +272,7 @@ impl Fixture {
     /// Put a body straight onto the record's overlay, bypassing the tools —
     /// for the shapes the agent schema cannot author (a schedule, node policy,
     /// a corrupt body).
-    async fn put_overlay(&self, id: &str, toml_src: &str) {
+    pub(crate) async fn put_overlay(&self, id: &str, toml_src: &str) {
         let mut record = self
             .store
             .load(&self.company)
@@ -287,7 +287,7 @@ impl Fixture {
         self.store.save(&record).await.unwrap();
     }
 
-    async fn overlays(&self) -> Vec<OverlayWorkflow> {
+    pub(crate) async fn overlays(&self) -> Vec<OverlayWorkflow> {
         self.store
             .load(&self.company)
             .await
@@ -296,7 +296,7 @@ impl Fixture {
             .unwrap_or_default()
     }
 
-    async fn enabled(&self) -> Vec<String> {
+    pub(crate) async fn enabled(&self) -> Vec<String> {
         self.store
             .load(&self.company)
             .await
@@ -305,12 +305,12 @@ impl Fixture {
             .unwrap_or_default()
     }
 
-    fn events(&self) -> Vec<CompanyEvent> {
+    pub(crate) fn events(&self) -> Vec<CompanyEvent> {
         self.log.events.lock().unwrap().clone()
     }
 
     /// Write a seed file into `workflows/`, so an id is source-defined.
-    fn write_seed(&self, id: &str, toml_src: &str) {
+    pub(crate) fn write_seed(&self, id: &str, toml_src: &str) {
         let dir = self.dir.path().join("workflows");
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join(format!("{id}.toml")), toml_src).expect("write seed");
@@ -318,7 +318,7 @@ impl Fixture {
 }
 
 /// The graph the `create_workflow`/`update_workflow` schema accepts, as JSON.
-fn graph_args(id: &str, name: &str, worker_name: &str) -> Value {
+pub(crate) fn graph_args(id: &str, name: &str, worker_name: &str) -> Value {
     json!({
         "id": id,
         "name": name,
@@ -339,7 +339,7 @@ fn graph_args(id: &str, name: &str, worker_name: &str) -> Value {
 /// put it on the record directly rather than via a tool call so a fixture can
 /// start from "already owned" without depending on `UpdateWorkflowTool`'s own
 /// desk handling — the same reason `SCHEDULED_TOML` does.
-const OWNED_TOML: &str = r#"
+pub(crate) const OWNED_TOML: &str = r#"
 id = "owned"
 name = "Owned flow"
 owner_desk = "engineering"
@@ -356,7 +356,7 @@ from = "start"
 to = "done"
 "#;
 
-const SEED_TOML: &str = r#"
+pub(crate) const SEED_TOML: &str = r#"
 id = "seeded"
 name = "Seeded flow"
 [[node]]
@@ -374,7 +374,7 @@ to = "done"
 
 /// A graph whose trigger carries a cron. Only an operator can author this, so
 /// tests put it on the record directly.
-const SCHEDULED_TOML: &str = r#"
+pub(crate) const SCHEDULED_TOML: &str = r#"
 id = "nightly"
 name = "Nightly flow"
 [[node]]
@@ -392,7 +392,7 @@ to = "done"
 "#;
 
 /// A graph with an operator's approval gate on a node.
-const GATED_TOML: &str = r#"
+pub(crate) const GATED_TOML: &str = r#"
 id = "gated"
 name = "Gated flow"
 [[node]]
@@ -418,18 +418,18 @@ to = "done"
 "#;
 
 /// The markdown a tool result puts in front of the model.
-fn md(result: &ToolResult) -> String {
+pub(crate) fn md(result: &ToolResult) -> String {
     result.markdown_formatted.clone().unwrap_or_default()
 }
 
 /// The text of an error result.
-fn err_text(result: &ToolResult) -> String {
+pub(crate) fn err_text(result: &ToolResult) -> String {
     assert!(result.is_error, "expected an error result");
     result.output_for_llm(false)
 }
 
 /// The JSON payload a successful result carries.
-fn data(result: &ToolResult) -> Value {
+pub(crate) fn data(result: &ToolResult) -> Value {
     assert!(!result.is_error, "expected a success result: {result:?}");
     for block in &result.content {
         if let oh::skills::types::ToolContent::Json { data } = block {
