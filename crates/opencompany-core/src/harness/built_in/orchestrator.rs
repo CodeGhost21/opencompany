@@ -9,7 +9,10 @@
 //! first agent when none is tagged (so a company without an orchestrator behaves
 //! exactly as before).
 //!
-//! It reaches sixteen tools, all wired only onto the orchestrator agent:
+//! It reaches sixteen tools, wired onto the orchestrator agent (three of them —
+//! the hand-off tools `spawn_task`, `delegate_to_desk` and
+//! `delegate_to_teammate` — also onto every other roster agent, scoped; see
+//! [`member_delegation_tools`]):
 //!
 //! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`],
 //!   recent [`EventLog`] history, and (issue #1859) a `## Board` summary of
@@ -3640,11 +3643,13 @@ pub fn delegation_tools(
     ]
 }
 
-/// The delegation tools a desk member gets when its manifest entry names a
-/// `delegates_to` allowlist (issue #176): `spawn_task`, a `delegate_to_desk`
-/// narrowed to that allowlist, and — since #884 — a `delegate_to_teammate`
-/// narrowed to its own desk-mates plus the members of the desks that allowlist
-/// permits.
+/// The delegation tools every **non-orchestrator** roster agent gets:
+/// `spawn_task`, a `delegate_to_desk` and a `delegate_to_teammate`, both
+/// scoped by its manifest `delegates_to` — unrestricted when that list is
+/// empty (the ordinary case), narrowed to the named desks (and, for the
+/// teammate tool, its own desk-mates plus those desks' members) when it is not.
+/// Issue #176 wired these only onto a member that opted in with a list; a
+/// specialist with none had no way to reach the colleague beside it.
 ///
 /// Deliberately a subset of [`delegation_tools`] rather than the same list.
 /// `assign_task`, `review_task`, `query_company`, `run_workflow`,

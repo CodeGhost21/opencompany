@@ -1529,12 +1529,11 @@ impl<'a> DelegationRunner<'a> {
         // delegation tools it already has. Nothing here dispatches.
         let with_mentions;
         let message = if operator_turn && !self.also_mentioned.is_empty() {
-            // A responder with no hand-off tool at all (an overlay teammate,
-            // or a manifest member with an empty `delegates_to`) cannot act on
-            // "hand work to them" — see `responder_can_delegate`. Telling it
-            // to anyway is not a harmless nudge: it is an instruction the
-            // model has no tool to follow, for a name it now believes should
-            // be receiving work it never will.
+            // A responder whose `delegates_to` narrows its reach past a
+            // mentioned teammate cannot act on "hand work to them" — see
+            // `reachable_mentioned`. Telling it to anyway is not a harmless
+            // nudge: it is an instruction the tool would refuse, for a name it
+            // now believes should be receiving work it never will.
             with_mentions = {
                 let reachable = self.reachable_mentioned(responder);
                 let unreachable: Vec<&str> = self
