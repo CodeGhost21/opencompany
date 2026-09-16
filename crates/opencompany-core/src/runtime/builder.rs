@@ -20,11 +20,10 @@ use crate::app::config::{AuthMode, BrainMode};
 use crate::brain::medulla::MedullaTransport;
 use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::brain::{EchoBrain, HostedMedullaBrain};
-// `inference` (the module path) is needed unconditionally by `agent_pairs`
-// and `any_agent_pair_resolves` below (keys rework, issue #2306, slice 3a) —
-// pure/read-only helpers that must build in the default feature set, even
-// though every other use of this module in this file sits behind
-// `openhuman`. `EnvDefault` stays gated: it is only ever named inside the
+// Both unconditional: `agent_pairs` and `any_agent_pair_resolves` (keys
+// rework, issue #2306, slice 3a) are pure helpers that must build in the
+// default feature set, and `platform_default` hands every runtime its
+// managed endpoint whether or not a harness is linked to think on it.
 use crate::company::inference;
 use crate::company::inference::EnvDefault;
 use crate::company::runtime::{CompanyMail, CompanyRuntime, OpsStores};
