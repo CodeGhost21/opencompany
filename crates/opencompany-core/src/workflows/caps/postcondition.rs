@@ -102,7 +102,7 @@ pub(crate) fn evaluate_postcondition(spec: &Value, output: &Value) -> Result<(),
                 // rewrote a validated `field` into null/non-string between
                 // save and this call (an authored `=`-expression resolved
                 // away by config resolution is the concrete case that
-                // motivated this; see `workflows::caps::tests::
+                // motivated this; see `workflows::caps::tests_field_present::
                 // a_field_resolved_away_by_an_authored_expression_fails_closed_at_run_turn`).
                 // `field_present`'s entire job is checking that one named
                 // field exists — evaluating it with no field to check is

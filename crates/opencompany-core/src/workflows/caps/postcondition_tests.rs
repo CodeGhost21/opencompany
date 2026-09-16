@@ -128,7 +128,7 @@ fn field_present_on_bare_text_or_agent_ref_still_accepts_their_string_value() {
 
 /// Codex #3894038816 on #1937 — the silent-disable finding. `postcondition`
 /// rides inside the engine-resolved node config (see
-/// `workflows::caps::tests::a_field_resolved_away_by_an_authored_expression_fails_closed_at_run_turn`
+/// `workflows::caps::tests_field_present::a_field_resolved_away_by_an_authored_expression_fails_closed_at_run_turn`
 /// for the full authored-`"=item.missing"` → config-resolution trace), so
 /// a `field` that resolved to anything other than a present string reaches
 /// this function looking IDENTICAL to a `field_present` declared with no
