@@ -3,8 +3,8 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use super::*;
 use super::inference_test_support::*;
+use super::*;
 
 use crate::company::CompanyManifest;
 use crate::ports::types::{CompanyId, CompanyRecord};
@@ -81,7 +81,6 @@ async fn a_provider_not_in_use_needs_no_confirmation() {
     assert_eq!(status, StatusCode::OK, "{raw}");
     assert!(resp.get("usedBy").is_none(), "{resp}");
 }
-
 
 #[tokio::test]
 async fn a_route_naming_a_provider_nobody_holds_is_refused() {

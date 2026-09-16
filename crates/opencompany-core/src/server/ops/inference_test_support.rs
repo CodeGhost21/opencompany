@@ -60,7 +60,11 @@ base_url = "https://byo.example/v1"
 }
 
 /// Commits `manifest` as `id`'s record — what `manifest_inference` reads.
-pub(super) async fn save_record(home: &std::path::Path, id: &CompanyId, manifest: &CompanyManifest) {
+pub(super) async fn save_record(
+    home: &std::path::Path,
+    id: &CompanyId,
+    manifest: &CompanyManifest,
+) {
     use crate::ports::CompanyStore;
     FsCompanyStore::new(home.to_path_buf())
         .save(&CompanyRecord {
