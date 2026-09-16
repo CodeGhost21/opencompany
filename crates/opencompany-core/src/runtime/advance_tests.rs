@@ -189,10 +189,9 @@ async fn a_card_outside_in_progress_is_never_moved() {
             ("t-review", COLUMN_IN_REVIEW),
             ("t-todo", COLUMN_TODO),
         ] {
-            let moved =
-                advance_settled_card(tasks.as_ref(), &company, id, status, "late settle")
-                    .await
-                    .unwrap();
+            let moved = advance_settled_card(tasks.as_ref(), &company, id, status, "late settle")
+                .await
+                .unwrap();
             assert_eq!(moved, None, "{status} moved {id} out of {column}");
             assert_eq!(column_of(&tasks, &company, id).await, column);
         }

@@ -259,8 +259,8 @@ fn granted_search_refusals_name_provider_and_capability_failures() {
             .collect(),
         ..WorkflowToolWiring::default()
     };
-    let tier_message = refusal_for("web_search", &["search".to_string()], &tier)
-        .expect("tier filtering refuses");
+    let tier_message =
+        refusal_for("web_search", &["search".to_string()], &tier).expect("tier filtering refuses");
     assert!(tier_message.contains("capability tier filtered"));
     assert!(tier_message.contains("raise the capability tier"));
 }

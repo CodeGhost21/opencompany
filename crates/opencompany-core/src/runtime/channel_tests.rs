@@ -208,8 +208,7 @@ async fn the_durable_operator_channel_journals_to_the_operator_line() {
 /// of a silent discard.
 #[tokio::test]
 async fn a_durable_operator_send_fails_when_the_journal_refuses_it() {
-    let channel =
-        DurableOperatorChannel::new(CompanyId::new("acme"), Arc::new(FailingEventLog));
+    let channel = DurableOperatorChannel::new(CompanyId::new("acme"), Arc::new(FailingEventLog));
     let result = channel
         .send(OutboundMessage {
             message_id: None,

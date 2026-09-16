@@ -21,9 +21,7 @@ impl MemLog {
             .unwrap()
             .iter()
             .filter_map(|event| match event {
-                CompanyEvent::RunStatusChanged { from, to, .. } => {
-                    Some((from.clone(), to.clone()))
-                }
+                CompanyEvent::RunStatusChanged { from, to, .. } => Some((from.clone(), to.clone())),
                 _ => None,
             })
             .collect()
@@ -187,8 +185,7 @@ async fn the_row_is_durable_before_its_frame_is_appended() {
         fn subscribe(
             &self,
             _id: &CompanyId,
-        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem>
-        {
+        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
             Box::pin(futures::stream::empty())
         }
     }

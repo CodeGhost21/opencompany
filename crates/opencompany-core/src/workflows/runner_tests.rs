@@ -4431,15 +4431,8 @@ async fn a_clean_finish_lets_the_next_run_deliver_again() {
     assert_eq!(channel.sent().len(), 1);
     // …and the caller journals its clean finish, the way a real entry point
     // does once the run returns.
-    crate::runtime::record_run_finished(
-        &events,
-        &rec.id,
-        &file.id,
-        true,
-        &ctx1.run_id,
-        Ok(&run1),
-    )
-    .await;
+    crate::runtime::record_run_finished(&events, &rec.id, &file.id, true, &ctx1.run_id, Ok(&run1))
+        .await;
 
     // Run 2 (the next day's fire) delivers again — never suppressed.
     let deps2 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), true);
@@ -5628,9 +5621,9 @@ async fn a_cleanly_cancelled_run_winds_down_at_the_boundary_keeping_its_nodes() 
         .collect();
     assert_eq!(finished, vec!["shape".to_string(), "ceo".to_string()]);
     assert!(
-        !journal
-            .iter()
-            .any(|e| matches!(e, CompanyEvent::WorkflowNodeStarted { node_id, .. } if node_id == "done")),
+        !journal.iter().any(
+            |e| matches!(e, CompanyEvent::WorkflowNodeStarted { node_id, .. } if node_id == "done")
+        ),
         "the halted node must not even open a started bracket"
     );
 }
@@ -6258,8 +6251,7 @@ async fn every_blocked_node_is_armed_before_the_first_journal_write_is_awaited()
     let run_id = "run-1".to_string();
     let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
     let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key("run-1", "first");
-    let second_turn =
-        crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+    let second_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
     // Simulates what `park_gated_calls` already did at real park time,
     // for both nodes, before this settle pass ever runs.
     parking.blocked_nodes.arm(
@@ -6446,8 +6438,7 @@ async fn a_turn_released_mid_settle_batch_is_not_stashed_behind_its_own_release(
     let run_id = "run-1825-p2e".to_string();
     let trigger_input = serde_json::json!({ "request": "quarterly numbers" });
     let first_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "first");
-    let second_turn =
-        crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
+    let second_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&run_id, "second");
     // What `park_gated_calls` already did for both, at real park time,
     // before this settle pass ever runs.
     parking.blocked_nodes.arm(

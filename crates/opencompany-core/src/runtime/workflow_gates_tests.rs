@@ -344,8 +344,7 @@ fn a_poisoned_lock_panics_rather_than_silently_serving_stale_state() {
         panic!("simulated holder panic while the lock is held");
     }));
 
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| q.undecided("turn-1")));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| q.undecided("turn-1")));
     assert!(
         result.is_err(),
         "a call against a poisoned lock must panic, not silently return a count"

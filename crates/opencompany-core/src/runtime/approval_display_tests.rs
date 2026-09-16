@@ -140,8 +140,7 @@ fn long_strings_are_truncated_on_a_character_boundary() {
 #[test]
 fn a_string_at_the_cap_is_left_alone() {
     let exact = "x".repeat(MAX_STRING_CHARS);
-    let out =
-        display_payload(&effect(serde_json::json!({ "command": exact.clone() }))).unwrap();
+    let out = display_payload(&effect(serde_json::json!({ "command": exact.clone() }))).unwrap();
     assert_eq!(out["command"], Value::String(exact));
 }
 

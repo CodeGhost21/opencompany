@@ -35,8 +35,7 @@ fn namespace_is_unambiguous_when_segments_contain_colons() {
     let dir = tempfile::tempdir().unwrap();
     let secrets: Arc<dyn SecretStore> = Arc::new(FsSecretStore::new(dir.path().to_path_buf()));
     let company = CompanyId::new("acme");
-    let left =
-        CompanyStateStore::new(secrets.clone(), company.clone(), "workflow:a".to_string());
+    let left = CompanyStateStore::new(secrets.clone(), company.clone(), "workflow:a".to_string());
     let right = CompanyStateStore::new(secrets, company, "workflow".to_string());
 
     assert_ne!(left.namespaced("cursor"), right.namespaced("a:cursor"));

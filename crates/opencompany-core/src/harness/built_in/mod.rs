@@ -77,7 +77,7 @@ pub mod composio_direct;
 /// gate, the approval policy and the Composio client are all real; only the
 /// model's choices and the Composio backend are scripted. Test-only.
 #[cfg(all(test, feature = "composio"))]
-mod composio_turn_test;
+mod composio_turn_tests;
 /// Issue #416: the confined turn — an ephemeral agent with no tools, no company
 /// memory and no delegation, for a question that is about one object rather than
 /// about the company. See [`confine`].
@@ -98,7 +98,7 @@ pub mod hosting;
 /// `CompanyAgent`'s private `agent` field (the vendored session) to ask
 /// `last_turn_hit_cap` — a child of `built_in`, not of the re-exporting parent.
 #[cfg(test)]
-mod iteration_cap_turn_test;
+mod iteration_cap_turn_tests;
 pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;
@@ -119,7 +119,7 @@ pub mod native_salvage;
 /// to keep its cycle paired all the way back into the model's context. Only the
 /// model's output and the search backend are scripted. Test-only.
 #[cfg(test)]
-mod native_salvage_turn_test;
+mod native_salvage_turn_tests;
 pub mod orchestrator;
 /// Issue #6014: task-aware extraction of an oversized tool result — one
 /// bounded model call that keeps what answers the turn, in place of a byte cut

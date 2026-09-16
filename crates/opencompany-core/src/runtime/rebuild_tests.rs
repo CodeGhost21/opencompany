@@ -38,11 +38,7 @@ struct Working {
 
 #[async_trait]
 impl RuntimeRebuilder for Working {
-    async fn rebuild(
-        &self,
-        _state: &AppState,
-        request: RebuildRequest,
-    ) -> Result<CompanyRuntime> {
+    async fn rebuild(&self, _state: &AppState, request: RebuildRequest) -> Result<CompanyRuntime> {
         RuntimeBuilder::new(self.home.clone(), request.manifest)
             .with_id(request.id)
             .with_handover(request.handover)
@@ -56,11 +52,7 @@ struct Broken;
 
 #[async_trait]
 impl RuntimeRebuilder for Broken {
-    async fn rebuild(
-        &self,
-        _state: &AppState,
-        _request: RebuildRequest,
-    ) -> Result<CompanyRuntime> {
+    async fn rebuild(&self, _state: &AppState, _request: RebuildRequest) -> Result<CompanyRuntime> {
         Err(OpenCompanyError::Config("no inference backend".to_string()))
     }
 }
@@ -312,8 +304,7 @@ async fn a_rebuild_does_not_revert_a_manifest_write_that_lands_during_quiesce() 
 
     let state_for_task = state.clone();
     let id_for_task = id.clone();
-    let task =
-        tokio::spawn(async move { rebuild_company(&state_for_task, &id_for_task).await });
+    let task = tokio::spawn(async move { rebuild_company(&state_for_task, &id_for_task).await });
 
     // Give the spawned task every chance to reach the blocked
     // `quiesce()` await before the write below lands. A fixed yield

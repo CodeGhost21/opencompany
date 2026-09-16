@@ -363,8 +363,7 @@ async fn an_agent_node_is_never_gated_here() {
 async fn an_http_request_node_gates_under_supervised() {
     let mut node = tool_node("fetch", "unused");
     node.kind = NodeKind::HttpRequest;
-    node.config =
-        json!({ "method": "post", "url": "https://api.example.com/v1/pay?token=s3cret" });
+    node.config = json!({ "method": "post", "url": "https://api.example.com/v1/pay?token=s3cret" });
     let mut g = graph(vec![node]);
 
     let gated = apply_policy_gates(
@@ -490,8 +489,8 @@ fn a_target_never_carries_url_userinfo() {
             "POST api.example.com:8443",
         ),
     ] {
-        let target = http_target(&json!({ "method": "POST", "url": url }))
-            .expect("a host is nameable here");
+        let target =
+            http_target(&json!({ "method": "POST", "url": url })).expect("a host is nameable here");
         assert_eq!(target, expected, "{url}");
         assert!(!target.contains('@'), "{url} → {target}");
         assert!(!target.contains("secret"), "{url} → {target}");

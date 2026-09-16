@@ -5,8 +5,8 @@ use crate::company::CompanyManifest;
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompressedTrace, Effect,
-    EffectGroup, Verdict,
+    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompressedTrace, Effect, EffectGroup,
+    Verdict,
 };
 use crate::runtime::scheduler::FakeClock;
 use crate::runtime::{CompanyRegistry, RuntimeBuilder};

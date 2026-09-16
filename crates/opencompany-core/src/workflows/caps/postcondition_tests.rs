@@ -39,17 +39,13 @@ fn field_present_passes_when_the_field_resolves() {
 #[test]
 fn field_present_fails_when_the_field_is_absent() {
     let output = json!({ "text": "prose only" });
-    assert!(
-        evaluate_postcondition(&spec_with_field("field_present", "items"), &output).is_err()
-    );
+    assert!(evaluate_postcondition(&spec_with_field("field_present", "items"), &output).is_err());
 }
 
 #[test]
 fn field_present_fails_when_the_field_is_explicitly_null() {
     let output = json!({ "items": null });
-    assert!(
-        evaluate_postcondition(&spec_with_field("field_present", "items"), &output).is_err()
-    );
+    assert!(evaluate_postcondition(&spec_with_field("field_present", "items"), &output).is_err());
 }
 
 #[test]
@@ -229,9 +225,7 @@ fn non_empty_list_checks_the_named_field_when_given() {
     );
 
     let empty = json!({ "items": [] });
-    assert!(
-        evaluate_postcondition(&spec_with_field("non_empty_list", "items"), &empty).is_err()
-    );
+    assert!(evaluate_postcondition(&spec_with_field("non_empty_list", "items"), &empty).is_err());
 }
 
 /// An unrecognized `require` is a declared gate this binary cannot

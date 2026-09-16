@@ -97,9 +97,7 @@ fn changes(log: &MemLog) -> Vec<(String, String)> {
         .unwrap()
         .iter()
         .map(|event| match event {
-            CompanyEvent::WorkspaceChanged { node_id, change } => {
-                (node_id.clone(), change.clone())
-            }
+            CompanyEvent::WorkspaceChanged { node_id, change } => (node_id.clone(), change.clone()),
             other => panic!("expected a workspace announcement, got {other:?}"),
         })
         .collect()

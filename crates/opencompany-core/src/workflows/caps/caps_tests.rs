@@ -106,13 +106,11 @@ async fn an_agent_node_dispatches_through_run_background_workflow_with_run_and_n
         .prefix("oc-1702-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(RecordingWorkflowTurn::new());
     let board_claim = Arc::new(deps.delegations.claim_board("run-1702"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1702"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1702"));
     let runner = HarnessAgentRunner::new(
         turn.clone(),
         deps,
@@ -261,13 +259,11 @@ async fn a_capped_turn_settles_failed_and_feeds_run_capped_nodes() {
         .prefix("oc-1865-capped-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(CappedWorkflowTurn);
     let board_claim = Arc::new(deps.delegations.claim_board("run-1865"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1865"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1865"));
     let capped = RunCappedNodes::default();
     let runs: Arc<dyn crate::ports::RunStore> =
         Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
@@ -540,11 +536,10 @@ async fn the_judge_sees_the_operators_run_request_not_just_the_static_instructio
         .prefix("oc-1990-run-request-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
-        ])
-        .await;
+    let (base_url, script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+    ])
+    .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(RecordingWorkflowTurn::new());
@@ -711,14 +706,12 @@ async fn recovered_evidence_that_does_not_close_the_gap_is_not_accepted() {
         .prefix("oc-1990-recover-reverify-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"retry\"}"),
-        ])
-        .await;
-    let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+    let (base_url, script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"retry\"}"),
+    ])
+    .await;
+    let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     deps.facts = Some(Arc::new(OneFactStore));
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(RefusalWorkflowTurn);
@@ -785,14 +778,12 @@ async fn a_recovered_reply_ships_the_exact_text_the_judge_certified() {
         .prefix("oc-1990-recover-certified-text-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
-        ])
-        .await;
-    let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+    let (base_url, script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+    ])
+    .await;
+    let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     deps.facts = Some(Arc::new(OneFactStore));
     let record = crate::workflows::gated_tool_turn_test::record();
     let oversized = "R".repeat(25_000);
@@ -866,14 +857,12 @@ async fn a_recovered_reply_does_not_emit_its_pre_recovery_json_parse() {
         .prefix("oc-1990-recover-stale-parse-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
-        ])
-        .await;
-    let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+    let (base_url, _script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+    ])
+    .await;
+    let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     deps.facts = Some(Arc::new(OneFactStore));
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
@@ -950,14 +939,12 @@ async fn a_recovered_reply_that_fails_its_postcondition_does_not_settle_succeede
         .prefix("oc-1990-recover-postcondition-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
-        ])
-        .await;
-    let (mut deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
+    let (base_url, _script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+    ])
+    .await;
+    let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     deps.facts = Some(Arc::new(OneFactStore));
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
@@ -1186,8 +1173,7 @@ async fn a_budget_paused_turn_skips_the_sufficiency_judge() {
         }),
     }));
     let board_claim = Arc::new(deps.delegations.claim_board("run-1990"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1990"));
     let runner = HarnessAgentRunner::new(
         turn,
         deps,
@@ -1244,8 +1230,7 @@ async fn a_budget_paused_turn_settles_failed_and_feeds_run_capped_nodes() {
         .prefix("oc-1883-budget-paused-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "paused — out of budget".to_string(),
@@ -1259,8 +1244,7 @@ async fn a_budget_paused_turn_settles_failed_and_feeds_run_capped_nodes() {
         }),
     }));
     let board_claim = Arc::new(deps.delegations.claim_board("run-1883"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1883"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1883"));
     let capped = RunCappedNodes::default();
     let runs: Arc<dyn crate::ports::RunStore> =
         Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
@@ -1317,9 +1301,7 @@ async fn a_budget_paused_turn_settles_failed_and_feeds_run_capped_nodes() {
     assert_eq!(attempts[0].status, crate::ports::RunStatus::Failed);
     assert_eq!(
         attempts[0].error.as_deref(),
-        Some(
-            "agent paused for lack of inference budget/credits: acme is out of inference credits"
-        )
+        Some("agent paused for lack of inference budget/credits: acme is out of inference credits")
     );
 }
 
@@ -1481,8 +1463,7 @@ async fn an_abnormal_acp_stop_fails_the_workflow_node() {
         .prefix("oc-1880-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "I can't help with that.".to_string(),
@@ -1493,8 +1474,7 @@ async fn an_abnormal_acp_stop_fails_the_workflow_node() {
         budget_paused: None,
     }));
     let board_claim = Arc::new(deps.delegations.claim_board("run-1880"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1880"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1880"));
     let runner = HarnessAgentRunner::new(
         turn,
         deps,
@@ -1549,13 +1529,11 @@ async fn a_node_whose_postcondition_fails_halts_before_returning_ok() {
         .prefix("oc-1866-postcondition-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(CappedWorkflowTurn);
     let board_claim = Arc::new(deps.delegations.claim_board("run-1866"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1866"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1866"));
     let runs: Arc<dyn crate::ports::RunStore> =
         Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
     let runner = HarnessAgentRunner::new(
@@ -1626,8 +1604,7 @@ async fn a_node_with_no_postcondition_is_unaffected() {
         .prefix("oc-1866-no-postcondition-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(RecordingWorkflowTurn::new());
     let board_claim = Arc::new(deps.delegations.claim_board("run-1866b"));
@@ -1670,8 +1647,7 @@ async fn a_satisfying_output_still_returns_ok() {
         .prefix("oc-1866-satisfying-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(RecordingWorkflowTurn::new());
     let board_claim = Arc::new(deps.delegations.claim_board("run-1866c"));
@@ -1736,8 +1712,7 @@ async fn a_reply_that_is_a_json_list_satisfies_non_empty_list_with_no_field() {
         .prefix("oc-1937-postcondition-list-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "[\"x\", \"y\"]".to_string(),
@@ -1748,8 +1723,7 @@ async fn a_reply_that_is_a_json_list_satisfies_non_empty_list_with_no_field() {
         budget_paused: None,
     }));
     let board_claim = Arc::new(deps.delegations.claim_board("run-1937"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1937"));
     let runner = HarnessAgentRunner::new(
         turn,
         deps,
@@ -1800,8 +1774,7 @@ async fn a_prose_reply_still_fails_non_empty_list_with_no_field() {
         .prefix("oc-1937-postcondition-prose-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "here is a summary, not a list".to_string(),
@@ -1872,8 +1845,7 @@ async fn a_reply_that_is_json_satisfies_field_present_on_a_json_dotted_path() {
         .prefix("oc-1937-postcondition-field-present-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "{\"items\": [1, 2, 3]}".to_string(),
@@ -1945,8 +1917,7 @@ async fn the_parsed_reply_lands_in_the_emitted_value_a_downstream_binding_reads(
         .prefix("oc-1937-postcondition-emitted-value-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "{\"items\": [1, 2, 3]}".to_string(),
@@ -2019,8 +1990,7 @@ async fn a_reply_that_parses_as_json_is_not_merged_without_a_declared_postcondit
         .prefix("oc-1937-no-postcondition-json-reply-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "{\"revenue\": 12000, \"text\": \"ignored\"}".to_string(),
@@ -2090,8 +2060,7 @@ async fn a_bare_array_reply_replaces_the_emitted_value_wholesale() {
         .prefix("oc-1937-bare-array-emission-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "[\"x\", \"y\"]".to_string(),
@@ -2164,8 +2133,7 @@ async fn a_bare_scalar_reply_fails_field_present_on_the_bare_json_root() {
         .prefix("oc-1937-bare-scalar-rejected-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "42".to_string(),
@@ -2326,8 +2294,7 @@ async fn a_field_resolved_away_by_an_authored_expression_fails_closed_at_run_tur
         .prefix("oc-1937-expression-field-resolved-away-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "just prose, no items here".to_string(),
@@ -2402,8 +2369,7 @@ async fn a_colliding_field_would_diverge_between_gate_and_emitted_value() {
         .prefix("oc-1937-colliding-field-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let record = crate::workflows::gated_tool_turn_test::record();
     let turn = Arc::new(ScriptedTurn(crate::harness::TurnOutcome {
         reply: "{\"text\": [\"a\", \"b\"], \"agent_ref\": 123}".to_string(),
@@ -2663,8 +2629,7 @@ async fn park_gated_calls_arms_the_stash_before_any_block_settle_pass_runs() {
         .prefix("oc-1825-p1-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let parking = deps
         .delivery
         .clone()
@@ -2697,8 +2662,7 @@ async fn park_gated_calls_arms_the_stash_before_any_block_settle_pass_runs() {
         publish_refusal_claim,
     );
 
-    let node_turn =
-        crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+    let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
 
     // Pushed inside the run's own scope, exactly as its turn would.
     let claim = queue.claim(ApprovalScope::Run("run-1825-p1".to_string()));
@@ -2775,8 +2739,7 @@ async fn park_gated_calls_durably_stashes_before_any_block_settle_pass_runs() {
         .prefix("oc-1825-p1b-")
         .tempdir()
         .expect("tempdir");
-    let (deps, journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let queue = deps.approval_requests.clone();
     let trigger_input = json!({ "request": "quarterly numbers" });
     let board_claim = Arc::new(deps.delegations.claim_board("run-1825-p1b"));
@@ -2804,8 +2767,7 @@ async fn park_gated_calls_durably_stashes_before_any_block_settle_pass_runs() {
         publish_refusal_claim,
     );
 
-    let node_turn =
-        crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+    let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
 
     let claim = queue.claim(ApprovalScope::Run("run-1825-p1b".to_string()));
     claim
@@ -2856,8 +2818,7 @@ async fn park_gated_calls_leaves_an_unstashed_turn_untouched() {
         .prefix("oc-2005-release-guard-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let trigger_input = json!({ "topic": "quarterly numbers" });
     let board_claim = Arc::new(deps.delegations.claim_board("run-2005-guard"));
     let publish_refusal_claim = Arc::new(
@@ -2884,8 +2845,7 @@ async fn park_gated_calls_leaves_an_unstashed_turn_untouched() {
         publish_refusal_claim,
     );
 
-    let node_turn =
-        crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+    let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
 
     // Nothing was ever queued for this node's turn — no blocker, no gated
     // call — so this call never armed a stash for it.
@@ -2979,8 +2939,7 @@ async fn a_node_with_no_successfully_parked_call_leaves_no_stash_behind() {
         publish_refusal_claim,
     );
 
-    let node_turn =
-        crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+    let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
 
     let claim = queue.claim(ApprovalScope::Run("run-1825-p2c".to_string()));
     claim
@@ -3071,8 +3030,7 @@ async fn approving_the_first_card_of_a_multi_call_node_does_not_complete_the_bat
     use crate::harness::policy::{ApprovalRequest, ApprovalScope};
     use crate::ports::approvals::ApprovalGate;
     use crate::ports::types::{
-        Actor, ActorKind, ApprovalId, CompanyEvent, Effect, EffectGroup, PolicyDecision,
-        Verdict,
+        Actor, ActorKind, ApprovalId, CompanyEvent, Effect, EffectGroup, PolicyDecision, Verdict,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex as AsyncMutex;
@@ -3256,8 +3214,7 @@ async fn overflowing_runner_notices(
     let queue = deps.approval_requests.clone();
     let notices = RunNotices::default();
     let board_claim = Arc::new(deps.delegations.claim_board("run-1"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1"));
     let runner = HarnessAgentRunner::new(
         single_turn(&deps),
         deps,
@@ -3300,8 +3257,7 @@ async fn overflowing_runner_notices(
             }
         })
         .await;
-    let node_turn =
-        crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+    let node_turn = crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
     claim
         .scoped(runner.park_gated_calls(Some("work"), "work", &node_turn))
         .await;
@@ -3320,13 +3276,11 @@ async fn a_captured_publish_reconciles_its_earlier_refusal_notice() {
         .prefix("oc-1775-")
         .tempdir()
         .expect("tempdir");
-    let (deps, _journal) =
-        crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+    let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
     let pending_publishes = deps.pending_publishes.clone();
     let notices = RunNotices::default();
     let board_claim = Arc::new(deps.delegations.claim_board("run-1775"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1775"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1775"));
     let runner = HarnessAgentRunner::new(
         single_turn(&deps),
         deps,
@@ -4510,8 +4464,7 @@ async fn run_failing_node(
     let (deps, journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir);
     let record = crate::workflows::gated_tool_turn_test::record();
     let board_claim = Arc::new(deps.delegations.claim_board("run-1861"));
-    let publish_refusal_claim =
-        Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1861"));
+    let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run("run-1861"));
     let blocks = RunBlocks::default();
     let runner = HarnessAgentRunner::new(
         Arc::new(FailingTurn(error.to_string())),
@@ -4746,8 +4699,7 @@ mod node_blocker_answer {
     ) -> HarnessAgentRunner {
         let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(String::new(), dir);
         let board_claim = Arc::new(deps.delegations.claim_board(RUN_ID));
-        let publish_refusal_claim =
-            Arc::new(deps.pending_publishes.claim_refusals_for_run(RUN_ID));
+        let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run(RUN_ID));
         HarnessAgentRunner::new(
             turn,
             deps,
@@ -4945,8 +4897,7 @@ mod node_blocker_answer {
             .expect("parking");
         let trigger_input = json!({ "topic": "quarterly numbers" });
         let board_claim = Arc::new(deps.delegations.claim_board(RUN_ID));
-        let publish_refusal_claim =
-            Arc::new(deps.pending_publishes.claim_refusals_for_run(RUN_ID));
+        let publish_refusal_claim = Arc::new(deps.pending_publishes.claim_refusals_for_run(RUN_ID));
         let runner = HarnessAgentRunner::new(
             single_turn(&deps),
             deps,
@@ -5015,11 +4966,7 @@ mod node_blocker_answer {
                 self.inner.evaluate(company, effect).await
             }
 
-            async fn park(
-                &self,
-                company: &CompanyId,
-                effect: Effect,
-            ) -> crate::Result<ApprovalId> {
+            async fn park(&self, company: &CompanyId, effect: Effect) -> crate::Result<ApprovalId> {
                 *self.armed_at_park.lock().expect("spy lock") =
                     Some(self.blocked_nodes.is_armed(&self.turn));
                 self.inner.park(company, effect).await
@@ -5109,7 +5056,7 @@ mod node_blocker_answer {
     /// extracted from a node's gated-call batch inside `park_gated_calls`.
     #[tokio::test]
     async fn park_gated_calls_blocker_extraction_arms_the_stash_before_the_first_card_is_parkable()
-     {
+    {
         use crate::harness::policy::{ApprovalRequest, ApprovalScope};
         use crate::ports::ApprovalGate;
         use crate::ports::blockers::BlockerPayload;
@@ -5134,11 +5081,7 @@ mod node_blocker_answer {
                 self.inner.evaluate(company, effect).await
             }
 
-            async fn park(
-                &self,
-                company: &CompanyId,
-                effect: Effect,
-            ) -> crate::Result<ApprovalId> {
+            async fn park(&self, company: &CompanyId, effect: Effect) -> crate::Result<ApprovalId> {
                 *self.armed_at_park.lock().expect("spy lock") =
                     Some(self.blocked_nodes.is_armed(&self.turn));
                 self.inner.park(company, effect).await
@@ -5469,12 +5412,11 @@ async fn a_peer_answer_the_judge_accepts_ships_the_recovered_context_block() {
         .prefix("oc-1866-peer-accepted-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
-        ])
-        .await;
+    let (base_url, script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+    ])
+    .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     let turn = Arc::new(ConsultedPeerTurn::new("The renewal date is March 1st."));
     let (runner, blocks, _board, _notices, _artifacts) =
@@ -5519,12 +5461,11 @@ async fn a_peer_answer_the_judge_rejects_parks_an_information_blocker() {
         .prefix("oc-1866-peer-rejected-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"retry\"}"),
-        ])
-        .await;
+    let (base_url, _script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"retry\"}"),
+    ])
+    .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     let runs: Arc<dyn crate::ports::RunStore> =
         Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
@@ -5577,12 +5518,11 @@ async fn a_peer_answer_the_judge_accepts_still_fails_its_postcondition() {
         .prefix("oc-1866-peer-postcondition-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
-        ])
-        .await;
+    let (base_url, _script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+    ])
+    .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     let runs: Arc<dyn crate::ports::RunStore> =
         Arc::new(crate::store::FsOps::new(dir.path().to_path_buf()));
@@ -5620,9 +5560,7 @@ async fn a_peer_answer_the_judge_accepts_still_fails_its_postcondition() {
     let attempts = runs
         .list_runs(
             &CompanyId::new("acme"),
-            &crate::ports::RunFilter::for_workflow_run(
-                "run-1866-peer-postcondition".to_string(),
-            ),
+            &crate::ports::RunFilter::for_workflow_run("run-1866-peer-postcondition".to_string()),
         )
         .await
         .expect("list attempts");
@@ -5639,12 +5577,11 @@ async fn a_consultation_that_stages_board_work_leaves_nothing_behind() {
         .prefix("oc-1866-peer-no-authority-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
-        ])
-        .await;
+    let (base_url, _script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"continue\"}"),
+    ])
+    .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     let queues = deps.clone();
     let turn = Arc::new(ConsultedPeerTurn::staging(
@@ -5772,8 +5709,7 @@ async fn a_consultation_cannot_re_enter_the_recovery_ladder() {
             self.node_turns
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(crate::harness::TurnOutcome {
-                reply: "I cannot draft the email without the customer's renewal date."
-                    .to_string(),
+                reply: "I cannot draft the email without the customer's renewal date.".to_string(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
                 abnormal_stop: None,
@@ -5787,12 +5723,11 @@ async fn a_consultation_cannot_re_enter_the_recovery_ladder() {
         .prefix("oc-1866-peer-reentrant-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-            crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
-        ])
-        .await;
+    let (base_url, _script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+        crate::workflows::gated_tool_turn_test::Turn::Say("{\"verdict\":\"recover\"}"),
+    ])
+    .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     let turn = Arc::new(ReentrantPeerTurn {
         consults: std::sync::atomic::AtomicUsize::new(0),
@@ -5855,13 +5790,12 @@ async fn an_escalate_verdict_never_enters_the_recovery_ladder() {
         .prefix("oc-1866-peer-escalate-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, script) =
-        crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
-            crate::workflows::gated_tool_turn_test::Turn::Say(
-                "{\"verdict\":\"escalate\",\"gap\":\"infrastructure\"}",
-            ),
-        ])
-        .await;
+    let (base_url, script) = crate::workflows::gated_tool_turn_test::spawn_script_recording(vec![
+        crate::workflows::gated_tool_turn_test::Turn::Say(
+            "{\"verdict\":\"escalate\",\"gap\":\"infrastructure\"}",
+        ),
+    ])
+    .await;
     let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(base_url, dir.path());
     let turn = Arc::new(ConsultedPeerTurn::new("should never be reached"));
     let (runner, _blocks, _board, _notices, _artifacts) =

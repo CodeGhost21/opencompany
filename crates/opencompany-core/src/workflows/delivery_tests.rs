@@ -269,8 +269,8 @@ admins = [{list}]
     /// `Send` effect, so a test that parks under `full` is the one that
     /// proves delivery does not route through `evaluate`.
     fn with_parking(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
-        let policy = toml::from_str(&format!("mode = \"{policy_mode}\"\n"))
-            .expect("valid [policy] block");
+        let policy =
+            toml::from_str(&format!("mode = \"{policy_mode}\"\n")).expect("valid [policy] block");
         let gate = Arc::new(ManifestApprovalGate::new(policy));
         let journal = Arc::new(RuntimeJournal::new(dir.join("journal.jsonl")));
         self.deps.parking = Some(DeliveryParking {
@@ -298,8 +298,8 @@ admins = [{list}]
     /// and it fails at the real I/O boundary rather than at a mock, so the
     /// test exercises the same error path a full disk would.
     fn with_failing_journal(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
-        let policy = toml::from_str(&format!("mode = \"{policy_mode}\"\n"))
-            .expect("valid [policy] block");
+        let policy =
+            toml::from_str(&format!("mode = \"{policy_mode}\"\n")).expect("valid [policy] block");
         let gate = Arc::new(ManifestApprovalGate::new(policy));
         let blocked = dir.join("unwritable-journal.jsonl");
         std::fs::create_dir_all(&blocked).expect("journal path occupied by a directory");
@@ -450,9 +450,7 @@ admins = [{list}]
                     agent_id,
                     text,
                     ..
-                } if chat_id == crate::runtime::channel::OPERATOR_CHANNEL => {
-                    Some((agent_id, text))
-                }
+                } if chat_id == crate::runtime::channel::OPERATOR_CHANNEL => Some((agent_id, text)),
                 _ => None,
             })
             .collect()
@@ -533,11 +531,7 @@ impl UserStore for FailingUserStore {
             "user directory is unreadable".into(),
         ))
     }
-    async fn get_user(
-        &self,
-        _company: &CompanyId,
-        _id: &str,
-    ) -> crate::Result<Option<UserRecord>> {
+    async fn get_user(&self, _company: &CompanyId, _id: &str) -> crate::Result<Option<UserRecord>> {
         unreachable!("owner delivery reads only list_users")
     }
     async fn find_user_by_email(

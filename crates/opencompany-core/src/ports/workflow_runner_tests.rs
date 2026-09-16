@@ -103,8 +103,7 @@ fn new_with_scheduled_true_defaults_started_by_to_schedule() {
 /// instead of settling for `new`'s coarse reading.
 #[test]
 fn with_started_by_overrides_the_default() {
-    let ctx =
-        WorkflowRunContext::new(false).with_started_by(StartedBy::Agent("ceo".to_string()));
+    let ctx = WorkflowRunContext::new(false).with_started_by(StartedBy::Agent("ceo".to_string()));
     assert_eq!(ctx.started_by, StartedBy::Agent("ceo".to_string()));
     // Overriding the sender does not retroactively flip `scheduled` — the
     // two are independent facts about the run.
@@ -118,8 +117,7 @@ fn with_started_by_overrides_the_default() {
 #[test]
 fn started_by_is_excluded_from_equality() {
     let a = WorkflowRunContext::new(false).with_started_by(StartedBy::Operator);
-    let mut b =
-        WorkflowRunContext::new(false).with_started_by(StartedBy::Agent("ceo".to_string()));
+    let mut b = WorkflowRunContext::new(false).with_started_by(StartedBy::Agent("ceo".to_string()));
     b.run_id = a.run_id.clone();
     assert_eq!(
         a, b,

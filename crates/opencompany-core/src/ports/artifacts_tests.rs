@@ -42,8 +42,7 @@ fn each_revision_remembers_the_attempt_that_wrote_it() {
 
     // A pre-#242 blob is exactly what an unstamped record serializes to —
     // the field is skipped when absent — so it must still load, with `None`.
-    let unstamped =
-        ArtifactRecord::new("a2", "t-1", "Draft", ArtifactKind::Text, "one", "ceo", 1);
+    let unstamped = ArtifactRecord::new("a2", "t-1", "Draft", ArtifactKind::Text, "one", "ceo", 1);
     let legacy = serde_json::to_string(&unstamped).expect("serialize");
     assert!(!legacy.contains("runId"), "{legacy}");
     let loaded: ArtifactRecord =
@@ -71,8 +70,7 @@ fn stamping_an_empty_record_is_a_no_op() {
 /// rewrite history and claim it had always lived in the new node.
 #[test]
 fn each_revision_remembers_the_node_it_was_mirrored_into() {
-    let mut a =
-        ArtifactRecord::new("a1", "t-1", "Spec", ArtifactKind::Markdown, "v1", "ceo", 1);
+    let mut a = ArtifactRecord::new("a1", "t-1", "Spec", ArtifactKind::Markdown, "v1", "ceo", 1);
     a.stamp_workspace_node("node-old");
     assert_eq!(a.workspace_node_id(), Some("node-old"));
 
@@ -123,8 +121,7 @@ fn a_pre_mirror_record_loads_with_no_workspace_node() {
         "updatedAtMillis": 5,
         "source": "specs/launch.md"
     }"##;
-    let loaded: ArtifactRecord =
-        serde_json::from_str(legacy).expect("a pre-#552 record parses");
+    let loaded: ArtifactRecord = serde_json::from_str(legacy).expect("a pre-#552 record parses");
     assert_eq!(loaded.workspace_node_id(), None);
     // Round-tripping one must not mint a node id for it.
     let json = serde_json::to_string(&loaded).unwrap();

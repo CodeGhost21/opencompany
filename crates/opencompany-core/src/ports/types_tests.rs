@@ -2239,8 +2239,7 @@ fn explicit_no_cap_policy_override_survives_json_round_trip() {
     override_.auto_approve_under_usd = Some(None);
     let encoded = serde_json::to_value(&override_).expect("serialize override");
     assert!(encoded["auto_approve_under_usd"].is_null());
-    let decoded: PolicyOverride =
-        serde_json::from_value(encoded).expect("deserialize override");
+    let decoded: PolicyOverride = serde_json::from_value(encoded).expect("deserialize override");
     assert_eq!(decoded.auto_approve_under_usd, Some(None));
 }
 

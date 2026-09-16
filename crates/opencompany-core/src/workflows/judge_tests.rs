@@ -141,8 +141,7 @@ fn focus_terms_extracts_content_words_from_a_criteria_sentence() {
 
 #[test]
 fn focus_terms_is_capped_and_deduplicated() {
-    let terms =
-        focus_terms("alpha alpha bravo charlie delta echo foxtrot golf hotel india juliet");
+    let terms = focus_terms("alpha alpha bravo charlie delta echo foxtrot golf hotel india juliet");
     assert!(terms.len() <= MAX_FOCUS_TERMS, "{terms:?}");
     let unique: std::collections::HashSet<_> = terms.iter().collect();
     assert_eq!(unique.len(), terms.len(), "no duplicate terms: {terms:?}");
