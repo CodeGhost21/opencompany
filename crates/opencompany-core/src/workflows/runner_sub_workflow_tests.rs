@@ -1,5 +1,5 @@
-use super::tests_node_kinds::{RecordingSlowProvider};
 use super::tests_capped_halt::{deps, deps_with_source, record, tools_record, write_wf};
+use super::tests_node_kinds::RecordingSlowProvider;
 use super::*;
 
 use crate::company::parse_workflow;

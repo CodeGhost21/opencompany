@@ -1,6 +1,6 @@
+use super::tests_cancel_delivery::deps_delivering_to_channel;
 use super::tests_capped_halt::{GREET, deps, record};
-use super::tests_delivery_gate::{REPORT_TO_DESK};
-use super::tests_cancel_delivery::{deps_delivering_to_channel};
+use super::tests_delivery_gate::REPORT_TO_DESK;
 use super::*;
 
 use crate::company::parse_workflow;
@@ -130,7 +130,9 @@ async fn a_clean_finish_lets_the_next_run_deliver_again() {
 /// Deps with a real filesystem journal wired, so the progress path is
 /// exercised end to end rather than through a double: the claim under test
 /// is that these events reach disk in an order a reader can rely on.
-pub(super) fn deps_with_events(dir: &std::path::Path) -> (HarnessDeps, Arc<dyn crate::ports::EventLog>) {
+pub(super) fn deps_with_events(
+    dir: &std::path::Path,
+) -> (HarnessDeps, Arc<dyn crate::ports::EventLog>) {
     let events: Arc<dyn crate::ports::EventLog> = Arc::new(crate::store::FsEventLog::new(dir));
     let mut deps = deps(dir);
     deps.events = Some(events.clone());

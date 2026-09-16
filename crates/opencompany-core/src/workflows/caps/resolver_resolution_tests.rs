@@ -109,7 +109,10 @@ fn seed_resolver(dir: &std::path::Path, root_id: &str) -> StoreWorkflowResolver 
 
 /// A resolver with NO seed directory, serving only overlay bodies — the
 /// hosted shape (issue #168).
-pub(super) fn overlay_resolver(overlays: Vec<OverlayWorkflow>, root_id: &str) -> StoreWorkflowResolver {
+pub(super) fn overlay_resolver(
+    overlays: Vec<OverlayWorkflow>,
+    root_id: &str,
+) -> StoreWorkflowResolver {
     StoreWorkflowResolver::new(
         None,
         store_with(overlays),

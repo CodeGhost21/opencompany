@@ -1,5 +1,5 @@
+use super::tests_turn_dispatch::ok_outcome;
 use super::tests_turn_dispatch::single_turn;
-use super::tests_turn_dispatch::{ok_outcome};
 use super::*;
 
 /// Issue #2005: the engine-side trigger reader — what an answered blocker

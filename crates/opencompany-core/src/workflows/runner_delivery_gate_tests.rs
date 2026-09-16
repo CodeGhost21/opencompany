@@ -1,5 +1,5 @@
 use super::tests_capped_halt::{GREET, deps, record, tools_record, workflow_workspace};
-use super::tests_reclassify::{RecordingLane};
+use super::tests_reclassify::RecordingLane;
 use super::*;
 
 use crate::company::parse_workflow;

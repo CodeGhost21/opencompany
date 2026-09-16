@@ -1,6 +1,6 @@
-use super::tests_sub_workflow::{GATED, THREE_GATES, deps_with_parking};
 use super::tests_capped_halt::{GREET, deps, record, tools_record};
-use super::tests_delivery_gate::{REPORT_TO_DESK};
+use super::tests_delivery_gate::REPORT_TO_DESK;
+use super::tests_sub_workflow::{GATED, THREE_GATES, deps_with_parking};
 use super::*;
 
 use crate::company::parse_workflow;

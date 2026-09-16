@@ -1,7 +1,7 @@
 use super::tests_capped_halt::{GREET, deps, record, tools_record};
+use super::tests_checkpoint_cancel::GatedProvider;
+use super::tests_delivery_gate::REPORT_TO_DESK;
 use super::tests_journal::{STALLS, deps_with_events, journaled};
-use super::tests_checkpoint_cancel::{GatedProvider};
-use super::tests_delivery_gate::{REPORT_TO_DESK};
 use super::*;
 
 use crate::company::parse_workflow;

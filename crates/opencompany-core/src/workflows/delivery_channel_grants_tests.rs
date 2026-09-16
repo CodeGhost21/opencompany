@@ -1,4 +1,6 @@
-use super::tests_owner_setup::{COMPANY_ADDRESS, Harness, RefusingMailSender, graph, reached_output, record, smtp_creds};
+use super::tests_owner_setup::{
+    COMPANY_ADDRESS, Harness, RefusingMailSender, graph, reached_output, record, smtp_creds,
+};
 use super::*;
 
 use async_trait::async_trait;

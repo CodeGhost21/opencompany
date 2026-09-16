@@ -1,4 +1,4 @@
-use super::tests_recovery_evidence::{EscalatingJudgeProvider};
+use super::tests_recovery_evidence::EscalatingJudgeProvider;
 use super::tests_turn_dispatch::{CappedWorkflowTurn, RecordingWorkflowTurn};
 use super::*;
 
