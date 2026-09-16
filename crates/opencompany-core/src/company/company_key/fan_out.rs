@@ -968,7 +968,12 @@ pub async fn fan_out(
             SlotOutcome::Kept(SkipReason::CustomKey) => SlotOutcome::Skipped(SkipReason::CustomKey),
             _ => SlotOutcome::Skipped(SkipReason::InferenceNotWritten),
         }
-    } else if let Some(existing) = row.as_ref().filter(|r| r.base_url != proxy_base_url) {
+    } else if let Some(existing) = row.as_ref().filter(|existing| {
+        existing.base_url != proxy_base_url
+            || model.as_ref().is_some_and(|chosen| {
+                existing.model() != inference_store::ModelOnRow::One(chosen.trim().to_string())
+            })
+    }) {
         // The row already exists, but its stored endpoint predates (or was
         // minted under) a different `TINYHUMANS_API_URL` than the one this
         // instance is configured for now — a non-production deployment that
@@ -987,7 +992,14 @@ pub async fn fan_out(
                 label: existing.label.clone(),
                 kind: existing.kind.clone(),
                 base_url: proxy_base_url.clone(),
-                models: existing.models.clone(),
+                // `PUT …/credential/model` is the completion path for an
+                // existing legacy row with no unique model.  Persist its
+                // selection before making it the default; otherwise the
+                // default can name a model the row cannot route to.
+                models: model
+                    .as_deref()
+                    .map(tier_overrides)
+                    .unwrap_or_else(|| existing.models.clone()),
                 enabled: existing.enabled,
             },
         )
