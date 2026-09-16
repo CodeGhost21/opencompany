@@ -87,4 +87,3 @@ fn an_unparseable_manifest_reads_as_no_version_at_all() {
     std::fs::write(pkg.join("package.json"), "{ truncated").unwrap();
     assert_eq!(installed_version_in(root.path(), harness), None);
 }
-}

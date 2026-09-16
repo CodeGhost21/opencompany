@@ -592,4 +592,3 @@ async fn start_when_free(hosts: &mut LocalHosts, id: &str) -> LocalInstanceInfo 
     }
     panic!("a released root must become takeable: {last:?}");
 }
-}
