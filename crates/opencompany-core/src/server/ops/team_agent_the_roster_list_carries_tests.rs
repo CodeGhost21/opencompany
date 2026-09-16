@@ -11,6 +11,7 @@ use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
+use super::tests_requested_grants_reads_overlay::*;
 
 /// A company whose grants actually bite: `ceo` asks for one tool the company
 /// does not allow, `writer` asks for nothing at all, and `hermit` sits on no
@@ -361,7 +362,7 @@ async fn an_unedited_field_still_comes_from_the_manifest() {
 
 /// A manifest with a blueprint `prompt`, so the persona-override tests have a
 /// seed for "Reset to blueprint" to restore.
-const PERSONA_MANIFEST: &str = r#"
+pub(super) const PERSONA_MANIFEST: &str = r#"
 [company]
 name = "Acme"
 [policy]
@@ -461,13 +462,13 @@ async fn null_instructions_resets_a_manifest_teammate_to_blueprint() {
 /// The smallest valid GIF, as bytes. Real enough to be sniffed as one,
 /// which is the whole point — the upload route reads the signature rather
 /// than believing the part's declared type.
-const TINY_GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\xff\x00,\x00\x00\x00\x00\
+pub(super) const TINY_GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x00\xff\x00,\x00\x00\x00\x00\
 \x01\x00\x01\x00\x00\x02\x00;";
 
 /// A PNG whose header claims a 65535×65535 frame in a body of a few dozen
 /// bytes — the decompression bomb the dimension caps exist for. The
 /// signature and IHDR are enough for both the sniff and the size read.
-fn bomb_png() -> Vec<u8> {
+pub(super) fn bomb_png() -> Vec<u8> {
     let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
     v.extend_from_slice(&13u32.to_be_bytes());
     v.extend_from_slice(b"IHDR");
@@ -478,7 +479,7 @@ fn bomb_png() -> Vec<u8> {
 }
 
 /// Posts `bytes` to the avatar upload route as a `file` part named `name`.
-async fn upload_avatar(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
+pub(super) async fn upload_avatar(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
     const BOUNDARY: &str = "----ocavatartest";
     let mut body: Vec<u8> = Vec::new();
     body.extend_from_slice(
@@ -513,7 +514,7 @@ async fn upload_avatar(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCod
 /// named `name`, declaring `mime` as its `Content-Type`. The declared type
 /// is what the store keeps — the referent check must not trust it, and this
 /// helper exists to prove that.
-async fn upload_workspace_binary(
+pub(super) async fn upload_workspace_binary(
     state: &AppState,
     name: &str,
     mime: &str,
