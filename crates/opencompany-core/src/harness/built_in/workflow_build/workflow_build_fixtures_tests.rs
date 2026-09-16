@@ -55,7 +55,7 @@ pub(crate) struct ScriptedModel {
     calls: AtomicUsize,
     /// When set, the model moves the card to To-do on invoke, before answering —
     /// the operator's drag landing while the pass is waiting on the model.
-    move_card: StdMutex<Option<(Weak<CompanyRuntime>, String)>>,
+    pub(super) move_card: StdMutex<Option<(Weak<CompanyRuntime>, String)>>,
 }
 
 impl ScriptedModel {
