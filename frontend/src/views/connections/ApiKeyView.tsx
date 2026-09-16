@@ -51,6 +51,7 @@ import {
   balanceLine,
   canRemoveKey,
   headerActions,
+  keyVerdict,
   type AccountLoad,
 } from "@/views/connections/account";
 import { AccountKeyDialog, type AccountKeyModelStep } from "@/views/connections/AccountKeyDialog";
@@ -187,7 +188,7 @@ export function ApiKeyView({ client, company }: Props) {
       const [credential, money] = await Promise.all([
         getCompanyCredential(client, company),
         getCompanyBilling(client, company).catch(
-          (err): CompanyBilling => ({
+          (): CompanyBilling => ({
             // A rejected billing request is not the same fact as "no key". The
             // credential result (just resolved above, in the same batch) is
             // what actually says whether a key exists; a company that has one
@@ -195,10 +196,12 @@ export function ApiKeyView({ client, company }: Props) {
             // the balance row silently vanish. `configured` is corrected
             // against the credential result once both have settled below.
             configured: false,
-            unavailable:
-              err instanceof ApiError
-                ? err.message
-                : "The balance could not be read just now.",
+            unavailable: "The balance could not be read just now.",
+            // The request never reached the hub's verdict, so nothing here
+            // knows the key's standing — and a thrown error carries whatever
+            // text some layer chose to put in it, which is not a sentence this
+            // page may put under somebody's balance.
+            unavailableReason: "unknown",
           }),
         ),
       ]);
@@ -513,7 +516,8 @@ export function ApiKeyView({ client, company }: Props) {
     void write("", "clear", confirmInUseFor(removeReason));
   }, [write, removeReason]);
 
-  const shape = accountShape(load, status);
+  const shape = accountShape(load, status, billing);
+  const verdict = keyVerdict(status, billing);
   const removable = canRemoveKey(status);
   const actions = headerActions(status, canManage);
   const openKeyDialog = () => {
@@ -527,6 +531,12 @@ export function ApiKeyView({ client, company }: Props) {
   };
   const balance = balanceLine(billing);
   const account = status?.account;
+  // The hub's own top-up address where it sent one; the host-derived link only
+  // while nothing has said the key is refused. A refused key does not start
+  // working because the account behind it has more money in it, and a Top up
+  // beside "replace it to reconnect" offers the wrong repair.
+  const topUpUrl =
+    billing?.summary?.topUpUrl ?? (verdict === "rejected" ? undefined : account?.topUpUrl);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -587,12 +597,22 @@ export function ApiKeyView({ client, company }: Props) {
         {/* The state. One row for the account, one for what is left on it. */}
         <Card>
           <CardContent className="px-0">
-            {/* Named for what the card holds, not for one of the three states
-                it can be in: a heading reading "Connected" over "No account
-                connected yet." or over "The host could not say" contradicts the
-                only line under it. */}
-            <h3 className="px-4 pb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-              {shape === "connected" ? "Connected" : "Account"}
+            {/* Named for the state the row is actually in, never for one it
+                might be in: a heading reading "Connected" over "No account
+                connected yet.", over "The host could not say", or over a key
+                the hub has refused contradicts the only line under it. */}
+            <h3
+              className={cn(
+                "px-4 pb-2 text-xs font-medium tracking-wide uppercase",
+                shape === "rejected" ? "text-status-blocked-text" : "text-muted-foreground",
+              )}
+              data-testid="account-card-state"
+            >
+              {shape === "connected"
+                ? "Connected"
+                : shape === "rejected"
+                  ? "Action needed"
+                  : "Account"}
             </h3>
 
             {load === "loading" ? (
@@ -640,7 +660,7 @@ export function ApiKeyView({ client, company }: Props) {
                       className="truncate text-xs text-muted-foreground"
                       data-testid="account-row-subline"
                     >
-                      {accountSubline(load, status)}
+                      {accountSubline(load, status, billing)}
                     </span>
                   </span>
 
@@ -736,14 +756,12 @@ export function ApiKeyView({ client, company }: Props) {
                       </a>
                     )}
 
-                    {/* The hub's own top-up address where it sent one, else the
-                        one the host derived. Moving money is a decision made
-                        signed in on the hub, so this is a link and never a
-                        route here. */}
-                    {(billing?.summary?.topUpUrl ?? account?.topUpUrl) && (
+                    {/* Moving money is a decision made signed in on the hub, so
+                        this is a link and never a route here. */}
+                    {topUpUrl && (
                       <a
                         className="inline-flex items-center gap-1 text-xs font-medium underline underline-offset-4"
-                        href={billing?.summary?.topUpUrl ?? account?.topUpUrl}
+                        href={topUpUrl}
                         target="_blank"
                         rel="noreferrer"
                         data-testid="billing-top-up"

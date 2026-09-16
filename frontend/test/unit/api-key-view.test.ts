@@ -1034,3 +1034,90 @@ describe("ApiKeyView offers a restart action when the host says one is needed (K
     );
   });
 });
+
+describe("ApiKeyView does not claim a key works because it is stored", () => {
+  const HUB = {
+    manageKeysUrl: "https://hub.example/keys",
+    topUpUrl: "https://hub.example/top-up",
+  };
+
+  /** A page whose credential resolves to this company's own key, with the hub's
+   * billing read answering however the case needs. */
+  function page(billing: () => Promise<unknown>) {
+    return clientFor({
+      credential: async () => credential({ configured: true, source: "company", account: HUB }),
+      billing,
+    });
+  }
+
+  const state = () =>
+    container.querySelector('[data-testid="account-card-state"]')?.textContent?.trim();
+  const subline = () =>
+    container.querySelector('[data-testid="account-row-subline"]')?.textContent?.trim();
+
+  it("says action is needed, and why, when the hub refused the stored key", async () => {
+    await mount(
+      page(async () => ({
+        configured: true,
+        unavailable: "TinyHumans refused this company's key.",
+        unavailableReason: "rejected",
+        unavailableCode: "http_401",
+      })),
+    );
+
+    expect(state()).toBe("Action needed");
+    expect(subline()).toContain("refusing it");
+    expect(subline()).not.toContain("Acting as this company's own");
+  });
+
+  // Money does not repair a refused credential, and a Top up beside "replace it
+  // to reconnect" offers the wrong fix on the one row that is telling somebody
+  // what to do.
+  it("offers no top-up link against a refused key", async () => {
+    await mount(
+      page(async () => ({
+        configured: true,
+        unavailable: "TinyHumans refused this company's key.",
+        unavailableReason: "rejected",
+      })),
+    );
+
+    expect(container.querySelector('[data-testid="billing-top-up"]')).toBeNull();
+  });
+
+  // The control. An outage is not a dead key: the row stays connected and the
+  // host-derived top-up link stays offered.
+  it("keeps the connected row and its top-up link through an outage", async () => {
+    await mount(
+      page(async () => ({
+        configured: true,
+        unavailable: "TinyHumans could not be reached just now.",
+        unavailableReason: "unreachable",
+      })),
+    );
+
+    expect(state()).toBe("Connected");
+    expect(subline()).toContain("Acting as this company's own");
+    expect(
+      container.querySelector('[data-testid="billing-top-up"]')?.getAttribute("href"),
+    ).toBe(HUB.topUpUrl);
+  });
+
+  // The hub's response body is what put raw JSON under a balance. Nothing it
+  // returns is rendered anywhere on the page.
+  it("renders none of the hub's response body", async () => {
+    const body = '{"success":false,"error":"Invalid API key","statusCode":401}';
+    await mount(
+      page(async () => ({
+        configured: true,
+        unavailable: body,
+        unavailableReason: "rejected",
+      })),
+    );
+
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("Invalid API key");
+    expect(text).not.toContain("success");
+    expect(text).toContain("Balance unknown");
+  });
+});
