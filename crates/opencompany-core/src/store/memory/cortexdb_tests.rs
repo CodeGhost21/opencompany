@@ -46,7 +46,7 @@ struct MockState {
     recall_lag_calls: Mutex<u32>,
 }
 
-const TOKEN: &str = "test-token";
+pub(super) const TOKEN: &str = "test-token";
 pub(super) const ACTOR: &str = "opencompany-test";
 
 /// Whether the request carries the one accepted credential pair.
