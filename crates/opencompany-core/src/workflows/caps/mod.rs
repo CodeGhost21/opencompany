@@ -287,19 +287,19 @@ pub async fn build_capabilities(
         None
     } else {
         match (&deps.search, &deps.secrets) {
-        (Some(backend), Some(secrets)) => {
-            let company_key =
-                crate::company::search::load_managed_key(&company, secrets.as_ref()).await?;
-            (backend.credential.configured() || company_key.is_some()).then(|| {
-                backend
-                    .clone()
-                    .with_daily_call_cap(search_daily_call_cap)
-                    .with_company_credential(company.clone(), secrets.clone())
-            })
-        }
-        (Some(backend), None) if backend.credential.configured() => {
-            Some(backend.clone().with_daily_call_cap(search_daily_call_cap))
-        }
+            (Some(backend), Some(secrets)) => {
+                let company_key =
+                    crate::company::search::load_managed_key(&company, secrets.as_ref()).await?;
+                (backend.credential.configured() || company_key.is_some()).then(|| {
+                    backend
+                        .clone()
+                        .with_daily_call_cap(search_daily_call_cap)
+                        .with_company_credential(company.clone(), secrets.clone())
+                })
+            }
+            (Some(backend), None) if backend.credential.configured() => {
+                Some(backend.clone().with_daily_call_cap(search_daily_call_cap))
+            }
             _ => None,
         }
     };

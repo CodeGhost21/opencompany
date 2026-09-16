@@ -2085,6 +2085,8 @@ export interface CapabilityStatusDto {
    * store and had no deployment fallback from which to establish availability.
    */
   searchCredentialConfigured?: boolean;
+  /** Which managed Search credential wins: company first, then deployment. */
+  searchCredentialSource?: "attested" | "company" | "static" | "none";
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
   /**
