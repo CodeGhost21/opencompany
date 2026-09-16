@@ -12,22 +12,22 @@ use super::*;
 /// prompt that resolves immediately exits the loop before the steer check
 /// ever runs, and the cancel path goes unexercised. `cancel_hangs` makes
 /// `cancel` never answer (the bounded-RPC path).
-struct Scripted {
+pub(super) struct Scripted {
     turn: AcpTurn,
     /// Milliseconds to hold the turn open before answering — how a test
     /// owns the session's slot for a *bounded* window, so a second turn
     /// genuinely queues and then genuinely gets in.
-    holds_ms: u64,
-    hang: bool,
-    hold_for_cancel: bool,
-    cancel_hangs: bool,
-    cancel_fails: bool,
-    cancels: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(super) holds_ms: u64,
+    pub(super) hang: bool,
+    pub(super) hold_for_cancel: bool,
+    pub(super) cancel_hangs: bool,
+    pub(super) cancel_fails: bool,
+    pub(super) cancels: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     cancel_started: tokio::sync::Notify,
 }
 
 impl Scripted {
-    fn answering(updates: Vec<AcpUpdate>) -> Self {
+    pub(super) fn answering(updates: Vec<AcpUpdate>) -> Self {
         Self {
             turn: AcpTurn {
                 updates,
