@@ -473,7 +473,7 @@ pub(super) struct FailStandingRevokeStore {
 }
 
 impl FailStandingRevokeStore {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             inner: crate::ports::journal::MemoryJournalStore::default(),
         }
