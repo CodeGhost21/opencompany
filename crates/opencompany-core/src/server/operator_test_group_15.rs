@@ -1,5 +1,7 @@
 use super::*;
+#[cfg(feature = "openhuman")]
 use crate::ports::tasks::TaskTitle;
+#[cfg(feature = "openhuman")]
 use axum::http::StatusCode;
 
 use super::operator_test_support_1::*;
