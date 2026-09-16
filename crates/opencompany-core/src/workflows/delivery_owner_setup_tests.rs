@@ -16,11 +16,11 @@ use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::store::{FsInboxStore, FsOps};
 
 /// The company's own sending address in every test below.
-const COMPANY_ADDRESS: &str = "acme@opencompany.test";
+pub(super) const COMPANY_ADDRESS: &str = "acme@opencompany.test";
 
 /// A graph whose single `output` node carries `destination`, wired
 /// `trigger → done`. `target` is omitted when `None`.
-fn graph(kind: &str, target: Option<&str>) -> WorkflowFile {
+pub(super) fn graph(kind: &str, target: Option<&str>) -> WorkflowFile {
     let target_line = target
         .map(|t| format!("target = \"{t}\"\n"))
         .unwrap_or_default();
