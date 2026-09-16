@@ -1,3 +1,5 @@
+use super::tests_capped_halt::{GREET, deps, record, tools_record, workflow_workspace};
+use super::tests_reclassify::{RecordingLane};
 use super::*;
 
 use crate::company::parse_workflow;
@@ -234,7 +236,7 @@ fn without_nodes_removes_only_the_blocked_entries() {
 
 /// A graph whose terminal `output` node routes its report to a desk
 /// channel. `trigger → output` only, so it needs no roster.
-const REPORT_TO_DESK: &str = r#"
+pub(super) const REPORT_TO_DESK: &str = r#"
 id = "report"
 name = "Report"
 [[node]]

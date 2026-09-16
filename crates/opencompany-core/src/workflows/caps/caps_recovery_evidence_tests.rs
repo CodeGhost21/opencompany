@@ -1,3 +1,5 @@
+use super::tests_turn_dispatch::{RefusalWorkflowTurn};
+use super::tests_budget_postcondition::{ScriptedTurn};
 use super::*;
 
 #[async_trait]
@@ -522,7 +524,7 @@ async fn a_recovery_park_leaves_the_attempt_row_blocked() {
 /// A provider that counts every `invoke` and always escalates, so a judge
 /// call is both detectable and destructive to the caller's diagnosis.
 #[derive(Default)]
-struct EscalatingJudgeProvider {
+pub(super) struct EscalatingJudgeProvider {
     calls: std::sync::atomic::AtomicUsize,
 }
 

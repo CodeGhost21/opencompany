@@ -1,3 +1,5 @@
+use super::tests_capped_halt::{GREET, deps, record};
+use super::tests_journal::{STALLS, StallingProvider, deps_with_events, journaled};
 use super::*;
 
 use crate::company::parse_workflow;
@@ -548,7 +550,7 @@ async fn a_run_cancelled_before_it_starts_does_not_walk_the_graph() {
 /// **returns normally**. That is what makes a *clean* cancel possible: the
 /// agent node completes, the engine hits the next boundary, sees the flipped
 /// token, and winds the run down rather than being dropped mid-await.
-struct GatedProvider {
+pub(super) struct GatedProvider {
     inner: MockProvider,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,

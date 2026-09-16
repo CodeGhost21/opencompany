@@ -67,7 +67,7 @@ fn store_with_globals_disable(
 }
 
 /// A store whose record carries `overlays` as its runtime-authored graphs.
-fn store_with(overlays: Vec<OverlayWorkflow>) -> Arc<dyn CompanyStore> {
+pub(super) fn store_with(overlays: Vec<OverlayWorkflow>) -> Arc<dyn CompanyStore> {
     let manifest: CompanyManifest =
         toml::from_str("[company]\nname = \"Acme\"\n").expect("valid manifest");
     Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
@@ -109,7 +109,7 @@ fn seed_resolver(dir: &std::path::Path, root_id: &str) -> StoreWorkflowResolver 
 
 /// A resolver with NO seed directory, serving only overlay bodies — the
 /// hosted shape (issue #168).
-fn overlay_resolver(overlays: Vec<OverlayWorkflow>, root_id: &str) -> StoreWorkflowResolver {
+pub(super) fn overlay_resolver(overlays: Vec<OverlayWorkflow>, root_id: &str) -> StoreWorkflowResolver {
     StoreWorkflowResolver::new(
         None,
         store_with(overlays),
@@ -119,7 +119,7 @@ fn overlay_resolver(overlays: Vec<OverlayWorkflow>, root_id: &str) -> StoreWorkf
     )
 }
 
-fn overlay(id: &str, toml: String) -> OverlayWorkflow {
+pub(super) fn overlay(id: &str, toml: String) -> OverlayWorkflow {
     OverlayWorkflow {
         id: id.to_string(),
         toml,
@@ -155,7 +155,7 @@ to = "done"
 }
 
 /// A graph that runs `child_id` as a sub_workflow.
-fn parent_of(id: &str, child_id: &str) -> String {
+pub(super) fn parent_of(id: &str, child_id: &str) -> String {
     format!(
         r#"
 id = "{id}"

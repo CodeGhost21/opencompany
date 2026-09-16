@@ -1,3 +1,5 @@
+use super::tests_node_kinds::{RecordingSlowProvider};
+use super::tests_capped_halt::{deps, deps_with_source, record, tools_record, write_wf};
 use super::*;
 
 use crate::company::parse_workflow;
@@ -415,7 +417,7 @@ async fn a_run_below_the_limit_still_executes() {
 // --- #395: a paused gate becomes a decidable approval --------------------
 
 /// The graph T4 uses, with the gate node reachable and an output behind it.
-const GATED: &str = r#"
+pub(super) const GATED: &str = r#"
 id = "gated"
 name = "Gated"
 [[node]]
@@ -448,7 +450,7 @@ to = "done"
 /// gate's `evaluate` would *allow* most effects. Parking under it proves the
 /// gate park is the already-decided path rather than a re-evaluation that
 /// would quietly let the run continue.
-fn deps_with_parking(
+pub(super) fn deps_with_parking(
     dir: &std::path::Path,
 ) -> (HarnessDeps, Arc<crate::runtime::journal::RuntimeJournal>) {
     let policy = toml::from_str("mode = \"full\"\n").expect("valid [policy] block");
@@ -582,7 +584,7 @@ async fn the_same_gate_on_a_different_input_is_a_second_decision() {
 /// `parallel_gate_fanout_test`'s `FANOUT_TOML`, sized to exercise
 /// `park_pending_gates`'s own loop directly rather than a full
 /// `CompanyRuntime`.
-const THREE_GATES: &str = r#"
+pub(super) const THREE_GATES: &str = r#"
 id = "three-gate"
 name = "Three Gate"
 [[node]]

@@ -1,3 +1,6 @@
+use super::tests_sub_workflow::{GATED, THREE_GATES, deps_with_parking};
+use super::tests_capped_halt::{GREET, deps, record, tools_record};
+use super::tests_delivery_gate::{REPORT_TO_DESK};
 use super::*;
 
 use crate::company::parse_workflow;
@@ -509,7 +512,7 @@ async fn a_report_is_delivered_once_across_a_gate_and_its_continuation() {
 /// Deps that deliver a report to the operator channel, sharing an event log
 /// and a channel across runs — so a run 1's write-behind record and the
 /// count of sends are both visible to run 2.
-fn deps_delivering_to_channel(
+pub(super) fn deps_delivering_to_channel(
     dir: &std::path::Path,
     events: Arc<dyn crate::ports::EventLog>,
     channel: crate::runtime::channel::RecordingChannel,

@@ -47,7 +47,7 @@ fn undeclared() -> WorkflowFile {
     authored(&[])
 }
 
-fn node(id: &str, kind: NodeKind, config: Value) -> Node {
+pub(super) fn node(id: &str, kind: NodeKind, config: Value) -> Node {
     Node {
         id: id.to_string(),
         kind,
@@ -59,7 +59,7 @@ fn node(id: &str, kind: NodeKind, config: Value) -> Node {
     }
 }
 
-fn graph(nodes: Vec<Node>) -> WorkflowGraph {
+pub(super) fn graph(nodes: Vec<Node>) -> WorkflowGraph {
     WorkflowGraph {
         id: Some("wf".to_string()),
         nodes,

@@ -154,7 +154,7 @@ fn a_halt_does_not_hide_an_unrelated_failure() {
 
 /// A workflow lane that records which agent it served. Its reply names the
 /// lane so the run output proves the same routing decision as the call log.
-struct RecordingLane {
+pub(super) struct RecordingLane {
     label: &'static str,
     seen: std::sync::Mutex<Vec<String>>,
 }
@@ -621,4 +621,4 @@ async fn a_capped_node_is_reclassified_even_when_a_later_node_blocks_the_run() {
 /// call involved). `ok_branch`'s turn always reports a real, non-empty
 /// reply; the scripted judge behind `deps.provider` is what answers
 /// `halt_benign` for it.
-struct HaltOkTurn;
+pub(super) struct HaltOkTurn;

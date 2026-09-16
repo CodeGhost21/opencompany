@@ -1,3 +1,6 @@
+use super::tests_capped_halt::{GREET, deps, record};
+use super::tests_delivery_gate::{REPORT_TO_DESK};
+use super::tests_cancel_delivery::{deps_delivering_to_channel};
 use super::*;
 
 use crate::company::parse_workflow;
@@ -127,7 +130,7 @@ async fn a_clean_finish_lets_the_next_run_deliver_again() {
 /// Deps with a real filesystem journal wired, so the progress path is
 /// exercised end to end rather than through a double: the claim under test
 /// is that these events reach disk in an order a reader can rely on.
-fn deps_with_events(dir: &std::path::Path) -> (HarnessDeps, Arc<dyn crate::ports::EventLog>) {
+pub(super) fn deps_with_events(dir: &std::path::Path) -> (HarnessDeps, Arc<dyn crate::ports::EventLog>) {
     let events: Arc<dyn crate::ports::EventLog> = Arc::new(crate::store::FsEventLog::new(dir));
     let mut deps = deps(dir);
     deps.events = Some(events.clone());
@@ -135,7 +138,7 @@ fn deps_with_events(dir: &std::path::Path) -> (HarnessDeps, Arc<dyn crate::ports
 }
 
 /// Every event journaled for `company`, oldest first.
-async fn journaled(
+pub(super) async fn journaled(
     events: &Arc<dyn crate::ports::EventLog>,
     company: &CompanyId,
 ) -> Vec<CompanyEvent> {
@@ -446,7 +449,7 @@ async fn a_trigger_rerun_records_its_resume_semantic() {
 /// node kind whose executor this test can hold open deterministically —
 /// which is also the realistic wedge: the run an operator actually wants to
 /// stop is one sitting on a slow inference call.
-struct StallingProvider {
+pub(super) struct StallingProvider {
     entered: Arc<tokio::sync::Notify>,
 }
 
@@ -474,7 +477,7 @@ impl crate::harness::provider::HarnessModel for StallingProvider {
 /// `start → shape → ceo → done`: a transform that finishes instantly, then
 /// an agent node that never will. Cancelling between the two is what proves
 /// the trail keeps the completed node and only the completed node.
-const STALLS: &str = r#"
+pub(super) const STALLS: &str = r#"
 id = "stalls"
 name = "Stalls"
 [[node]]

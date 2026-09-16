@@ -1,3 +1,4 @@
+use super::tests_resolution::{overlay, overlay_resolver, parent_of, store_with};
 use super::*;
 
 use crate::company::CompanyManifest;

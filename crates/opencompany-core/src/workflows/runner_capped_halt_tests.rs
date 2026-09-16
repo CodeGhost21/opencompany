@@ -1,3 +1,4 @@
+use super::tests_reclassify::{HaltOkTurn, RecordingLane};
 use super::*;
 
 use crate::company::parse_workflow;
@@ -389,7 +390,7 @@ impl crate::runtime::delegation::RunTurn for RecordingLane {
     }
 }
 
-fn record() -> CompanyRecord {
+pub(super) fn record() -> CompanyRecord {
     let manifest = toml::from_str(
         r#"
 [company]
@@ -431,7 +432,7 @@ description = "Runs Acme."
     }
 }
 
-fn deps(dir: &std::path::Path) -> HarnessDeps {
+pub(super) fn deps(dir: &std::path::Path) -> HarnessDeps {
     HarnessDeps {
         emergency_gate: None,
         notifications: None,
@@ -491,14 +492,14 @@ fn deps(dir: &std::path::Path) -> HarnessDeps {
 
 /// Deps with a `workflow_source_dir` wired, so `sub_workflow`-by-id resolves
 /// children from `source`'s `workflows/` directory.
-fn deps_with_source(dir: &std::path::Path, source: &std::path::Path) -> HarnessDeps {
+pub(super) fn deps_with_source(dir: &std::path::Path, source: &std::path::Path) -> HarnessDeps {
     let mut deps = deps(dir);
     deps.workflow_source_dir = Some(source.to_path_buf());
     deps
 }
 
 /// Writes `src` to `<source>/workflows/<id>.toml`.
-fn write_wf(source: &std::path::Path, id: &str, src: &str) {
+pub(super) fn write_wf(source: &std::path::Path, id: &str, src: &str) {
     let workflows = source.join("workflows");
     std::fs::create_dir_all(&workflows).unwrap();
     std::fs::write(workflows.join(format!("{id}.toml")), src).unwrap();
@@ -507,7 +508,7 @@ fn write_wf(source: &std::path::Path, id: &str, src: &str) {
 /// A record whose `[tools].allow` grants every namespace, so the workflow
 /// `tool_call` capability can reach the Cell A toolbelt (policy `full` keeps
 /// the exec autonomy at Full so the tools can act).
-fn tools_record() -> CompanyRecord {
+pub(super) fn tools_record() -> CompanyRecord {
     let manifest = toml::from_str(
         r#"
 [company]
@@ -548,7 +549,7 @@ allow = ["*"]
 }
 
 /// The workflow workspace directory the tool_call toolbelt is sandboxed to.
-fn workflow_workspace(home: &std::path::Path, company: &str) -> std::path::PathBuf {
+pub(super) fn workflow_workspace(home: &std::path::Path, company: &str) -> std::path::PathBuf {
     let workflows = home.join(company).join("_workflow");
     let workflow = std::fs::read_dir(workflows)
         .unwrap()
@@ -569,7 +570,7 @@ fn workflow_workspace(home: &std::path::Path, company: &str) -> std::path::PathB
 /// the agent node executing on the harness pool: the offline mock provider
 /// echoes the node's prompt, proving the turn went through the openhuman
 /// agent rather than being skipped.
-const GREET: &str = r#"
+pub(super) const GREET: &str = r#"
 id = "greet"
 name = "Greet"
 

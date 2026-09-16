@@ -1,3 +1,7 @@
+use super::tests_capped_halt::{GREET, deps, record, tools_record};
+use super::tests_journal::{STALLS, deps_with_events, journaled};
+use super::tests_checkpoint_cancel::{GatedProvider};
+use super::tests_delivery_gate::{REPORT_TO_DESK};
 use super::*;
 
 use crate::company::parse_workflow;
@@ -577,7 +581,7 @@ async fn t8_dry_run_collects_the_node_trail_but_journals_no_node_started() {
 /// [`release`](Self::release) lets the parked append through; every append
 /// after that — including a second match — passes straight through so
 /// nothing deadlocks the loop under test.
-struct GatedJournalStore {
+pub(super) struct GatedJournalStore {
     inner: crate::ports::journal::MemoryJournalStore,
     match_substr: &'static str,
     armed: std::sync::atomic::AtomicBool,

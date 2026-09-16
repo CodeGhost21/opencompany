@@ -1,3 +1,4 @@
+use super::tests_capped_halt::{deps, deps_with_source, tools_record, write_wf};
 use super::*;
 
 use crate::company::parse_workflow;
@@ -630,7 +631,7 @@ to = "done"
 /// mid-flight. It distinguishes child nodes by a marker string authored into
 /// each node's `prompt`: the node after `slow` must never be invoked once a
 /// parent cancel has propagated into the child run.
-struct RecordingSlowProvider {
+pub(super) struct RecordingSlowProvider {
     seen: Arc<std::sync::Mutex<Vec<String>>>,
     entered_slow: Arc<tokio::sync::Notify>,
     cancel: crate::ports::workflow_runner::RunCancel,

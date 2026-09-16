@@ -151,7 +151,7 @@ fn focus_terms_is_capped_and_deduplicated() {
 /// string — standing in for the real substring-match store closely enough
 /// to prove whether a whole-sentence query alone can ever reach a fact
 /// keyed on one of its content words.
-struct ExactMatchFactStore {
+pub(super) struct ExactMatchFactStore {
     matches: &'static str,
     fact: crate::ports::FactRecord,
 }
@@ -228,7 +228,7 @@ async fn ask_around_finds_a_fact_reachable_only_by_a_focused_term() {
 /// A meter that always reports enough spend to exhaust any total ceiling,
 /// regardless of `since_millis` — standing in for a company already past
 /// its plan-level token cap.
-struct ExhaustedMeter;
+pub(super) struct ExhaustedMeter;
 
 #[async_trait]
 impl crate::ports::UsageMeter for ExhaustedMeter {

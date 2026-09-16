@@ -29,7 +29,7 @@ impl RecordingWorkflowTurn {
 
 /// The shape every recorded turn answers with — the dispatch under test only
 /// cares about the ids it is handed, not what the (absent) agent did.
-fn ok_outcome() -> crate::harness::TurnOutcome {
+pub(super) fn ok_outcome() -> crate::harness::TurnOutcome {
     crate::harness::TurnOutcome {
         reply: "ok".to_string(),
         steps: Vec::new(),
@@ -181,7 +181,7 @@ async fn an_agent_node_dispatches_through_run_background_workflow_with_run_and_n
 /// iteration cap (issue #1865) — the one signal `reclassify_capped_nodes`
 /// keys off, so a fake this narrow is enough to drive the arm under test
 /// without a scripted model.
-struct CappedWorkflowTurn;
+pub(super) struct CappedWorkflowTurn;
 
 #[async_trait]
 impl RunTurn for CappedWorkflowTurn {
@@ -599,4 +599,4 @@ async fn the_judge_sees_the_operators_run_request_not_just_the_static_instructio
 /// A turn double that always answers with a fixed refusal reply — a node
 /// whose agent could not complete the ask, the shape a `recover` verdict is
 /// meant to rescue.
-struct RefusalWorkflowTurn;
+pub(super) struct RefusalWorkflowTurn;

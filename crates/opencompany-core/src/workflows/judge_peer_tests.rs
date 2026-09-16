@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use super::tests_parsing::{ExactMatchFactStore, ExhaustedMeter};
 use super::*;
 // ── the recovery ladder's peer rung ──────────────────────────────────────
 
