@@ -525,7 +525,7 @@ async fn a_recovery_park_leaves_the_attempt_row_blocked() {
 /// call is both detectable and destructive to the caller's diagnosis.
 #[derive(Default)]
 pub(super) struct EscalatingJudgeProvider {
-    calls: std::sync::atomic::AtomicUsize,
+    pub(super) calls: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
