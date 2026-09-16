@@ -367,6 +367,9 @@ impl SpeechContext {
             );
             left_for.push(format!("@{peer}"));
         }
+        if first_committed.is_some() {
+            crate::runtime::delegation::mark_turn_spoke();
+        }
         if let Some((peer, chat_id, trigger)) = first_committed {
             self.stage_recipient_turn(record, &peer, chat_id, trigger, &text);
         }
