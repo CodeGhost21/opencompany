@@ -64,7 +64,7 @@ impl crate::ports::RunStore for FailingRunHistory {
 /// rather than growing with however many cards an assignee has open.
 pub(super) struct CountingRunHistory {
     inner: Arc<dyn crate::ports::RunStore>,
-    list_runs_calls: std::sync::atomic::AtomicUsize,
+    pub(super) list_runs_calls: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
