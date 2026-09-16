@@ -77,6 +77,7 @@ pub mod types;
 #[cfg(test)]
 mod aside_test;
 #[cfg(test)]
+#[path = "aside_tests.rs"]
 mod aside_tests;
 #[cfg(test)]
 mod concurrency_tests;
