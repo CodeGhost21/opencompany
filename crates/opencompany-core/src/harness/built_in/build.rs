@@ -411,7 +411,8 @@ pub fn build_agent_with_model(
                 manifest_agent.id.clone(),
                 events,
                 deps.store.clone(),
-            ),
+            )
+            .with_dispatch(deps.delegations.clone()),
         ));
     }
     // Installed-MCP-registry surface (`mcp_registry_list_tools` /
