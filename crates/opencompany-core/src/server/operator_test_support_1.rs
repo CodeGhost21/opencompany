@@ -254,7 +254,7 @@ pub(super) async fn state_with_failing_runs(home: &std::path::Path) -> AppState 
 /// The ids are the ones the smoke that found #982 used, and the roles are
 /// deliberately distinct words, so a test can address one teammate in a
 /// message whose text points at another.
-fn roster_manifest() -> CompanyManifest {
+pub(super) fn roster_manifest() -> CompanyManifest {
     toml::from_str(
         r#"
 [company]

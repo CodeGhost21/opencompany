@@ -166,7 +166,7 @@ pub(super) async fn session_rows(uri: &str) -> Vec<serde_json::Value> {
 /* ---- issue #364: durable ids, threads, reactions, channel isolation ---- */
 
 /// Posts a chat message and returns the decoded `ChatResponse` body.
-async fn post_chat(app: &Router, cookie: &str, body: &str) -> serde_json::Value {
+pub(super) async fn post_chat(app: &Router, cookie: &str, body: &str) -> serde_json::Value {
     let response = app
         .clone()
         .oneshot(
@@ -377,7 +377,7 @@ pub(super) fn resolve_request(approval_id: &ApprovalId, body: serde_json::Value)
 /// conversation, which is the shape a node blocker takes and the reason the
 /// chat blocker path — which filters on the thread — can never reach one.
 #[cfg(feature = "openhuman")]
-async fn park_node_blocker(
+pub(super) async fn park_node_blocker(
     runtime: &Arc<CompanyRuntime>,
     id: &str,
     group_key: Option<&str>,
@@ -522,7 +522,7 @@ pub(super) async fn assert_refused(body: serde_json::Value, expect_in_error: &st
 /// controllable instant — the gate is what `extend_approval` asks whether an
 /// id is live, and the journal is what projects the deadline, so an extend
 /// test needs both seeded exactly as a real park leaves them.
-async fn park_for_extend(runtime: &Arc<CompanyRuntime>, id: &str, at_millis: u64) -> ApprovalId {
+pub(super) async fn park_for_extend(runtime: &Arc<CompanyRuntime>, id: &str, at_millis: u64) -> ApprovalId {
     use crate::runtime::journal::{ApprovalConversation, TaskLink};
     let approval = ApprovalId::new(id);
     let effect = crate::ports::types::Effect {

@@ -205,7 +205,7 @@ pub(super) async fn turn_rows(runtime: &Arc<CompanyRuntime>) -> Vec<(String, Str
 }
 
 // ---- issue #66: the operator attention SSE feed ----
-fn stored(event: CompanyEvent) -> StoredEvent {
+pub(super) fn stored(event: CompanyEvent) -> StoredEvent {
     StoredEvent {
         seq: EventSeq::new(7),
         company: CompanyId::new("acme"),
@@ -215,7 +215,7 @@ fn stored(event: CompanyEvent) -> StoredEvent {
 }
 
 // ---- issue #228: the workflow-run outcome projection ----
-fn delivery_row(node: &str, status: crate::ports::DeliveryStatus) -> crate::ports::DeliveryReport {
+pub(super) fn delivery_row(node: &str, status: crate::ports::DeliveryStatus) -> crate::ports::DeliveryReport {
     crate::ports::DeliveryReport {
         node: node.into(),
         kind: "email".into(),
@@ -631,7 +631,7 @@ pub(super) fn card_in_review(id: &str, chat_id: &str) -> crate::ports::tasks::Ta
 /// Both address forms. Every ops route is registered under two, and this
 /// pair had already drifted apart: only the alias carried the
 /// temporary-password refusal, so every assertion below runs against both.
-const APPROVAL_SCOPES: [&str; 2] = ["/api/v1/companies/acme", "/api/v1/company"];
+pub(super) const APPROVAL_SCOPES: [&str; 2] = ["/api/v1/companies/acme", "/api/v1/company"];
 
 pub(super) fn resolve_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
     let builder = Request::builder()
@@ -662,7 +662,7 @@ pub(super) fn extend_as(scope: &str, approval_id: &str, cookie: Option<&str>) ->
 
 // -- resolve_attachments: IDOR-safe re-resolution, the attachment cap, --
 // -- bad-id/folder refusal, and dedup (issue #1682) ----------------------
-fn attachment_binary_node(id: &str, name: &str, mime: &str) -> WorkspaceNode {
+pub(super) fn attachment_binary_node(id: &str, name: &str, mime: &str) -> WorkspaceNode {
     WorkspaceNode {
         id: id.to_string(),
         name: name.to_string(),
