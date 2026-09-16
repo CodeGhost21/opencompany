@@ -575,7 +575,9 @@ pub struct HarnessDeps {
     /// The runtime builder supplies the deployment fallback from
     /// [`search_backend_from_env`](crate::harness::provider::search_backend_from_env),
     /// and [`HarnessPool::ensure`] attaches the company's `search/managed/key`
-    /// as the request-time first tier. It also applies the company's
+    /// as the request-time first tier. Searches authenticated by that key bill
+    /// the company's TinyHumans account; the deployment fallback bills the
+    /// account of whoever runs this server. It also applies the company's
     /// `[tools].search_daily_calls` cap. When `Some` **and** a company
     /// **explicitly** grants `search` (never via `*`), [`build::build_agent`]
     /// wires [`search::search_tools`]; a grant with no credential wires nothing

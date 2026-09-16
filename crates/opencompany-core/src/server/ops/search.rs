@@ -144,6 +144,10 @@ pub struct SearchStatus {
     /// Whether managed search resolves from this company's copied TinyHumans
     /// key or the deployment fallback.
     ///
+    /// The company key bills the company's TinyHumans account. The deployment
+    /// fallback instead bills the account of whoever runs this server; the
+    /// per-company daily cap applies to both tiers.
+    ///
     /// The Managed row is rendered from this rather than from a permanent
     /// "Always on" badge. Managed search is always the *fallback*, which is a
     /// different claim from always *working*: a self-hosted deployment with no
