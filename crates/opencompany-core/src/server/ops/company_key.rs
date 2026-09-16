@@ -149,6 +149,8 @@ struct CredentialStatusDto {
     inference_has_own_key: bool,
     /// The same for `composio/tinyhumans/key` (with 1a's legacy read).
     composio_has_own_key: bool,
+    /// The same for `search/managed/key`.
+    search_has_own_key: bool,
     /// `inference/default` is set (`ProviderOnly` or `Full`).
     default_set: bool,
     /// Whether the `tinyhumans` row saving would fill already carries a
@@ -396,6 +398,7 @@ async fn effective_status(
         hub_link: state.hub_identity().is_some(),
         inference_has_own_key: facts.inference_has_own_key,
         composio_has_own_key: facts.composio_has_own_key,
+        search_has_own_key: facts.search_has_own_key,
         default_set: facts.default_set,
         inference_has_model,
         used_by,

@@ -85,6 +85,8 @@ export interface CompanyCredentialStatus {
   inferenceHasOwnKey?: boolean;
   /** The same for `composio/tinyhumans/key` (with 1a's legacy read). */
   composioHasOwnKey?: boolean;
+  /** The same for the company-owned managed Search credential. */
+  searchHasOwnKey?: boolean;
   /**
    * Whether the `tinyhumans` row saving would fill already carries a model —
    * so saving here would not leave anything for step two to ask, and the

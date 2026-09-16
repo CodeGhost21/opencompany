@@ -371,6 +371,8 @@ pub struct SlotFacts {
     pub inference_has_own_key: bool,
     /// The same for `composio/tinyhumans/key` (with 1a's legacy read).
     pub composio_has_own_key: bool,
+    /// The same for the company-owned managed Search credential.
+    pub search_has_own_key: bool,
     /// `inference/default` is set (`ProviderOnly` or `Full`).
     pub default_set: bool,
 }
@@ -393,12 +395,16 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
             .await?
             .trim()
             .to_string();
+    let search_now = crate::company::search::load_managed_key(company, secrets)
+        .await?
+        .unwrap_or_default();
     let default_now = inference_store::load_default(company, secrets).await?;
 
     let has_own_key = |current: &str| !current.is_empty() && current != account_key;
     Ok(SlotFacts {
         inference_has_own_key: has_own_key(&inference_now),
         composio_has_own_key: has_own_key(&composio_now),
+        search_has_own_key: has_own_key(&search_now),
         default_set: !matches!(default_now, inference_store::DefaultChoice::Unset),
     })
 }
