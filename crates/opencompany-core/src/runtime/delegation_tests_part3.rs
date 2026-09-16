@@ -114,6 +114,71 @@ async fn without_an_evaluator_an_abstention_keeps_the_deterministic_answer() {
     );
 }
 
+/// The defect, at the seam that still opens cards by construction: the card
+/// a hand-off opens is named after the **work**, not after the instruction.
+///
+/// The assertion that matters is the negative one. A card titled
+/// `hey can you take a look at the pricing page, I think the tiers are…` is
+/// a prefix of the request wearing an ellipsis, and that is what a board of
+/// them read as — a chat log. Asserting only the expected string would still
+/// pass if the title were an excerpt that happened to match.
+#[tokio::test]
+async fn a_hand_off_card_is_named_after_the_work_not_the_instruction() {
+    let rambling = "hey can you take a look at the pricing page, I think the tiers are \
+                    confusing and we should probably reword the middle one";
+    let fx = Fixture::new();
+    let titler = ScriptedTitler::new("Reword the middle pricing tier");
+    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+    fx.runner(&turns)
+        .with_titler(&titler)
+        .run_delegation(handoff(rambling), None, MessageContext::default())
+        .await
+        .expect("delegation runs");
+
+    let cards = fx.cards().await;
+    assert_eq!(cards.len(), 1, "one hand-off, one card: {cards:?}");
+    assert_eq!(cards[0].title, "Reword the middle pricing tier");
+    assert!(
+        !rambling.starts_with(cards[0].title.trim_end_matches('…')),
+        "the headline is still an excerpt of the request: {}",
+        cards[0].title
+    );
+    // The full instruction is not lost — it moved to where the detail belongs.
+    assert!(
+        cards[0]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("the tiers are confusing")),
+        "the instruction must survive on the card: {:?}",
+        cards[0].note
+    );
+    assert_eq!(titler.asked(), vec![rambling.to_string()]);
+}
+
+/// No titler wired — an offline company, a default build — still opens the
+/// hand-off card, named the way every card was named before.
+#[tokio::test]
+async fn without_a_titler_a_hand_off_card_is_still_opened_and_still_named() {
+    let request = "hey can you take a look at the pricing page, I think the tiers are \
+                   confusing and we should probably reword the middle one";
+    let fx = Fixture::new();
+    let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+
+    fx.runner(&turns)
+        .run_delegation(handoff(request), None, MessageContext::default())
+        .await
+        .expect("delegation runs");
+
+    let cards = fx.cards().await;
+    assert_eq!(cards.len(), 1, "one hand-off, one card: {cards:?}");
+    assert_eq!(
+        cards[0].title,
+        crate::ports::tasks::TaskTitle::truncated(request)
+    );
+    assert!(!cards[0].title.is_empty());
+}
+
 /// The coupling this change exists to break: the handler's card is adopted
 /// even when its headline bears **no relation** to the message.
 ///
