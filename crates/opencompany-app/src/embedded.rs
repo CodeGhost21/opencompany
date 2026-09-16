@@ -174,8 +174,33 @@ pub async fn start_with(
     // spelled out below is only what this host owns: the loopback bind and the
     // sign-in default.
     let config_file = opencompany::app::config::ConfigFile::load(instance.home())?;
+
+    // Bound HERE, before the config exists, so the config can name the port the
+    // OS actually chose. It used to be bound after, with `bind` left reading
+    // the literal `127.0.0.1:0` it was asked for — and everything that derives
+    // an address from `config().bind` then said port `0`: a TinyHumans key
+    // grant sent the browser back to `http://127.0.0.1:0/…`, which Chrome
+    // refuses outright (`ERR_UNSAFE_PORT`), and an MCP OAuth redirect URI was
+    // registered the same way. `bind` is what `host_base_url()` reads, so it
+    // has to be the truth, not the request.
+    //
+    // `127.0.0.1:0`, never `0.0.0.0`: an embedded instance is this machine's,
+    // and a routable address would publish someone's company to their café.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| {
+            opencompany::error::OpenCompanyError::Config(format!(
+                "could not bind `127.0.0.1:0`: {error}"
+            ))
+        })?;
+    let address = listener.local_addr().map_err(|error| {
+        opencompany::error::OpenCompanyError::Config(format!(
+            "could not read the embedded host's bound address: {error}"
+        ))
+    })?;
+
     let config = AppConfig {
-        bind: "127.0.0.1:0".to_string(),
+        bind: address.to_string(),
         // No sign-in, for every company this host serves.
         //
         // A desktop install is one machine and one person: there is nobody to
@@ -291,19 +316,10 @@ pub async fn start_with(
     // below is already stopped, rather than plumbing a second shutdown path
     // through a struct that otherwise has none.
     let sweeper = state.spawn_acp_session_sweeper(std::sync::Arc::new(tokio::sync::Notify::new()));
-    let (address, serving) = match opencompany::server::bind("127.0.0.1:0", state).await {
-        Ok(bound) => bound,
-        Err(error) => {
-            // The sweeper was already running (an infinite loop with no other
-            // shutdown path here), so a failed bind must abort it explicitly
-            // or it outlives this whole attempt — one more sweeper leaked per
-            // retry a caller makes after a busy-port failure.
-            sweeper.abort();
-            return Err(error);
-        }
-    };
+    // The listener was bound at the top of this function (see there for why),
+    // so nothing here can fail between starting the sweeper and serving.
     let server = tokio::spawn(async move {
-        if let Err(error) = serving.run().await {
+        if let Err(error) = opencompany::server::serve_on(listener, state).await {
             tracing::error!(%error, "the embedded host stopped");
         }
     });
@@ -506,6 +522,50 @@ mod test {
         assert!(
             !body.contains("not part of a TinyHumans ecosystem"),
             "the host must not disown its own account: {status} {body}"
+        );
+    }
+
+    /// A key grant is sent back to the port this host actually bound.
+    ///
+    /// The config used to keep the literal `127.0.0.1:0` the listener was
+    /// asked for, and `credential/link/start` — which derives its return
+    /// address from `config().bind` because the shell's proxy sends no
+    /// `Origin` — told the hub to come back to `http://127.0.0.1:0/…`. Chrome
+    /// refuses port 0 outright (`ERR_UNSAFE_PORT`), so the flow died on the
+    /// last leg with a minted key nobody could redeem.
+    #[tokio::test]
+    async fn a_key_grant_returns_to_the_port_this_host_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+        let company = host.companies().first().expect("a seeded company").clone();
+
+        let started: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "{}/api/v1/companies/{company}/credential/link/start",
+                host.base_url()
+            ))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("the route answers")
+            .json()
+            .await
+            .expect("a JSON body");
+        let url = started["authorizeUrl"]
+            .as_str()
+            .unwrap_or_else(|| panic!("an authorize URL: {started}"));
+
+        assert!(
+            !url.contains("127.0.0.1%3A0") && !url.contains("127.0.0.1:0"),
+            "the return leg must not name port 0: {url}"
+        );
+        let expected = format!(
+            "127.0.0.1%3A{}%2Fauth%2Fkey%2Fcallback",
+            host.address().port()
+        );
+        assert!(
+            url.contains(&expected),
+            "the return leg must be this host's own callback on its bound port: {url}"
         );
     }
 
