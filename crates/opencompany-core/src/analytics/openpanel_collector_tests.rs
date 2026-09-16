@@ -4,11 +4,9 @@
 //! duplicated from `openpanel_transport_tests.rs`.
 
 use super::*;
-use crate::analytics::config::{
-    CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENDPOINT_ENV, resolve,
-};
-use crate::analytics::types::OpaqueId;
 use crate::analytics::Event;
+use crate::analytics::config::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENDPOINT_ENV, resolve};
+use crate::analytics::types::OpaqueId;
 use crate::app::config::MapEnv;
 use crate::app::deployment::{DEPLOYMENT_ENV, Deployment};
 use crate::ports::brain::Cognition;

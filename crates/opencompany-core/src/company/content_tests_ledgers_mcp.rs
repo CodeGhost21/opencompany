@@ -5,9 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use super::content_tests_support::*;
-use super::{
-    CompanyManifest, load_dir_ledgers,
-};
+use super::{CompanyManifest, load_dir_ledgers};
 use crate::runtime::builder::agent_scoped_grants;
 
 /// Every shipped bundle's ledger declarations must parse, and the set a company

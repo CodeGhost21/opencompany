@@ -2,14 +2,11 @@
 //! runnability, and per-agent output-destination resolution (split out
 //! of `content_tests.rs`).
 
-
 use super::content_tests_support::*;
 use super::workflow_file::WorkflowNodeKind;
 use super::{
-    CompanyManifest, grants_chargebee_explicit, grants_composio_explicit,
-    grants_media_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, load_catalog_skills,
-    parse_workflow,
+    CompanyManifest, grants_chargebee_explicit, grants_composio_explicit, grants_media_explicit,
+    grants_search_explicit, grants_workspace_write_explicit, load_catalog_skills, parse_workflow,
 };
 use crate::runtime::builder::agent_scoped_grants;
 

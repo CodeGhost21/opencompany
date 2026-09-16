@@ -5,9 +5,7 @@ use serde_json::json;
 use super::workflow_admin_fixtures_tests::*;
 use super::*;
 use crate::company::{CompanyManifest, update_company_workflow};
-use crate::ports::types::{
-    CompanyEvent, CompanyRecord,
-};
+use crate::ports::types::{CompanyEvent, CompanyRecord};
 
 // ---------------------------------------------------------------------------
 // 5. delete

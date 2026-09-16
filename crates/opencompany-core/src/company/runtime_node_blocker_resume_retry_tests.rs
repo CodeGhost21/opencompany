@@ -15,9 +15,7 @@ use crate::ports::types::{CompanyId, Effect, EffectGroup};
 use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
-use crate::runtime::workflow_resume::{
-    blocker_answer_for, workflow_node_turn_key,
-};
+use crate::runtime::workflow_resume::{blocker_answer_for, workflow_node_turn_key};
 
 const RUN_ID: &str = "run-that-blocked";
 const NODE_ID: &str = "draft";

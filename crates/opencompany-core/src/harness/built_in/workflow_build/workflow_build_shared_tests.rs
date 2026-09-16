@@ -6,10 +6,10 @@ use super::tests_pass_1::agent_deps;
 use super::workflow_build_fixtures_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
+use crate::ports::UsageMeter;
 use crate::ports::runs::{NewRun, RunStatus};
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
-use crate::ports::UsageMeter;
 
 /// [`MANIFEST`] plus one desk, so the runtime's deliverable channel set is
 /// exactly `["engineering"]` (issue #1191). The default fixture declares no

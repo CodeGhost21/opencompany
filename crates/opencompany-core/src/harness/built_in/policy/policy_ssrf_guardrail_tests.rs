@@ -5,9 +5,7 @@ use super::*;
 // lookup a call in production does.
 use super::policy_spend_cap_tests::FixedMeter;
 use super::policy_test_helpers_tests::*;
-use crate::policy::test_support::{
-    composio_send_args, composio_unclassified_args,
-};
+use crate::policy::test_support::{composio_send_args, composio_unclassified_args};
 
 // -----------------------------------------------------------------------
 // The S2 http_request deflection guardrail (issue #1759)

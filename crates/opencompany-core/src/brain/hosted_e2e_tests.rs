@@ -9,9 +9,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::brain::medulla::MockTransport;
-use crate::brain::medulla::wire::{
-    self,
-};
+use crate::brain::medulla::wire::{self};
 use crate::ports::types::CompanyEvent;
 
 // ---------------------------------------------------------------------------

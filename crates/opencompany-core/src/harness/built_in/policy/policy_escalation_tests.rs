@@ -4,10 +4,7 @@ use super::*;
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
 use super::policy_test_helpers_tests::*;
-use crate::policy::test_support::{
-    composio_send_args,
-    composio_unclassified_args_numbered,
-};
+use crate::policy::test_support::{composio_send_args, composio_unclassified_args_numbered};
 
 #[tokio::test]
 async fn escalate_to_human_sets_the_turn_boundary_and_explicitly_refuses_overflow() {

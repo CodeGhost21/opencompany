@@ -4,9 +4,7 @@ use super::*;
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
 use super::policy_test_helpers_tests::*;
-use crate::policy::test_support::{
-    composio_args, composio_unclassified_args,
-};
+use crate::policy::test_support::{composio_args, composio_unclassified_args};
 
 /// The sibling defects the same sweep turned up. Four pure reads of the
 /// agent's own workspace parked under the default mode, because the

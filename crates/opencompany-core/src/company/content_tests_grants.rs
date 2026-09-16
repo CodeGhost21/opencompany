@@ -2,7 +2,6 @@
 //! search- and billing-grant rules every shipped template must obey
 //! (split out of `content_tests.rs`).
 
-
 use super::content_tests_support::*;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,

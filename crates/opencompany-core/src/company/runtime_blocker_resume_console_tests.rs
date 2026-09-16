@@ -5,8 +5,7 @@ use crate::company::runtime::CompanyRuntime;
 use crate::company::task_intent::BlockerReplyIntent;
 use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
 use crate::ports::tasks::{
-    COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord,
-    TaskTitle,
+    COLUMN_IN_PROGRESS, COLUMN_PAUSED, COLUMN_TODO, TaskDeliverable, TaskRecord, TaskTitle,
 };
 use crate::ports::types::CompanyId;
 use std::path::Path;
