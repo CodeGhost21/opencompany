@@ -62,7 +62,7 @@ pub(super) struct Turn {
 }
 
 impl Turn {
-    fn reply(reply: &str) -> Self {
+    pub(super) fn reply(reply: &str) -> Self {
         Self {
             reply: reply.to_string(),
             ..Self::default()
@@ -71,7 +71,7 @@ impl Turn {
 
     /// A turn that authors workflows inline, the way an operator asking
     /// "create a workflow named X" is answered (issue #678).
-    fn authoring(reply: &str, authors: Vec<TaskOutputWorkflow>) -> Self {
+    pub(super) fn authoring(reply: &str, authors: Vec<TaskOutputWorkflow>) -> Self {
         Self {
             reply: reply.to_string(),
             authors,
@@ -79,7 +79,7 @@ impl Turn {
         }
     }
 
-    fn queueing(reply: &str, queues: Vec<Delegation>) -> Self {
+    pub(super) fn queueing(reply: &str, queues: Vec<Delegation>) -> Self {
         Self {
             reply: reply.to_string(),
             queues,
@@ -89,7 +89,7 @@ impl Turn {
 
     /// A turn that reaches for a board tool the way the model does — through
     /// the tool boundary, where it can be refused (issue #267).
-    fn tooling(reply: &str, tool_pushes: Vec<Delegation>) -> Self {
+    pub(super) fn tooling(reply: &str, tool_pushes: Vec<Delegation>) -> Self {
         Self {
             reply: reply.to_string(),
             tool_pushes,
@@ -97,7 +97,7 @@ impl Turn {
         }
     }
 
-    fn cancelled(reply: &str) -> Self {
+    pub(super) fn cancelled(reply: &str) -> Self {
         Self {
             reply: reply.to_string(),
             cancel: true,
@@ -108,7 +108,7 @@ impl Turn {
     /// A turn whose `delegate_to_desk` call was REFUSED at the tool
     /// boundary (issue #176): nothing is queued, and the desk it named is
     /// recorded for the drain to report.
-    fn refused(reply: &str, desks: &[&str]) -> Self {
+    pub(super) fn refused(reply: &str, desks: &[&str]) -> Self {
         Self {
             reply: reply.to_string(),
             refuses: desks.iter().map(|d| d.to_string()).collect(),
@@ -118,7 +118,7 @@ impl Turn {
 
     /// A turn the in-turn spend brake halted (issue #1032): it replies with
     /// whatever it had, and reports the halt alongside.
-    fn spend_halted(reply: &str, agent: &str, spent_usd: f64, cap_usd: f64) -> Self {
+    pub(super) fn spend_halted(reply: &str, agent: &str, spent_usd: f64, cap_usd: f64) -> Self {
         Self {
             reply: reply.to_string(),
             spend_halt: Some(crate::harness::SpendHalt {
@@ -134,7 +134,7 @@ impl Turn {
     /// #1846): it replies with the actionable pause copy, and reports the
     /// pause alongside — the delegation-fold analogue of
     /// [`spend_halted`](Self::spend_halted).
-    fn budget_paused(reply: &str, agent: &str, summary: &str) -> Self {
+    pub(super) fn budget_paused(reply: &str, agent: &str, summary: &str) -> Self {
         Self {
             reply: reply.to_string(),
             budget_paused: Some(crate::harness::BudgetPause {
@@ -148,7 +148,7 @@ impl Turn {
     /// A turn whose **first** tool call parked for approval, so it produced
     /// nothing: the reply is the agent saying it is blocked, not a result.
     /// This is the shape in the issue #465 report.
-    fn parked(reply: &str, tool: &str) -> Self {
+    pub(super) fn parked(reply: &str, tool: &str) -> Self {
         Self {
             reply: reply.to_string(),
             parks: vec![tool.to_string()],
