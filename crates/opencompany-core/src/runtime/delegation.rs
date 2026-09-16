@@ -375,8 +375,9 @@ summarize it or pass it along. Do not delegate again; just relay what came back.
 /// message directly.
 #[derive(Default)]
 pub(crate) struct DelegationOutcome {
-    /// A chat bubble to surface as-is (unused by the current delegations).
-    pub(crate) bubble: Option<OutboundMessage>,
+    /// Chat bubbles to surface as-is. Conversation dispatch uses this for the
+    /// recipient's DM reply and any bounded child replies it caused.
+    pub(crate) bubbles: Vec<OutboundMessage>,
     /// A synchronous desk reply to relay through a second orchestrator turn.
     pub(crate) desk_reply: Option<DeskReply>,
     /// Set when an operator CANCELLED this delegation's run mid-flight, so its
@@ -2069,9 +2070,7 @@ impl<'a> DelegationRunner<'a> {
             if let Some(id) = out.spawned_task {
                 drained.spawned_task.get_or_insert(id);
             }
-            if let Some(bubble) = out.bubble {
-                drained.bubbles.push(bubble);
-            }
+            drained.bubbles.extend(out.bubbles);
             if let Some(desk) = out.desk_reply {
                 drained.desk_replies.push(desk);
             }
