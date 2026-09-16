@@ -7,6 +7,26 @@ use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
 
+
+/// The two halves of #457's scoping, exercised **together and directly**
+/// (issue #610).
+///
+/// [`standing_scope_of`] mints the scope and
+/// [`StandingGrant::admits_scope`] spends it, and since #559 no tier routes
+/// a Composio read through both — see the retention note on
+/// `standing_scope_of`. Each half is pinned on its own elsewhere, and each
+/// of those tests spells the toolkit as its own `"github"` literal. Two
+/// literals in two files are not an agreement: change what
+/// `standing_scope_of` returns and both suites can be made green
+/// separately while the pairing they describe is broken, with no live
+/// caller left to notice.
+///
+/// So nothing here is written down. Every scope comes out of
+/// `standing_scope_of` and goes straight into a grant or into
+/// `admits_scope`, which makes this a test of whether the two functions
+/// still agree rather than of what either one says.
+#[test]
+#[cfg(feature = "openhuman")]
 pub(super) fn the_minted_scope_is_the_scope_a_grant_admits() {
     use crate::runtime::grants::{GrantId, StandingGrant};
 

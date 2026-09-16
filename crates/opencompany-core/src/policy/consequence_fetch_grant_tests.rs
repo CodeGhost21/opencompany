@@ -559,18 +559,3 @@ pub(super) fn the_scope_names_the_host_the_fetching_client_will_actually_use() {
         );
     }
 }
-
-/// The `auto` line, named tool by tool and taken from the whole table
-/// rather than a sample (issue #560).
-///
-/// [`Consequence::parks_under_auto`] is easy to check as a predicate; what
-/// an operator actually feels is *which tools* stopped asking. And since
-/// #560, [`Standing::Grantable`] decides two things at once — may be
-/// delegated to one teammate, **and** runs unattended for everyone under
-/// `auto` — so an edit loosening one tool for a delegation reason moves it
-/// across this line as a side effect.
-///
-/// This walks [`declared_tools`], so a tool joining or leaving the
-/// unattended set fails here and has to be named deliberately. The
-/// predicate test alone would not notice.
-#[test]

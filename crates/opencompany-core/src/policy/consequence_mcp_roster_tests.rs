@@ -7,6 +7,11 @@ use super::consequence_composio_tests::*;
 use super::consequence_scope_labels_tests::*;
 use super::consequence_shell_git_mcp_tests::*;
 
+
+/// Issue #443: the agent persona instructs every agent to call these rather
+/// than answer a capability question from memory. They read local
+/// registration state and reach nothing.
+#[test]
 pub(super) fn listing_mcp_servers_and_tools_never_parks_but_calling_through_one_does() {
     for tool in [
         "mcp_list_servers",
@@ -363,23 +368,3 @@ pub(super) fn lookup_ignores_case() {
         "the curated lookup is case-insensitive on the slug too"
     );
 }
-
-/// The two halves of #457's scoping, exercised **together and directly**
-/// (issue #610).
-///
-/// [`standing_scope_of`] mints the scope and
-/// [`StandingGrant::admits_scope`] spends it, and since #559 no tier routes
-/// a Composio read through both — see the retention note on
-/// `standing_scope_of`. Each half is pinned on its own elsewhere, and each
-/// of those tests spells the toolkit as its own `"github"` literal. Two
-/// literals in two files are not an agreement: change what
-/// `standing_scope_of` returns and both suites can be made green
-/// separately while the pairing they describe is broken, with no live
-/// caller left to notice.
-///
-/// So nothing here is written down. Every scope comes out of
-/// `standing_scope_of` and goes straight into a grant or into
-/// `admits_scope`, which makes this a test of whether the two functions
-/// still agree rather than of what either one says.
-#[test]
-#[cfg(feature = "openhuman")]

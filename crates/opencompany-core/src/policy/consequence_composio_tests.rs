@@ -7,6 +7,21 @@ use super::consequence_mcp_roster_tests::*;
 use super::consequence_scope_labels_tests::*;
 use super::consequence_shell_git_mcp_tests::*;
 
+
+/// The `auto` line, named tool by tool and taken from the whole table
+/// rather than a sample (issue #560).
+///
+/// [`Consequence::parks_under_auto`] is easy to check as a predicate; what
+/// an operator actually feels is *which tools* stopped asking. And since
+/// #560, [`Standing::Grantable`] decides two things at once — may be
+/// delegated to one teammate, **and** runs unattended for everyone under
+/// `auto` — so an edit loosening one tool for a delegation reason moves it
+/// across this line as a side effect.
+///
+/// This walks [`declared_tools`], so a tool joining or leaving the
+/// unattended set fails here and has to be named deliberately. The
+/// predicate test alone would not notice.
+#[test]
 pub(super) fn the_auto_tier_line_is_pinned_tool_by_tool() {
     // The whole of what `auto` changes: parks for an operator under
     // `supervised`, runs unattended under `auto`. Every entry is the
@@ -686,8 +701,3 @@ pub(super) fn an_unrecognised_toolkit_is_its_own_kind_of_miss() {
         CatalogLookup::UnknownToolkit { .. }
     ));
 }
-
-/// Issue #443: the agent persona instructs every agent to call these rather
-/// than answer a capability question from memory. They read local
-/// registration state and reach nothing.
-#[test]
