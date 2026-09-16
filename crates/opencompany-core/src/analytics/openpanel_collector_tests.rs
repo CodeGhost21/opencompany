@@ -1,7 +1,7 @@
 //! Collector-behavior tests (queueing, retries, cancellation, header
 //! safety), split out of `openpanel_tests.rs` (topic split, >750 lines).
-//! Shares the `spawn_collector`/`Collector`/`envelope`/`env`/`events`
-//! helpers, duplicated from `openpanel_transport_tests.rs`.
+//! Shares the `spawn_collector`/`Collector`/`envelope`/`env` helpers,
+//! duplicated from `openpanel_transport_tests.rs`.
 
 use super::*;
 use crate::analytics::config::{
