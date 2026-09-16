@@ -8,6 +8,7 @@ use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, p
 
 use super::super::*;
 use super::fixtures::*;
+use super::log_adapter::seed_desk;
 use crate::Result;
 use crate::ports::events::{EventLog, EventStreamItem};
 use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, StoredEvent};
