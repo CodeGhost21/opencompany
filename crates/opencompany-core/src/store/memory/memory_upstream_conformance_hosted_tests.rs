@@ -1,3 +1,11 @@
+use std::sync::Arc;
+
+use tinymemory::registry::DriverClass;
+use tinymemory_api::provider::MemoryProvider;
+
+use super::driver::{MemoryDriverConfig, MemoryMode, RemoteDeployment, open_driver};
+use super::tests_upstream_conformance::{assert_retains_then_conforms, facade_round_trip};
+
 mod live_hosted {
     use super::*;
 

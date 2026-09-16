@@ -15,6 +15,28 @@ use crate::server::ops::mailer::{MailSender, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::store::{FsInboxStore, FsOps};
 
+/// An `output` node that only exists to pause for approval is control flow,
+/// not a report-back that lost its address. It contributes no row, so a
+/// correct gated workflow does not grow a "not delivered" badge on every
+/// continuation run.
+#[tokio::test]
+async fn an_approval_gate_with_no_destination_is_not_reported_as_misconfigured() {
+    let gate = parse_workflow(
+        r#"
+id = "gated"
+name = "Gated"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Gate"
+requires_approval = true
+[[edge]]
+from = "start"
+to = "done"
 "#,
     )
     .expect("a gate graph is valid");

@@ -637,4 +637,3 @@ async fn email_granted_and_established_sends_and_records_outbound() {
     assert_eq!(outbound.len(), 1, "the send must leave an audit record");
     assert!(outbound[0].body.contains("Q3 is up 12%."));
 }
-

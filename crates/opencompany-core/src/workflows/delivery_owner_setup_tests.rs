@@ -614,4 +614,3 @@ async fn owner_emails_every_active_admin() {
     assert!(email.subject.contains("Report flow"), "{}", email.subject);
     // `owner` needs no grant: this record grants nothing at all.
 }
-
