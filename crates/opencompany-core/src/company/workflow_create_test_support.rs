@@ -3,8 +3,8 @@
 use super::*;
 use std::sync::Mutex as StdMutex;
 
-use crate::company::{CompanyManifest, RawEdge, RawNode, load_workflow_union};
-use crate::ports::types::{
+pub(super) use crate::company::{CompanyManifest, RawEdge, RawNode, load_workflow_union};
+pub(super) use crate::ports::types::{
     CompanyRecord, CompanySummary, EventSeq, LedgerEntry, OverlayDesk, ResponderMode, StoredEvent,
 };
 use async_trait::async_trait;
