@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use super::moves_test::{Runner, manifest_with, open};
+use super::moves_tests::{Runner, manifest_with, open};
 use super::test::{MemoryLog, desk_of};
 use super::*;
 use crate::ports::events::EventLog;
