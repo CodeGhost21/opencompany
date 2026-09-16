@@ -1,7 +1,7 @@
+use super::toolbelt_test_helpers_tests::*;
 use super::*;
 use serde_json::json;
 use std::collections::HashSet;
-use super::toolbelt_test_helpers_tests::*;
 
 #[test]
 fn filter_allow_all_is_identity() {

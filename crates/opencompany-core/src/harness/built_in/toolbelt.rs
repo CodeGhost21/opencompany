@@ -1065,8 +1065,8 @@ pub fn composio_capability_admits(wired: bool, capabilities: &CapabilityFilter) 
 }
 
 #[cfg(test)]
-#[path = "toolbelt_test_helpers_tests.rs"]
-mod toolbelt_test_helpers_tests;
+#[path = "toolbelt_media_filter_tests.rs"]
+mod tests_media_filter;
 #[cfg(test)]
 #[path = "toolbelt_shape_tests.rs"]
 mod tests_shape;
@@ -1074,8 +1074,8 @@ mod tests_shape;
 #[path = "toolbelt_shell_security_tests.rs"]
 mod tests_shell_security;
 #[cfg(test)]
-#[path = "toolbelt_media_filter_tests.rs"]
-mod tests_media_filter;
-#[cfg(test)]
 #[path = "toolbelt_workspace_io_tests.rs"]
 mod tests_workspace_io;
+#[cfg(test)]
+#[path = "toolbelt_test_helpers_tests.rs"]
+mod toolbelt_test_helpers_tests;

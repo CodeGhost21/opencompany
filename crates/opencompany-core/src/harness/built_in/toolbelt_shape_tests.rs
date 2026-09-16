@@ -1,7 +1,7 @@
+use super::toolbelt_test_helpers_tests::*;
 use super::*;
 use serde_json::json;
 use std::collections::HashSet;
-use super::toolbelt_test_helpers_tests::*;
 
 /// The brief must name every tool the flag it rides on actually wires, or
 /// it re-creates the bug it exists to fix one namespace at a time. Each
@@ -115,7 +115,6 @@ fn the_run_instruction_is_gated_on_shell() {
     let with_shell = sandbox_brief(true, true, false);
     assert!(with_shell.contains("run the command"), "{with_shell}");
 }
-
 
 #[test]
 fn shell_tools_expose_expected_names() {
@@ -359,10 +358,9 @@ fn native_vocabulary_covers_every_native_mapped_namespace() {
         "brave_image_search",
         "brave_video_search",
     ];
-    let native: std::collections::HashSet<&str> =
-        crate::company::native_capability_namespaces()
-            .into_iter()
-            .collect();
+    let native: std::collections::HashSet<&str> = crate::company::native_capability_namespaces()
+        .into_iter()
+        .collect();
     for tool in mapped {
         let ns = namespace_of(tool).expect("mapped tool has a namespace");
         if ns == "composio" || ns == "web" {
@@ -374,4 +372,3 @@ fn native_vocabulary_covers_every_native_mapped_namespace() {
         );
     }
 }
-

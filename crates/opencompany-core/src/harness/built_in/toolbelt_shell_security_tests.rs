@@ -1,7 +1,7 @@
+use super::toolbelt_test_helpers_tests::*;
 use super::*;
 use serde_json::json;
 use std::collections::HashSet;
-use super::toolbelt_test_helpers_tests::*;
 #[test]
 fn exec_security_shape_is_workspace_scoped_and_hardened() {
     let ws = Path::new("/tmp/oc-toolbelt-policy");
