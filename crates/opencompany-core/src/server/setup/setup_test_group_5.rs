@@ -467,3 +467,64 @@ async fn the_draft_probe_refuses_an_endpoint_carrying_a_credential() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+/// A refused add is **reported**, not raised.
+///
+/// The company is already seeded by the time the add runs, so failing the apply
+/// over a draft would leave the operator with a built company behind an error
+/// screen and no way back into the wizard. The refusal rides `provider_note`
+/// instead, and the rest of the apply stands.
+///
+/// Driven through the one refusal reachable without a network: a draft with no
+/// model, which `store::check_model_id` refuses before any write.
+#[tokio::test]
+async fn a_refused_provider_is_reported_rather_than_failing_the_apply() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "law_firm",
+            "name": "Acme",
+            "provider_draft": {
+                "kind": "custom",
+                "label": "Acme Models",
+                "baseUrl": DRAFT_ENDPOINT,
+                "key": PROVIDER_KEY,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "the apply still succeeds: {body}");
+    assert_eq!(body["seeded_company"], "acme", "{body}");
+    let note = body["provider_note"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the refusal must be said: {body}"));
+    assert!(
+        !note.contains("invalid request"),
+        "the envelope's own vocabulary is not for a person: {note}"
+    );
+
+    // And nothing half-applied: the add refuses before any write.
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("the seeded company is registered");
+    let providers =
+        crate::company::inference::store::list_providers(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .unwrap();
+    assert!(providers.is_empty(), "{providers:?}");
+    assert_eq!(
+        secret(
+            &runtime,
+            &crate::company::inference::store::provider_key_key("acme-models")
+        )
+        .await,
+        None,
+        "a refused add must leave no orphaned credential"
+    );
+}
