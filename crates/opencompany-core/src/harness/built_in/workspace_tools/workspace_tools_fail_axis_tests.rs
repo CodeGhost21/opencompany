@@ -1,4 +1,5 @@
 use super::tests::*;
+use super::tests_write::FixedTree;
 use super::*;
 use crate::store::FsOps;
 

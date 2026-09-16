@@ -202,7 +202,7 @@ pub(super) struct ScriptedTurns {
 }
 
 impl ScriptedTurns {
-    fn new(fx: &Fixture, turns: Vec<Turn>) -> Self {
+    pub(super) fn new(fx: &Fixture, turns: Vec<Turn>) -> Self {
         Self {
             queue: fx.queue.clone(),
             approvals: fx.approvals.clone(),
@@ -222,47 +222,47 @@ impl ScriptedTurns {
     /// Runs this script under a different `[tools].max_delegation_depth`
     /// (issue #176) — `1` reproduces the pre-#176 "desks may not
     /// re-delegate" behaviour.
-    fn with_max_depth(mut self, max_depth: usize) -> Self {
+    pub(super) fn with_max_depth(mut self, max_depth: usize) -> Self {
         self.max_depth = max_depth;
         self
     }
 
     /// What the tool boundary answered every [`Turn::tool_pushes`] call, in
     /// order (issue #267).
-    fn staged(&self) -> Vec<orchestrator::Staged> {
+    pub(super) fn staged(&self) -> Vec<orchestrator::Staged> {
         self.staged.lock().expect("staged").clone()
     }
 
     /// `(agent_id, message)` for every turn run, in order.
-    fn calls(&self) -> Vec<(String, String)> {
+    pub(super) fn calls(&self) -> Vec<(String, String)> {
         self.calls.lock().expect("calls").clone()
     }
 
     /// `(assignee, column)` for every card on the board when turn `n`
     /// started.
-    fn board_at_turn(&self, n: usize) -> Vec<(String, String)> {
+    pub(super) fn board_at_turn(&self, n: usize) -> Vec<(String, String)> {
         self.board_at_turn.lock().expect("board")[n].clone()
     }
 
     /// Whether the delegation queue was claimed at all while turn `n` ran
     /// (issue #453).
-    fn committed_at_turn(&self, n: usize) -> bool {
+    pub(super) fn committed_at_turn(&self, n: usize) -> bool {
         self.claim_at_turn(n) != orchestrator::DrainClaim::Unclaimed
     }
 
     /// *How* the delegation queue was claimed while turn `n` ran — full, or
     /// narrowed to answering (issue #267).
-    fn claim_at_turn(&self, n: usize) -> orchestrator::DrainClaim {
+    pub(super) fn claim_at_turn(&self, n: usize) -> orchestrator::DrainClaim {
         self.committed_at_turn.lock().expect("committed")[n]
     }
 
     /// Whether [`is_chat_only_turn`] read `true` from INSIDE turn `n` — the
     /// real hint the harness pool would have read, not one the test forced.
-    fn chat_only_at_turn(&self, n: usize) -> bool {
+    pub(super) fn chat_only_at_turn(&self, n: usize) -> bool {
         self.chat_only_at_turn.lock().expect("chat_only")[n]
     }
 
-    async fn next(
+    pub(super) async fn next(
         &self,
         agent_id: &str,
         message: &str,
