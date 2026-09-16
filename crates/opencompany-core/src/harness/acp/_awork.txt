@@ -20,3 +20,4 @@ fn a_working_turn() -> Vec<AcpUpdate> {
         },
         AcpUpdate::MessageChunk("done".into()),
     ]
+}

@@ -120,7 +120,7 @@ fn operator_request() -> CycleRequest {
     }
 }
 
-fn effect_frame(kind: &str, index: usize, payload: Value) -> InboundFrame {
+pub(super) fn effect_frame(kind: &str, index: usize, payload: Value) -> InboundFrame {
     InboundFrame::Effect(EffectFrame {
         kind: kind.into(),
         cycle_id: cid(),
@@ -129,7 +129,7 @@ fn effect_frame(kind: &str, index: usize, payload: Value) -> InboundFrame {
     })
 }
 
-fn tool_call_frame(name: &str, index: usize, args: Value) -> InboundFrame {
+pub(super) fn tool_call_frame(name: &str, index: usize, args: Value) -> InboundFrame {
     InboundFrame::ToolCall(ToolCallFrame {
         cycle_id: cid(),
         call_id: wire::call_id(&cid(), "tool", index),
