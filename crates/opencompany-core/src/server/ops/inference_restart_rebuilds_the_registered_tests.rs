@@ -1,6 +1,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
+#[cfg(feature = "openhuman")]
+use serde_json::Value;
+use serde_json::json;
 use tower::ServiceExt;
 
 use super::inference_test_support::*;
