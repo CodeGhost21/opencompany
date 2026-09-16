@@ -11,6 +11,10 @@ search-managed-key fan-out slot). This folder is a plan **and** an
 implementation brief — an implementer with no other context should be able to
 execute a slice exactly from what's written here.
 
+Per-slice, implementer-ready detail (files to touch, steps, tests, risks) is
+in [implementation-plan.md](implementation-plan.md) and its linked task
+files — read that folder before starting any slice in the table below.
+
 - **Requested by:** the operator, 2026-09-16, worked out turn-by-turn across a
   design conversation, not a written brief. This folder is that conversation's
   record.
