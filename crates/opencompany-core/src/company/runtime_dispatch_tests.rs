@@ -3,7 +3,9 @@
 #[cfg(feature = "openhuman")]
 use super::tests_core::RecordingMeter;
 use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
+#[cfg(feature = "openhuman")]
 use crate::ports::tasks::TaskTitle;
+#[cfg(feature = "openhuman")]
 use std::sync::Arc;
 
 pub(super) async fn runtime_and_record() -> (
