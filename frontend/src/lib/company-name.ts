@@ -1,5 +1,5 @@
-// The company display name's client-side length rule, shared by every field
-// that accepts one.
+// The company display name's client-side length rules: the profile rename's,
+// and the shorter one first-run setup is held to.
 
 /**
  * The host's own limit (`COMPANY_NAME_MAX_CHARS`,
@@ -23,4 +23,24 @@ export function clampToCompanyNameLimit(value: string): string {
   return points.length <= COMPANY_NAME_MAX_CHARS
     ? value
     : points.slice(0, COMPANY_NAME_MAX_CHARS).join("");
+}
+
+/**
+ * The limit the first-run setup path accepts (`MAX_COMPANY_NAME`,
+ * `src/company/setup.rs`), which is not the profile rename's
+ * {@link COMPANY_NAME_MAX_CHARS}. The host truncates a longer name rather than
+ * refusing it, so a field clamped to the wider limit hands back a company
+ * called something other than what was typed.
+ */
+export const SETUP_COMPANY_NAME_MAX_CHARS = 60;
+
+/**
+ * Clamps `value` to {@link SETUP_COMPANY_NAME_MAX_CHARS}, counting code points
+ * as {@link clampToCompanyNameLimit} does and for the same reason.
+ */
+export function clampToSetupCompanyNameLimit(value: string): string {
+  const points = Array.from(value);
+  return points.length <= SETUP_COMPANY_NAME_MAX_CHARS
+    ? value
+    : points.slice(0, SETUP_COMPANY_NAME_MAX_CHARS).join("");
 }

@@ -51,6 +51,7 @@ import { useOptionalHosts } from "@/connections/HostsContext";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { clampToSetupCompanyNameLimit } from "@/lib/company-name";
 import { TEAM_TONES, initials, toneFor } from "@/lib/team";
 import { fieldCopy, fieldPlaceholder } from "@/lib/setup-fields";
 import type { Step } from "@/components/ui/stepper";
@@ -332,13 +333,11 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   /** The shipped company template the operator explicitly chose. */
   const [template, setTemplate] = useState("");
   /**
-   * What to call the company, as typed on the review step.
+   * What to call the company, once the operator has typed one.
    *
-   * Nothing asked before this. The host derived a name from the *industry*
-   * answer and minted the company id from it, so "what kind of company are you
-   * setting up?" was silently also "what is it called?", permanently — there is
-   * no rename anywhere in the product. Seeded with a suggestion when the roster
-   * arrives, so the field arrives answered rather than as one more question.
+   * Asked with the other questions about the business, because the host mints
+   * the company id from it and there is no rename anywhere in the product — so
+   * it is the most permanent answer in the flow, and used to be collected last.
    */
   const [companyName, setCompanyName] = useState("");
   /**
@@ -795,6 +794,20 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     provider === MANAGED_PROVIDER &&
     !!values.tinyhumans_api_key?.trim();
 
+  const chosenTemplateName =
+    status?.templates.find((candidate) => candidate.id === template)?.name ?? null;
+  /**
+   * The name this company is heading for.
+   *
+   * Derived rather than stored while it is still ours: a suggestion has to
+   * track the answers it was drawn from, and a cached one went stale the moment
+   * the operator went back and picked a different template. Once they type, the
+   * answer is theirs and the derivation stops.
+   */
+  const name = nameTouched
+    ? companyName
+    : suggestedCompanyName(draft.industry, chosenTemplateName);
+
   /**
    * Ask the host to design a team, on the way into Review.
    *
@@ -847,20 +860,6 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       if (generation !== setupWayGenerationRef.current) return;
       setRoster(proposed);
       setRosterEdited(false);
-      // Suggested, never imposed: the field is editable and this only fills a
-      // blank one, so an operator who has already named their company does not
-      // watch it change under them when they go back and re-design.
-      // Re-suggested on every design, and only over a suggestion: a name the
-      // operator typed survives going back and changing their mind about the
-      // template, and a name they never typed does not.
-      if (!nameTouched) {
-        setCompanyName(
-          suggestedCompanyName(
-            draft.industry,
-            status?.templates.find((candidate) => candidate.id === template)?.name ?? null,
-          ),
-        );
-      }
     } catch (err: unknown) {
       if (generation === setupWayGenerationRef.current) {
         setDesignError(err instanceof Error ? err.message : String(err));
@@ -873,8 +872,6 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     client,
     draft,
     template,
-    nameTouched,
-    status,
     modelless,
     provider,
     providerDraft,
@@ -907,7 +904,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
 
       const result = await submitSetup(client, {
         fields: changed,
-        name: companyName.trim() || null,
+        name: name.trim() || null,
         // Sent for either path. The designed company carries its own copy
         // below; a seeded template has no other way to learn it, and no shipped
         // template names an admin — so without this, choosing a template *and*
@@ -952,9 +949,9 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       // company exists either way, and a rename that fails is a label, not a
       // company. Never a reason to show an error on a screen that just
       // succeeded.
-      if (result.seeded_company && companyName.trim() && onNameLocalHost) {
+      if (result.seeded_company && name.trim() && onNameLocalHost) {
         try {
-          await onNameLocalHost(companyName.trim());
+          await onNameLocalHost(name.trim());
         } catch (error: unknown) {
           console.warn("[setup] could not name the host after the company", error);
         }
@@ -972,7 +969,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     roster,
     rosterEdited,
     template,
-    companyName,
+    name,
     draft,
     email,
     provider,
@@ -1212,6 +1209,9 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     ) {
       return "Tell us a little about the company first.";
     }
+    if (current.id === "business" && needsCompany && !name.trim()) {
+      return "Give your company a name.";
+    }
     if (current.id === "account" && needsCompany) {
       // Checked here rather than left to the manifest validator on the last
       // screen, which reported it as "`[users].admins` has an invalid entry"
@@ -1327,6 +1327,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
             draft={draft}
             templates={status.templates}
             template={template}
+            name={name}
             onTemplate={(id) => {
               setTemplate(id);
               const selected = status.templates.find((candidate) => candidate.id === id);
@@ -1334,6 +1335,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
                 setDraft((current) => ({ ...current, industry: selected.name }));
               }
               setRoster(null);
+            }}
+            onName={(next) => {
+              setCompanyName(next);
+              setNameTouched(true);
             }}
             onChange={setDraft}
             onEnter={advance}
@@ -1407,11 +1412,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
             designing={designing}
             designError={designError}
             roster={roster}
-            name={companyName}
-            onName={(next) => {
-              setCompanyName(next);
-              setNameTouched(true);
-            }}
+            name={name}
             onRoster={(next) => {
               setRoster(next);
               // Any edit takes the template path off the table — see
@@ -1982,7 +1983,6 @@ function ReviewStep({
   designError,
   roster,
   name,
-  onName,
   onRoster,
   onRetry,
   changed,
@@ -1995,9 +1995,8 @@ function ReviewStep({
   designing: boolean;
   designError: string | null;
   roster: SetupRoster | null;
-  /** What the company will be called. */
+  /** What the company will be called, as answered on the business step. */
   name: string;
-  onName: (name: string) => void;
   onRoster: (roster: SetupRoster) => void;
   onRetry: () => void;
   changed: Record<string, string | null>;
@@ -2056,31 +2055,6 @@ function ReviewStep({
 
   return (
     <div className="space-y-4" data-testid="setup-review">
-      {/* The name, asked once, here.
-          Last screen before it is permanent: the host mints the company id from
-          this and never changes it, and nothing in the product renames a
-          company afterwards. It sits above the roster because it is the one
-          field on this screen that cannot be revisited later, while any
-          agent can be added, renamed or dropped from the console. */}
-      <div className="space-y-1.5">
-        <Label htmlFor="setup-company-name">What should we call it?</Label>
-        <Input
-          id="setup-company-name"
-          data-testid="setup-company-name"
-          value={name}
-          // The host clamps to this too (`MAX_COMPANY_NAME`), because the id is
-          // derived from the name and becomes a directory component. Bounded
-          // here as well so the operator sees the limit rather than meeting it
-          // as a truncation after the fact.
-          maxLength={60}
-          placeholder="Your company's name"
-          onChange={(e) => onName(e.target.value)}
-        />
-        <p className="text-xs leading-snug text-muted-foreground">
-          This names the company and its id. You can change it now; you can&apos;t later.
-        </p>
-      </div>
-
       <div>
         <h2 className="text-base font-medium leading-snug">Your team</h2>
         <p className="text-xs leading-snug text-muted-foreground">
@@ -2244,6 +2218,13 @@ function ReviewStep({
             You&apos;ll sign in as <span className="font-medium text-foreground">{email.trim()}</span>.
           </p>
         )}
+        {name.trim() && (
+          <p className="mt-1" data-testid="setup-review-name">
+            The company will be called{" "}
+            <span className="font-medium text-foreground">{name.trim()}</span>, permanently —
+            go back to the business step to change it.
+          </p>
+        )}
       </div>
 
       {built !== null && (
@@ -2354,7 +2335,9 @@ function BusinessStep({
   draft,
   templates,
   template,
+  name,
   onTemplate,
+  onName,
   onChange,
   onEnter,
   modelless,
@@ -2362,7 +2345,10 @@ function BusinessStep({
   draft: SetupDraft;
   templates: SetupStatus["templates"];
   template: string;
+  /** What the company will be called. */
+  name: string;
   onTemplate: (id: string) => void;
+  onName: (name: string) => void;
   onChange: (update: (d: SetupDraft) => SetupDraft) => void;
   onEnter: () => void;
   /**
@@ -2443,6 +2429,26 @@ function BusinessStep({
             }}
           />
         )}
+      </div>
+
+      <div>
+        <Label htmlFor="setup-company-name" className="text-base font-medium leading-snug">
+          What should we call it?
+        </Label>
+        <p className="text-xs leading-snug text-muted-foreground">
+          This names the company and its id. You can change it now; you can&apos;t later.
+        </p>
+        <Input
+          id="setup-company-name"
+          data-testid="setup-company-name"
+          value={name}
+          placeholder="Your company's name"
+          className="mt-2.5"
+          onChange={(e) => onName(clampToSetupCompanyNameLimit(e.target.value))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onEnter();
+          }}
+        />
       </div>
 
       {/* Both questions exist to brief a model. Without one they are asked and

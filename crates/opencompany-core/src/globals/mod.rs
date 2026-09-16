@@ -45,7 +45,8 @@ mod generated {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "globals_tests.rs"]
+mod tests;
 
 /// The `<kind>` half of a `[globals].disable` entry.
 ///

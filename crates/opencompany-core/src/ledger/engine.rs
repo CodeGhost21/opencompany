@@ -506,5 +506,5 @@ fn indexed_entries<'a>(spec: &LedgerSpec, entries: &'a Entries) -> (Vec<&'a Entr
 }
 
 #[cfg(test)]
-#[path = "engine_test.rs"]
-mod test;
+#[path = "engine_tests.rs"]
+mod tests;

@@ -432,6 +432,23 @@ jobs:
 
       - run: ./scripts/ci/assert-md-line-cap.sh
 
+  # Same shape and same reasoning as `markdown-cap`, for Rust: a 750-line cap
+  # on every file under `crates/*/src`, and unit tests in a sibling
+  # `*_tests.rs` rather than an inline `#[cfg(test)] mod`. Toolchain-free — it
+  # is `wc` and `awk` over the tree — so it runs unconditionally, and a PR that
+  # grows a file past the cap fails in one legible line instead of never.
+  rust-source-layout:
+    name: Rust source layout
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `tests` until the split PR lands; then `all`, which adds the line cap.
+      - run: ./scripts/ci/assert-rs-source-layout.sh tests
+
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
@@ -2374,6 +2391,7 @@ jobs:
       - changes
       - actions-pinned
       - markdown-cap
+      - rust-source-layout
       - rust
       - rust-mail
       - rust-mongodb

@@ -568,4 +568,5 @@ async fn ingest_links(
 }
 
 #[cfg(test)]
-mod test;
+#[path = "memory_ingest_tests.rs"]
+mod tests;

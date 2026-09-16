@@ -1009,5 +1009,8 @@ impl Memory for CortexdbMemory {
 }
 
 #[cfg(test)]
-#[path = "cortexdb_test.rs"]
-mod test;
+#[path = "cortexdb_tests.rs"]
+mod tests;
+#[cfg(test)]
+#[path = "cortexdb_namespace_tests.rs"]
+mod tests_namespace;
