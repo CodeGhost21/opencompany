@@ -1,7 +1,6 @@
 use super::*;
 
 /// A desk-visible row by `author`, or an aside when `to` names somebody.
-
 fn row(id: &str, author: &str, text: &str, to: &[&str]) -> MessageView {
     MessageView {
         id: id.to_owned(),
