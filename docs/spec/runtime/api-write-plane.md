@@ -429,6 +429,7 @@ GET    …/credential                         whether the company has its own ke
 PUT    …/credential                         set / rotate / clear the company's TinyHumans key  [admin]
 POST   …/credential/link/start              begin a PKCE key grant; answers the hub URL to navigate to  [admin]
 POST   …/credential/link/finish             redeem the returned code; stores the minted key  [admin]
+GET    /auth/key/callback                    the host's own return leg for a key grant (desktop); trust is the parked `state`
 GET    …/domain                             the stored domain + records + last verify result, or `null`
 PUT    …/domain                             set the custom domain  [admin]
 POST   …/domain/verify                       server-side DNS check
