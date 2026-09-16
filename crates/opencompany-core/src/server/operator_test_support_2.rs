@@ -603,14 +603,14 @@ pub(super) async fn await_continuation(runtime: &Arc<CompanyRuntime>) -> bool {
 /// A running company with one tool call parked and a brain that will stall
 /// on the follow-up turn until `release` is fired.
 pub(super) struct StalledCompany {
-    app: axum::Router,
-    runtime: Arc<CompanyRuntime>,
-    approval_id: ApprovalId,
+    pub(super) app: axum::Router,
+    pub(super) runtime: Arc<CompanyRuntime>,
+    pub(super) approval_id: ApprovalId,
     /// Fires once the follow-up turn has begun — by which point the verdict
     /// is journaled and the grant minted.
-    entered: Arc<tokio::sync::Notify>,
+    pub(super) entered: Arc<tokio::sync::Notify>,
     /// The test's permission for that turn to finish.
-    release: Arc<tokio::sync::Notify>,
+    pub(super) release: Arc<tokio::sync::Notify>,
 }
 
 pub(super) async fn stalled_company(home: &std::path::Path) -> StalledCompany {
