@@ -14,14 +14,14 @@ pub(super) use crate::ports::types::LedgerEntry;
 pub(super) use crate::store::FsOps;
 
 impl ScriptedTriage {
-    fn new(verdict: crate::harness::triage::TriageVerdict) -> Self {
+    pub(super) fn new(verdict: crate::harness::triage::TriageVerdict) -> Self {
         Self {
             verdict,
             asked: Mutex::new(Vec::new()),
         }
     }
 
-    fn asked(&self) -> Vec<String> {
+    pub(super) fn asked(&self) -> Vec<String> {
         self.asked.lock().expect("asked").clone()
     }
 }
@@ -83,14 +83,14 @@ pub(super) struct ScriptedTitler {
 }
 
 impl ScriptedTitler {
-    fn new(title: &'static str) -> Self {
+    pub(super) fn new(title: &'static str) -> Self {
         Self {
             title,
             asked: Mutex::new(Vec::new()),
         }
     }
 
-    fn asked(&self) -> Vec<String> {
+    pub(super) fn asked(&self) -> Vec<String> {
         self.asked.lock().expect("asked").clone()
     }
 }

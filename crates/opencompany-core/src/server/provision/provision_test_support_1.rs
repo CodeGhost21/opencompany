@@ -493,11 +493,11 @@ pub(super) async fn build_runtime_with_archive_status_read_failing_twice(
 /// `remove_owner` always fails — models a persisted-store hiccup landing
 /// exactly on eviction's durable ownership cleanup step.
 pub(super) struct FailingOwnershipRemoval {
-    remove_owner_calls: std::sync::atomic::AtomicUsize,
+    pub(super) remove_owner_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FailingOwnershipRemoval {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             remove_owner_calls: std::sync::atomic::AtomicUsize::new(0),
         })
