@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
 
 // -----------------------------------------------------------------------
 // Issue #661: the queue is scoped per claimant
