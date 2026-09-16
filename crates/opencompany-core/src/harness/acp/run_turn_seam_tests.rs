@@ -1,5 +1,5 @@
-use super::*;
 use super::run_turn_test_fixtures::*;
+use super::*;
 
 /// The claim the whole slice rests on: this is usable anywhere the
 /// OpenHuman implementation is.

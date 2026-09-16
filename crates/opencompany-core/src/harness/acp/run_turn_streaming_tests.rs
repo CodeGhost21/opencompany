@@ -1,5 +1,5 @@
-use super::*;
 use super::run_turn_test_fixtures::*;
+use super::*;
 
 /// Drains the live frames a turn published, giving up once the bus goes
 /// quiet — a turn that published nothing must be provable, not merely
@@ -9,8 +9,7 @@ async fn drain_live(
 ) -> Vec<crate::turn_stream::TurnStreamEvent> {
     use futures::StreamExt;
     let mut frames = Vec::new();
-    while let Ok(Some(frame)) =
-        tokio::time::timeout(Duration::from_millis(50), stream.next()).await
+    while let Ok(Some(frame)) = tokio::time::timeout(Duration::from_millis(50), stream.next()).await
     {
         if let Some(event) = frame.as_turn() {
             frames.push(event.clone());
@@ -276,4 +275,3 @@ fn a_burst_of_thoughts_is_one_row_until_something_else_happens() {
     assert!(live_frame_from(&AcpUpdate::MessageChunk("hi".into()), &mut state).is_none());
     assert!(live_frame_from(&AcpUpdate::ThoughtChunk, &mut state).is_some());
 }
-
