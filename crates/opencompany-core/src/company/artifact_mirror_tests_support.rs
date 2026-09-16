@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::company::workspace_scaffold::ARTIFACTS_ROOT;
-use crate::ports::artifacts::ArtifactKind;
+pub(super) use crate::company::workspace_scaffold::ARTIFACTS_ROOT;
+pub(super) use crate::ports::artifacts::ArtifactKind;
 use crate::store::FsOps;
 
 /// One `FsOps` backing both ports, so a test exercises the real stores
