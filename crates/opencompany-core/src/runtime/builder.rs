@@ -1610,6 +1610,15 @@ impl RuntimeBuilder {
     /// Assembles the runtime, materializing `company.toml` and replaying the
     /// journal to rebuild the approval queue.
     pub async fn build(mut self) -> Result<CompanyRuntime> {
+        // The platform managed default this runtime resolves managed inference
+        // against — endpoint always, credential when the deployment has one.
+        // `app::harness::attach` seeds it from the host's `api_url`; a builder
+        // that was never attached (a test, an embedder that skipped `attach`)
+        // derives the endpoint from `with_api_url` or the production default,
+        // and carries no credential. Computed once, first, before `self` starts
+        // being moved out of, so the brain, the harness lanes and the
+        // runtime's own reads all see the same answer.
+        let platform_default = self.platform_default();
         let home = self.home;
         let id = self.id;
         // Issue #290. Present ⇒ this is a rebuild of a live company, so every
@@ -3091,15 +3100,6 @@ impl RuntimeBuilder {
             self.manifest.company.name = r.manifest.company.name.clone();
         }
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
-
-        // The platform managed default this runtime resolves managed inference
-        // against — endpoint always, credential when the deployment has one.
-        // `app::harness::attach` seeds it from the host's `api_url`; a builder
-        // that was never attached (a test, an embedder that skipped `attach`)
-        // derives the endpoint from `with_api_url` or the production default,
-        // and carries no credential. Computed once here so the brain, the
-        // harness lanes and the runtime's own reads all see the same answer.
-        let platform_default = self.platform_default();
 
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,

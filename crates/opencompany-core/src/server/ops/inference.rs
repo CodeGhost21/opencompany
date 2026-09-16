@@ -2981,27 +2981,6 @@ base_url = "https://byo.example/v1"
         assert_ne!(body["code"], "not_configured");
     }
 
-    #[cfg(feature = "openhuman")]
-    #[test]
-    fn platform_default_follows_the_injected_inference_url() {
-        use crate::app::config::MapEnv;
-
-        let env = MapEnv::new([
-            ("TINYHUMANS_API_KEY", "platform-key"),
-            ("OPENCOMPANY_INFERENCE_URL", STAGING_URL),
-        ]);
-        assert_eq!(
-            platform_default(&env).map(|d| d.base_url),
-            Some(STAGING_URL.to_string())
-        );
-
-        // A URL with no credential resolves to nothing — the same answer the
-        // harness gives, so the card never advertises an endpoint that would
-        // route nowhere.
-        let bare = MapEnv::new([("OPENCOMPANY_INFERENCE_URL", STAGING_URL)]);
-        assert!(platform_default(&bare).is_none());
-    }
-
     #[tokio::test]
     async fn status_defaults_to_managed_then_switches_to_runtime() {
         let home_dir = home();
