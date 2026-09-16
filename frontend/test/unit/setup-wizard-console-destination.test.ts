@@ -121,7 +121,20 @@ async function click(testId: string) {
  * whose popup portals onto `document.body` and does not exist until the
  * trigger opens it.
  */
+/**
+ * Gets past step 0 onto the model step, and is a no-op once already there.
+ *
+ * The flow opens on the setup-way choice, and the provider picker sits behind
+ * "Set it up yourself".
+ */
+async function chooseSelfManaged() {
+  if (!find("setup-way-self-managed")) return;
+  await click("setup-way-self-managed");
+  await next();
+}
+
 async function skipModel() {
+  await chooseSelfManaged();
   await click("setup-provider-select");
   const none = document.body.querySelector('[data-testid="setup-provider-none"]') as
     | HTMLElement

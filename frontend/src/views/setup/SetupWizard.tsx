@@ -103,13 +103,44 @@ import { HOST_SETTINGS_HIDDEN } from "@/product-scope";
  * questions about *them* are what earn the right to ask one of those.
  */
 const STEPS: readonly (Step & { fields: readonly string[] })[] = [
-  { id: "power", label: "Model", fields: ["tinyhumans_api_key"] },
+  { id: "setup-way", label: "Setup", fields: [] },
+  { id: "managed-login", label: "Model", fields: ["tinyhumans_api_key"] },
+  { id: "self-managed-connect", label: "Model", fields: ["tinyhumans_api_key"] },
   { id: "business", label: "Business", fields: [] },
   { id: "signin", label: "Sign-in", fields: ["auth_mode"] },
   { id: "account", label: "You", fields: [] },
   { id: "advanced", label: "Advanced", fields: [] },
   { id: "review", label: "Review", fields: [] },
 ];
+
+/** How the operator wants this instance set up, as answered on step 0. */
+type SetupWay = "managed" | "self-managed";
+
+/** The step-1 screen each way leads to. */
+const STEP_ONE_FOR: Record<SetupWay, string> = {
+  managed: "managed-login",
+  "self-managed": "self-managed-connect",
+};
+
+/** The branch: step 0 and the two step-1 screens it chooses between. */
+const BRANCH_STEP_IDS: readonly string[] = ["setup-way", ...Object.values(STEP_ONE_FOR)];
+
+/** Whether a step id is one of the two step-1 screens. */
+function isStepOne(id: string): boolean {
+  return id === STEP_ONE_FOR.managed || id === STEP_ONE_FOR["self-managed"];
+}
+
+/** How each setup way is described, in what the operator gets rather than in mechanism. */
+const SETUP_WAY_COPY: Record<SetupWay, { label: string; hint: string }> = {
+  managed: {
+    label: "Managed with TinyHumans",
+    hint: "One key covers the model, the integrations and search. We look after the credentials.",
+  },
+  "self-managed": {
+    label: "Set it up yourself",
+    hint: "Bring your own provider and your own integration keys. Nothing is brokered for you.",
+  },
+};
 
 /**
  * Where each provider's own key is minted, for the operator who does not have
@@ -345,6 +376,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    * reorder these will not think to restate the argument.
    */
   const [stepId, setStepId] = useState<string>(STEPS[0].id);
+  /**
+   * The way picked on step 0, or `null` while it is unanswered.
+   *
+   * Only ever the operator's own answer. Where the question is not asked at
+   * all the way is resolved from the host instead — see `setupWay`.
+   */
+  const [chosenWay, setChosenWay] = useState<SetupWay | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -639,6 +677,53 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
   }, [status, values, provider]);
 
   /**
+   * Whether the managed way can actually be completed on this host.
+   *
+   * Two host-reported facts, both of which the managed branch dead-ends
+   * without: the TinyHumans route has to be on offer at all, and the host has
+   * to accept a key for it from this operator rather than owning that field
+   * from the environment. Null status counts as offered — the read has not
+   * landed, and a branch that appears once it does is better than one that
+   * vanishes under someone already reading it.
+   */
+  const managedWayOffered = useMemo(() => {
+    if (!status) return true;
+    if (!SETUP_INFERENCE_OPTIONS.some((option) => option.id === "managed")) return false;
+    const field = status.fields.find((f) => f.key === "tinyhumans_api_key");
+    return field === undefined || field.editable;
+  }, [status]);
+
+  /**
+   * Whether step 0 is a question worth asking.
+   *
+   * Not on a host with only one answer available, and not on a re-run: an
+   * instance that has already been configured is being edited, and the way it
+   * was set up is not back on the table.
+   */
+  const asksSetupWay = managedWayOffered && !status?.complete;
+
+  /**
+   * The way in force. Unasked resolves to self-managed, which is the branch
+   * that needs nothing brokered and so can never dead-end.
+   */
+  const setupWay: SetupWay | null = asksSetupWay ? chosenWay : "self-managed";
+
+  /**
+   * Answer step 0, clearing what the other branch had already collected.
+   *
+   * A key typed against one way would otherwise be presented to the other, and
+   * a roster designed under the old answer would ride through Review.
+   */
+  const chooseSetupWay = (way: SetupWay) => {
+    if (chosenWay !== null && chosenWay !== way) {
+      set("tinyhumans_api_key", "");
+      setTested({ kind: "untested" });
+      setRoster(null);
+    }
+    setChosenWay(way);
+  };
+
+  /**
    * The steps this host actually shows. `STEPS` stays the source of order.
    *
    * A host that asks nobody to sign in has nobody to invite, so the address step
@@ -666,11 +751,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     () =>
       STEPS.filter(
         (s) =>
-          (s.id !== "power" || tested.kind !== "hosted") &&
+          (!BRANCH_STEP_IDS.includes(s.id) || tested.kind !== "hosted") &&
+          (s.id !== "setup-way" || asksSetupWay) &&
+          (!isStepOne(s.id) || (setupWay !== null && STEP_ONE_FOR[setupWay] === s.id)) &&
           (s.id !== "account" || !status || requiresSignIn(status, values)) &&
           (s.id !== "advanced" || ADVANCED_GROUPS.length > 0),
       ),
-    [status, values, tested],
+    [status, values, tested, asksSetupWay, setupWay],
   );
 
   // A position whose step is no longer shown falls back to the start. That is
@@ -1042,10 +1129,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
 
   /** Whether this step can be left, and why not when it cannot. */
   const problem = (): string | undefined => {
+    if (current.id === "setup-way" && !chosenWay) {
+      return "Pick how you'd like to set this up.";
+    }
     // The gate. Untested is not "probably fine": the whole reason this step
     // moved to the front is that a bad credential is silent everywhere else.
     if (
-      current.id === "power" &&
+      isStepOne(current.id) &&
       tested.kind !== "ok" &&
       tested.kind !== "skipped" &&
       tested.kind !== "hosted"
@@ -1171,6 +1261,10 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       }
     >
       <div className="space-y-6" data-testid="setup-wizard">
+        {current.id === "setup-way" && (
+          <SetupWayStep value={chosenWay} onChange={chooseSetupWay} />
+        )}
+
         {current.id === "business" && (
           <BusinessStep
             draft={draft}
@@ -1207,7 +1301,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
           />
         )}
 
-        {current.id === "power" && (
+        {isStepOne(current.id) && (
           <PowerStep
             status={status}
             client={client}
@@ -1543,6 +1637,54 @@ function AccountStep({
           if (e.key === "Enter") onEnter();
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * Step 0: which of the two setup paths this instance takes.
+ *
+ * Asks nothing of the host — the answer decides which step-1 screen mounts
+ * next and nothing else.
+ */
+function SetupWayStep({
+  value,
+  onChange,
+}: {
+  value: SetupWay | null;
+  onChange: (way: SetupWay) => void;
+}) {
+  return (
+    <div>
+      <h2 className="text-base font-medium leading-snug" data-testid="setup-question">
+        How would you like to set this up?
+      </h2>
+      <p className="text-xs leading-snug text-muted-foreground">
+        You can change any of it later from Connections.
+      </p>
+
+      <div className="mt-2.5 space-y-2">
+        {(Object.keys(SETUP_WAY_COPY) as SetupWay[]).map((way) => {
+          const copy = SETUP_WAY_COPY[way];
+          const active = value === way;
+          return (
+            <button
+              key={way}
+              type="button"
+              onClick={() => onChange(way)}
+              data-testid={`setup-way-${way}`}
+              aria-pressed={active}
+              className={cn(
+                "w-full rounded-lg border p-3 text-left transition-colors hover:bg-muted",
+                active && "border-primary bg-muted",
+              )}
+            >
+              <div className="text-sm font-medium">{copy.label}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">{copy.hint}</div>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
