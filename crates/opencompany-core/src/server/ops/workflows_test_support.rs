@@ -1117,7 +1117,7 @@ pub(crate) mod running {
         /// the engine (the engine's own cancel behaviour is pinned in
         /// `workflows::runner`).
         pub(crate) struct StalledRunner {
-            entered: Arc<tokio::sync::Notify>,
+            pub(crate) entered: Arc<tokio::sync::Notify>,
                         pub(crate) release: Arc<tokio::sync::Notify>,
             /// Set only if the run was allowed to finish on its own terms —
             /// which is how a test tells "the run completed" from "the run was
