@@ -1,3 +1,8 @@
+pub(super) use super::*;
+pub(super) use crate::ports::tasks::TaskTitle;
+
+pub(super) use std::sync::Mutex;
+
 impl ScriptedTriage {
     fn new(verdict: crate::harness::triage::TriageVerdict) -> Self {
         Self {
