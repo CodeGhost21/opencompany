@@ -54,16 +54,44 @@ pub const TEAM_HEADING: &str = "## Your team";
 /// manifest entry that says nothing — the line says so in one clause rather
 /// than repeating the roster.
 pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
-    let roster = record.effective_agents();
-    let others: Vec<&crate::company::Agent> =
-        roster.iter().filter(|agent| agent.id != agent_id).collect();
+    let manifest_roster = record.effective_agents();
+    // The manifest roster, then the operator-added teammates — the same order
+    // `roster_agent_ids` (and every refusal message) uses, so the listing and
+    // the tools agree about who comes first. An overlay teammate has no
+    // manifest row; it carries its display name, its role and its mandate,
+    // which is all this section needs of anybody.
+    let roster: Vec<Teammate<'_>> = manifest_roster
+        .iter()
+        .map(|agent| Teammate {
+            id: &agent.id,
+            name: agent.name.as_deref(),
+            role: &agent.role,
+            description: agent.description.as_deref(),
+        })
+        .chain(
+            record
+                .overlay_agents
+                .iter()
+                .filter(|overlay| !manifest_roster.iter().any(|agent| agent.id == overlay.id))
+                .map(|overlay| Teammate {
+                    id: &overlay.id,
+                    name: Some(&overlay.name),
+                    role: &overlay.role,
+                    description: overlay.description.as_deref(),
+                }),
+        )
+        .collect();
+    let others: Vec<&Teammate<'_>> = roster.iter().filter(|agent| agent.id != agent_id).collect();
     if others.is_empty() {
         return String::new();
     }
-    let orchestrator = crate::company::orchestrator_id(&roster).map(str::to_string);
+    let orchestrator = crate::company::orchestrator_id(&manifest_roster).map(str::to_string);
     let company = record.manifest.company.name.trim();
-    let me = roster.iter().find(|agent| agent.id == agent_id);
-    let delegates_to: &[String] = me.map(|agent| agent.delegates_to.as_slice()).unwrap_or(&[]);
+    let delegates_to: &[String] = manifest_roster
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .map(|agent| agent.delegates_to.as_slice())
+        .unwrap_or(&[]);
 
     // Whether the reach line at the bottom will narrow the roster. Decided up
     // front so the opening sentence and that line cannot contradict each other.
@@ -99,9 +127,9 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
     ));
     for agent in &others {
         out.push_str("- `");
-        out.push_str(&agent.id);
+        out.push_str(agent.id);
         out.push_str("` — ");
-        match agent.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        match agent.name.map(str::trim).filter(|n| !n.is_empty()) {
             Some(name) if !name.eq_ignore_ascii_case(agent.role.trim()) => {
                 out.push_str(name);
                 out.push_str(", ");
@@ -109,11 +137,13 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
             }
             _ => out.push_str(agent.role.trim()),
         }
-        if orchestrator.as_deref() == Some(agent.id.as_str()) {
-            out.push_str(" (the orchestrator: the operator's point of contact, who can bring \
-                          anyone in and owns the board)");
+        if orchestrator.as_deref() == Some(agent.id) {
+            out.push_str(
+                " (the orchestrator: the operator's point of contact, who can bring anyone in \
+                 and owns the board)",
+            );
         }
-        if let Some(description) = agent.description.as_deref().map(str::trim)
+        if let Some(description) = agent.description.map(str::trim)
             && !description.is_empty()
         {
             out.push_str(": ");
@@ -177,6 +207,15 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
         });
     }
     out
+}
+
+/// One roster entry as this section renders it — the four things a new hire
+/// is told about a colleague, whichever of the two roster halves they are on.
+struct Teammate<'a> {
+    id: &'a str,
+    name: Option<&'a str>,
+    role: &'a str,
+    description: Option<&'a str>,
 }
 
 /// A desk's operator-facing name, or its id when it has none to show.
