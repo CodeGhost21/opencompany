@@ -118,6 +118,7 @@ import {
   type ChatMessage,
   dispatchMarkerPlacement,
   fromHistory,
+  reconcileTranscript,
   hostMessageId,
   liveFrameThreadKey,
   liveReplyIdentity,
@@ -1984,11 +1985,13 @@ export function AppShell({
             return;
           }
           setTranscripts((t) => {
-            const known = new Set((t[channelId] ?? []).map((m) => m.id));
-            const fresh = hydrated.filter((m) => !known.has(m.id));
-            return fresh.length === 0
-              ? t
-              : { ...t, [channelId]: [...(t[channelId] ?? []), ...fresh] };
+            // Reconciled, not merely appended: a referral folds its exchange
+            // onto a row this transcript ALREADY holds, so an id filter drops
+            // exactly the update it exists to deliver. See
+            // `reconcileTranscript` for the whole reasoning.
+            const existing = t[channelId] ?? [];
+            const merged = reconcileTranscript(existing, hydrated);
+            return merged === existing ? t : { ...t, [channelId]: merged };
           });
         })
         .catch(() => {
