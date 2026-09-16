@@ -1391,6 +1391,7 @@ impl CompanyAgent {
         // Runs inside the `agent` critical section, which already serialises
         // this agent's turns.
         let mut session_cues: Option<String> = None;
+        let mut isolated_context_turn = false;
         // Codex P1: a session delta's `next_state` must not land in
         // `self.session` until the turn it was cued into actually succeeds.
         // The rows it marks delivered are handed to the model as this turn's
@@ -1456,11 +1457,19 @@ impl CompanyAgent {
             // next chat turn.
             let mut reseed = !brings_own_context && (chat_only || session.watermark.is_none());
             if brings_own_context {
+                isolated_context_turn = true;
                 if !agent.history().is_empty() {
                     agent.clear_history();
                 }
                 overrides.suppress_transcript_autoload = true;
-                *session = agent_session::AgentSessionState::default();
+                // The episode prompt already contains the triggering message,
+                // but it does not contain unrelated unseen channel/DM rows.
+                // Preserve the company-wide watermark and mark only the trigger
+                // seen; resetting the whole state here permanently skipped
+                // those unrelated rows on the next cold seed.
+                if let Some(seq) = chat.message_seq {
+                    session.accept_seen(seq);
+                }
             }
             if !reseed
                 && !brings_own_context
@@ -2116,6 +2125,12 @@ impl CompanyAgent {
             && let Some(next_state) = pending_session_commit.take()
         {
             *self.session.lock().await = next_state;
+        }
+        // A Hive turn's attributed/visibility-filtered prompt must not become
+        // ordinary conversational history for the next channel. Its durable
+        // rows remain discoverable through the preserved session watermark.
+        if isolated_context_turn && !agent.history().is_empty() {
+            agent.clear_history();
         }
         let outcome = reply.map(|reply| TurnOutcome {
             reply: if overrides.suppress_tools {
