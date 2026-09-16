@@ -93,7 +93,7 @@ async fn callback(State(state): State<AppState>, Query(query): Query<CallbackQue
     // The same company gate the scoped extractors apply, minus the session:
     // the parked link is what proves this request may act for the company,
     // and `redeem_link` refuses a `state` parked for any other one.
-    let Some(runtime) = state.registry().get(&crate::company::CompanyId::from(company)) else {
+    let Some(runtime) = state.registry().get(&crate::ports::types::CompanyId::new(company)) else {
         return failure_page(
             StatusCode::NOT_FOUND,
             "Company not found",
