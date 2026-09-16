@@ -455,9 +455,6 @@ async fn a_provider_name_past_the_bound_is_refused_rather_than_breaking_the_stor
 // not the built-in production constant.
 // ---------------------------------------------------------------------
 
-const MANAGED_MANIFEST: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
-     [inference]\nprovider = \"managed\"\n";
-
 #[tokio::test]
 async fn unconfigured_company_reports_the_platform_url_not_the_built_in_default() {
     let home_dir = home();
