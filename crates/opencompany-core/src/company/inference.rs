@@ -162,40 +162,6 @@ impl Default for HarnessScope {
 /// and [`OPENROUTER_BASE_URL`] serve the same catalogue; only who pays differs.
 pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/agent-integrations/openrouter";
 
-/// The TinyHumans platform this process was configured for (`AppConfig::api_url`,
-/// from `TINYHUMANS_API_URL` / `config.toml`), recorded once at boot so the
-/// managed chain follows it without every resolver growing an `api_url`
-/// parameter. Unset (tests, early boot) reads as the production default.
-///
-/// **A process-wide value, deliberately** — every real entry point
-/// (`opencompany serve`, the desktop shell's embedded server) constructs
-/// exactly one [`AppState`](crate::AppState) for the whole life of the
-/// process, which is also this workload's documented deployment shape: the
-/// hosting manager builds one per-tenant *container*, so "one process, one
-/// platform" already holds without this static enforcing it. Threading
-/// `api_url` as an explicit parameter through [`resolve_endpoint`] and every
-/// caller of [`resolve_effective`] down to the turn path would remove the
-/// global outright, but every one of those is also the harness-build and
-/// turn-resolution seam multiple other subsystems share — CodeRabbit's own
-/// review tagged that refactor a "heavy lift", and reworking a hot, widely
-/// shared signature under review pressure is how a global mutable gets
-/// traded for a wrong-provider turn. Tracked as a follow-up rather than done
-/// here (PR #2338 review: Codex P2, CodeRabbit Major, tinysweeper high).
-///
-/// **Set-once, not last-write-wins**, which is the part of the finding this
-/// PR *does* close: a test binary constructs many [`AppState`]s with many
-/// unrelated `api_url`s in one process (`hub_test.rs`'s
-/// `https://hub.example.com`, `desktop.rs`'s ephemeral
-/// `http://127.0.0.1:<port>`), and the previous last-write-wins semantics
-/// meant whichever happened to run last decided what every *other* test's
-/// "no platform configured" assertion saw — a real, reproducible source of
-/// order-dependent flakiness, not merely a theoretical one. First-write-wins
-/// matches the one-`AppState`-per-process production invariant exactly (the
-/// first, and only, real call is the only one that should ever count) and
-/// turns the test-suite race into "whichever test's setup runs first stays
-/// harmless", because none of those other configs feed `platform_base_url()`
-/// for their own purposes — only a caller resolving *managed* inference does,
-/// and no such caller runs inside `hub_test.rs` or `desktop.rs`'s own tests.
 /// The production TinyHumans OpenRouter proxy base used when a caller has no
 /// explicit [`EnvDefault`]. Deployments with a configured platform pass that
 /// default through their own resolution path; this fallback intentionally
