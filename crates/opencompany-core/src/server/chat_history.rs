@@ -2616,8 +2616,20 @@ fn is_admin_only_event(event: &CompanyEvent) -> bool {
 }
 
 #[cfg(test)]
-#[path = "chat_history_tests.rs"]
-mod tests;
+#[path = "chat_history_moves_tests.rs"]
+mod tests_moves;
+#[cfg(test)]
+#[path = "chat_history_reactions_tests.rs"]
+mod tests_reactions;
+#[cfg(test)]
+#[path = "chat_history_mentions_tests.rs"]
+mod tests_mentions;
+#[cfg(test)]
+#[path = "chat_history_terminal_tests.rs"]
+mod tests_terminal;
+#[cfg(test)]
+#[path = "chat_history_attribution_audit_tests.rs"]
+mod attribution_audit;
 
 #[cfg(test)]
 #[path = "chat_history_dead_card_test.rs"]
