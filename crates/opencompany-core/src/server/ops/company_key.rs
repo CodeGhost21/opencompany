@@ -467,7 +467,7 @@ async fn rebuild_if_pending(
     let inference_moved = report.slots.iter().any(|s| {
         matches!(
             s.slot,
-            company_key::Slot::Provider | company_key::Slot::Default
+            company_key::Slot::Inference | company_key::Slot::Provider | company_key::Slot::Default
         ) && slot_changed(s.outcome)
     });
     if !inference_moved || !restart_required_for(runtime.as_ref()).await {
