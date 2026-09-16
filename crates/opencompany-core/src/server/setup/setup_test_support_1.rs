@@ -5,11 +5,6 @@
 //! into a file nothing will read, and that the open-while-unconfigured access
 //! gate closes the moment either of its two conditions stops holding.
 
-use std::sync::Arc;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-use async_trait::async_trait;
 use crate::app::config::MapEnv;
 use crate::company::CompanyManifest;
 use crate::company::runtime::CompanyRuntime;
@@ -21,6 +16,11 @@ use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::{AppConfig, AppState};
+use async_trait::async_trait;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 pub(super) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -146,7 +146,10 @@ pub(super) async fn get_setup_as_admin(state: AppState) -> serde_json::Value {
     body_json(response).await
 }
 
-pub(super) async fn post_setup(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+pub(super) async fn post_setup(
+    state: AppState,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let response = router(state)
         .oneshot(
             Request::builder()
@@ -205,7 +208,10 @@ impl RuntimeRebuilder for SelectiveRebuilder {
 // ---------------------------------------------------------------------------
 // The roster proposal, before any company exists
 // ---------------------------------------------------------------------------
-pub(super) async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+pub(super) async fn post_roster(
+    state: AppState,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let response = router(state)
         .oneshot(
             Request::builder()

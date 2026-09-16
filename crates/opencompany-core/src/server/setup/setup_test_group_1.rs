@@ -1,8 +1,3 @@
-use std::sync::Arc;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-use async_trait::async_trait;
 use crate::app::config::MapEnv;
 use crate::company::CompanyManifest;
 use crate::company::runtime::CompanyRuntime;
@@ -14,6 +9,11 @@ use crate::server::ops::mailer::{MailCredentials, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::server::router;
 use crate::{AppConfig, AppState};
+use async_trait::async_trait;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 use super::setup_test_support_1::*;
 
