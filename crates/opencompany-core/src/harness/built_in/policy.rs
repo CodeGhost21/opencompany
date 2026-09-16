@@ -2179,17 +2179,14 @@ fn classify_group(tool_name: &str, args: &serde_json::Value) -> EffectGroup {
 #[path = "policy/policy_test_helpers_tests.rs"]
 mod policy_test_helpers_tests;
 #[cfg(test)]
-#[path = "policy/policy_hitl_tests.rs"]
-mod tests_hitl;
-#[cfg(test)]
 #[path = "policy/policy_autonomy_tests.rs"]
 mod tests_autonomy;
 #[cfg(test)]
+#[path = "policy/policy_call_judgement_tests.rs"]
+mod tests_call_judgement;
+#[cfg(test)]
 #[path = "policy/policy_effect_classification_tests.rs"]
 mod tests_effect_classification;
-#[cfg(test)]
-#[path = "policy/policy_park_queue_tests.rs"]
-mod tests_park_queue;
 #[cfg(test)]
 #[path = "policy/policy_escalation_tests.rs"]
 mod tests_escalation;
@@ -2197,23 +2194,26 @@ mod tests_escalation;
 #[path = "policy/policy_grant_redemption_tests.rs"]
 mod tests_grant_redemption;
 #[cfg(test)]
+#[path = "policy/policy_hitl_tests.rs"]
+mod tests_hitl;
+#[cfg(test)]
+#[path = "policy/policy_park_queue_tests.rs"]
+mod tests_park_queue;
+#[cfg(test)]
+#[path = "policy/policy_path_split_tests.rs"]
+mod tests_path_split;
+#[cfg(test)]
 #[path = "policy/policy_scopes_tests.rs"]
 mod tests_scopes;
 #[cfg(test)]
 #[path = "policy/policy_spend_cap_tests.rs"]
 mod tests_spend_cap;
 #[cfg(test)]
+#[path = "policy/policy_ssrf_guardrail_tests.rs"]
+mod tests_ssrf_guardrail;
+#[cfg(test)]
 #[path = "policy/policy_standing_grants_tests.rs"]
 mod tests_standing_grants;
 #[cfg(test)]
 #[path = "policy/policy_standing_grants_more_tests.rs"]
 mod tests_standing_grants_more;
-#[cfg(test)]
-#[path = "policy/policy_call_judgement_tests.rs"]
-mod tests_call_judgement;
-#[cfg(test)]
-#[path = "policy/policy_path_split_tests.rs"]
-mod tests_path_split;
-#[cfg(test)]
-#[path = "policy/policy_ssrf_guardrail_tests.rs"]
-mod tests_ssrf_guardrail;

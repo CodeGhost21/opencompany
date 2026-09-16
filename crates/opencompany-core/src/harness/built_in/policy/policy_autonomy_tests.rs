@@ -6,12 +6,12 @@ use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 // Issue #470: the `composio_execute` fixtures are built here, from the same
 // key the classifier reads, so a call in a test reaches the same catalogue
 // lookup a call in production does.
+use super::policy_test_helpers_tests::*;
 use crate::policy::test_support::{
     COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
     composio_read_args, composio_send_args, composio_unclassified_args,
     composio_unclassified_args_numbered,
 };
-use super::policy_test_helpers_tests::*;
 
 /// The two approval paths must decide the same operator list the same way
 /// (issue #684).
@@ -699,4 +699,3 @@ async fn media_generate_parks_supervised_and_denies_readonly_but_list_is_read_on
         ToolPolicyDecision::Allow
     );
 }
-
