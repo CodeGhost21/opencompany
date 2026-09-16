@@ -15,26 +15,26 @@ use crate::error::OpenCompanyError;
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
-const OLD: &str = "th-not-a-real-key";
-const NEW: &str = "th-not-a-real-key-2";
-const CUSTOM: &str = "th-not-a-real-key-custom";
-const MODEL: &str = "acme/test-model";
+pub(super) const OLD: &str = "th-not-a-real-key";
+pub(super) const NEW: &str = "th-not-a-real-key-2";
+pub(super) const CUSTOM: &str = "th-not-a-real-key-custom";
+pub(super) const MODEL: &str = "acme/test-model";
 
-const ACCOUNT_KEY_KEY: &str = crate::company::company_key::KEY_KEY;
-const COMPOSIO_KEY_KEY: &str = crate::company::composio::TINYHUMANS_KEY_KEY;
-const COMPOSIO_LEGACY_KEY: &str = crate::company::composio::LEGACY_TOKEN_KEY;
-const LEGACY_INFERENCE_KEY_KEY: &str = crate::company::inference::KEY_KEY;
+pub(super) const ACCOUNT_KEY_KEY: &str = crate::company::company_key::KEY_KEY;
+pub(super) const COMPOSIO_KEY_KEY: &str = crate::company::composio::TINYHUMANS_KEY_KEY;
+pub(super) const COMPOSIO_LEGACY_KEY: &str = crate::company::composio::LEGACY_TOKEN_KEY;
+pub(super) const LEGACY_INFERENCE_KEY_KEY: &str = crate::company::inference::KEY_KEY;
 
-fn company(tag: &str) -> CompanyId {
+pub(super) fn company(tag: &str) -> CompanyId {
     CompanyId::new(format!("fan-out-{tag}"))
 }
 
-fn llm_key_key() -> String {
+pub(super) fn llm_key_key() -> String {
     inference_store::provider_key_key(inference::MANAGED_SLUG)
 }
 
 #[derive(Default)]
-struct MemSecrets {
+pub(super) struct MemSecrets {
     map: Mutex<HashMap<String, String>>,
 }
 
@@ -56,7 +56,7 @@ impl SecretStore for MemSecrets {
 
 /// A store whose writes to one key always fail — for the rollback and
 /// failure-isolation rules.
-struct FailsWriting {
+pub(super) struct FailsWriting {
     inner: MemSecrets,
     failing_key: String,
 }
@@ -78,7 +78,7 @@ impl SecretStore for FailsWriting {
 /// [`concurrent_saves_leave_every_copy_equal_to_the_account_key`], which needs
 /// two `fan_out` calls to actually interleave rather than one finishing
 /// before the other starts.
-struct SlowSecrets {
+pub(super) struct SlowSecrets {
     inner: MemSecrets,
 }
 
@@ -95,7 +95,7 @@ impl SecretStore for SlowSecrets {
 
 /// A canned prober answer, with a call counter so a test can assert the
 /// probe never ran at all (e.g. on a `CustomKey` skip).
-struct FakeProber {
+pub(super) struct FakeProber {
     answer: std::result::Result<Vec<String>, probe::ProbeClass>,
     calls: AtomicUsize,
 }
@@ -135,14 +135,14 @@ impl InferenceProber for FakeProber {
     }
 }
 
-async fn raw_set(secrets: &dyn SecretStore, company: &CompanyId, key: &str, value: &str) {
+pub(super) async fn raw_set(secrets: &dyn SecretStore, company: &CompanyId, key: &str, value: &str) {
     secrets
         .set(company, key, SecretValue(value.to_string()))
         .await
         .unwrap();
 }
 
-async fn raw_get(secrets: &dyn SecretStore, company: &CompanyId, key: &str) -> String {
+pub(super) async fn raw_get(secrets: &dyn SecretStore, company: &CompanyId, key: &str) -> String {
     secrets
         .get(company, key)
         .await
@@ -151,7 +151,7 @@ async fn raw_get(secrets: &dyn SecretStore, company: &CompanyId, key: &str) -> S
         .unwrap_or_default()
 }
 
-async fn seed_row(secrets: &dyn SecretStore, company: &CompanyId, model: &str) {
+pub(super) async fn seed_row(secrets: &dyn SecretStore, company: &CompanyId, model: &str) {
     inference_store::put_provider(
         company,
         secrets,
@@ -171,7 +171,7 @@ async fn seed_row(secrets: &dyn SecretStore, company: &CompanyId, model: &str) {
     .unwrap();
 }
 
-fn outcome(report: &FanOutReport, slot: Slot) -> SlotOutcome {
+pub(super) fn outcome(report: &FanOutReport, slot: Slot) -> SlotOutcome {
     report
         .slots
         .iter()
@@ -180,7 +180,7 @@ fn outcome(report: &FanOutReport, slot: Slot) -> SlotOutcome {
         .outcome
 }
 
-fn full(provider: &str, model: &str) -> inference_store::DefaultChoice {
+pub(super) fn full(provider: &str, model: &str) -> inference_store::DefaultChoice {
     inference_store::DefaultChoice::Full(inference_store::ModelChoice {
         provider: provider.to_string(),
         model: model.to_string(),

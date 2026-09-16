@@ -1,3 +1,103 @@
+    /// The same guard on the way IN: a bundle written by a host that predates
+    /// #358 carries the withdrawn text beside its tombstone, and importing it
+    /// must not write that text into the fresh journal.
+    ///
+    /// Built by hand-editing the exported `events.jsonl` back to the
+    /// pre-redaction bytes, which is exactly the shape such a bundle has.
+    #[tokio::test]
+    async fn an_old_bundle_cannot_smuggle_a_withdrawn_message_back_in() {
+        let home1 = tmp_root("smuggle-src");
+        let home2 = tmp_root("smuggle-dst");
+        let dest = tmp_root("smuggle-bundle");
+        let id = CompanyId::new("smuggle-co");
+        const SECRET: &str = "sk-live-SMUGGLED";
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_desk_hive: Vec::new(),
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+        })
+        .await
+        .unwrap();
+        let leaked = e1
+            .append(
+                &id,
+                CompanyEvent::TaskDiscussionPosted {
+                    task_id: "t1".into(),
+                    text: SECRET.into(),
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+        e1.append(
+            &id,
+            CompanyEvent::TaskDiscussionRedacted {
+                task_id: "t1".into(),
+                seq: leaked.value(),
+                by: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        export_bundle(&id, &dest, s1, e1, m1, c1, None, ExportOpts::default())
+            .await
+            .unwrap();
+
+        // Put the secret back, as an older exporter would have written it.
+        let path = dest.join(EVENTS_JSONL);
+        let scrubbed = tokio::fs::read_to_string(&path).await.unwrap();
+        let old_shape = scrubbed.replace(crate::ports::tasks::REDACTED_DISCUSSION_TEXT, SECRET);
+        assert!(old_shape.contains(SECRET), "the fixture did not rewrite");
+        tokio::fs::write(&path, old_shape).await.unwrap();
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        import_bundle(&dest, s2, e2.clone(), m2, c2, None)
+            .await
+            .unwrap();
+        let events = e2
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !events.iter().any(|stored| matches!(
+                &stored.event,
+                CompanyEvent::TaskDiscussionPosted { text, .. } if text.contains(SECRET)
+            )),
+            "an old bundle smuggled a withdrawn message into the new journal"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// Issue #85: a template-launched company's `template_provenance` survives an
+    /// export → import round-trip intact (source_id, version, and path all carry
+    /// through the bundle's `meta.json`), so exporting then importing never
+    /// silently strips a company's origin template.
+    #[tokio::test]
     async fn template_provenance_survives_roundtrip() {
         let home1 = tmp_root("prov-src");
         let home2 = tmp_root("prov-dst");
