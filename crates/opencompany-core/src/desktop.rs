@@ -481,7 +481,7 @@ fn desktop_builder(
     manifest: CompanyManifest,
 ) -> Result<RuntimeBuilder> {
     let mut builder = attach_tinyhumans_feedback(
-        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest)),
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest), state.config()),
         state.config(),
     )
     .with_id(id)
@@ -615,7 +615,7 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
         allowed_origins: vec![TAURI_WEBVIEW_ORIGIN.to_string()],
     });
     let runtime =
-        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest))
+        crate::app::attach_harness(RuntimeBuilder::new(state.home().to_path_buf(), manifest), state.config())
             .with_id(company_id.clone())
             .with_auth_mode_override(state.auth_mode_override())
             .build()
