@@ -420,8 +420,8 @@ rationale and the three-answer "when does it take effect" table, is in
 
 ### Credential-bearing surfaces (feature-gated)
 
-These write secrets to the `SecretStore` and expose only non-secret status.
-The native OAuth compatibility routes below deliberately **do not** write a
+These write secrets to the `SecretStore` and expose only non-secret status. The
+native OAuth compatibility routes below deliberately **do not** write a
 credential: the old credential was unreachable by agents.
 
 ```text
@@ -482,9 +482,8 @@ window on the legacy path alone, and closing it there would need a conditional
 write that `SecretStore` cannot express today.
 
 `…/credential` is the company's **one** TinyHumans key, presented by every
-surface wired to it (**Composio today**) — see
-[`credentials.md`](credentials.md) for the resolution order, the rotation
-guarantee, and which surfaces are deliberately outside it.
+surface wired to it — see [`credentials.md`](credentials.md) for the resolution
+order, the rotation guarantee, and where a key grant's return leg lands.
 
 ### Retired native OAuth callback
 
