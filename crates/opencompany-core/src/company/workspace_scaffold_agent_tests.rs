@@ -312,14 +312,3 @@ async fn rollback_leaves_an_adopted_folder_but_sweeps_an_unadopted_one() {
     );
 }
 
-/// The desk minter is the same shape one root over — and since issue #645
-/// it is the *only* thing that ever creates `desks/`. Deliberately run with
-/// no scaffold at all: the first call must mint the root and the member
-/// folder together, which is what lets boot stop laying down an empty root
-/// nothing was filling.
-///
-/// The root it mints stamps `Seed`, exactly as the boot scaffold used to,
-/// so no consumer can tell a lazily-minted root from the old eager one. The
-/// desk folder stamps `Seed` too, because a desk is not an agent and
-/// `WorkspaceOrigin` has no way to name one.
-#[tokio::test]

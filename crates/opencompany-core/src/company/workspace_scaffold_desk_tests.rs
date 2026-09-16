@@ -86,6 +86,17 @@ async fn tree_paths(ws: &Arc<dyn WorkspaceStore>, company: &CompanyId) -> Vec<St
     paths(&ws.tree(company).await.unwrap())
 }
 
+/// The desk minter is the same shape one root over — and since issue #645
+/// it is the *only* thing that ever creates `desks/`. Deliberately run with
+/// no scaffold at all: the first call must mint the root and the member
+/// folder together, which is what lets boot stop laying down an empty root
+/// nothing was filling.
+///
+/// The root it mints stamps `Seed`, exactly as the boot scaffold used to,
+/// so no consumer can tell a lazily-minted root from the old eager one. The
+/// desk folder stamps `Seed` too, because a desk is not an agent and
+/// `WorkspaceOrigin` has no way to name one.
+#[tokio::test]
 async fn ensure_desk_folder_mints_the_desks_root_on_first_use() {
     let (_dir, ws) = store().await;
     let company = CompanyId::new("acme");
