@@ -6078,5 +6078,65 @@ async fn extend_approval(
 }
 
 #[cfg(test)]
-#[path = "operator_tests.rs"]
-mod tests;
+#[path = "operator_test_support_1.rs"]
+mod operator_test_support_1;
+#[cfg(test)]
+#[path = "operator_test_support_2.rs"]
+mod operator_test_support_2;
+#[cfg(test)]
+#[path = "operator_test_support_3.rs"]
+mod operator_test_support_3;
+#[cfg(test)]
+#[path = "operator_test_support_4.rs"]
+mod operator_test_support_4;
+#[cfg(test)]
+#[path = "operator_test_group_1.rs"]
+mod operator_test_group_1;
+#[cfg(test)]
+#[path = "operator_test_group_2.rs"]
+mod operator_test_group_2;
+#[cfg(test)]
+#[path = "operator_test_group_3.rs"]
+mod operator_test_group_3;
+#[cfg(test)]
+#[path = "operator_test_group_4.rs"]
+mod operator_test_group_4;
+#[cfg(test)]
+#[path = "operator_test_group_5.rs"]
+mod operator_test_group_5;
+#[cfg(test)]
+#[path = "operator_test_group_6.rs"]
+mod operator_test_group_6;
+#[cfg(test)]
+#[path = "operator_test_group_7.rs"]
+mod operator_test_group_7;
+#[cfg(test)]
+#[path = "operator_test_group_8.rs"]
+mod operator_test_group_8;
+#[cfg(test)]
+#[path = "operator_test_group_9.rs"]
+mod operator_test_group_9;
+#[cfg(test)]
+#[path = "operator_test_group_10.rs"]
+mod operator_test_group_10;
+#[cfg(test)]
+#[path = "operator_test_group_11.rs"]
+mod operator_test_group_11;
+#[cfg(test)]
+#[path = "operator_test_group_12.rs"]
+mod operator_test_group_12;
+#[cfg(test)]
+#[path = "operator_test_group_13.rs"]
+mod operator_test_group_13;
+#[cfg(test)]
+#[path = "operator_test_group_14.rs"]
+mod operator_test_group_14;
+#[cfg(test)]
+#[path = "operator_test_group_15.rs"]
+mod operator_test_group_15;
+#[cfg(test)]
+#[path = "operator_test_group_16.rs"]
+mod operator_test_group_16;
+#[cfg(test)]
+#[path = "operator_test_group_17.rs"]
+mod operator_test_group_17;
