@@ -33,6 +33,10 @@ async fn tree_paths(ws: &Arc<dyn WorkspaceStore>, company: &CompanyId) -> Vec<St
     paths(&ws.tree(company).await.unwrap())
 }
 
+/// A minted folder that never received the write it was made for is swept
+/// when the caller rolls back — leaving no empty `agents/<id>/` for the
+/// Repair button. The reserved root it hangs off is scaffolding and stays.
+#[tokio::test]
 async fn rollback_removes_a_minted_folder_that_stayed_empty() {
     let (_dir, ws) = store().await;
     let company = CompanyId::new("acme");

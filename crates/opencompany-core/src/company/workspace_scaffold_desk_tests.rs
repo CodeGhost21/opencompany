@@ -355,7 +355,3 @@ async fn ensure_agent_folder_tracked_reports_created_then_adopted() {
     assert_eq!(first, second, "and hands back the same folder");
 }
 
-/// A minted folder that never received the write it was made for is swept
-/// when the caller rolls back — leaving no empty `agents/<id>/` for the
-/// Repair button. The reserved root it hangs off is scaffolding and stays.
-#[tokio::test]
