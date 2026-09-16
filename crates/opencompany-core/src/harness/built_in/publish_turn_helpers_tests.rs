@@ -279,7 +279,11 @@ tier = "orchestrator"
 
 /// Wire a real brain against the scripted endpoint, with task and artifact
 /// stores on disk.
-pub(crate) fn brain(base_url: String, grants: &str, dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+pub(crate) fn brain(
+    base_url: String,
+    grants: &str,
+    dir: &std::path::Path,
+) -> (HarnessBrain, Arc<FsOps>) {
     brain_with(base_url, grants, dir, true)
 }
 
@@ -287,7 +291,10 @@ pub(crate) fn brain(base_url: String, grants: &str, dir: &std::path::Path) -> (H
 ///
 /// The fail-closed case: nothing can record a deliverable, so `build_agent`
 /// does not offer the tool and the brain never claims the publish queue.
-pub(crate) fn brain_without_artifacts(base_url: String, dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+pub(crate) fn brain_without_artifacts(
+    base_url: String,
+    dir: &std::path::Path,
+) -> (HarnessBrain, Arc<FsOps>) {
     brain_with(base_url, "\"*\"", dir, false)
 }
 
@@ -482,4 +489,3 @@ pub(crate) fn publish(path: &'static str) -> Turn {
         args: json!({ "path": path }),
     }
 }
-
