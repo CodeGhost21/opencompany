@@ -1,13 +1,10 @@
-use super::{AsideConversation, MessageView, aside_body, fold_asides};
+//! Issue #885: the audit's classification rule.
+//!
+//! The rule is "an `agent_id` naming no roster teammate", not
+//! `== "operator"`, so these pin both the shape actually observed and the
+//! generalisation — the same writer bug on another channel produces a
+//! different wrong string and still has to be counted.
 
-/// A desk-visible row by `author`, or an aside when `to` names somebody.
-
-/// Issue #885: the audit's classification rule.
-///
-/// The rule is "an `agent_id` naming no roster teammate", not
-/// `== "operator"`, so these pin both the shape actually observed and the
-/// generalisation — the same writer bug on another channel produces a
-/// different wrong string and still has to be counted.
 use super::*;
 
 fn reply(seq: u64, agent_id: &str) -> StoredEvent {
