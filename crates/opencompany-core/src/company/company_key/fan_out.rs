@@ -396,16 +396,18 @@ pub async fn slot_facts(company: &CompanyId, secrets: &dyn SecretStore) -> Resul
 /// slots, read as one batch — always AFTER the account key itself is already
 /// safely stored, never before (see [`fan_out`]'s own step 3/4).
 ///
-/// Carries no default-marker read: unlike `row`, which step 8's health probe
-/// needs *before* the network round trip (for the provider's `base_url`),
-/// nothing here needs the default before the probe, and reading it this early
-/// only invited a second, later re-read to stay accurate. [`fan_out`] now
-/// reads `inference/default` exactly once, under `index_lock`, in step 9b
-/// (KR review comment 4012261302) — see [`RelockedReads`].
+/// Carries no default-marker read, and no provider row: step 8's health probe
+/// used to need the row's `base_url` here, before the network round trip, but
+/// now always probes the freshly derived `proxy_base_url` instead (Codex
+/// review — an existing row's stored endpoint can be stale, and probing it
+/// rather than the endpoint the row is about to be migrated to defeated the
+/// migration on the very call that performs it). The row itself is read once,
+/// fresh, under `index_lock` in step 9b — see [`RelockedReads`] — which is
+/// also why reading it this early only ever invited a second, later re-read
+/// to stay accurate.
 struct ReadSlots {
     composio_now: String,
     legacy_managed: bool,
-    row: Option<inference_store::Provider>,
     inference_key_key: String,
     inference_raw_new: Option<String>,
     legacy_owned: bool,
