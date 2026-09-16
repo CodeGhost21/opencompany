@@ -97,7 +97,7 @@ impl SecretStore for SlowSecrets {
 /// probe never ran at all (e.g. on a `CustomKey` skip).
 pub(super) struct FakeProber {
     answer: std::result::Result<Vec<String>, probe::ProbeClass>,
-    calls: AtomicUsize,
+    pub(super) calls: AtomicUsize,
 }
 
 impl FakeProber {
