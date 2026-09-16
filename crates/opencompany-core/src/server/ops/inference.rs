@@ -1011,7 +1011,7 @@ async fn effective_status_with(
         Some(platform) => resolve_effective(runtime.id(), &manifest, Some(platform), secrets)
             .await
             .map_err(ApiError)?
-            .map_or_else(inference::platform_base_url, |d| d.base_url),
+            .map_or_else(|| platform.base_url.clone(), |d| d.base_url),
         // No platform endpoint on this deployment: nothing to inherit, so the
         // tenant resolve already holds the whole answer and the second read is
         // skipped.

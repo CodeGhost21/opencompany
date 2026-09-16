@@ -454,7 +454,7 @@ async fn an_existing_row_migrates_to_a_changed_proxy_base_url() {
     assert_eq!(prober.last_base_url(), Some(migrated));
     assert_eq!(
         outcome(&report, Slot::Provider),
-        SlotOutcome::Kept(SkipReason::RowExists)
+        SlotOutcome::Rotated
     );
 }
 
