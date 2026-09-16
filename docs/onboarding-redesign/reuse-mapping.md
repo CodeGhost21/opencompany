@@ -80,6 +80,24 @@ implementation.
   → `addProvider(client, company, input)` → `POST …/inference/providers`
   (`api/inference.ts:538-540`). Same two dialogs, same handler, same endpoint,
   mounted inside the wizard.
+
+  **Corrected while implementing 4b-i.** Two of those sentences did not survive
+  contact:
+
+  - **`ProvidersTab` itself cannot be mounted, and must not be.** It is a
+    controlled view over `InferenceState`/`InferenceActions`, and `useInference`
+    opens with `GET {scope}/inference`, which answers `CompanyNotFound` before a
+    company exists. The two dialogs *are* mountable verbatim — neither makes a
+    request of its own on the add path — so the wizard's step owns the
+    orchestration between them instead, in the shape `submitConnect` already
+    has. `inference-connect-dialog-offline.test.ts` pins the offline claim.
+  - **The endpoint is reached at the apply, not from the step.** `POST
+    …/inference/providers` is admin-scoped to an existing company, so the step
+    stages the add's own body and the apply runs it through
+    `add_provider_inner` — the handler's whole body, split out. The two new
+    first-run routes (`POST /api/v1/setup/inference/probe` for the model list,
+    and the apply's `provider_draft` field) are the same functions behind the
+    first-run gate, not second implementations of them.
 - **Composio.** The exact Composio page's credential dialog —
   `ComposioSection.tsx`'s inline `Dialog` (`:811` on), backed by
   `useComposioCredential` (`use-composio-credential.ts:90`). Its `submit()`
