@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::error::UsedBy;
 
-/// One of the five things a single `PUT …/credential` can touch.
+/// One of the six things a single `PUT …/credential` can touch.
 ///
 /// Always reported in this order — see [`FanOutReport::slots`] — because that
 /// is also roughly the causal order: the account key lands first, its copies
@@ -22,6 +22,7 @@ use crate::error::UsedBy;
 pub enum Slot {
     Composio,
     Inference,
+    Search,
     Provider,
     Default,
     Health,
@@ -156,7 +157,7 @@ pub struct FanOutRequest<'a> {
 /// true by construction rather than by discipline.
 #[derive(Clone, Debug, Default)]
 pub struct FanOutReport {
-    /// Always in order: composio, inference, provider, default, health.
+    /// Always in order: composio, inference, search, provider, default, health.
     pub slots: Vec<SlotReport>,
     /// Whether a `tinyhumans` row could not be created or defaulted for want
     /// of a model — the console's cue to ask for one.

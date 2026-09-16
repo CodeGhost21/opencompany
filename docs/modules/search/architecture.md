@@ -164,7 +164,7 @@ else. Every branch worth a test moves into `resolve.ts`, `classify.ts` or
 is exactly the sort of conditional that rots inside a component:
 
 ```ts
-controlsFor(row)  // managed  -> []               no toggle, no remove
+controlsFor(row)  // managed  -> [replace key]     only with a company-owned key
                   // account  -> [enable, test, replace key, remove, default]
                   // searxng  -> [enable, test, edit address, remove, default]
 ```

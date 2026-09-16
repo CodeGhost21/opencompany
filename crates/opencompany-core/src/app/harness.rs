@@ -41,7 +41,7 @@ pub fn attach(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
     use crate::harness::HarnessPool;
     use crate::harness::provider::{
         PlatformCredentialStatus, harness_inference_from_env_at, media_backend_from_env,
-        search_backend_from_env,
+        search_backend_handle_from_env,
     };
 
     // Issue #879: every managed surface below fails closed and says nothing at
@@ -63,13 +63,12 @@ pub fn attach(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
         Some(media_backend) => builder.with_media_backend(media_backend),
         None => builder,
     };
-    // Issue #238: the MANAGED web-search backend, on the same platform identity
-    // as managed inference and resolved from the environment only. Absent ⇒
-    // `web_search` stays unwired even for a company that grants `search`.
-    let builder = match search_backend_from_env(&ProcessEnv) {
-        Some(search_backend) => builder.with_search_backend(search_backend),
-        None => builder,
-    };
+    // Issue #238/#2342: one process-wide MANAGED web-search handle. It may have
+    // no deployment credential: company credentials decorate clones at runtime,
+    // while neither credential still leaves `web_search` unwired. Keeping the
+    // base handle here makes its ledger shared by every harness lane and by
+    // workflow tool calls.
+    let builder = builder.with_search_backend(search_backend_handle_from_env(&ProcessEnv));
     // The managed env default is an *optional*, lowest-precedence source; a
     // BYOK-only tenant supplies none and still gets a harness brain from its
     // manifest/runtime config.

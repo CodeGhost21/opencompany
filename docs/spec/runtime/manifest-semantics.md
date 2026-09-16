@@ -224,10 +224,10 @@ each page under the 500-line cap.
     is **priced and opt-in**: granted only by an **explicit** `search` /
     `search.*` entry in `[tools].allow` (the `*` wildcard deliberately does
     **not** grant it, and unlike `media`/`composio` it is **not** in the default
-    grant list either), and it runs exclusively on the **platform
-    credential** — the same identity as keyless `openrouter`, resolved from the
-    environment, never a tenant key. The backend charges per request and reports
-    the amount, which is recorded as one `SearchCall` usage sample and rolls into
+    grant list either). Managed search uses the company's copied TinyHumans key
+    when present, then the deployment credential used by keyless `openrouter`.
+    The backend charges the identity presented per request and reports the
+    amount, which is recorded as one `SearchCall` usage sample and rolls into
     the window's cost.
     Three things differ from `media` on purpose:
     - **Individual searches do not park for approval.** Consent is the explicit

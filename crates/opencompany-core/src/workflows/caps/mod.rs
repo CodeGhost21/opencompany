@@ -269,7 +269,43 @@ pub async fn build_capabilities(
     // operator's, which is the disagreement `effective_policy` exists to prevent.
     let mode = PolicyMode::parse(&record.effective_policy().mode);
     let grants = record.manifest.tools.allow.clone();
-    let wiring = workflow_tool_wiring(&deps);
+    // The process-wide handle may intentionally be present without a
+    // deployment credential so a company key added later inherits its shared
+    // ledger. Resolve the effective credential before using presence as the
+    // workflow-wiring verdict.
+    let search_daily_call_cap = record
+        .manifest
+        .tools
+        .search_daily_calls
+        .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS);
+    let search_granted = crate::company::grants_search_explicit(&grants);
+    let managed_search = if dry_run {
+        // Dry runs install inert effect slots and deliberately never consult
+        // the secret store. Preserve the deployment wiring verdict only.
+        deps.search.clone()
+    } else if !search_granted {
+        None
+    } else {
+        match (&deps.search, &deps.secrets) {
+            (Some(backend), Some(secrets)) => {
+                let company_key =
+                    crate::company::search::load_managed_key(&company, secrets.as_ref()).await?;
+                (backend.credential.configured() || company_key.is_some()).then(|| {
+                    backend
+                        .clone()
+                        .with_daily_call_cap(search_daily_call_cap)
+                        .with_company_credential(company.clone(), secrets.clone())
+                })
+            }
+            (Some(backend), None) if backend.credential.configured() => {
+                Some(backend.clone().with_daily_call_cap(search_daily_call_cap))
+            }
+            _ => None,
+        }
+    };
+    let mut wiring_deps = deps.clone();
+    wiring_deps.search = managed_search.clone();
+    let wiring = workflow_tool_wiring(&wiring_deps);
 
     // sub_workflow-by-id resolves children from the union of the company's seed
     // `workflows/` directory and the record's runtime-authored bodies — so a
@@ -370,7 +406,7 @@ pub async fn build_capabilities(
             web_allowed_domains.clone(),
             grants,
             &deps.capabilities,
-            deps.search.as_ref(),
+            managed_search.as_ref(),
             deps.tenant_search.as_ref(),
             search_metering,
             wiring,

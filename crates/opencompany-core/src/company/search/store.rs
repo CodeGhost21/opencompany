@@ -772,8 +772,13 @@ pub async fn store_provider_key(
     Ok(())
 }
 
-/// One provider's credential, trying its own address and falling back to the
-/// legacy flat one for entry zero.
+/// One provider's credential, trying its own address and temporarily falling
+/// back to the deprecated flat one for entry zero.
+///
+/// The fallback cannot be removed until stored instances have been migrated:
+/// a company that connected Search before the provider list and never revisited
+/// the page still has its only credential there. `store_provider_key` converges
+/// it on the next write in the meantime.
 pub async fn load_provider_key(
     company: &CompanyId,
     secrets: &dyn SecretStore,

@@ -17,6 +17,7 @@ import { ModelField } from "@/inference/ModelField";
 import {
   COMPOSIO_PAGE_HREF,
   LLM_PAGE_HREF,
+  SEARCH_PAGE_HREF,
   accountFillLine,
   modelStepTitle,
   type AccountFills,
@@ -46,7 +47,7 @@ interface Props {
   error: string | null;
   /** Saves the pasted value. The page closes the dialog once the write lands. */
   onSubmit: (key: string) => void;
-  /** Which of the LLM/Composio slots this save would fill — `null` renders no line. */
+  /** Which of the LLM/Composio/Search slots this save would fill — `null` renders no line. */
   fills: AccountFills | null;
   /** Set once the host answers `needsModel` for the key just saved — the dialog then shows step two. */
   modelStep: AccountKeyModelStep | null;
@@ -68,7 +69,7 @@ interface Props {
  * Deliberately minimal (operator request, 2026-09-14): a heading, the field,
  * the "Get an API key" link, Save and Cancel, and an error only when a save
  * fails — plus, since the keys rework (issue #2306), one conditional line
- * naming the LLM/Composio slots this save would fill (Q9) and, when the host
+ * naming the LLM/Composio/Search slots this save would fill (Q9) and, when the host
  * answers `needsModel`, a second step asking for the model to finish setting
  * up TinyHumans for LLM. Still no other explanatory paragraph.
  *
@@ -77,7 +78,8 @@ interface Props {
  * `PUT …/credential`, under a per-company lock
  * (`company_key::fan_out`, slice 4a): the account key itself, and — never
  * overwriting a key set on that page's own (Q7) — its copies at
- * `composio/tinyhumans/key` and `provider/tinyhumans/key`. A `tinyhumans` row
+ * `composio/tinyhumans/key`, `provider/tinyhumans/key`, and
+ * `search/managed/key`. A `tinyhumans` row
  * is only ever created with a model (a key with no row is not "set" — see
  * `account-fill.ts`), which is what step two is for.
  *
@@ -245,6 +247,19 @@ export function AccountKeyDialog({
                         className="font-medium text-foreground underline underline-offset-4"
                       >
                         Composio page
+                      </a>
+                    )}
+                    {(fills?.llm && !fills?.llmHasModel && fills?.search) ||
+                    (fills?.composio && fills?.search)
+                      ? " · "
+                      : null}
+                    {fills?.search && (
+                      <a
+                        href={SEARCH_PAGE_HREF}
+                        data-testid="account-key-search-link"
+                        className="font-medium text-foreground underline underline-offset-4"
+                      >
+                        Search page
                       </a>
                     )}
                   </p>

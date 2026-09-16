@@ -208,11 +208,10 @@ impl SearchCallLedger {
 /// Everything the metered `web_search` tool needs: the MANAGED platform
 /// credential, the company's daily ceiling, and the shared ledger enforcing it.
 ///
-/// **Security invariant** — the credential here is the platform's own identity,
-/// resolved from the environment by the runtime builder, never a tenant BYOK
-/// key. The backend bills the platform account and derives the tenant
-/// server-side, exactly as it does for managed inference and media, so a company
-/// can never point search at a key it controls.
+/// **Security invariant** — the request presents either the company's own
+/// TinyHumans account key or the platform identity, in that order. The former
+/// is still sent only to the fixed TinyHumans managed backend and billed to the
+/// same company; it is not an arbitrary provider key or endpoint.
 ///
 /// The credential is a [`Credential`], not a `String`, so a projected/rotating
 /// platform token is read on the request path rather than flattened at build
@@ -224,8 +223,12 @@ impl SearchCallLedger {
 pub struct SearchBackend {
     /// The managed backend base URL (e.g. `https://api.tinyhumans.ai`).
     pub backend_url: String,
-    /// The MANAGED platform credential. Never a tenant key.
+    /// The deployment-level MANAGED credential, used only after the company's
+    /// own TinyHumans key is absent.
     pub credential: Credential,
+    /// Optional company-scoped tier, read live before `credential` on every
+    /// request. The secret itself is never cached in this handle.
+    company_credential: Option<(CompanyId, Arc<dyn crate::ports::SecretStore>)>,
     /// Metered searches allowed per company per UTC day. `0` disables search
     /// while leaving the grant in place.
     pub daily_call_cap: u32,
@@ -241,6 +244,7 @@ impl SearchBackend {
         Self {
             backend_url,
             credential,
+            company_credential: None,
             daily_call_cap,
             calls: SearchCallLedger::default(),
         }
@@ -258,6 +262,37 @@ impl SearchBackend {
         self.daily_call_cap = cap;
         self
     }
+
+    /// Keeps this backend's current endpoint and credential configuration but
+    /// adopts the process-lifetime call ledger from `previous`.
+    pub(crate) fn with_ledger_from(mut self, previous: &Self) -> Self {
+        self.calls = previous.calls.clone();
+        self
+    }
+
+    /// Adds the company-owned managed-search tier ahead of the deployment
+    /// credential while preserving this backend's shared daily-call ledger.
+    pub fn with_company_credential(
+        mut self,
+        company: CompanyId,
+        secrets: Arc<dyn crate::ports::SecretStore>,
+    ) -> Self {
+        self.company_credential = Some((company, secrets));
+        self
+    }
+
+    /// Resolves the bearer on the request path: company key first, deployment
+    /// identity last. A store failure propagates rather than silently charging
+    /// a different account.
+    async fn current_credential(&self) -> crate::Result<Option<String>> {
+        if let Some((company, secrets)) = &self.company_credential
+            && let Some(key) =
+                crate::company::search::load_managed_key(company, secrets.as_ref()).await?
+        {
+            return Ok(Some(key));
+        }
+        self.credential.current().await
+    }
 }
 
 impl std::fmt::Debug for SearchBackend {
@@ -267,7 +302,7 @@ impl std::fmt::Debug for SearchBackend {
             .field("backend_url", &self.backend_url)
             .field(
                 "credential",
-                &if self.credential.configured() {
+                &if self.company_credential.is_some() || self.credential.configured() {
                     "<redacted>"
                 } else {
                     "<unset>"
@@ -460,7 +495,7 @@ impl Tool for WebSearchTool {
         // 2. Resolve the managed bearer NOW, not at build time, so a rotated
         //    platform token authenticates without a roster rebuild (the
         //    `composio::live_call` precedent).
-        let token = match self.backend.credential.current().await {
+        let token = match self.backend.current_credential().await {
             Ok(Some(token)) => token,
             Ok(None) => {
                 self.backend.calls.refund(company, now);
@@ -706,6 +741,40 @@ fn render_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::SecretStore;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemSecrets(Mutex<HashMap<String, String>>);
+
+    #[async_trait]
+    impl crate::ports::SecretStore for MemSecrets {
+        async fn get(
+            &self,
+            _company: &CompanyId,
+            key: &str,
+        ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
+                .map(crate::ports::types::SecretValue))
+        }
+
+        async fn set(
+            &self,
+            _company: &CompanyId,
+            key: &str,
+            value: crate::ports::types::SecretValue,
+        ) -> crate::Result<()> {
+            self.0.lock().unwrap().insert(key.to_string(), value.0);
+            Ok(())
+        }
+    }
 
     fn item(
         title: &str,
@@ -719,6 +788,35 @@ mod tests {
             publish_date: published.map(str::to_string),
             excerpts: excerpt.map(str::to_string).into_iter().collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn company_managed_key_is_read_live_before_the_deployment_fallback() {
+        let company = CompanyId::new("acme");
+        let secrets = Arc::new(MemSecrets::default());
+        let backend = SearchBackend::new(
+            "https://api.tinyhumans.ai".to_string(),
+            Credential::from_value("deployment-key"),
+            10,
+        )
+        .with_company_credential(company.clone(), secrets.clone());
+
+        assert_eq!(
+            backend.current_credential().await.unwrap().as_deref(),
+            Some("deployment-key")
+        );
+        secrets
+            .set(
+                &company,
+                crate::company::search::MANAGED_KEY_SECRET,
+                crate::ports::types::SecretValue("company-key".to_string()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.current_credential().await.unwrap().as_deref(),
+            Some("company-key")
+        );
     }
 
     // --- the daily cap -----------------------------------------------------

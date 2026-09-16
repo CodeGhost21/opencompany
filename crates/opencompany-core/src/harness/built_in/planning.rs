@@ -1308,8 +1308,21 @@ async fn gather_evidence(
                 // used to build the roster. Ask the live store the same way
                 // `HarnessPool::resolve_tenant_search` does, so this evidence and
                 // the belt a freshly-dispatched agent actually gets agree.
-                let search_backend_configured = deps.search.is_some()
-                    || (crate::company::grants_search_explicit(&allow)
+                let search_granted = crate::company::grants_search_explicit(&allow);
+                let managed_search_configured = deps
+                    .search
+                    .as_ref()
+                    .is_some_and(|backend| backend.credential.configured())
+                    || (search_granted
+                        && deps.search.is_some()
+                        && crate::company::search::load_managed_key(
+                            runtime.id(),
+                            runtime.secrets().as_ref(),
+                        )
+                        .await
+                        .map(|key| key.is_some())?);
+                let search_backend_configured = managed_search_configured
+                    || (search_granted
                         && match crate::harness::search_byo::TenantSearch::resolve(
                             runtime.secrets(),
                             runtime.id(),

@@ -141,8 +141,12 @@ pub struct SearchStatus {
     pub granted: bool,
     /// Whether this build has the agent search tools compiled in at all.
     pub in_build: bool,
-    /// Whether the platform's own managed search credential resolves on this
-    /// deployment.
+    /// Whether managed search resolves from this company's copied TinyHumans
+    /// key or the deployment fallback.
+    ///
+    /// The company key bills the company's TinyHumans account. The deployment
+    /// fallback instead bills the account of whoever runs this server; the
+    /// per-company daily cap applies to both tiers.
     ///
     /// The Managed row is rendered from this rather than from a permanent
     /// "Always on" badge. Managed search is always the *fallback*, which is a
@@ -151,6 +155,9 @@ pub struct SearchStatus {
     /// that badge would be the one claim on this page an operator most needs to
     /// be true.
     pub managed_configured: bool,
+    /// Whether the managed credential belongs to this company rather than the
+    /// deployment fallback. This is what makes the Managed row editable.
+    pub managed_key_configured: bool,
     /// The company's daily managed-search ceiling.
     pub managed_daily_call_cap: u32,
     /// The providers a company can connect.
@@ -228,8 +235,8 @@ async fn write_all(runtime: &CompanyRuntime, writes: &[(&str, String)]) -> Resul
     Ok(())
 }
 
-/// Whether the platform's own managed search credential resolves here.
-fn managed_configured() -> bool {
+/// Whether the deployment fallback for managed search resolves here.
+fn deployment_managed_configured() -> bool {
     #[cfg(feature = "openhuman")]
     {
         use crate::app::config::ProcessEnv;
@@ -301,6 +308,10 @@ async fn status_of(runtime: &CompanyRuntime) -> Result<SearchStatus, ApiError> {
         .as_ref()
         .and_then(|record| record.manifest.tools.search_daily_calls)
         .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS);
+    let managed_key_configured =
+        crate::company::search::load_managed_key(runtime.id(), runtime.secrets().as_ref())
+            .await?
+            .is_some();
 
     let candidates =
         crate::company::search::candidates(runtime.id(), runtime.secrets().as_ref()).await?;
@@ -352,7 +363,8 @@ async fn status_of(runtime: &CompanyRuntime) -> Result<SearchStatus, ApiError> {
         needs_endpoint,
         granted,
         in_build: cfg!(feature = "openhuman"),
-        managed_configured: managed_configured(),
+        managed_configured: managed_key_configured || deployment_managed_configured(),
+        managed_key_configured,
         managed_daily_call_cap,
         supported_providers: SUPPORTED_PROVIDERS
             .iter()
@@ -862,11 +874,35 @@ async fn replace_key(
 ) -> Result<Json<SearchStatus>, ApiError> {
     let runtime = &company.runtime;
     let slug = slug.trim().to_ascii_lowercase();
+    let key = supplied(body.api_key.as_deref()).unwrap_or_default();
+    if slug == MANAGED_PROVIDER {
+        let _guard = crate::company::company_key::slot_guard(runtime.id()).await;
+        if key.is_empty() && !body.confirm_in_use {
+            let current = status_of(runtime).await?;
+            if current.effective_provider == MANAGED_PROVIDER && current.managed_key_configured {
+                return Err(ApiError(OpenCompanyError::InUse {
+                    message: "Managed Search is active for this company.".to_string(),
+                    used_by: UsedBy {
+                        default: true,
+                        ..Default::default()
+                    },
+                }));
+            }
+        }
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                crate::company::search::MANAGED_KEY_SECRET,
+                SecretValue(key),
+            )
+            .await?;
+        return Ok(Json(status_of(runtime).await?));
+    }
     let info = catalogue_entry(&slug)?;
     if !info.needs_key() {
         return Err(invalid(format!("{} does not take an API key", info.label)));
     }
-    let key = supplied(body.api_key.as_deref()).unwrap_or_default();
     // Only a clear is guarded (in-use-guards.md §1/§6): a clear is
     // functionally equivalent to disabling the row from a dependent's point
     // of view — a key-less row cannot serve the default — while a rotate
@@ -1297,6 +1333,41 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use serde_json::{Value, json};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn managed_company_key_can_be_replaced_without_becoming_a_provider_row() {
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path(), true).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/managed/key",
+            &admin,
+            Some(json!({"apiKey": "th-company-search-key"})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["managedConfigured"], true, "{body}");
+        assert_eq!(body["managedKeyConfigured"], true, "{body}");
+        assert_eq!(body["providers"], json!([]), "{body}");
+        assert!(!body.to_string().contains("th-company-search-key"));
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/managed/key",
+            &admin,
+            Some(json!({"apiKey": "", "confirmInUse": true})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["managedKeyConfigured"], false, "{body}");
+        assert_eq!(body["providers"], json!([]), "{body}");
+    }
 
     use crate::ports::types::CompanyId;
 

@@ -22,14 +22,16 @@
 import type { CompanyCredentialStatus } from "@/api/credential";
 import { connectionsHref } from "@/views/connection-pages";
 
-/** Where the two conditional links in the dialog's fill line go. */
+/** Where the conditional links in the dialog's fill line go. */
 export const LLM_PAGE_HREF = connectionsHref("inference");
 export const COMPOSIO_PAGE_HREF = connectionsHref("composio");
+export const SEARCH_PAGE_HREF = connectionsHref("search");
 
 /** Which of the two derived slots a save would actually fill. */
 export interface AccountFills {
   llm: boolean;
   composio: boolean;
+  search: boolean;
   /**
    * Whether the `tinyhumans` row `llm` would fill already has a model of its
    * own — `false` on a host that has not landed `inferenceHasModel` yet,
@@ -48,13 +50,15 @@ export interface AccountFills {
 export function accountFills(status: CompanyCredentialStatus | null): AccountFills | null {
   if (
     typeof status?.inferenceHasOwnKey !== "boolean" ||
-    typeof status?.composioHasOwnKey !== "boolean"
+    typeof status?.composioHasOwnKey !== "boolean" ||
+    typeof status?.searchHasOwnKey !== "boolean"
   ) {
     return null;
   }
   return {
     llm: !status.inferenceHasOwnKey,
     composio: !status.composioHasOwnKey,
+    search: !status.searchHasOwnKey,
     llmHasModel: status.inferenceHasModel === true,
   };
 }
@@ -79,13 +83,25 @@ export function accountFillLine(fills: AccountFills | null): string | null {
   if (!fills) return null;
   const llm = fills.llm && !fills.llmHasModel;
   if (llm && fills.composio) {
+    if (fills.search) {
+      return "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — connects it for Composio, and uses it as this company's managed Search credential.";
+    }
     return "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and connects it for Composio.";
   }
   if (llm) {
+    if (fills.search) {
+      return "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and uses it as this company's managed Search credential.";
+    }
     return "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next.";
+  }
+  if (fills.composio && fills.search) {
+    return "Saving also connects TinyHumans for Composio and uses this key as the company's managed Search credential.";
   }
   if (fills.composio) {
     return "Saving also connects TinyHumans for Composio.";
+  }
+  if (fills.search) {
+    return "Saving also uses this key as the company's managed Search credential.";
   }
   return null;
 }

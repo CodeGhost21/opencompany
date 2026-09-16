@@ -128,11 +128,15 @@ struct CapabilityStatusDto {
     /// `openhuman` harness feature deliberately, so CI's gated lane compiles and
     /// tests it rather than a real-money surface shipping untested.
     search_in_build: bool,
-    /// Whether a MANAGED search credential is resolvable from the environment on
-    /// this build. Never reflects a tenant secret: it answers "can this
-    /// deployment search on the platform's account", which is a different
-    /// question from [`search_provider`](Self::search_provider) below.
-    search_credential_configured: bool,
+    /// Whether a MANAGED search credential resolves for this company, either
+    /// from its copied TinyHumans key or the deployment fallback. Omitted when
+    /// the company tier cannot be read and no deployment fallback establishes
+    /// a definitive `true` verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_credential_configured: Option<bool>,
+    /// The effective managed Search owner: company first, then deployment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_credential_source: Option<CredentialSource>,
     /// The provider this company's searches actually go to — `managed`, or the
     /// slug it configured in Settings → Search and finished configuring.
     ///
@@ -260,6 +264,8 @@ struct OptInFlags {
     /// below exists to catch.
     composio_credential_source: Option<CredentialSource>,
     search_granted: bool,
+    search_credential_configured: Option<bool>,
+    search_credential_source: Option<CredentialSource>,
     search_daily_call_cap: u32,
     search_provider: String,
     /// Issue #1192. Carried on the flags rather than derived per DTO site for
@@ -295,6 +301,8 @@ impl OptInFlags {
             // not the same answer as "no credential resolves".
             composio_credential_source: None,
             search_granted: false,
+            search_credential_configured: Some(search_deployment_credential_configured()),
+            search_credential_source: None,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             search_provider: crate::company::search::MANAGED_PROVIDER.to_string(),
             publish_granted: false,
@@ -324,7 +332,8 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         composio_credential_source: flags.composio_credential_source,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
-        search_credential_configured: search_credential_configured(),
+        search_credential_configured: flags.search_credential_configured,
+        search_credential_source: flags.search_credential_source,
         search_daily_call_cap: flags.search_daily_call_cap,
         search_provider: flags.search_provider.clone(),
         publish_granted: flags.publish_granted,
@@ -386,11 +395,8 @@ async fn composio_credential_source(
     }
 }
 
-/// Whether a MANAGED search credential (issue #238) is resolvable from the
-/// environment on this build. Env-only, never a tenant secret, matching the
-/// harness's fail-closed resolution. Off the harness feature this is always
-/// `false` — there is no agent to search with.
-fn search_credential_configured() -> bool {
+/// Whether the deployment-level MANAGED search fallback is available.
+fn search_deployment_credential_configured() -> bool {
     #[cfg(feature = "openhuman")]
     {
         use crate::app::config::ProcessEnv;
@@ -399,6 +405,38 @@ fn search_credential_configured() -> bool {
     #[cfg(not(feature = "openhuman"))]
     {
         false
+    }
+}
+
+/// Whether MANAGED search can resolve for this company through the same two
+/// tiers as the request path: its copied TinyHumans key first, then the
+/// deployment credential. Off the harness feature there is no search tool.
+async fn search_credential_source(runtime: &CompanyRuntime) -> Option<CredentialSource> {
+    #[cfg(feature = "openhuman")]
+    {
+        match crate::company::search::load_managed_key(runtime.id(), runtime.secrets().as_ref())
+            .await
+        {
+            Ok(Some(_)) => Some(CredentialSource::Company),
+            Ok(None) => Some(
+                crate::company::TinyhumansTokenSource::from_env(&crate::app::config::ProcessEnv)
+                    .map(|source| source.credential_source())
+                    .unwrap_or(CredentialSource::None),
+            ),
+            Err(err) => {
+                tracing::warn!(
+                    company = %runtime.id(),
+                    error = %err,
+                    "[capabilities] could not resolve the managed Search credential tier; omitting its source and configured verdict"
+                );
+                None
+            }
+        }
+    }
+    #[cfg(not(feature = "openhuman"))]
+    {
+        let _ = runtime;
+        Some(CredentialSource::None)
     }
 }
 
@@ -463,6 +501,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
     };
     // Media + composio are opt-in per tool grant (explicit namespace, never `*`)
     // and live on the manifest regardless of whether a `[plan]` is configured.
+    let search_credential_source = search_credential_source(runtime).await;
     let flags = OptInFlags {
         cognition,
         media_granted: crate::company::grants_media_explicit(&record.manifest.tools.allow),
@@ -499,6 +538,9 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         // ceiling, not a token budget — so both travel with the plan-independent
         // flags.
         search_granted: crate::company::grants_search_explicit(&record.manifest.tools.allow),
+        search_credential_source,
+        search_credential_configured: search_credential_source
+            .map(|source| source != CredentialSource::None),
         search_daily_call_cap: record
             .manifest
             .tools
@@ -579,7 +621,8 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         composio_credential_source: flags.composio_credential_source,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
-        search_credential_configured: search_credential_configured(),
+        search_credential_configured: flags.search_credential_configured,
+        search_credential_source: flags.search_credential_source,
         search_daily_call_cap: flags.search_daily_call_cap,
         search_provider: flags.search_provider.clone(),
         publish_granted: flags.publish_granted,
@@ -1072,6 +1115,62 @@ mod tests {
             crate::company::DEFAULT_SEARCH_DAILY_CALLS,
             "an unset cap reports the built-in default: {dto2}"
         );
+    }
+
+    /// The capability card asks the same question as the request path: a
+    /// company-owned managed key is sufficient even when this test process has
+    /// no deployment search credential.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn reports_company_managed_search_key_as_configured() {
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"search\"]\n",
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        state
+            .registry()
+            .get(&company)
+            .unwrap()
+            .secrets()
+            .set(
+                &company,
+                crate::company::search::MANAGED_KEY_SECRET,
+                crate::ports::types::SecretValue("company-search-key".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["searchCredentialConfigured"], true, "{dto}");
+    }
+
+    /// A secret-store outage is neither "no credential" nor a reason to lose
+    /// the endpoint's unrelated budget and grant data.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn omits_managed_search_verdict_when_the_secret_store_is_unreadable() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let manifest_toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"search\"]\n";
+        let state = state_with_manifest(&home, manifest_toml).await;
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_secrets(std::sync::Arc::new(BrokenSecrets))
+            .build()
+            .await
+            .unwrap();
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+
+        let (status, dto) = get_capabilities(&state).await;
+        assert_eq!(status, StatusCode::OK, "{dto}");
+        assert_eq!(dto["searchGranted"], true, "{dto}");
+        assert!(dto.get("searchCredentialConfigured").is_none(), "{dto}");
     }
 
     /// Issue #567: the MCP bridge's build state travels on every response, with

@@ -813,6 +813,32 @@ impl CompanyRuntime {
             )
             .await;
         }
+        // `attach_harness` deliberately keeps an uncredentialed base Search
+        // handle alive so a company key added later can share its ledger. The
+        // handle's presence alone is therefore not proof that `web_search` is
+        // usable. Resolve the effective company-or-deployment credential before
+        // advertising workflow wiring.
+        if resolved
+            .search
+            .as_ref()
+            .is_some_and(|backend| !backend.credential.configured())
+        {
+            match crate::company::search::load_managed_key(&company.id, self.secrets().as_ref())
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => resolved.search = None,
+                Err(err) => {
+                    tracing::warn!(
+                        company = %company.id,
+                        "[search] could not read the managed company credential while resolving workflow wiring: {err}"
+                    );
+                    // Unknown is not unconfigured. Keep the base handle in the
+                    // wiring verdict so callers do not misreport a transient
+                    // secret-store outage as missing configuration.
+                }
+            }
+        }
         Some(crate::workflows::caps::workflow_tool_wiring(&resolved))
     }
 
@@ -8883,6 +8909,47 @@ mod tests {
             "a wired namespace carries no reason: {:?}",
             wiring.missing
         );
+    }
+
+    /// An uncredentialed process-wide Search handle exists so a company key
+    /// added later can reuse its ledger. Presence is not availability: without
+    /// either credential, workflow grounding must still report Search unwired.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_rejects_an_uncredentialed_search_handle() {
+        let (mut runtime, mut record, _home) = runtime_and_record().await;
+        record.manifest.tools.allow.push("search".to_string());
+        let mut deps = wiring_deps(
+            &runtime,
+            None,
+            crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            None,
+        );
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.tinyhumans.ai".to_string(),
+            crate::company::credentials::Credential::None,
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        deps.secrets = Some(runtime.secrets().clone());
+        runtime.set_workflow_harness_deps(deps);
+
+        let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
+        assert_eq!(
+            wiring.missing.get("search").copied(),
+            Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured)
+        );
+
+        runtime
+            .secrets()
+            .set(
+                &record.id,
+                crate::company::search::MANAGED_KEY_SECRET,
+                crate::ports::types::SecretValue("company-search-key".to_string()),
+            )
+            .await
+            .expect("store company Search key");
+        let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
+        assert!(wiring.wired_namespaces.contains("search"));
     }
 
     /// Issue #874, the staging repro at the layer the route reads: a company that
