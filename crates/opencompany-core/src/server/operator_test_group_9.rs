@@ -1,6 +1,8 @@
 use super::*;
 use crate::server::router;
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
+#[cfg(not(feature = "openhuman"))]
+use axum::body::to_bytes;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
