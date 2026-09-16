@@ -1152,7 +1152,12 @@ async fn connect_drafted_provider(
     .await
     {
         Ok(mutation) => Ok(Some(mutation.note)),
-        Err(ApiError(err @ OpenCompanyError::InvalidRequest(_))) => Ok(Some(err.to_string())),
+        // The refusal's own sentence, without the envelope's `invalid request: `
+        // prefix. That prefix says which *kind* of error this is to a caller
+        // that might branch on it, and says nothing at all to the operator
+        // reading this line on the completion screen — where, unlike an error
+        // response, nothing downstream strips it.
+        Err(ApiError(OpenCompanyError::InvalidRequest(message))) => Ok(Some(message)),
         Err(ApiError(err)) => Err(err),
     }
 }
