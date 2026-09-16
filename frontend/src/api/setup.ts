@@ -12,6 +12,7 @@
 // consistent with the file the whole surface exists to write.
 
 import type { OpenCompanyClient } from "./client";
+import type { AddProviderInput, ProbeResult } from "./inference";
 import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
 
 /** Which precedence layer supplied a field's current value. */
@@ -210,6 +211,26 @@ export function testInference(
 }
 
 /**
+ * Read a drafted endpoint's model catalogue before a company exists.
+ *
+ * The same probe `POST {scope}/inference/probe` runs, reached through the
+ * first-run gate rather than through the company admin one — the add-provider
+ * sequence mounted in the wizard needs the endpoint's own list to offer, and
+ * there is no company to scope the read to yet.
+ *
+ * Not {@link testInference}: that answers with one model rather than the list
+ * the model step is made of, and it falls back to the host's own injected
+ * credential when the key is blank — which would report a pass for a key this
+ * operator never gave.
+ */
+export function probeSetupDraft(
+  client: OpenCompanyClient,
+  body: { baseUrl: string; key?: string; kind?: string },
+): Promise<ProbeResult> {
+  return client.post<ProbeResult>("/api/v1/setup/inference/probe", body);
+}
+
+/**
  * A completed wizard.
  *
  * A `null` field value clears the key, letting the next precedence layer supply
@@ -276,6 +297,21 @@ export interface SetupInput {
    * unmade.
    */
   tinyhumans_model?: string | null;
+  /**
+   * The provider the self-managed branch connected, added to the company this
+   * call seeds.
+   *
+   * The **same body** `POST …/inference/providers` takes — so the wizard's
+   * provider is created by the same host function the LLM page's add runs,
+   * with its slot guard, its first-provider default, its rollback pair and its
+   * auto-route, rather than by a wizard-only write that would land the row
+   * without any of them.
+   *
+   * Carried on the apply rather than sent from the step that collected it,
+   * because that route is admin-scoped to an existing company and first run
+   * has neither.
+   */
+  provider_draft?: AddProviderInput | null;
 }
 
 /** The company the wizard designed, as the review step hands it over. */
@@ -443,6 +479,16 @@ export interface SetupApplied {
    * would be the one thing this step exists to stop doing.
    */
   credential_note?: string | null;
+  /**
+   * What connecting the self-managed branch's provider did, in the host's own
+   * words — the same sentence the LLM page's add toast carries.
+   *
+   * Absent when no provider was drafted, and absent on a host predating the
+   * field. Carries the refusal too: the company is built by the time the add
+   * runs, so an endpoint that stopped answering is said rather than turned
+   * into a failed setup.
+   */
+  provider_note?: string | null;
 }
 
 /** Read this instance's setup state. */
