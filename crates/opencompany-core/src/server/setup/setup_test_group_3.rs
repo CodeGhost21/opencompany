@@ -2,8 +2,8 @@
 use crate::app::config::MapEnv;
 use crate::ports::types::CompanyId;
 use axum::http::StatusCode;
+#[cfg(feature = "openhuman")]
 use std::sync::Arc;
-use tower::ServiceExt;
 
 use super::setup_test_support_1::*;
 
