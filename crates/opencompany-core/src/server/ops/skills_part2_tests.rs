@@ -301,7 +301,7 @@ mod http {
     async fn a_global_can_be_disabled_and_re_enabled_through_the_put_route() {
         let home = tempfile::tempdir().unwrap();
         let state = state_with_company(home.path()).await;
-        let slug = super::tests::global_slug();
+        let slug = super::tests_skill_md_frontmatter_resists::global_slug();
 
         let listed = |state: &AppState, slug: String| {
             let state = state.clone();
