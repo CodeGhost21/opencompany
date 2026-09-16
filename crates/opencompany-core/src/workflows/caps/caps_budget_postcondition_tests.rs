@@ -187,7 +187,7 @@ async fn a_spend_halted_turn_skips_the_judge_and_settles_failed() {
 /// A [`RunTurn`] that always answers with a scripted outcome — standing in
 /// for an ACP-backed harness whose turn stopped abnormally, without
 /// needing a real ACP subprocess to produce one.
-struct ScriptedTurn(crate::harness::TurnOutcome);
+pub(super) struct ScriptedTurn(pub(super) crate::harness::TurnOutcome);
 
 #[async_trait]
 impl RunTurn for ScriptedTurn {
