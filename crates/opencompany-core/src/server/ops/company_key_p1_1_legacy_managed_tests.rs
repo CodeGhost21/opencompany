@@ -427,14 +427,14 @@ async fn status_never_carries_a_key_when_reporting_own_key_facts() {
 // ---------------------------------------------------------------------------
 
 /// The key the mock hub mints when a grant is redeemed.
-const GRANTED_KEY: &str = "tiny_live_granted_by_the_hub_do_not_echo_me";
+pub(super) const GRANTED_KEY: &str = "tiny_live_granted_by_the_hub_do_not_echo_me";
 
 /// A state with a hub that will mint `GRANTED_KEY` for the right verifier.
 ///
 /// The verifier is not known until the host mints one, so the exchange is
 /// seeded *after* `start` — which is also the only way to assert that the host
 /// sends the challenge for the verifier it actually kept.
-async fn state_with_hub(home: &std::path::Path, company: &str) -> AppState {
+pub(super) async fn state_with_hub(home: &std::path::Path, company: &str) -> AppState {
     state_with_manifest(home, company, GRANTED)
         .await
         .with_hub_identity(std::sync::Arc::new(
