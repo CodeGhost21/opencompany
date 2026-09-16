@@ -1,10 +1,10 @@
-// Shared fixtures and helpers for the `team_agent` test files split out of
-// the original single inline `#[cfg(test)] mod tests { ... }` module. Every
-// item here was duplicated verbatim across the split siblings (or used
-// unqualified from a sibling that never defined it); this file is the one
-// copy they all import from now. Included via `include!` from `team_agent.rs`
-// (rather than `#[path]`) because a `#[path]`-loaded module here failed to
-// resolve for sibling `use super::team_agent_test_support::*;` imports.
+//! Shared fixtures and helpers for the `team_agent` test files split out of
+//! the original single inline `#[cfg(test)] mod tests { ... }` module. Every
+//! item here was duplicated verbatim across the split siblings (or used
+//! unqualified from a sibling that never defined it); this file is the one
+//! copy they all import from now. Included via `include!` from `team_agent.rs`
+//! (rather than `#[path]`) because a `#[path]`-loaded module here failed to
+//! resolve for sibling `use super::team_agent_test_support::*;` imports.
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
