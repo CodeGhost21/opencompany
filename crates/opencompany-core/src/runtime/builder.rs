@@ -25,10 +25,7 @@ use crate::brain::{EchoBrain, HostedMedullaBrain};
 // pure/read-only helpers that must build in the default feature set, even
 // though every other use of this module in this file sits behind
 // `openhuman`. `EnvDefault` stays gated: it is only ever named inside the
-// `openhuman`-only harness-brain wiring, so importing it unconditionally
-// would be an unused-import warning with `openhuman` off.
 use crate::company::inference;
-#[cfg(feature = "openhuman")]
 use crate::company::inference::EnvDefault;
 use crate::company::runtime::{CompanyMail, CompanyRuntime, OpsStores};
 use crate::company::{CompanyManifest, GroupChat, Policy, Tools};
