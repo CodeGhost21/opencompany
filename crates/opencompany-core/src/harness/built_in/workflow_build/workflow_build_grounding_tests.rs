@@ -22,6 +22,7 @@ use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
 use super::workflow_build_fixtures_tests::*;
+use super::workflow_build_shared_tests::*;
 
 // ---------------------------------------------------------------------------
 // Grounding & gates (issue #813) — unit tier over the pure helpers
