@@ -3910,13 +3910,13 @@ impl HarnessPool {
             (Some(backend), Some(_)) => backend.clone(),
             (Some(backend), None) if backend.credential.configured() => backend.clone(),
             (Some(_), None) => return None,
-            (None, Some(_)) => match self
-                .managed_search_backends
-                .read()
-                .await
-                .get(&company.id)
-                .cloned()
-            {
+            (None, Some(_)) => match {
+                // Drop the read guard before the vacant branch takes the write
+                // lock; keeping the temporary guard alive across the match
+                // would deadlock the first company-only resolution.
+                let backends = self.managed_search_backends.read().await;
+                backends.get(&company.id).cloned()
+            } {
                 Some(backend) => backend,
                 None => {
                     use crate::app::config::ProcessEnv;
