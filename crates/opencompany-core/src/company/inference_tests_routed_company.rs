@@ -1,8 +1,8 @@
 //! Routed-managed-company tests: a routed managed company is a
 //! configured company (split out of `inference_tests.rs`).
 
-use super::*;
 use super::inference_tests_support::*;
+use super::*;
 
 // ---- a routed-managed company is a configured company ---------------------
 //

@@ -2,8 +2,8 @@
 //! row's honest state, and how the provider list reaches the resolver
 //! (split out of `inference_tests.rs`).
 
-use super::*;
 use super::inference_tests_support::*;
+use super::*;
 
 // ---- the managed credential chain (issue #2266) -------------------------
 //
@@ -387,4 +387,3 @@ async fn nothing_configured_still_resolves_to_nothing() {
             .is_none()
     );
 }
-

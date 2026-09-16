@@ -2,8 +2,8 @@
 //! manifest, secret store and legacy sources (split out of
 //! `inference_tests.rs`).
 
-use super::*;
 use super::inference_tests_support::*;
+use super::*;
 
 // ---- precedence matrix -------------------------------------------------
 
@@ -490,4 +490,3 @@ async fn clearing_runtime_reverts_to_manifest() {
         "openrouter"
     );
 }
-

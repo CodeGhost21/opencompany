@@ -1,8 +1,8 @@
 //! Write-only-key, validation and first-run-probe tests (split out of
 //! `inference_tests.rs`).
 
-use super::*;
 use super::inference_tests_support::*;
+use super::*;
 
 // ---- write-only key ----------------------------------------------------
 
@@ -245,11 +245,10 @@ async fn the_default_harness_reads_the_legacy_flat_keys() {
     assert_eq!(scope.key_key(), KEY_KEY);
     assert_eq!(scope.config_key(), RUNTIME_CONFIG_KEY);
 
-    let decl =
-        resolve_effective_scoped(&company, &Inference::default(), None, &secrets, &scope)
-            .await
-            .unwrap()
-            .expect("the legacy config resolves");
+    let decl = resolve_effective_scoped(&company, &Inference::default(), None, &secrets, &scope)
+        .await
+        .unwrap()
+        .expect("the legacy config resolves");
     assert_eq!(decl.source, InferenceSource::Runtime);
     assert_eq!(bearer(&decl).await.as_deref(), Some("legacy-key"));
 
@@ -430,8 +429,7 @@ async fn managed_probe_without_env_default_reports_the_platform_endpoint() {
 /// the managed diversion must not over-correct them.
 #[tokio::test]
 async fn other_provider_probes_still_honour_the_form_endpoint_and_key() {
-    let openrouter =
-        decl_for_probe("openrouter", Some("https://proxy/v1"), Some("or-key"), None);
+    let openrouter = decl_for_probe("openrouter", Some("https://proxy/v1"), Some("or-key"), None);
     assert_eq!(openrouter.base_url, "https://proxy/v1");
     assert!(!openrouter.is_proxied());
     assert_eq!(bearer(&openrouter).await.as_deref(), Some("or-key"));
@@ -466,4 +464,3 @@ async fn keyless_openrouter_override_probe_stays_direct_and_keyless() {
     assert!(!decl.is_proxied());
     assert_eq!(bearer(&decl).await, None);
 }
-

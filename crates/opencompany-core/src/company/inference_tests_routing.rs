@@ -1,8 +1,8 @@
 //! Routing-table tests: how the routing table actually reaches the
 //! resolver (split out of `inference_tests.rs`).
 
-use super::*;
 use super::inference_tests_support::*;
+use super::*;
 
 // ---- the routing table actually reaches the resolver ---------------------
 //
@@ -313,11 +313,10 @@ async fn a_named_harness_that_configured_itself_outranks_the_company_provider_li
     // A named harness that declared `[harness.inference]` of its own does
     // not. It resolves through what it declared.
     let own = HarnessScope::named("deep").declaring_own_inference(true);
-    let mine =
-        resolve_effective_scoped(&company, &inference("openrouter"), None, &secrets, &own)
-            .await
-            .unwrap()
-            .expect("a harness with its own section resolves through it");
+    let mine = resolve_effective_scoped(&company, &inference("openrouter"), None, &secrets, &own)
+        .await
+        .unwrap()
+        .expect("a harness with its own section resolves through it");
     assert_ne!(
         mine.base_url, "https://first.example/v1",
         "the company's connected provider must not outrank this harness's own section"
@@ -718,4 +717,3 @@ async fn coding_reads_the_agentic_route_rather_than_one_of_its_own() {
     .unwrap();
     assert_eq!(decl.base_url, "https://second.example/v1");
 }
-
