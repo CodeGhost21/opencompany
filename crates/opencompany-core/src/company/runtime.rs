@@ -8936,6 +8936,18 @@ mod tests {
             wiring.missing.get("search").copied(),
             Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured)
         );
+
+        runtime
+            .secrets()
+            .set(
+                &record.id,
+                crate::company::search::MANAGED_KEY_SECRET,
+                crate::ports::types::SecretValue("company-search-key".to_string()),
+            )
+            .await
+            .expect("store company Search key");
+        let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
+        assert!(wiring.wired_namespaces.contains("search"));
     }
 
     /// Issue #874, the staging repro at the layer the route reads: a company that
