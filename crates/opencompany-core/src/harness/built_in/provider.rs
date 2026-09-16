@@ -163,7 +163,8 @@ pub trait HarnessModel: ChatModel<()> {
 ///   source ([`TinyhumansTokenSource::from_env`]: a projected `TINYHUMANS_TOKEN_FILE`
 ///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`**, and
 ///   the runtime keeps its offline echo brain.
-/// * url — `OPENCOMPANY_INFERENCE_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
+/// * url — `OPENCOMPANY_INFERENCE_URL`, else the TinyHumans proxy derived from
+///   `TINYHUMANS_API_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
 /// * model — `OPENCOMPANY_INFERENCE_MODEL`, else [`DEFAULT_HOSTED_MODEL`].
 ///
 /// `OPENCOMPANY_INFERENCE_KEY` is checked first because it is a *different*
@@ -230,9 +231,13 @@ pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credentia
         Some(key) => Credential::from_value(key),
         None => Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?)),
     };
-    let base_url = env
-        .get("OPENCOMPANY_INFERENCE_URL")
-        .unwrap_or_else(inference::platform_base_url);
+    let base_url = env.get("OPENCOMPANY_INFERENCE_URL").unwrap_or_else(|| {
+        crate::company::inference::catalogue::tinyhumans_proxy_url(
+            &crate::company::composio::backend_url_or_default(
+                env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
+            ),
+        )
+    });
     Some((credential, base_url))
 }
 
@@ -2655,6 +2660,22 @@ mod tests {
         assert_eq!(bearer_of(&cfg).await.as_deref(), Some("sk-platform"));
         assert_eq!(cfg.base_url, "https://staging-api.tinyhumans.ai/openai/v1");
         assert_eq!(model.as_deref(), Some("reasoning-v1"));
+    }
+
+    #[tokio::test]
+    async fn env_config_derives_the_inference_proxy_from_the_platform_api_url() {
+        let env = MapEnv::new([
+            ("TINYHUMANS_API_KEY", "sk-platform"),
+            (
+                crate::company::composio::TINYHUMANS_API_URL_ENV,
+                "https://staging-api.tinyhumans.ai/",
+            ),
+        ]);
+        let (cfg, _) = harness_inference_from_env(&env).expect("configured");
+        assert_eq!(
+            cfg.base_url,
+            "https://staging-api.tinyhumans.ai/agent-integrations/openrouter"
+        );
     }
 
     #[test]
