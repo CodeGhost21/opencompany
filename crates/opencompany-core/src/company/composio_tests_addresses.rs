@@ -2,7 +2,7 @@
 //! the pinned storage addresses, and which of the legacy/new addresses
 //! wins on read (split out of `composio_tests.rs`).
 
-use super::tests_pins::MemSecrets;
+use super::tests_pins::{MemSecrets, raw};
 use super::*;
 
 #[test]
