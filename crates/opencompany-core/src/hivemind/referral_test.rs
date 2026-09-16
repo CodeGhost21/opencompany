@@ -2035,3 +2035,99 @@ async fn the_asker_is_handed_the_exchange_it_just_had_and_nothing_older() {
         "but not every other exchange this pair has ever had: {continuation}"
     );
 }
+
+/// A seat reads its own agent-to-agent history, on both sides of it.
+///
+/// A pair thread is `dm:<a>+<b>` — neither a desk nor either participant's own
+/// direct line — so `elsewhere_for` matched none of it and no agent ever read
+/// one again. The asker saw the exchange it had just had, on the one turn
+/// straight after it, and that was all: the teammate who ANSWERED never saw it
+/// again, and neither side kept anything from an earlier one. Two seats could
+/// settle something and rediscover it from scratch the next day.
+#[tokio::test]
+async fn a_seat_reads_the_private_lines_it_is_part_of() {
+    let log = Arc::new(MemoryLog::default());
+    let pair = super::referral::pair_conversation("planner", "sre");
+    for (who, text) in [
+        ("planner", "what is the replica lag budget?"),
+        ("sre", "400ms, measured at the edge"),
+    ] {
+        log.append(
+            &MemoryLog::company(),
+            CompanyEvent::AgentReply {
+                audience: Vec::new(),
+                chat_id: pair.clone(),
+                agent_id: who.to_owned(),
+                text: text.to_owned(),
+                steps: Vec::new(),
+                task_id: None,
+                outputs: Vec::new(),
+                parent: None,
+                mentions: Vec::new(),
+                mention_depth: 0,
+            },
+        )
+        .await
+        .expect("the earlier exchange is journaled");
+    }
+
+    let trigger = open(&log).await;
+    let manifest = two_desks(REFERRING);
+    let record = record(&manifest);
+    let desk = desk_of(&manifest, "eng").expect("a room");
+    let runner = Runner::new(&[
+        (
+            "planner",
+            "!propose #stage Stage the rollout behind a flag.",
+        ),
+        ("scout", "!support #stage ^1 Fine."),
+        ("critic", "!commit #stage ^2 Recorded."),
+    ]);
+    EpisodeDriver::new(
+        MemoryLog::company(),
+        desk,
+        Arc::clone(&log) as Arc<dyn EventLog>,
+        &runner,
+        "Decide the rollout.",
+    )
+    .with_context_desks(crate::hivemind::company_desks(&record))
+    .run(trigger)
+    .await
+    .expect("the episode runs");
+
+    let planner = runner
+        .asked()
+        .into_iter()
+        .find(|(who, _)| who == "planner")
+        .map(|(_, prompt)| prompt)
+        .expect("planner takes a turn");
+
+    assert!(
+        planner.contains("400ms, measured at the edge"),
+        "the asker keeps what it was told, past the turn it was told on:\n{planner}"
+    );
+    assert!(
+        planner.contains("Your exchange with @sre"),
+        "labelled by the teammate it was with:\n{planner}"
+    );
+    // The row it wrote itself stays its own, the way every other elsewhere
+    // section marks a seat's own words.
+    assert!(
+        planner.contains("planner (you): what is the replica lag budget?"),
+        "and its own question is attributed to it:\n{planner}"
+    );
+
+    // A seat that was never in this conversation cannot read it. Every key is
+    // built from the reader's own id, so a pair between two other people is not
+    // addressable at all.
+    let scout = runner
+        .asked()
+        .into_iter()
+        .find(|(who, _)| who == "scout")
+        .map(|(_, prompt)| prompt)
+        .expect("scout takes a turn");
+    assert!(
+        !scout.contains("400ms, measured at the edge"),
+        "somebody else's private line is not readable:\n{scout}"
+    );
+}

@@ -830,7 +830,25 @@ impl<'a> EpisodeDriver<'a> {
                         // "Your exchange with @dm:planner+sre" in front of the
                         // model, naming an internal id as though it were a
                         // colleague's handle.
-                        carried.push((format!("Your exchange with @{other}"), rows));
+                        //
+                        // Merged into the section that label already names,
+                        // rather than opening a second one beside it: now that
+                        // `elsewhere_for` carries this seat's pair threads, an
+                        // earlier exchange with the SAME teammate is already
+                        // here under this exact label, and two sections with
+                        // one name is the ambiguity `elsewhere` renders per
+                        // conversation to avoid. Sorted and deduplicated for
+                        // the same reason the direct line's two spellings are.
+                        let label = format!("Your exchange with @{other}");
+                        if let Some(existing) =
+                            carried.iter_mut().find(|(existing, _)| *existing == label)
+                        {
+                            existing.1.extend(rows);
+                            existing.1.sort_by_key(|message| message.sequence);
+                            existing.1.dedup_by_key(|message| message.sequence);
+                        } else {
+                            carried.push((label, rows));
+                        }
                     }
                     // **The asker's turn continues on the answer it paid for.**
                     //
@@ -1453,6 +1471,47 @@ impl<'a> EpisodeDriver<'a> {
             .context_desks
             .iter()
             .all(|desk| desk.id != agent_id && desk.name != agent_id);
+        // **Every private line this seat holds, not just the one with the
+        // operator.**
+        //
+        // A pair thread is `dm:<a>+<b>` — neither a desk nor either
+        // participant's own direct line — so it matched none of the targets
+        // above and no agent ever read one again. The asker got the exchange it
+        // had just had, on the single turn straight after it, and that was all:
+        // the teammate who ANSWERED never saw it again, and neither side
+        // retained anything from a previous one. Two seats could settle
+        // something on Monday and rediscover it from scratch on Tuesday, which
+        // is exactly what a live retail run did — agents re-asking each other
+        // about capabilities they had already exchanged.
+        //
+        // Deterministic keys make this enumerable rather than searchable:
+        // `pair_conversation` sorts the two ids, so the thread this seat shares
+        // with any teammate is computable without an index. A thread that never
+        // happened simply projects empty and is skipped by the loop below.
+        //
+        // Only threads this seat is IN: every key is built from `agent_id`
+        // itself, so a pair between two other people is not addressable here.
+        // The viewer narrowing below is the second line of that defence.
+        let mut partners: Vec<String> = self
+            .context_desks
+            .iter()
+            .flat_map(|desk| desk.members.iter())
+            .filter(|member| *member != agent_id)
+            .cloned()
+            .collect();
+        partners.sort();
+        partners.dedup();
+        let pairs: Vec<(String, String, String)> = partners
+            .into_iter()
+            .map(|other| {
+                let thread = super::referral::pair_conversation(agent_id, &other);
+                (
+                    thread.clone(),
+                    thread,
+                    format!("Your exchange with @{other}"),
+                )
+            })
+            .collect();
         let targets: Vec<(String, String, String)> = self
             .context_desks
             .iter()
@@ -1482,6 +1541,7 @@ impl<'a> EpisodeDriver<'a> {
                 format!("{}{agent_id}", crate::runtime::assignee::DM_PREFIX),
                 direct_line_label,
             )))
+            .chain(pairs)
             .collect();
         let mut elsewhere: Vec<(String, Vec<tinyhivemind_hive::SessionMessage>)> =
             Vec::with_capacity(targets.len());
