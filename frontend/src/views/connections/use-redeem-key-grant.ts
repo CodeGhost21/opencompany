@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { finishCredentialLink } from "@/api/credential";
+import { type CompanyCredentialMutation, finishCredentialLink } from "@/api/credential";
 import { ApiError } from "@/api/types";
 import { takeKeyLink, takeKeyLinkRefusal } from "@/lib/pending-key-link";
 
@@ -23,7 +23,7 @@ import { takeKeyLink, takeKeyLinkRefusal } from "@/lib/pending-key-link";
 export function useRedeemKeyGrant(
   client: OpenCompanyClient,
   company: string | null,
-  onConnected?: () => void,
+  onConnected?: (result: CompanyCredentialMutation) => void,
 ): boolean {
   const [busy, setBusy] = useState(false);
   // StrictMode double-invokes effects, and the code is single-use: a second
@@ -37,7 +37,7 @@ export function useRedeemKeyGrant(
       try {
         const result = await finishCredentialLink(client, company, state, code);
         toast.success("Connected to TinyHumans.", { description: result.note });
-        onConnected?.();
+        onConnected?.(result);
       } catch (err) {
         // The host's own words where it sent them: "that connection attempt has
         // expired" tells an operator to click again, which a generic failure

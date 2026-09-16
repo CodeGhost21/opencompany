@@ -236,7 +236,24 @@ export function ApiKeyView({ client, company }: Props) {
   // null when it fails — would drop the credential with no way back to it.
   // The page no longer shows a sign-in button (operator request, 2026-09-14);
   // a grant started elsewhere still lands here.
-  const onGrantConnected = useCallback(() => setGeneration((n) => n + 1), []);
+  //
+  // A grant stores a key this page never saw, so when the host answers
+  // `needsModel` the model step opens with NO pending key: `writeModel` then
+  // completes the row through `PUT …/credential/model`, off the stored key.
+  // Without this the toast said "choose a model" and every path on from it
+  // asked for the key again.
+  const onGrantConnected = useCallback((result: CompanyCredentialMutation) => {
+    setGeneration((n) => n + 1);
+    if (result.needsModel === true) {
+      pendingKey.current = null;
+      setModelStep({
+        models: result.models ?? [],
+        setsDefault: result.setsDefault ?? false,
+        note: result.note,
+      });
+      setEditing(true);
+    }
+  }, []);
   useRedeemKeyGrant(client, company, onGrantConnected);
 
   useEffect(() => {
@@ -383,15 +400,16 @@ export function ApiKeyView({ client, company }: Props) {
   );
 
   /**
-   * Step two: save the model against the key step one already stored. Guarded
-   * on `pendingKey` rather than trusting the caller — a stray call after the
-   * dialog has already been closed and forgotten its pending key must not
-   * repost an empty key.
+   * Step two: save the model against the key step one already stored — or,
+   * with no pending key (a redeemed grant, whose key this page never held),
+   * against the key the host stores, through `PUT …/credential/model`. A
+   * stray call once the dialog has closed and forgotten both its pending key
+   * and its model step must not post anything at all.
    */
   const writeModel = useCallback(
     async (model: string) => {
       const key = pendingKey.current;
-      if (!key) {
+      if (!key && !modelStep) {
         setModelStep(null);
         setEditing(false);
         return;
@@ -399,7 +417,9 @@ export function ApiKeyView({ client, company }: Props) {
       setBusy(true);
       setKeyError(null);
       try {
-        const result = await setCompanyCredential(client, company, key, model);
+        const result = key
+          ? await setCompanyCredential(client, company, key, model)
+          : await setCompanyCredentialModel(client, company, model);
         // KR-ACCT-01: the same restart-honesty fix as `write`'s own success
         // toast, above — step two is the save that actually completes the
         // `tinyhumans` row with a model, so it is at least as likely as step
@@ -423,7 +443,7 @@ export function ApiKeyView({ client, company }: Props) {
         setBusy(false);
       }
     },
-    [client, company, doRestart],
+    [client, company, doRestart, modelStep],
   );
 
   /**
