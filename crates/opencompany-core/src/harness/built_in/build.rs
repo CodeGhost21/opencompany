@@ -1687,5 +1687,5 @@ pub(crate) fn file_tools(workspace: &Path) -> Vec<Box<dyn Tool>> {
 }
 
 #[cfg(test)]
-#[path = "build_tests_full.rs"]
+#[path = "build_tests.rs"]
 mod tests;
