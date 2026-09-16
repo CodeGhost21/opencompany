@@ -8052,6 +8052,10 @@ mod tests_blocker_claim;
 #[cfg(test)]
 #[path = "runtime_blocker_race_tests.rs"]
 mod tests_blocker_race;
+/// The thread-as-review-surface: a reply to a settled `in_review` dispatch
+/// card's settle pill or relay bubble routes as review feedback and re-runs
+/// the card; an Approve verdict finishes it.
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_review_tests.rs"]
 mod tests_review;
@@ -8064,21 +8068,33 @@ mod tests_ambiguous_mentions;
 #[cfg(test)]
 #[path = "runtime_notify_mentions_tests.rs"]
 mod tests_notify_mentions;
+/// A blocker surfaces in the responsible teammate's DM, groups by root
+/// cause, and an operator's reply routes back as a verdict.
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_blocker_dms_reply_tests.rs"]
 mod tests_blocker_dms_reply;
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_blocker_dms_concurrency_tests.rs"]
 mod tests_blocker_dms_concurrency;
+/// Resuming the stopped step — a task card is re-dispatched, a cancel
+/// settles it — and a blocker's inert effect is never executed.
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_blocker_resume_card_tests.rs"]
 mod tests_blocker_resume_card;
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_blocker_resume_console_tests.rs"]
 mod tests_blocker_resume_console;
+/// What is under test is whether a continuation run is started, with what
+/// trigger input, and how many times.
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_node_blocker_resume_retry_tests.rs"]
 mod tests_node_blocker_resume_retry;
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_node_blocker_resume_stash_tests.rs"]
 mod tests_node_blocker_resume_stash;
