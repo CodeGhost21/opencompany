@@ -133,7 +133,7 @@ pub(crate) struct ScriptedRunner {
 }
 
 impl ScriptedRunner {
-    pub(super) fn new(lines: &[(&str, &str)]) -> Self {
+    pub(crate) fn new(lines: &[(&str, &str)]) -> Self {
         Self {
             lines: Mutex::new(
                 lines
@@ -146,7 +146,7 @@ impl ScriptedRunner {
     }
 
     /// Every `(agent, prompt)` the episode asked for, in order.
-    pub(super) fn asked(&self) -> Vec<(String, String)> {
+    pub(crate) fn asked(&self) -> Vec<(String, String)> {
         self.asked.lock().expect("script poisoned").clone()
     }
 }
