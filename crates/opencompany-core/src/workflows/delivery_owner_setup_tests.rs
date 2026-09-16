@@ -69,7 +69,7 @@ to = "done"
 }
 
 /// A run output in which `done` produced one text item — the reached case.
-fn reached_output() -> Value {
+pub(super) fn reached_output() -> Value {
     serde_json::json!({
         "nodes": {
             "start": { "items": [{ "json": { "seed": 1 } }] },
