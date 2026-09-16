@@ -11,6 +11,7 @@ use axum::http::{Request, StatusCode};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+use super::graphql_test_group_1::query;
 use super::graphql_test_support_1::*;
 
 /// `Company.workspaceSearch` (issue #607), over the same shared helper the REST

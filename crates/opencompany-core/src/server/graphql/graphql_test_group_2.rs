@@ -11,6 +11,7 @@ use axum::http::{Request, StatusCode};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+use super::graphql_test_group_1::query;
 use super::graphql_test_support_1::*;
 
 /// Issue #246 + #65: the card a reply opened is projected on **both** history

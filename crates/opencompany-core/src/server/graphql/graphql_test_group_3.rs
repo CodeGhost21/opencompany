@@ -11,6 +11,7 @@ use axum::http::{Request, StatusCode};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+use super::graphql_test_group_1::query;
 use super::graphql_test_support_1::*;
 
 /// On the serve path a company has an on-disk source dir; `Company.skills`,
