@@ -572,7 +572,7 @@ pub(super) struct Fixture {
     pub(super) approvals: ApprovalRequestQueue,
     /// Workflows a turn authored inline (issue #678). Empty in every test
     /// that does not stage one, which is what keeps this a pure addition.
-    workflow_refs: WorkflowRefQueue,
+    pub(super) workflow_refs: WorkflowRefQueue,
 }
 
 impl Fixture {
