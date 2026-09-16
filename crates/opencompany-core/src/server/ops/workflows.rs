@@ -3932,5 +3932,50 @@ fn relabel_blocked(nodes: &mut [WorkflowRunNode], blocked: &[crate::ports::Workf
 }
 
 #[cfg(test)]
-#[path = "workflows_tests.rs"]
-mod tests;
+#[path = "workflows_a_plain_errored_node_tests.rs"]
+mod tests_a_plain_errored_node;
+#[cfg(test)]
+#[path = "workflows_editable_is_overlay_backed_tests.rs"]
+mod tests_editable_is_overlay_backed;
+#[cfg(test)]
+#[path = "workflows_getting_a_malformed_workflow_tests.rs"]
+mod tests_getting_a_malformed_workflow;
+#[cfg(test)]
+#[path = "workflows_hosted_a_paused_company_refuses_tests.rs"]
+mod tests_hosted_a_paused_company_refuses;
+#[cfg(test)]
+#[path = "workflows_hosted_create_persists_and_reads_tests.rs"]
+mod tests_hosted_create_persists_and_reads;
+#[cfg(test)]
+#[path = "workflows_hosted_edit_and_delete_serve_tests.rs"]
+mod tests_hosted_edit_and_delete_serve;
+#[cfg(test)]
+#[path = "workflows_hosted_fix_error_resolution_prefers_tests.rs"]
+mod tests_hosted_fix_error_resolution_prefers;
+#[cfg(test)]
+#[path = "workflows_hosted_revisions_list_is_metadata_tests.rs"]
+mod tests_hosted_revisions_list_is_metadata;
+#[cfg(test)]
+#[path = "workflows_hosted_run_card_tests.rs"]
+mod tests_hosted_run_card;
+#[cfg(test)]
+#[path = "workflows_hosted_run_history_groups_a_tests.rs"]
+mod tests_hosted_run_history_groups_a;
+#[cfg(test)]
+#[path = "workflows_hosted_run_history_is_not_tests.rs"]
+mod tests_hosted_run_history_is_not;
+#[cfg(test)]
+#[path = "workflows_hosted_run_history_leaves_a_tests.rs"]
+mod tests_hosted_run_history_leaves_a;
+#[cfg(test)]
+#[path = "workflows_hosted_the_enabled_route_toggles_tests.rs"]
+mod tests_hosted_the_enabled_route_toggles;
+#[cfg(test)]
+#[path = "workflows_running_a_dropped_connection_does_tests.rs"]
+mod tests_running_a_dropped_connection_does;
+#[cfg(test)]
+#[path = "workflows_running_a_synchronous_run_cancelled_tests.rs"]
+mod tests_running_a_synchronous_run_cancelled;
+#[cfg(test)]
+#[path = "workflows_running_dry_run_request_echoes_tests.rs"]
+mod tests_running_dry_run_request_echoes;
