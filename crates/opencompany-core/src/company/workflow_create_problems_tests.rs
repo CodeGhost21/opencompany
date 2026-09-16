@@ -1,6 +1,7 @@
 //! workflow_create: issue #1016 structured, per-node/field workflow problems.
 
 use super::test_support::*;
+use super::tests_schedule_update::with_one_workflow;
 use super::*;
 
 // --- issue #1016: structured, per-node/field workflow problems -----------
