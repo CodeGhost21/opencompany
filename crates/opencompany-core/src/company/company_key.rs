@@ -62,7 +62,9 @@ pub use fan_out::{
     CopyDecision, InferenceProber, LiveProber, SlotFacts, account_key_used_by,
     copy_account_key_to_composio, decide_copy, fan_out, fan_out_note, slot_facts, slot_guard,
 };
-pub use types::{FanOutKey, FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport};
+pub use types::{
+    FanOutKey, FanOutReport, FanOutRequest, SkipReason, Slot, SlotOutcome, SlotReport,
+};
 
 /// The canonical per-company TinyHumans credential key. Write-only via the
 /// console; the value is the raw key string.

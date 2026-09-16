@@ -444,7 +444,10 @@ async fn an_existing_row_migrates_to_a_changed_proxy_base_url() {
     assert_eq!(providers.len(), 1, "migrating in place, not adding a row");
     assert_eq!(providers[0].base_url, migrated);
     // Everything else about the row survived the migration untouched.
-    assert_eq!(providers[0].model(), inference_store::ModelOnRow::One(MODEL.to_string()));
+    assert_eq!(
+        providers[0].model(),
+        inference_store::ModelOnRow::One(MODEL.to_string())
+    );
     assert!(providers[0].enabled);
     // The health probe checked the row's *new* endpoint, not the one it was
     // about to migrate away from.
