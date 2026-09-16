@@ -1757,24 +1757,24 @@ async fn company_status_temp_password_boundary_waits_for_an_assigned_branch() {
 
 #[test]
 fn table_counts_and_intentional_widenings_are_explicit() {
-    assert_eq!(OPS_SCOPED_ROUTES.len(), 209);
+    assert_eq!(OPS_SCOPED_ROUTES.len(), 210);
     assert_eq!(
         OPS_SCOPED_ROUTES
             .iter()
             .map(|route| route.path)
             .collect::<BTreeSet<_>>()
             .len(),
-        164,
+        165,
     );
     assert_eq!(OPS_EXACT_ROUTES.len(), 3);
     assert_eq!(
         OPS_SCOPED_ROUTES.len() * 2,
-        418,
+        420,
         "dual-address ops route-method rows",
     );
     assert_eq!(
         OPS_SCOPED_ROUTES.len() * 2 + OPS_EXACT_ROUTES.len(),
-        421,
+        423,
         "complete ops route-method rows",
     );
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 4);
@@ -1785,7 +1785,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        471,
+        472,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1793,10 +1793,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        374,
+        375,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 3_297);
+    assert_eq!(render_snapshot().lines().count(), 3_304);
     assert_eq!(
         all_routes()
             .map(|route| {
@@ -1815,8 +1815,8 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .iter()
             .filter(|route| route.access == Access::Admin)
             .count(),
-        78,
-        "63 signature-admin, seven body-admin, and eight aspirational authority rows",
+        79,
+        "64 signature-admin, seven body-admin, and eight aspirational authority rows",
     );
     assert_eq!(
         OPS_SCOPED_ROUTES
