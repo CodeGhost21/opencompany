@@ -20,15 +20,9 @@ use std::time::{Duration, Instant};
 const TEST_CLIENT_ID: &str = "not-a-real-client-id";
 const TEST_CLIENT_SECRET: &str = "not-a-real-client-secret";
 
-/// The headers each request arrived with, in order, name and value.
-type SeenHeaders = Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>>;
-
-/// A local collector that counts what it is sent and keeps the bodies and
-/// the headers.
+/// A local collector that counts what it is sent.
 struct Collector {
     hits: Arc<AtomicUsize>,
-    bodies: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
-    headers: SeenHeaders,
     url: String,
     shutdown: tokio::sync::oneshot::Sender<()>,
     handle: tokio::task::JoinHandle<()>,
