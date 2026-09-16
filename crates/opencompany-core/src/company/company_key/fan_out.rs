@@ -428,9 +428,6 @@ async fn read_slots(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Re
     let legacy_managed = providers.iter().any(|p| {
         p.origin == inference_store::ProviderOrigin::EntryZero && p.slug == inference::MANAGED_SLUG
     });
-    let row = providers.into_iter().find(|p| {
-        p.origin == inference_store::ProviderOrigin::Indexed && p.slug == inference::MANAGED_SLUG
-    });
     let inference_key_key = inference_store::provider_key_key(inference::MANAGED_SLUG);
     let inference_raw_new = secrets
         .get(company, &inference_key_key)
