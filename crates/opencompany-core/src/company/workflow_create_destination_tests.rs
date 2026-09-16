@@ -3,7 +3,7 @@
 use super::test_support::*;
 use super::tests_tool_call::tool_call_draft;
 #[cfg(feature = "openhuman")]
-use super::tests_tool_call::manifest_with_allow;
+use super::tests_tool_call::{manifest_with_allow, tool_call_draft_args};
 use super::*;
 
 // --- output destinations (issue #981) ------------------------------------
