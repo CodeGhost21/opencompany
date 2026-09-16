@@ -2,6 +2,8 @@
 //! failures, and read/write isolation between the two addresses (split
 //! out of `composio_tests.rs`).
 
+use super::tests_addresses::SecretsFailingToRead;
+use super::tests_pins::{MemSecrets, SecretsFailingToWrite, raw};
 use super::*;
 
 #[tokio::test]
