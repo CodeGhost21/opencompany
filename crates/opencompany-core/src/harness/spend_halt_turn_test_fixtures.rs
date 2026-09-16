@@ -68,7 +68,7 @@ pub(super) const SPEND_MARKER: &str = "reached its spend cap partway through";
 
 /// What the scripted model does on each successive call.
 #[derive(Clone, Debug)]
-enum Turn {
+pub(super) enum Turn {
     /// Emit a native tool call with these literal arguments.
     Call { tool: String, args: Value },
     /// Finish with plain assistant text.
