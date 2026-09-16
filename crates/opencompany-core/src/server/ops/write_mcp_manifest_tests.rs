@@ -19,20 +19,6 @@ use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 use super::write_test_support::*;
 
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("opencompany-ops-")
-        .tempdir()
-        .expect("tempdir")
-}
-
-fn manifest() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
-    )
-    .unwrap()
-}
-
 /// The sorted node names in a workspace tree body.
 ///
 /// A freshly-built company is no longer an empty tree: boot scaffolds the
@@ -86,56 +72,6 @@ async fn state_with_workspace(
         Some(workspace),
     )
     .await
-}
-
-async fn state_with(
-    home: &std::path::Path,
-    quota: crate::runtime::WorkspaceQuota,
-    workspace: Option<std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>>,
-) -> AppState {
-    use crate::ports::CompanyStore;
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest(),
-            ledger: Vec::new(),
-            lifecycle: "running".to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest())
-        .with_id(id.clone())
-        .with_workspace_quota(quota);
-    if let Some(workspace) = workspace {
-        builder = builder.with_workspace(workspace);
-    }
-    let runtime = builder.build().await.unwrap();
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    // Every route needs a principal now; the harness signs in as an admin so
-    // tests keep asserting write behavior rather than auth.
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
 }
 
 /// The repo's `companies/` directory, whose bundles' `skills/` are the skill
