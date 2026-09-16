@@ -159,9 +159,15 @@ test("a key grant from the hub sets up TinyHumans without the console ever seein
 
   // 5. A turn goes through the backend on the granted key.
   await open(page, "/#/chat");
+  const backendReplies = page.locator("article[data-message-id]").filter({ hasText: /MOCK_LLM/ });
+  const replyCountBefore = await backendReplies.count();
   await page.getByPlaceholder(/^Message /).fill(`tinyhumans key grant e2e ${Date.now()}`);
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText(/MOCK_LLM/).first()).toBeVisible({ timeout: 90_000 });
+  // Scoped to rendered message bubbles and counted before/after — the same
+  // pattern as `tinyhumans-account-key.spec.ts` — so this proves the *new*
+  // turn reached the backend rather than matching an older visible MOCK_LLM
+  // reply already in the transcript (CodeRabbit review).
+  await expect(backendReplies).toHaveCount(replyCountBefore + 1, { timeout: 90_000 });
   await expect(page.getByText(/^You said:/)).toHaveCount(0);
 });
 
