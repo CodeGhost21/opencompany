@@ -525,6 +525,47 @@ mod test {
         );
     }
 
+    /// A key grant is sent back to the port this host actually bound.
+    ///
+    /// The config used to keep the literal `127.0.0.1:0` the listener was
+    /// asked for, and `credential/link/start` — which derives its return
+    /// address from `config().bind` because the shell's proxy sends no
+    /// `Origin` — told the hub to come back to `http://127.0.0.1:0/…`. Chrome
+    /// refuses port 0 outright (`ERR_UNSAFE_PORT`), so the flow died on the
+    /// last leg with a minted key nobody could redeem.
+    #[tokio::test]
+    async fn a_key_grant_returns_to_the_port_this_host_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+        let company = host.companies().first().expect("a seeded company").clone();
+
+        let started: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "{}/api/v1/companies/{company}/credential/link/start",
+                host.base_url()
+            ))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("the route answers")
+            .json()
+            .await
+            .expect("a JSON body");
+        let url = started["authorizeUrl"]
+            .as_str()
+            .unwrap_or_else(|| panic!("an authorize URL: {started}"));
+
+        assert!(
+            !url.contains("127.0.0.1%3A0") && !url.contains("127.0.0.1:0"),
+            "the return leg must not name port 0: {url}"
+        );
+        let expected = format!("127.0.0.1%3A{}%2Fauth%2Fkey%2Fcallback", host.address().port());
+        assert!(
+            url.contains(&expected),
+            "the return leg must be this host's own callback on its bound port: {url}"
+        );
+    }
+
     /// The starter company is seeded once, not per launch.
     #[tokio::test]
     async fn a_relaunch_reuses_the_company_the_root_already_holds() {
