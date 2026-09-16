@@ -490,6 +490,14 @@ async fn a_failed_row_migration_reports_failed_not_kept() {
     .unwrap();
 
     assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Failed);
+    assert_eq!(outcome(&report, Slot::Health), SlotOutcome::Failed);
+    assert!(
+        !inference_store::load_health(&cid, &secrets.inner)
+            .await
+            .unwrap()
+            .contains_key(inference::MANAGED_SLUG),
+        "the successful probe was for an endpoint the row did not adopt"
+    );
     // The row itself really is unchanged — the write failed, not merely the
     // report of it.
     let providers = inference_store::list_providers(&cid, &secrets.inner)
