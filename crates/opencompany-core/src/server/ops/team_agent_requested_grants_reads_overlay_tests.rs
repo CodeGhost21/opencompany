@@ -175,7 +175,7 @@ fn requested_grants_reads_overlay_then_manifest_then_empty() {
     assert_eq!(super::requested_grants(&record, "nobody"), None);
 }
 
-async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
+pub(super) async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
     let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -217,7 +217,7 @@ async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> App
     state
 }
 
-async fn send(
+pub(super) async fn send(
     state: &AppState,
     method: &str,
     uri: &str,
@@ -245,7 +245,7 @@ async fn send(
     (status, value)
 }
 
-async fn draft_for(state: &AppState, agent: &str, body: Value) -> (StatusCode, Value) {
+pub(super) async fn draft_for(state: &AppState, agent: &str, body: Value) -> (StatusCode, Value) {
     send(
         state,
         "POST",
@@ -255,11 +255,11 @@ async fn draft_for(state: &AppState, agent: &str, body: Value) -> (StatusCode, V
     .await
 }
 
-async fn get_agent(state: &AppState, agent: &str) -> (StatusCode, Value) {
+pub(super) async fn get_agent(state: &AppState, agent: &str) -> (StatusCode, Value) {
     send(state, "GET", &format!("/api/v1/company/team/{agent}"), None).await
 }
 
-async fn patch_agent(state: &AppState, agent: &str, body: Value) -> (StatusCode, Value) {
+pub(super) async fn patch_agent(state: &AppState, agent: &str, body: Value) -> (StatusCode, Value) {
     send(
         state,
         "PATCH",
@@ -273,7 +273,7 @@ async fn patch_agent(state: &AppState, agent: &str, body: Value) -> (StatusCode,
 /// request in as an admin, which is exactly why this exists: an
 /// authority check verified only as an admin passes identically against no
 /// check at all.
-async fn send_as(
+pub(super) async fn send_as(
     state: &AppState,
     method: &str,
     uri: &str,
@@ -303,7 +303,7 @@ async fn send_as(
 }
 
 /// Adds a teammate through the console's own route and returns its id.
-async fn add_overlay(state: &AppState, name: &str, role: &str) -> String {
+pub(super) async fn add_overlay(state: &AppState, name: &str, role: &str) -> String {
     let (status, created) = send(
         state,
         "POST",
@@ -318,7 +318,7 @@ async fn add_overlay(state: &AppState, name: &str, role: &str) -> String {
 /// Seeds one `inference/providers` row directly on `agent`'s secret
 /// store, for the pin-validation tests (keys rework, issue #2306, slice
 /// 3a) — the same pattern `server::ops::inference`'s own tests use.
-async fn seed_provider(state: &AppState, slug: &str, enabled: bool) {
+pub(super) async fn seed_provider(state: &AppState, slug: &str, enabled: bool) {
     use crate::company::inference::store;
 
     let id = CompanyId::new("acme");
@@ -339,7 +339,7 @@ async fn seed_provider(state: &AppState, slug: &str, enabled: bool) {
     .unwrap();
 }
 
-fn strings(value: &Value) -> Vec<String> {
+pub(super) fn strings(value: &Value) -> Vec<String> {
     value
         .as_array()
         .unwrap_or_else(|| panic!("expected an array, got {value}"))
