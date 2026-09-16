@@ -1,6 +1,7 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::json;
+use tower::ServiceExt;
 
 use super::team_agent_test_support::*;
 use crate::server::router;
