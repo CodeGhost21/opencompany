@@ -565,11 +565,20 @@ async fn set_key(
     // "the admin swapped the Composio token" — two changes with different blast
     // radii. An audit line that cannot name what changed is most of the way to
     // not having one.
-    journal_fan_out(&company, clearing, &report).await?;
+    // The rebuild runs even when the journal write fails, and the journal
+    // result is propagated only after — a journal failure must not also cost
+    // the rebuild. Retrying the identical payload once inference is already
+    // configured produces no changed inference/provider/default slot (every
+    // slot reads `alreadyCurrent`/`RowExists`/`DefaultAlreadySet`), so a
+    // journal-failure-then-retry sequence would otherwise never rebuild a
+    // company that has been on the echo brain since the first, unlogged
+    // attempt (CodeRabbit review).
+    let journal_result = journal_fan_out(&company, clearing, &report).await;
 
     // Read off whichever runtime is live after this write — the successor if
     // the fan-out configured inference for a company that booted without any.
     let live = rebuild_if_pending(&state, &company, &report).await;
+    journal_result?;
     Ok(Json(MutationResponse {
         status: effective_status(&state, live.as_ref()).await?,
         note: company_key::fan_out_note(clearing, &report, body.model.as_deref()),
