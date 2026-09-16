@@ -7,6 +7,7 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use super::operator_test_support_1::*;
+#[cfg(feature = "openhuman")]
 use super::operator_test_support_2::*;
 
 /// The ask-which question lands in the thread that asked it.
