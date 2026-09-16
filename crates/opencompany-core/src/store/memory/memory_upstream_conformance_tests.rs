@@ -38,7 +38,7 @@ use super::driver::{MemoryDriverConfig, MemoryMode, RemoteDeployment, open_drive
 use crate::ports::{CompanyId, CompressedTrace, ContextChunk, FactKind, FactRecord};
 
 /// Opens a driver through the production path and fails the test on refusal.
-fn open(config: &MemoryDriverConfig) -> (Arc<dyn MemoryProvider>, DriverClass) {
+pub(super) fn open(config: &MemoryDriverConfig) -> (Arc<dyn MemoryProvider>, DriverClass) {
     open_driver(config)
         .expect("the driver must bind")
         .expect("this config names a driver, so `None` is a routing bug")
@@ -47,7 +47,7 @@ fn open(config: &MemoryDriverConfig) -> (Arc<dyn MemoryProvider>, DriverClass) {
 /// The suite skips every write-path assertion for a non-retaining driver, so a
 /// provider (or a broken double behind it) that dropped writes would let
 /// `assert_provider` pass having proved almost nothing. Guard first.
-async fn assert_retains_then_conforms(provider: Arc<dyn MemoryProvider>) {
+pub(super) async fn assert_retains_then_conforms(provider: Arc<dyn MemoryProvider>) {
     assert!(
         tinymemory_conformance::retains_writes(provider.as_ref()).await,
         "driver `{}` must retain writes, or the conformance run is vacuous",
@@ -58,7 +58,7 @@ async fn assert_retains_then_conforms(provider: Arc<dyn MemoryProvider>) {
 
 /// Traces, facts and context through the decorator's ports — the JSON-envelope
 /// encode/decode path (#1201's shape) — against whatever engine is bound.
-async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass) {
+pub(super) async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass) {
     let bound = BoundMemory::bind(provider, class).expect("bind");
     let company = CompanyId::new("acme");
 
@@ -220,33 +220,33 @@ async fn facade_round_trip(provider: Arc<dyn MemoryProvider>, class: DriverClass
 
 /// A record as one of the vendor doubles holds it.
 #[derive(Clone, Debug)]
-struct Row {
-    id: String,
-    content: String,
-    metadata: Value,
+pub(super) struct Row {
+    pub(super) id: String,
+    pub(super) content: String,
+    pub(super) metadata: Value,
     /// The `containerTag` the adapter sent at create time (Supermemory only;
     /// Mem0 rows carry an empty one).
-    tag: String,
+    pub(super) tag: String,
 }
 
 /// The doubles' shared store: `id -> Row`, plus a counter for fresh ids.
 #[derive(Default, Debug)]
-struct Backend {
-    rows: BTreeMap<String, Row>,
+pub(super) struct Backend {
+    pub(super) rows: BTreeMap<String, Row>,
     next: usize,
 }
 
 impl Backend {
-    fn fresh_id(&mut self) -> String {
+    pub(super) fn fresh_id(&mut self) -> String {
         self.next += 1;
         format!("rec-{}", self.next)
     }
 }
 
-type Store = Arc<Mutex<Backend>>;
+pub(super) type Store = Arc<Mutex<Backend>>;
 
 /// Serves `app` on an ephemeral port and returns its base URL.
-async fn serve(app: Router) -> String {
+pub(super) async fn serve(app: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -258,7 +258,7 @@ async fn serve(app: Router) -> String {
 }
 
 /// The production remote config for one hosted engine, pointed at a double.
-fn remote_config(driver: &str, endpoint: &str) -> MemoryDriverConfig {
+pub(super) fn remote_config(driver: &str, endpoint: &str) -> MemoryDriverConfig {
     MemoryDriverConfig {
         mode: MemoryMode::Remote,
         driver_id: Some(driver.into()),
