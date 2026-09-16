@@ -111,11 +111,11 @@ async fn stored(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
         .expect("card exists")
 }
 
+
 /// The headline of the tier: an operator's "retry" moves the paused card
 /// back into In Progress so its dispatch edge fires, and the blocker is
 /// cleared.
 #[tokio::test]
-
 async fn retry_redispatches_the_paused_card() {
     let (runtime, _home) = runtime().await;
     seed(&runtime, &card("t-1", COLUMN_PAUSED)).await;
@@ -537,4 +537,3 @@ async fn an_agent_question_whose_card_moved_on_answers_the_conversation() {
         "the answer must reach the conversation it was asked in; posted: {notes:?}"
     );
 }
-
