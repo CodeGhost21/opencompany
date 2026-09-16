@@ -998,8 +998,19 @@ async fn set_api_key(
 /// read the host's logs, which is a wider audience than the admin who pasted
 /// the key. The class is what diagnosis needs, and it is still logged.
 async fn classified_probe(runtime: &CompanyRuntime, api_key: &str) -> Option<ComposioProbeClass> {
+    classify_key(runtime.id().as_ref(), api_key).await
+}
+
+/// The same check, named by whoever asked rather than by a company.
+///
+/// First-run setup has no company and still has to answer "is this key any
+/// good" before the operator finds out from an empty tool belt. `scope` is the
+/// caller's name, used for the log line and for the test-only transport
+/// override — the check itself dials Composio's own fixed URL and reads no
+/// company at all, which is why a second caller is possible.
+pub(crate) async fn classify_key(scope: &str, api_key: &str) -> Option<ComposioProbeClass> {
     #[cfg(test)]
-    let outcome = match probe_override::get(runtime.id().as_ref()) {
+    let outcome = match probe_override::get(scope) {
         Some(forced) => forced,
         None => probe_transport(api_key).await,
     };
@@ -1011,7 +1022,7 @@ async fn classified_probe(runtime: &CompanyRuntime, api_key: &str) -> Option<Com
         Err(raw) => {
             let class = classify(&raw);
             tracing::debug!(
-                company = %runtime.id(),
+                company = %scope,
                 class = %class,
                 "[composio] a draft API key did not check out"
             );
@@ -1052,7 +1063,7 @@ async fn probe_transport(_api_key: &str) -> Result<(), String> {
 /// them race. `#[cfg(test)]` throughout — there is no seam here in a shipped
 /// build.
 #[cfg(test)]
-mod probe_override {
+pub(crate) mod probe_override {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -1063,7 +1074,7 @@ mod probe_override {
         MAP.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    pub(super) fn set(company: &str, outcome: Outcome) {
+    pub(crate) fn set(company: &str, outcome: Outcome) {
         map()
             .lock()
             .expect("composio probe override")
@@ -1182,16 +1193,16 @@ async fn stored_api_key(runtime: &CompanyRuntime) -> Result<Option<String>, ApiE
 /// optional field on this surface.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ApiKeyTestDto {
+pub(crate) struct ApiKeyTestDto {
     /// Whether Composio answered the check.
-    ok: bool,
+    pub(crate) ok: bool,
     /// Why it did not, when it did not.
     #[serde(skip_serializing_if = "Option::is_none")]
-    probe_class: Option<ComposioProbeClass>,
+    pub(crate) probe_class: Option<ComposioProbeClass>,
     /// The operator-facing sentence for [`Self::probe_class`] — always
     /// [`describe_verdict`]'s fixed copy, never the upstream error text.
     #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
+    pub(crate) message: Option<String>,
 }
 
 /// `POST …/composio/tinyhumans/key/from-account` — copy this company's
