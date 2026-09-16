@@ -8,6 +8,7 @@ import { ApiError } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { clampToCompanyNameLimit } from "@/lib/company-name";
 import { VIEWS } from "@/lib/console-routes";
 import { cn } from "@/lib/utils";
 import { IntegrationStep } from "@/onboarding/IntegrationStep";
@@ -26,34 +27,6 @@ import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 function isKnownConsoleRoute(href: string): boolean {
   const head = href.replace(/^#\/?/, "").split("?")[0].split("/")[0];
   return (VIEWS as readonly string[]).includes(head);
-}
-
-// PR #1875 review finding: the name entered here is embedded verbatim into
-// every agent's system prompt (`persona_prompt`, `src/company/prompt.rs`),
-// so an unbounded paste can inflate every model request past its context
-// limit. Mirrors the host's own limit (`COMPANY_NAME_MAX_CHARS`,
-// `src/server/ops/company_profile.rs`) — the API's rejection is the real
-// enforcement point regardless of client, this only avoids a round trip for
-// the common case of a pasted document.
-const COMPANY_NAME_MAX_CHARS = 200;
-
-/**
- * Clamps `value` to `COMPANY_NAME_MAX_CHARS`, counting Unicode scalar values —
- * the same definition of "character" the host enforces with `chars().count()`
- * (`src/server/ops/company_profile.rs`) — rather than UTF-16 code units.
- *
- * PR #1875 review finding: the native `maxLength` attribute this field used
- * to carry counts UTF-16 code units, not scalar values. A name built from
- * 101-200 astral characters (most emoji, some scripts) passes the host's
- * `chars().count() <= 200` check, but each such character consumes two
- * UTF-16 units — so `maxLength={200}` silently refused input past 100 of
- * them, well inside what the API accepts. `Array.from` iterates by code
- * point, which is exactly `chars().count()`'s definition (same technique as
- * `titleFromMessage`, `lib/chat.ts`, and `documentSlug`, `api/memory.ts`).
- */
-export function clampToCompanyNameLimit(value: string): string {
-  const points = Array.from(value);
-  return points.length <= COMPANY_NAME_MAX_CHARS ? value : points.slice(0, COMPANY_NAME_MAX_CHARS).join("");
 }
 
 interface GateStep {

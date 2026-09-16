@@ -1,19 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { clampToCompanyNameLimit } from "@/onboarding/OnboardingGate";
+import { clampToCompanyNameLimit } from "@/lib/company-name";
 
 /**
- * PR #1875 review finding: the company-name field's native `maxLength`
- * attribute counted UTF-16 code units, not the Unicode scalar values the
- * host counts with `chars().count()` (`src/server/ops/company_profile.rs`).
- * An astral character (most emoji, some scripts) is one scalar value but two
- * UTF-16 units, so a name built from 101-200 of them passed the host's
- * 200-character limit but could not be typed past 100 of them through the
- * old `maxLength={200}` attribute.
+ * The company-name field's native `maxLength` attribute counts UTF-16 code
+ * units, not the Unicode scalar values the host counts with `chars().count()`
+ * (`src/server/ops/company_profile.rs`). An astral character (most emoji, some
+ * scripts) is one scalar value but two UTF-16 units, so a name built from
+ * 101-200 of them passes the host's 200-character limit while `maxLength={200}`
+ * refuses it.
  *
- * These pin `clampToCompanyNameLimit` against exactly that gap: it must
- * agree with the host's scalar-value definition of "character", not the
- * DOM's UTF-16 one.
+ * These pin `clampToCompanyNameLimit` against exactly that gap: it must agree
+ * with the host's scalar-value definition of "character", not the DOM's
+ * UTF-16 one.
  */
 describe("clampToCompanyNameLimit", () => {
   it("does not truncate a name at or under the limit", () => {
