@@ -422,6 +422,14 @@ export function ApiKeyView({ client, company }: Props) {
         const result = key
           ? await setCompanyCredential(client, company, key, model)
           : await setCompanyCredentialModel(client, company, model);
+        const modelWriteFailed = result.slots?.some(
+          (slot) =>
+            (slot.slot === "provider" || slot.slot === "default") && slot.outcome === "failed",
+        );
+        if (modelWriteFailed) {
+          setKeyError("The key was saved, but its model could not be applied. Please try again.");
+          return;
+        }
         // KR-ACCT-01: the same restart-honesty fix as `write`'s own success
         // toast, above — step two is the save that actually completes the
         // `tinyhumans` row with a model, so it is at least as likely as step

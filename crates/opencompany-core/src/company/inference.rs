@@ -1455,15 +1455,22 @@ async fn resolve_legacy_scoped(
             .as_deref()
             .map(str::trim)
             .filter(|url| !url.is_empty());
-        let key = load_inference_key_for(
-            company,
-            secrets,
-            credential_slug(raw),
-            manifest.api_key_secret.as_deref(),
-            scope,
-            manifest_base_url.is_none(),
-        )
-        .await?;
+        // An explicit endpoint is a direct provider.  In particular, the
+        // `managed` spelling must not make its TinyHumans account key travel
+        // to an operator-selected gateway.
+        let key = if manifest_base_url.is_some() && is_managed_choice(raw) {
+            String::new()
+        } else {
+            load_inference_key_for(
+                company,
+                secrets,
+                credential_slug(raw),
+                manifest.api_key_secret.as_deref(),
+                scope,
+                manifest_base_url.is_none(),
+            )
+            .await?
+        };
         let had_key = !key.trim().is_empty();
         // Which spelling reaches `resolve_endpoint` depends on whether the
         // manifest also names an endpoint. A manifest is hand-authored and

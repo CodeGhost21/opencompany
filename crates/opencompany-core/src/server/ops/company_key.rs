@@ -245,7 +245,7 @@ fn slot_changed(outcome: company_key::SlotOutcome) -> bool {
     use company_key::SlotOutcome;
     matches!(
         outcome,
-        SlotOutcome::Filled | SlotOutcome::Rotated | SlotOutcome::Cleared | SlotOutcome::RolledBack
+        SlotOutcome::Filled | SlotOutcome::Rotated | SlotOutcome::Cleared
     )
 }
 
