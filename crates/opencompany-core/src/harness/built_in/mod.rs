@@ -1975,6 +1975,12 @@ impl CompanyAgent {
         // which is right: the outcome describes the attempt that produced the
         // reply being returned.
         let hit_iteration_cap = agent.last_turn_hit_cap();
+        // A Hive turn's attributed/visibility-filtered prompt must not become
+        // ordinary conversational history for the next channel. Its durable
+        // rows remain discoverable through the preserved session watermark.
+        if isolated_context_turn && !agent.history().is_empty() {
+            agent.clear_history();
+        }
         drop(agent);
         let events = collector.await.unwrap_or_default();
         // A hard-failed ATTEMPT's spend, recovered from the progress stream —
@@ -2125,12 +2131,6 @@ impl CompanyAgent {
             && let Some(next_state) = pending_session_commit.take()
         {
             *self.session.lock().await = next_state;
-        }
-        // A Hive turn's attributed/visibility-filtered prompt must not become
-        // ordinary conversational history for the next channel. Its durable
-        // rows remain discoverable through the preserved session watermark.
-        if isolated_context_turn && !agent.history().is_empty() {
-            agent.clear_history();
         }
         let outcome = reply.map(|reply| TurnOutcome {
             reply: if overrides.suppress_tools {
