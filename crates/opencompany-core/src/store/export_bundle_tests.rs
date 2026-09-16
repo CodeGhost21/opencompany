@@ -1,6 +1,20 @@
-use super::tests::{admin_actor, budget_manifest, company_record, fs_ports, manifest, tmp_root};
-use super::*;
 
+    /// **A console tool grant must not be promoted to a seed grant by a
+    /// round-trip** (issue #1796).
+    ///
+    /// `write_to_dir` serializes the bundle's manifest straight into
+    /// `company.toml`, and that file becomes the SEED for whatever host serves
+    /// the restored company. The record's manifest is materialised
+    /// seed-plus-grants, so carrying it verbatim would write a seed that already
+    /// grants `chargebee` — the next rebuild's carry rule would correctly read
+    /// that as "version control spoke", drop the override, and the operator's
+    /// attributed grant would have become a manifest grant that
+    /// `DELETE …/tools/grants` can never reach again.
+    ///
+    /// So the bundle carries the seed and the override separately, and the
+    /// restored record is re-folded. Both halves are asserted: the `company.toml`
+    /// on disk must NOT name the namespace, and the imported record must.
+    #[tokio::test]
     async fn a_console_tool_grant_survives_a_roundtrip_without_becoming_a_seed_grant() {
         let home1 = tmp_root("grants-src");
         let home2 = tmp_root("grants-dst");
