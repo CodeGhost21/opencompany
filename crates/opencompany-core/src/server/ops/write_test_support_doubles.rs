@@ -1,8 +1,9 @@
-use super::*;
 //! Test doubles shared by the `ops` write-plane split test files:
 //! `FaultyArtifacts` (an `ArtifactStore` with one chosen fault) and
 //! `RecordingReads` (a `WorkspaceStore` wrapper that counts bytes read).
 //! Split out of `write_test_support.rs` to stay under the 750-line cap.
+
+use super::*;
 
 use crate::AppState;
 use crate::ports::types::CompanyId;
