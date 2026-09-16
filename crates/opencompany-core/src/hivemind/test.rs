@@ -721,6 +721,15 @@ async fn the_blind_round_hides_peers_and_the_prompt_says_so() {
         "{first}"
     );
     assert!(first.contains("In the room with you: @"), "{first}");
+    // **But NOT how to ask one of them, because this room cannot.** This
+    // driver is built with no federation, so `consider` never runs for its
+    // lines and an `@handle` here dispatches nothing — the same state a
+    // referred room is in. Promising the move anyway sends a seat to a dead
+    // end, which is the failure `peers()` avoids for desks.
+    assert!(
+        !first.contains("To get an ANSWER"),
+        "a room that cannot dispatch must not be told the @handle asks anybody:\n{first}"
+    );
 }
 
 #[test]
