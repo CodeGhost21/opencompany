@@ -2361,6 +2361,39 @@ mod tests {
         assert!(!decl.is_proxied());
     }
 
+    /// A blank or whitespace-only `base_url` is not "the operator named a
+    /// gateway" — it must resolve exactly like naming none at all, staying on
+    /// the platform proxy with the stored key (tinysweeper/CodeRabbit review:
+    /// `manifest.base_url.is_some()` used to read a blank string as an
+    /// explicit endpoint, which sent a `managed` company with a blank
+    /// `base_url` and a stored key straight to `openrouter.ai` — the same 401
+    /// `a_managed_manifest_with_a_stored_key_stays_on_the_platform` exists to
+    /// prevent for the no-`base_url` case).
+    #[tokio::test]
+    async fn a_blank_manifest_base_url_is_treated_as_absent() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        store_key(&company, &secrets, "th-not-a-real-key")
+            .await
+            .unwrap();
+
+        for blank in ["", "   ", "\t\n"] {
+            let mut manifest = inference(LEGACY_MANAGED);
+            manifest.base_url = Some(blank.to_string());
+            let decl = resolve_effective(&company, &manifest, None, &secrets)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(decl.base_url, platform_base_url(), "blank: {blank:?}");
+            assert!(decl.is_proxied(), "blank: {blank:?}");
+            assert_eq!(
+                bearer(&decl).await.as_deref(),
+                Some("th-not-a-real-key"),
+                "blank: {blank:?}"
+            );
+        }
+    }
+
     /// A committed manifest still saying `provider = "managed"` resolves as
     /// proxied OpenRouter rather than failing. It was valid when written, and the
     /// intent — "the platform's brain" — is exactly what proxied OpenRouter is.
