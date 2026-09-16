@@ -197,7 +197,7 @@ pub(super) const STANDUP_MD: &str =
 
 /// The scratch path a materialized skill lands at for the first roster agent
 /// (`ceo`) under a company's workspace root.
-fn skill_scratch(ws: &std::path::Path, slug: &str) -> std::path::PathBuf {
+pub(super) fn skill_scratch(ws: &std::path::Path, slug: &str) -> std::path::PathBuf {
     ws.join("acme")
         .join("ceo")
         .join("skill-catalog")
