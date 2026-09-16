@@ -12,6 +12,7 @@
 // consistent with the file the whole surface exists to write.
 
 import type { OpenCompanyClient } from "./client";
+import type { ComposioApiKeyTest } from "./composio";
 import type { AddProviderInput, ProbeResult } from "./inference";
 import { INFERENCE_MANAGED_HIDDEN } from "@/product-scope";
 
@@ -231,6 +232,26 @@ export function probeSetupDraft(
 }
 
 /**
+ * Check a Composio API key before there is a company to store it against.
+ *
+ * Takes the key, where the company-scoped route deliberately takes no body —
+ * there is no store to read it from yet. The destination is not in the body
+ * either way: the host dials Composio's own compile-time URL, so no caller can
+ * point this anywhere.
+ *
+ * Without it an operator types a wrong key here and learns nothing until they
+ * open Connections and find an empty tool belt.
+ */
+export function testSetupComposioKey(
+  client: OpenCompanyClient,
+  apiKey: string,
+): Promise<ComposioApiKeyTest> {
+  return client.post<ComposioApiKeyTest>("/api/v1/setup/composio/api-key/test", {
+    apiKey,
+  });
+}
+
+/**
  * A completed wizard.
  *
  * A `null` field value clears the key, letting the next precedence layer supply
@@ -312,6 +333,17 @@ export interface SetupInput {
    * has neither.
    */
   provider_draft?: AddProviderInput | null;
+  /**
+   * The Composio credential the self-managed branch collected, stored against
+   * the company this call seeds.
+   *
+   * One field for two routes, because the Connections dialog is one form for
+   * both: a company's own Composio API key (which also selects BYOK), or a
+   * token for the TinyHumans-managed route. The values are the same two
+   * `ComposioForm.credential` carries, so the form's own answer travels
+   * unchanged.
+   */
+  composio_draft?: { credential: "composio-api-key" | "composio-token"; value: string } | null;
 }
 
 /** The company the wizard designed, as the review step hands it over. */
@@ -489,6 +521,11 @@ export interface SetupApplied {
    * into a failed setup.
    */
   provider_note?: string | null;
+  /**
+   * What the Composio credential the wizard collected did. Absent when none was
+   * sent, and absent on a host predating the field.
+   */
+  composio_note?: string | null;
 }
 
 /** Read this instance's setup state. */
