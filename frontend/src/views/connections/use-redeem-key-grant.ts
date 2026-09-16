@@ -30,27 +30,47 @@ export function useRedeemKeyGrant(
   // call would spend nothing and report the host's "expired" refusal over a
   // connection that in fact succeeded.
   const redeeming = useRef(false);
+  // The latest `client`/`company`/`onConnected` this hook was rendered with —
+  // read at redemption *completion*, not closed over at redemption *start*.
+  // `ConnectionsSection` remounts `ApiKeyView` on a company change, so that
+  // transition already gets a fresh hook instance; a host switch that keeps
+  // the same company selected does not remount anything and instead re-renders
+  // this hook with a new `client`. Without this, the in-flight redemption's
+  // closure kept the *old* `client`/`company`/`onConnected` for its whole
+  // `await`, and reported success — and ran the (also stale) `onConnected`,
+  // which the mounted view treats as "the current scope connected" — against
+  // whichever scope happened to be selected when the promise resolved
+  // (CodeRabbit review).
+  const latest = useRef({ client, company, onConnected });
+  latest.current = { client, company, onConnected };
 
-  const finish = useCallback(
-    async (state: string, code: string) => {
-      setBusy(true);
-      try {
-        const result = await finishCredentialLink(client, company, state, code);
-        toast.success("Connected to TinyHumans.", { description: result.note });
-        onConnected?.(result);
-      } catch (err) {
-        // The host's own words where it sent them: "that connection attempt has
-        // expired" tells an operator to click again, which a generic failure
-        // does not.
-        toast.error(
-          err instanceof ApiError ? err.message : "Couldn't finish connecting to TinyHumans.",
-        );
-      } finally {
-        setBusy(false);
+  const finish = useCallback(async (state: string, code: string) => {
+    const { client: startClient, company: startCompany } = latest.current;
+    setBusy(true);
+    try {
+      const result = await finishCredentialLink(startClient, startCompany, state, code);
+      // The redemption itself always ran against `startClient`/`startCompany`
+      // — that part is correct no matter what changes underneath it. What
+      // must not happen is announcing that result, or handing it to
+      // `onConnected`, against a *different* scope than the one that earned
+      // it: discard rather than let a stale grant surface as "connected" on
+      // whatever host/company is current by the time the request returns.
+      if (latest.current.client !== startClient || latest.current.company !== startCompany) {
+        return;
       }
-    },
-    [client, company, onConnected],
-  );
+      toast.success("Connected to TinyHumans.", { description: result.note });
+      latest.current.onConnected?.(result);
+    } catch (err) {
+      // The host's own words where it sent them: "that connection attempt has
+      // expired" tells an operator to click again, which a generic failure
+      // does not.
+      toast.error(
+        err instanceof ApiError ? err.message : "Couldn't finish connecting to TinyHumans.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (redeeming.current) return;
