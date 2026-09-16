@@ -4,15 +4,6 @@ use crate::ports::types::CompanyId;
 use axum::http::StatusCode;
 use serde_json::json;
 
-
-
-
-
-
-
-
-
-
 /// The hosted shape, driven through the env seam (no process mutation): a
 /// company that pasted nothing reads `attested` from the instance identity,
 /// its own TinyHumans key outranks that, its own Composio token outranks
@@ -225,7 +216,6 @@ async fn authorize_route_conflicts_without_build_or_token() {
 }
 
 // --- Who may change what the company connects through (issue #403) -------
-
 
 /// The regression this issue is about: a signed-in member who is not an
 /// admin cannot change what the company's agents connect through — neither

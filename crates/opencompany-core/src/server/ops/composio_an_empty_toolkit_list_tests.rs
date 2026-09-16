@@ -4,15 +4,6 @@ use crate::server::ops::composio_toolkits;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
-
-
-
-
-
-
-
-
-
 /// Issue #397: an **empty** manifest allowlist means "defer to the backend"
 /// — allow everything — so the status must report open mode and hand the
 /// console a non-empty starting set. The old console gate keyed off
@@ -58,10 +49,6 @@ async fn an_empty_toolkit_list_is_open_mode_and_still_offers_providers() {
         "a fallback tells the operator it may be incomplete: {dto}"
     );
 }
-
-
-
-
 
 /// The heart of the reopened issue: in open mode the console is offered the
 /// **backend's** catalog, not a list maintained by hand in this repo.

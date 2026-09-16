@@ -227,12 +227,13 @@ pub(super) fn hundred_slugs() -> Vec<String> {
 /// exists.
 #[cfg(feature = "composio")]
 pub(super) fn composio_backend_env_guard() -> crate::test_support::EnvVarGuard {
-    crate::test_support::EnvVarGuard::capture(&[
-        crate::company::composio::TINYHUMANS_API_URL_ENV,
-    ])
+    crate::test_support::EnvVarGuard::capture(&[crate::company::composio::TINYHUMANS_API_URL_ENV])
 }
 
-pub(super) async fn read_slot(runtime: &super::CompanyRuntime, key: &'static str) -> Option<String> {
+pub(super) async fn read_slot(
+    runtime: &super::CompanyRuntime,
+    key: &'static str,
+) -> Option<String> {
     runtime
         .secrets()
         .get(runtime.id(), key)

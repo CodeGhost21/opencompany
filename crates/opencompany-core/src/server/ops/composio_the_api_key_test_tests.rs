@@ -2,15 +2,6 @@ use super::composio_test_support::*;
 use axum::http::StatusCode;
 use serde_json::json;
 
-
-
-
-
-
-
-
-
-
 /// A legacy-only BYOK key still passes the check route, and a subsequent
 /// `PUT` mirrors the rotated value to both addresses.
 #[tokio::test]
@@ -465,4 +456,3 @@ async fn the_clear_note_does_not_claim_a_new_token() {
         "the clear names what it did: {clear_note}"
     );
 }
-

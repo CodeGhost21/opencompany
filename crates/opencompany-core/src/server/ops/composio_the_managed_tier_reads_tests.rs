@@ -3,15 +3,6 @@ use super::{CredentialSource, access_for};
 use axum::http::StatusCode;
 use serde_json::json;
 
-
-
-
-
-
-
-
-
-
 /// The `attested` row of the matrix, which the route cannot reach without
 /// mutating the process environment.
 ///
@@ -514,4 +505,3 @@ async fn a_token_put_mirrors_to_the_legacy_slot() {
         Some("")
     );
 }
-

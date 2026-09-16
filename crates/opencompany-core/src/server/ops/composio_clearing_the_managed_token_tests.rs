@@ -3,15 +3,6 @@ use super::composio_test_support::*;
 use axum::http::StatusCode;
 use serde_json::json;
 
-
-
-
-
-
-
-
-
-
 /// A managed-token clear needs no confirmation while the company is on
 /// BYOK: `composio/mode` no longer selects the managed slot, so this
 /// clear is not touching what any live call resolves through, and the
