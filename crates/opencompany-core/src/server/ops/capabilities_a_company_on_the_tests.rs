@@ -644,12 +644,12 @@ async fn reports_total_ceiling_row_when_configured() {
 
 // ---- issue #886: the Composio verdict comes from the resolver -----------
 
-const GRANTS_COMPOSIO: &str =
+pub(super) const GRANTS_COMPOSIO: &str =
     "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n";
 
 /// A store whose reads always fail — the transient-hiccup case, mirroring
 /// `company_key`'s own fixture.
-struct BrokenSecrets;
+pub(super) struct BrokenSecrets;
 
 #[async_trait::async_trait]
 impl crate::ports::SecretStore for BrokenSecrets {
@@ -673,7 +673,7 @@ impl crate::ports::SecretStore for BrokenSecrets {
 /// The instance identity the platform hands a hosted pod. Built directly
 /// rather than through `from_env` so the tier matrix never touches the
 /// process environment.
-fn platform_identity() -> std::sync::Arc<TinyhumansTokenSource> {
+pub(super) fn platform_identity() -> std::sync::Arc<TinyhumansTokenSource> {
     std::sync::Arc::new(TinyhumansTokenSource::projected_file(
         "/var/run/secrets/tinyhumans.ai/token",
     ))
