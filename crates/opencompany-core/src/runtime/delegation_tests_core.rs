@@ -562,14 +562,14 @@ pub(super) fn peer_handoff(teammate: &str, instruction: &str) -> Delegation {
 /// over a temp dir, the shared queue, and the steer registry.
 pub(super) struct Fixture {
     _dir: tempfile::TempDir,
-    record: CompanyRecord,
-    tasks: Arc<dyn TaskStore>,
-    queue: DelegationQueue,
+    pub(super) record: CompanyRecord,
+    pub(super) tasks: Arc<dyn TaskStore>,
+    pub(super) queue: DelegationQueue,
     steer: InflightRegistry,
     /// Wired into every runner, so the parked-approval overlay (issue #465)
     /// is exercised by the whole existing suite rather than only by the
     /// tests that park something.
-    approvals: ApprovalRequestQueue,
+    pub(super) approvals: ApprovalRequestQueue,
     /// Workflows a turn authored inline (issue #678). Empty in every test
     /// that does not stage one, which is what keeps this a pure addition.
     workflow_refs: WorkflowRefQueue,
