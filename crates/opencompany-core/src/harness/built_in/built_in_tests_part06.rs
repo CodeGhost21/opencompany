@@ -7,7 +7,9 @@
 
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
+use super::built_in_test_fixtures_2::skill_scratch;
 use super::*;
+use crate::harness::provider::MockProvider;
 
 /// This file's own default `park()` call site — the top-level turn, not
 /// a delegated re-park — stamps the marker with the ambient
