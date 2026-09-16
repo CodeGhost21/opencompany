@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "openhuman")]
 use super::tests_core::{RacingJournalStore, RefusingJournalStore};
 
 /// **Major review finding (CodeRabbit) on PR #2038.** The claim-release
