@@ -818,5 +818,11 @@ pub fn may_delete(author: &LedgerAuthor) -> bool {
 }
 
 #[cfg(test)]
-#[path = "ledgers_test.rs"]
-mod test;
+#[path = "ledgers_tests_lifecycle.rs"]
+mod tests_lifecycle;
+#[cfg(test)]
+#[path = "ledgers_tests_validation.rs"]
+mod tests_validation;
+#[cfg(test)]
+#[path = "ledgers_tests_concurrency.rs"]
+mod tests_concurrency;
