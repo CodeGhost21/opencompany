@@ -1,9 +1,8 @@
-//! `chat_seed_regression`, continued: the thread-binding half of issue
-//! #1840's coverage. Split out because the combined inline module exceeded
-//! the 750-line file limit; see `built_in_chat_seed_seed_tests` for the rest.
+//! `chat_seed_regression`, continued (issue #1840): the thread-binding half
+//! of this coverage. Split out because the combined inline module exceeded
+//! the 750-line file limit; see `built_in_chat_seed_seed_tests` for the rest
+//! and the shared fixtures.
 
-use super::*;
-use super::built_in_test_fixtures::*;
 use super::*;
 
 use std::sync::Mutex as StdMutex;
@@ -13,6 +12,7 @@ use tinyinference::model::{ModelRequest, ModelResponse};
 
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
+use super::built_in_test_fixtures::*;
 
 /// An appendable in-memory journal. `read_from` returns ascending order,
 /// so the trait's default `read_before` yields the newest-first paging the
@@ -463,4 +463,3 @@ async fn a_seed_that_cannot_be_built_starts_blind_rather_than_leaking_the_bound_
         "the turn still has to answer the message it was given: {last:?}"
     );
 }
-

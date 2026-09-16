@@ -1,17 +1,16 @@
-//! Split from `built_in::tests::chat_seed_regression` because that inline
-//! module exceeded the 750-line file limit (issue #1840's own doc follows).
+//! Split from `built_in::tests::chat_seed_regression` (issue #1840) because
+//! that inline module exceeded the 750-line file limit. See
+//! `built_in_chat_seed_thread_binding_tests` for the rest.
 //!
-/// End-to-end proof that a chat reply is assembled WITH this desk's recent
-/// journaled history in front of the model (issue #1840), driven through the
-/// real `HarnessPool::run` path with only the model captured.
-///
-/// Each test is RED on the pre-fix code: the old switch branch re-seeded via
-/// OpenHuman's `seed_resume_from_thread_transcript`, which reads a file
-/// OpenCompany never writes for a `chat_id`, so the model saw `history_len =
-/// 0` and none of these markers reached it.
+//! End-to-end proof that a chat reply is assembled WITH this desk's recent
+//! journaled history in front of the model (issue #1840), driven through the
+//! real `HarnessPool::run` path with only the model captured.
+//!
+//! Each test is RED on the pre-fix code: the old switch branch re-seeded via
+//! OpenHuman's `seed_resume_from_thread_transcript`, which reads a file
+//! OpenCompany never writes for a `chat_id`, so the model saw `history_len =
+//! 0` and none of these markers reached it.
 
-use super::*;
-use super::built_in_test_fixtures::*;
 use super::*;
 
 use std::sync::Mutex as StdMutex;
@@ -21,6 +20,7 @@ use tinyinference::model::{ModelRequest, ModelResponse};
 
 use crate::ports::events::EventStreamItem;
 use crate::ports::types::{CompanyEvent, EventSeq, StoredEvent};
+use super::built_in_test_fixtures::*;
 
 /// An appendable in-memory journal. `read_from` returns ascending order,
 /// so the trait's default `read_before` yields the newest-first paging the
@@ -458,4 +458,3 @@ async fn a_thread_switch_within_one_channel_re_seeds() {
          clear the previous thread's history and re-seed from its own"
     );
 }
-
