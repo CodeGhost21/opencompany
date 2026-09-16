@@ -257,7 +257,7 @@ pub(super) fn racing_standing_grant(id: &str) -> crate::runtime::grants::Standin
 /// pins the mint/revoke *reconcile* path's own (oppositely ordered)
 /// append.
 pub(super) struct RefusingGrantRevokeStore {
-    inner: crate::ports::journal::MemoryJournalStore,
+    pub(super) inner: crate::ports::journal::MemoryJournalStore,
 }
 
 #[async_trait::async_trait]
