@@ -24,6 +24,11 @@ use crate::server::webhook::DefaultHashSigner;
 use crate::server::webhook::WebhookSigner;
 use crate::{AppConfig, AppState};
 
+/// Builds state holding one running company `acme`, with `connections` injected.
+async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> AppState {
+    state_with_secrets(home, connections, None).await
+}
+
 /// [`state_with`], optionally over an injected
 /// [`SecretStore`](crate::ports::SecretStore).
 ///
