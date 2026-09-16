@@ -586,7 +586,7 @@ fn upstream_output_and_run_topic_coexist() {
 /// One predecessor envelope carrying `chars` characters of page-like text —
 /// the shape a `web_fetch` `tool_call` node emits (its non-JSON output is
 /// wrapped as `{"text": …}`, which the tinyflows envelope lifts to `text`).
-fn source_envelope(marker: &str, chars: usize) -> Value {
+pub(super) fn source_envelope(marker: &str, chars: usize) -> Value {
     let body = format!("{marker}{}", "x".repeat(chars.saturating_sub(marker.len())));
     json!({ "json": { "text": body.clone() }, "text": body, "raw": { "text": body } })
 }
