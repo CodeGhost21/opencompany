@@ -746,22 +746,44 @@ pub fn roster_agent_ids(record: &CompanyRecord) -> Vec<String> {
     ids
 }
 
+/// Whether a [`delegates_to`](crate::company::Agent::delegates_to) list places
+/// no bound on where its holder may hand work: **empty**, or carrying the
+/// [`DELEGATES_TO_WILDCARD`](crate::company::DELEGATES_TO_WILDCARD).
+///
+/// Empty is unrestricted on the same convention as an omitted `tools` grant or
+/// an omitted `ledgers` list — the manifest says nothing, so nothing is
+/// narrowed. Only a list that names desks narrows. This is what makes a
+/// teammate able to reach the rest of its company without an operator
+/// enumerating the company in every agent's manifest entry.
+pub fn reach_is_unrestricted(allowed: &[String]) -> bool {
+    allowed.is_empty()
+        || allowed
+            .iter()
+            .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
+}
+
 /// The teammates `caller` may hand work to with [`DELEGATE_TO_TEAMMATE_TOOL`]
-/// (issue #884): everybody on a desk with them, plus everybody on a desk their
-/// `allowed` ([`delegates_to`](crate::company::Agent::delegates_to)) list
-/// permits. Never the caller itself.
+/// (issue #884). Never the caller itself.
 ///
-/// The desk-peer arm is the one #884 adds and the one that closes D1: a desk's
-/// lead can now reach the specialist sitting beside it without going back
-/// through the orchestrator. The allowlist arm is a re-reading of the existing
-/// #176 permission rather than a second one — a member allowed to hand work to a
-/// desk is allowed to hand it to somebody on that desk — so opting in to
-/// `delegates_to` grants exactly what it already granted, at teammate
-/// granularity.
+/// With an unrestricted `allowed` (see [`reach_is_unrestricted`]) — the
+/// ordinary case, an agent whose manifest entry says nothing — that is
+/// **everybody on the roster**: desk-mates first, then everybody else in
+/// roster order. A teammate is not locked out of the company because nobody
+/// wrote it a list, and the orchestrator and a desk-less specialist are
+/// reachable like anyone else. What bounds a chain is the depth cap and the
+/// cycle guard at the tool boundary, not the reach.
 ///
-/// Order is desk-peers first, then allowlisted desks, each in the desk's own
-/// membership order, deduplicated — so a refusal lists the nearest options
-/// first.
+/// With a list that names desks, the reach is everybody on a desk with the
+/// caller, plus everybody on a desk the list permits. The desk-peer arm is the
+/// one #884 added and the one that closes D1: a desk's lead can reach the
+/// specialist sitting beside it without going back through the orchestrator.
+/// The allowlist arm is a re-reading of the #176 desk permission at teammate
+/// granularity — a member allowed to hand work to a desk is allowed to hand it
+/// to somebody on that desk.
+///
+/// Order is desk-peers first, then the rest, each in the desk's own membership
+/// order, deduplicated — so a refusal (and the team brief) lists the nearest
+/// options first.
 pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     let push = |ids: &mut Vec<String>, id: &str| {
@@ -774,20 +796,9 @@ pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]
             push(&mut ids, &member);
         }
     }
-    if allowed
-        .iter()
-        .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
-    {
-        // `"*"` is documented as "every desk the company has"
-        // ([`DELEGATES_TO_WILDCARD`](crate::company::DELEGATES_TO_WILDCARD)),
-        // not "every roster agent" — the orchestrator and any agent sitting on
-        // no desk are outside a desk-based grant even when it is the widest
-        // one, so this must walk `desk_ids` + `effective_desk_members` exactly
-        // as the allowlisted-desk loop below does, not `roster_agent_ids`.
-        for desk in desk_ids(record) {
-            for member in record.effective_desk_members(&desk) {
-                push(&mut ids, &member);
-            }
+    if reach_is_unrestricted(allowed) {
+        for id in roster_agent_ids(record) {
+            push(&mut ids, &id);
         }
         return ids;
     }
@@ -834,9 +845,10 @@ fn agent_list(ids: Vec<String>) -> Option<String> {
 /// orchestrator's unrestricted copy, and a bare "not allowed" costs a turn per
 /// guess. Retryable in the same turn, unlike the depth and no-drain refusals.
 ///
-/// Never reached with an empty `allowed`: an empty allowlist means the tool was
-/// not wired at all. It still fails closed if one ever arrives — nothing
-/// resolves, so everything is refused.
+/// An **empty** `allowed` is unrestricted, exactly like the wildcard — see
+/// [`reach_is_unrestricted`]. It used to mean "the tool was not wired at all",
+/// back when only a member that opted in with `delegates_to` carried the tool;
+/// now every roster agent does, and an omitted list is the ordinary case.
 ///
 /// [`DELEGATES_TO_WILDCARD`]: crate::company::DELEGATES_TO_WILDCARD
 pub fn reject_out_of_allowlist_target(
@@ -844,10 +856,7 @@ pub fn reject_out_of_allowlist_target(
     allowed: &[String],
     key: &str,
 ) -> Option<String> {
-    if allowed
-        .iter()
-        .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
-    {
+    if reach_is_unrestricted(allowed) {
         return None;
     }
     // As above: an unresolvable key belongs to `reject_desk_target`.
