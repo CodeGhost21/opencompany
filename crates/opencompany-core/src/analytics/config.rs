@@ -550,5 +550,8 @@ fn non_blank(env: &dyn EnvSource, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[path = "config_tests.rs"]
-mod tests;
+#[path = "config_credential_tests.rs"]
+mod tests_credential;
+#[cfg(test)]
+#[path = "config_endpoint_tests.rs"]
+mod tests_endpoint;
