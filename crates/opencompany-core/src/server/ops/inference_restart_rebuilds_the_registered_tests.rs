@@ -6,6 +6,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use super::inference_test_support::*;
+#[cfg(feature = "openhuman")]
 use super::*;
 
 use crate::ports::types::CompanyId;
