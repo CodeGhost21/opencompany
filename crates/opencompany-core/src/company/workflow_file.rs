@@ -2280,5 +2280,17 @@ fn contains_non_finite_float(value: &toml::Value) -> bool {
 }
 
 #[cfg(test)]
-#[path = "workflow_file_raw_tests.rs"]
-mod tests;
+#[path = "workflow_file_parse_core_tests.rs"]
+mod tests_parse_core;
+#[cfg(test)]
+#[path = "workflow_file_node_config_tests.rs"]
+mod tests_node_config;
+#[cfg(test)]
+#[path = "workflow_file_node_kind_tests.rs"]
+mod tests_node_kind;
+#[cfg(test)]
+#[path = "workflow_file_destination_schedule_tests.rs"]
+mod tests_destination_schedule;
+#[cfg(test)]
+#[path = "workflow_file_union_console_tests.rs"]
+mod tests_union_console;
