@@ -70,7 +70,7 @@ async fn an_unauthorized_forward_is_refused_and_leaves_no_marker() {
 
 /// A runtime with a live event log, for the thread-root tests. Returns the
 /// tempdir too: dropping it deletes the log the runtime is reading.
-async fn runtime_with_events() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
+pub(super) async fn runtime_with_events() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
     let home_dir = tempfile::Builder::new()
         .prefix("opencompany-parent-")
         .tempdir()
@@ -191,7 +191,7 @@ async fn park_gated_node_call(
 /// under a fixed id at `at_millis`, exactly as a real park leaves them — the
 /// gate answers "is this live?" for extend/sweep, the journal projects the
 /// deadline and replays on boot.
-async fn seed_parked(
+pub(super) async fn seed_parked(
     rt: &crate::company::runtime::CompanyRuntime,
     id: &str,
     at_millis: u64,
@@ -586,7 +586,7 @@ async fn extend_approval_moves_deadline_and_survives_replay() {
 /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
 /// every `ApprovalExtended` line and passes everything else through to an
 /// in-memory backend.
-struct RefusingExtendStore {
+pub(super) struct RefusingExtendStore {
     inner: crate::ports::journal::MemoryJournalStore,
 }
 

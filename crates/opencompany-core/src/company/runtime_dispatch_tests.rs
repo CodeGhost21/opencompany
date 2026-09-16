@@ -4,7 +4,7 @@ use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
 use crate::ports::tasks::TaskTitle;
 use std::sync::Arc;
 
-async fn runtime_and_record() -> (
+pub(super) async fn runtime_and_record() -> (
     super::CompanyRuntime,
     crate::ports::CompanyRecord,
     tempfile::TempDir,

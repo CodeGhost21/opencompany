@@ -9,7 +9,7 @@
 /// volume mid-life.
 #[cfg(feature = "openhuman")]
 #[derive(Default)]
-struct RefusingJournalStore {
+pub(super) struct RefusingJournalStore {
     inner: crate::ports::journal::MemoryJournalStore,
     armed: std::sync::atomic::AtomicBool,
     allow_before_failing: std::sync::atomic::AtomicUsize,
@@ -85,7 +85,7 @@ impl crate::ports::journal::JournalStore for RefusingJournalStore {
 /// exercised deterministically rather than by hoping two tasks interleave.
 #[cfg(feature = "openhuman")]
 #[derive(Default)]
-struct RacingJournalStore {
+pub(super) struct RacingJournalStore {
     inner: crate::ports::journal::MemoryJournalStore,
     interleave: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -325,7 +325,7 @@ use async_trait::async_trait;
 
 #[cfg(feature = "openhuman")]
 #[derive(Default)]
-struct RecordingMeter {
+pub(super) struct RecordingMeter {
     queried_companies: Mutex<Vec<crate::ports::types::CompanyId>>,
 }
 
