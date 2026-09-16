@@ -576,22 +576,22 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::over(record())
     }
 
     /// A fixture over a three-desk roster whose leads may re-delegate
     /// (issue #176).
-    fn nested() -> Self {
+    pub(super) fn nested() -> Self {
         Self::over(nested_record())
     }
 
     /// A fixture over the one three-person desk issue #884 D1 was seen on.
-    fn peers() -> Self {
+    pub(super) fn peers() -> Self {
         Self::over(peer_record())
     }
 
-    fn over(record: CompanyRecord) -> Self {
+    pub(super) fn over(record: CompanyRecord) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         Self {
             tasks: Arc::new(FsOps::new(dir.path())) as Arc<dyn TaskStore>,
@@ -604,7 +604,7 @@ impl Fixture {
         }
     }
 
-    fn runner<'a>(&'a self, turns: &'a ScriptedTurns) -> DelegationRunner<'a> {
+    pub(super) fn runner<'a>(&'a self, turns: &'a ScriptedTurns) -> DelegationRunner<'a> {
         DelegationRunner::new(
             turns,
             &self.record,
@@ -618,7 +618,7 @@ impl Fixture {
         .with_workflow_refs(&self.workflow_refs)
     }
 
-    async fn cards(&self) -> Vec<TaskRecord> {
+    pub(super) async fn cards(&self) -> Vec<TaskRecord> {
         self.tasks.list(&self.record.id).await.expect("list cards")
     }
 }
