@@ -5,6 +5,7 @@
 //! all), and the "guarded write" pattern that checks a precondition and
 //! writes only if it still holds.
 
+use super::tests_concurrency::SlowSecrets;
 use super::*;
 
 #[derive(Default)]
