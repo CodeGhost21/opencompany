@@ -1,6 +1,7 @@
 use super::*;
 use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use crate::server::router;
 
 
 /// `GET …/revisions` returns metadata only — id, name, version,

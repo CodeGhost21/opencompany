@@ -1,6 +1,7 @@
 use super::*;
 use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use crate::server::router;
 
 
 /// A row journaled before issue #371 carries no `run_id`, so the

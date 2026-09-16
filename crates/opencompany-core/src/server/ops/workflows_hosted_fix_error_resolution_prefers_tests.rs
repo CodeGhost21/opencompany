@@ -1,6 +1,7 @@
 use super::*;
 use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use crate::server::router;
 
 #[test]
 fn fix_error_resolution_prefers_journal_then_hint_then_nothing() {

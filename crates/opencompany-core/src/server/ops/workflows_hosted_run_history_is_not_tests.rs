@@ -1,6 +1,7 @@
 use super::*;
 use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use crate::server::router;
 
 
 /// **Route-ordering pin.** `runs` is a syntactically valid `wid`, so

@@ -1,6 +1,7 @@
 use super::*;
 use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use crate::server::router;
 
 
 /// The join: a run's files are the artifacts of every card it opened,
