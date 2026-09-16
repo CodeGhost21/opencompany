@@ -1,4 +1,6 @@
 use super::*;
+use super::tests_peer_record::{record_with_peer, ConsultedPeerTurn};
+use super::tests_turn_dispatch::single_turn;
 
 impl ConsultedPeerTurn {
     fn new(peer_reply: &'static str) -> Self {
