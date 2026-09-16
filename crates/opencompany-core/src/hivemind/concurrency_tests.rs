@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 
-use super::moves_tests::{Runner, manifest_with};
+use super::moves_fixtures_tests::{Runner, manifest_with};
 use super::test::{MemoryLog, desk_of};
 use super::*;
 use crate::Result;

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::moves_tests::Runner;
+use super::moves_fixtures_tests::Runner;
 use super::referral;
 use super::test::{MemoryLog, desk_of, record};
 use super::*;
