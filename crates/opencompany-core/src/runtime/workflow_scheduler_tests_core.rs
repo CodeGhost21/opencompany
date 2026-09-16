@@ -131,10 +131,10 @@ pub(super) fn millis_at(year: i64, month: u32, day: u32, hour: u32, minute: u32)
 /// What one recorded scheduled run carries.
 #[derive(Clone, Debug)]
 pub(super) struct Recorded {
-    company: String,
-    workflow: String,
-    global: bool,
-    input: Value,
+    pub(super) company: String,
+    pub(super) workflow: String,
+    pub(super) global: bool,
+    pub(super) input: Value,
 }
 
 /// A [`WorkflowRunner`] that records every run instead of executing one, and
