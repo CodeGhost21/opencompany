@@ -710,7 +710,3 @@ async fn a_dm_reply_after_a_console_verdict_already_won_is_told_it_lost() {
     drop(dm_follow_up);
 }
 
-/// The thread-as-review-surface: a reply to a settled `in_review` dispatch
-/// card's settle pill or relay bubble routes as review feedback and re-runs
-/// the card; an Approve verdict finishes it.
-#[cfg(feature = "openhuman")]
