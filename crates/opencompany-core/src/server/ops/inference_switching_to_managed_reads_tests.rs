@@ -199,11 +199,6 @@ async fn key_never_leaks_across_any_response() {
     }
 }
 
-/// The discard port on loopback: a connection refused immediately, with no
-/// DNS lookup and no wait. Loopback is a permitted probe target here because
-/// the local-runtime category exists, which is exactly what makes it usable
-/// as a test endpoint.
-const UNREACHABLE: &str = "http://127.0.0.1:9/v1";
 
 // --- the connect flow ------------------------------------------------------
 
