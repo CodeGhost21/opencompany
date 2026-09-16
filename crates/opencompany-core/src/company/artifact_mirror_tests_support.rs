@@ -12,7 +12,7 @@ use crate::store::FsOps;
 
 /// One `FsOps` backing both ports, so a test exercises the real stores
 /// rather than a stub that cannot tell a create from an overwrite.
-fn stores() -> (tempfile::TempDir, Arc<FsOps>, CompanyId) {
+pub(super) fn stores() -> (tempfile::TempDir, Arc<FsOps>, CompanyId) {
     let dir = tempfile::tempdir().expect("tempdir");
     let ops = Arc::new(FsOps::new(dir.path()));
     (dir, ops, CompanyId::new("mirror-co"))
@@ -25,7 +25,7 @@ fn stores() -> (tempfile::TempDir, Arc<FsOps>, CompanyId) {
 /// what `materialize` does when the create fails, not about which limit
 /// produced the failure — and a real limit would tie the test to whichever
 /// cap happens to be tunable.
-struct RefusingCreate(Arc<FsOps>);
+pub(super) struct RefusingCreate(pub(super) Arc<FsOps>);
 
 #[async_trait::async_trait]
 impl WorkspaceStore for RefusingCreate {
@@ -152,7 +152,7 @@ impl WorkspaceStore for RefusingCreate {
 /// second writer has, so `materialize`'s rollback must find the lease and
 /// leave the folder standing rather than delete the one the rival is about to
 /// write into.
-struct AdoptParentThenRefuse(Arc<FsOps>);
+pub(super) struct AdoptParentThenRefuse(pub(super) Arc<FsOps>);
 
 #[async_trait::async_trait]
 impl WorkspaceStore for AdoptParentThenRefuse {
@@ -288,7 +288,7 @@ impl WorkspaceStore for AdoptParentThenRefuse {
 
 /// Every node id in the workspace, sorted — the set, which is what `tree`
 /// actually promises.
-async fn sorted_ids(ws: &dyn WorkspaceStore, company: &CompanyId) -> Vec<String> {
+pub(super) async fn sorted_ids(ws: &dyn WorkspaceStore, company: &CompanyId) -> Vec<String> {
     let mut ids: Vec<String> = ws
         .tree(company)
         .await
@@ -302,7 +302,7 @@ async fn sorted_ids(ws: &dyn WorkspaceStore, company: &CompanyId) -> Vec<String>
 
 /// A node's rendered path, so an assertion reads as a path rather than a
 /// ULID.
-async fn path_of(ws: &dyn WorkspaceStore, company: &CompanyId, id: &str) -> String {
+pub(super) async fn path_of(ws: &dyn WorkspaceStore, company: &CompanyId, id: &str) -> String {
     let nodes = ws.tree(company).await.unwrap();
     let mut parts = Vec::new();
     let mut cursor = Some(id.to_string());
@@ -317,7 +317,7 @@ async fn path_of(ws: &dyn WorkspaceStore, company: &CompanyId, id: &str) -> Stri
     parts.join("/")
 }
 
-fn target<'a>(source: &'a str, body: &'a str) -> PublishTarget<'a> {
+pub(super) fn target<'a>(source: &'a str, body: &'a str) -> PublishTarget<'a> {
     PublishTarget {
         agent_id: "cmo",
         task_id: "t-1",
@@ -331,7 +331,7 @@ fn target<'a>(source: &'a str, body: &'a str) -> PublishTarget<'a> {
 /// A real store whose swap boundary pauses until two publishers have both
 /// staged their payloads. This makes the race deterministic without
 /// replacing the compare-and-swap implementation under test.
-struct PausedSwap(Arc<FsOps>, Arc<tokio::sync::Barrier>);
+pub(super) struct PausedSwap(pub(super) Arc<FsOps>, pub(super) Arc<tokio::sync::Barrier>);
 
 #[async_trait::async_trait]
 impl WorkspaceStore for PausedSwap {
@@ -467,7 +467,7 @@ struct PausedTreeRead {
 }
 
 impl PausedTreeRead {
-    fn new(inner: Arc<FsOps>, arrivals: usize) -> Self {
+    pub(super) fn new(inner: Arc<FsOps>, arrivals: usize) -> Self {
         Self {
             inner,
             barrier: Arc::new(tokio::sync::Barrier::new(2)),
@@ -596,7 +596,7 @@ impl WorkspaceStore for PausedTreeRead {
 }
 
 /// Every node under `parent` carrying `name`, by id.
-fn named_children(nodes: &[WorkspaceNode], parent: &str, name: &str) -> Vec<String> {
+pub(super) fn named_children(nodes: &[WorkspaceNode], parent: &str, name: &str) -> Vec<String> {
     nodes
         .iter()
         .filter(|n| n.parent_id.as_deref() == Some(parent) && n.name == name)
@@ -608,10 +608,10 @@ fn named_children(nodes: &[WorkspaceNode], parent: &str, name: &str) -> Vec<Stri
 
 /// An artifact store with one chosen fault, so a test can ask for exactly
 /// the failure it means: unreadable (`list`) or unwritable (`upsert`).
-struct FaultyArtifacts {
-    listed: Vec<ArtifactRecord>,
-    list_fails: bool,
-    upsert_fails: bool,
+pub(super) struct FaultyArtifacts {
+    pub(super) listed: Vec<ArtifactRecord>,
+    pub(super) list_fails: bool,
+    pub(super) upsert_fails: bool,
 }
 
 #[async_trait::async_trait]
@@ -636,7 +636,7 @@ impl ArtifactStore for FaultyArtifacts {
     }
 }
 
-fn published_as(node_id: &str) -> ArtifactRecord {
+pub(super) fn published_as(node_id: &str) -> ArtifactRecord {
     let mut record = ArtifactRecord::new(
         "a-1",
         "t-1",
