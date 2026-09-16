@@ -1,5 +1,6 @@
 use super::tests::tmp_root;
 use super::*;
+use crate::store::conformance;
 
 // The fs backend runs the identical port-conformance suite the sqlite
 // backend runs under `--features sqlite`. Each test gets a fresh root so the
