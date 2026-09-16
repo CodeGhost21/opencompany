@@ -78,8 +78,7 @@ fn every_default_entry_names_a_declared_target_and_the_default_is_empty() {
         INTENDED_TARGETS.len(),
         "every shipped entry needs an explicit target in this test"
     );
-    for ((entry, target), shipped) in INTENDED_TARGETS.iter().zip(DEFAULT_ALWAYS_APPROVE.iter())
-    {
+    for ((entry, target), shipped) in INTENDED_TARGETS.iter().zip(DEFAULT_ALWAYS_APPROVE.iter()) {
         assert_eq!(entry, shipped, "the target table must track the default");
         assert!(
             declared_tools().any(|tool| tool == *target),

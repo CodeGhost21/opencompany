@@ -7,11 +7,10 @@ use futures::stream::{self, BoxStream};
 use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
 
 use super::super::*;
+use super::fixtures::*;
 use crate::Result;
 use crate::ports::events::{EventLog, EventStreamItem};
 use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, StoredEvent};
-use super::fixtures::*;
-
 
 #[tokio::test]
 async fn a_scripted_room_converges_and_journals_the_right_authors() {
@@ -138,4 +137,3 @@ fn the_marker_line_is_what_the_room_keeps() {
     assert_eq!(marker_line("I am not sure yet."), "I am not sure yet.");
     assert_eq!(marker_line("   \n\n"), "(no answer)");
 }
-

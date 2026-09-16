@@ -1,6 +1,6 @@
+use super::gate_resolution_tests::*;
 use super::*;
 use crate::ports::types::ActorKind;
-use super::gate_resolution_tests::*;
 
 use super::*;
 use crate::ports::types::ActorKind;
@@ -65,8 +65,7 @@ pub(super) fn policy_hitl_enabled_reflects_the_gate_that_reports_it() {
 
 #[tokio::test]
 async fn disabled_policy_hitl_allows_legacy_parks_but_keeps_hard_denials() {
-    let gate =
-        ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
+    let gate = ManifestApprovalGate::new(policy("supervised", None)).with_policy_hitl_disabled();
     assert_eq!(
         decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
         PolicyDecision::Allow
@@ -78,8 +77,7 @@ async fn disabled_policy_hitl_allows_legacy_parks_but_keeps_hard_denials() {
         PolicyDecision::Deny
     );
 
-    let readonly =
-        ManifestApprovalGate::new(policy("readonly", None)).with_policy_hitl_disabled();
+    let readonly = ManifestApprovalGate::new(policy("readonly", None)).with_policy_hitl_disabled();
     assert_eq!(
         decide(&readonly, &effect("payment.send", EffectGroup::Spend)).await,
         PolicyDecision::Deny
@@ -711,4 +709,3 @@ async fn resolve_amended_expired_denies() {
     assert_eq!(resolved, None);
     assert!(gate.parked_ids().is_empty());
 }
-

@@ -7,11 +7,10 @@ use futures::stream::{self, BoxStream};
 use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
 
 use super::super::*;
+use super::fixtures::*;
 use crate::Result;
 use crate::ports::events::{EventLog, EventStreamItem};
 use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, StoredEvent};
-use super::fixtures::*;
-
 
 #[test]
 fn a_desk_with_two_members_deliberates_by_default() {
@@ -249,4 +248,3 @@ fn the_derived_policy_scales_with_the_room() {
         3
     );
 }
-

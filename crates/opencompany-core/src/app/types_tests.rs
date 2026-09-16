@@ -21,9 +21,8 @@ fn resolve_host_falls_through_to_the_config_file() {
         "api_url = \"https://toml-api.example\"\ntinyplace_api_url = \"https://toml-place.example\"\n",
     )
     .expect("parses");
-    let config =
-        AppConfig::resolve_host(&crate::app::config::MapEnv::new([("", "")]), Some(&file))
-            .expect("resolves");
+    let config = AppConfig::resolve_host(&crate::app::config::MapEnv::new([("", "")]), Some(&file))
+        .expect("resolves");
     assert_eq!(config.api_url, "https://toml-api.example");
     assert_eq!(config.tinyplace_api_url, "https://toml-place.example");
 }
@@ -79,9 +78,8 @@ fn resolve_host_carries_the_workspace_section() {
     let file =
         toml::from_str::<crate::app::config::ConfigFile>("[workspace]\ngit_enabled = true\n")
             .expect("parses");
-    let config =
-        AppConfig::resolve_host(&crate::app::config::MapEnv::new([("", "")]), Some(&file))
-            .expect("resolves");
+    let config = AppConfig::resolve_host(&crate::app::config::MapEnv::new([("", "")]), Some(&file))
+        .expect("resolves");
     assert!(config.workspace_git_enabled);
 }
 

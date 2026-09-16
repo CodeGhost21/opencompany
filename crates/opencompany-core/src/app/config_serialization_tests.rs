@@ -1,6 +1,6 @@
+use super::config_resolution_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
-use super::config_resolution_tests::*;
 
 // -----------------------------------------------------------------
 // resolve_serve_bind: the layers `serve` actually honours.
@@ -350,8 +350,8 @@ pub(super) fn a_write_that_fails_leaves_no_temp_file_behind() {
     // `existing` reads NotFound as "no config yet" and proceeds, so the
     // failure below comes from the temp file's own `std::fs::write`
     // rather than from the initial read.
-    let err = write_config_toml(&root, &[("bind", ConfigValue::Str("0.0.0.0:9000".into()))])
-        .unwrap_err();
+    let err =
+        write_config_toml(&root, &[("bind", ConfigValue::Str("0.0.0.0:9000".into()))]).unwrap_err();
     assert_eq!(err.code(), "config_error");
     assert!(
         !root.exists(),

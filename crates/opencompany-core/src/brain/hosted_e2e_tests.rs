@@ -2,8 +2,8 @@
 //! with [`HostedMedullaBrain`] wired in through the builder. See
 //! `hosted_offline_tests.rs` for the offline half over [`MockTransport`].
 
-use super::*;
 use super::tests_offline::{effect_frame, tool_call_frame};
+use super::*;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -17,7 +17,6 @@ use crate::ports::types::{
     ApprovalId, ChunkAddr, ChunkHit, CompanyEvent, ContextOp, ContextOpResult, Effect,
     EffectDisposition, ToolResult,
 };
-
 
 // ---------------------------------------------------------------------------
 // End-to-end tests through a real CompanyRuntime

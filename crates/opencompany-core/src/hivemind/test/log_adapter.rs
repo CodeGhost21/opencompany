@@ -7,11 +7,10 @@ use futures::stream::{self, BoxStream};
 use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
 
 use super::super::*;
+use super::fixtures::*;
 use crate::Result;
 use crate::ports::events::{EventLog, EventStreamItem};
 use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, StoredEvent};
-use super::fixtures::*;
-
 
 pub(crate) async fn seed_desk(log: &MemoryLog) -> EventSeq {
     let company = MemoryLog::company();
@@ -163,4 +162,3 @@ async fn the_log_adapter_attributes_and_pages_desk_rows() {
         "`before` is exclusive: {older:?}"
     );
 }
-

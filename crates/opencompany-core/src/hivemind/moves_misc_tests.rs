@@ -12,14 +12,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote};
+use super::moves_fixtures_tests::*;
+use super::moves_grammar_tests::*;
+use super::moves_memory_tests::*;
 use super::test::{MemoryLog, desk_of, record};
 use super::*;
 use crate::Result;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, EventSeq};
-use super::moves_fixtures_tests::*;
-use super::moves_grammar_tests::*;
-use super::moves_memory_tests::*;
 
 // ---------------------------------------------------------------------------
 // A failed turn is not a failed room

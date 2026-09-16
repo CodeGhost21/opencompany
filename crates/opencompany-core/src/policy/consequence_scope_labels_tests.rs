@@ -1,11 +1,11 @@
+use super::consequence_composio_tests::*;
+use super::consequence_fetch_grant_tests::*;
+use super::consequence_hosting_tests::*;
+use super::consequence_mcp_roster_tests::*;
+use super::consequence_shell_git_mcp_tests::*;
 use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
-use super::consequence_hosting_tests::*;
-use super::consequence_fetch_grant_tests::*;
-use super::consequence_composio_tests::*;
-use super::consequence_mcp_roster_tests::*;
-use super::consequence_shell_git_mcp_tests::*;
 
 pub(super) fn the_minted_scope_is_the_scope_a_grant_admits() {
     use crate::runtime::grants::{GrantId, StandingGrant};
@@ -421,4 +421,3 @@ pub(super) fn every_consequence_tool_has_a_console_label() {
         collisions.join("; ")
     );
 }
-

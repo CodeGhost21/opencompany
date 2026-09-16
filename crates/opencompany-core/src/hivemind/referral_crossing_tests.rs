@@ -14,13 +14,13 @@ use async_trait::async_trait;
 
 use super::moves_fixtures_tests::Runner;
 use super::referral;
+use super::referral_fixtures_tests::*;
+use super::referral_prompt_tests::*;
 use super::test::{MemoryLog, desk_of, record};
 use super::*;
 use crate::Result;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, EventSeq};
-use super::referral_fixtures_tests::*;
-use super::referral_prompt_tests::*;
 
 // ---------------------------------------------------------------------------
 // What actually crosses
@@ -554,4 +554,3 @@ async fn the_same_line_is_never_asked_twice() {
     assert_eq!(far.asked().len(), 1, "{:?}", far.asked());
     assert_eq!(outcome.referrals.asked.len(), 1);
 }
-

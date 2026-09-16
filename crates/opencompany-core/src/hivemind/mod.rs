@@ -89,9 +89,9 @@ mod moves_memory_tests;
 #[cfg(test)]
 mod moves_misc_tests;
 #[cfg(test)]
-mod referral_fixtures_tests;
-#[cfg(test)]
 mod referral_crossing_tests;
+#[cfg(test)]
+mod referral_fixtures_tests;
 #[cfg(test)]
 mod referral_prompt_tests;
 #[cfg(test)]

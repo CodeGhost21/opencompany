@@ -213,4 +213,3 @@ pub(crate) fn three_member_manifest() -> String {
 pub(crate) fn desk_of(manifest: &str, chat: &str) -> Option<HiveDesk> {
     desk_episode(&record(manifest), Some(chat))
 }
-

@@ -12,14 +12,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use super::memory::{HiveMemory, HiveMemoryHit, HiveMemoryNote};
+use super::moves_fixtures_tests::*;
+use super::moves_memory_tests::*;
+use super::moves_misc_tests::*;
 use super::test::{MemoryLog, desk_of, record};
 use super::*;
 use crate::Result;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, EventSeq};
-use super::moves_fixtures_tests::*;
-use super::moves_memory_tests::*;
-use super::moves_misc_tests::*;
 
 // ---------------------------------------------------------------------------
 // The grammar itself
@@ -401,4 +401,3 @@ async fn two_bare_proposals_of_one_topic_do_not_carry_when_only_one_seat_may_pro
     );
     assert_eq!(outcome.violations.len(), 1, "{:?}", outcome.violations);
 }
-

@@ -1,6 +1,6 @@
+use super::config_serialization_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
-use super::config_serialization_tests::*;
 
 use super::*;
 use crate::company::CompanyManifest;
@@ -619,4 +619,3 @@ pub(super) fn tenant_namespace_alone_also_gates_as_hosted_tenant() {
     let err = resolve(&env, None, &default_manifest()).unwrap_err();
     assert!(err.to_string().contains("TINYHUMANS_API_URL"));
 }
-

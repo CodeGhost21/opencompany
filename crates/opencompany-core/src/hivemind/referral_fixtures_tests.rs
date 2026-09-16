@@ -14,13 +14,13 @@ use async_trait::async_trait;
 
 use super::moves_fixtures_tests::Runner;
 use super::referral;
+use super::referral_crossing_tests::*;
+use super::referral_prompt_tests::*;
 use super::test::{MemoryLog, desk_of, record};
 use super::*;
 use crate::Result;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, EventSeq};
-use super::referral_crossing_tests::*;
-use super::referral_prompt_tests::*;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -436,4 +436,3 @@ pub(super) fn a_named_reach_is_honoured_in_both_narrower_directions() {
         assert_eq!(reach.addresses_desks(), desks, "{word}");
     }
 }
-

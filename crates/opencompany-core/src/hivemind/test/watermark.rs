@@ -7,11 +7,10 @@ use futures::stream::{self, BoxStream};
 use tinyhivemind_hive::{SESSION_WINDOW, Sequence, SessionAuthor, SessionQuery, project_session};
 
 use super::super::*;
+use super::fixtures::*;
 use crate::Result;
 use crate::ports::events::{EventLog, EventStreamItem};
 use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, StoredEvent};
-use super::fixtures::*;
-
 
 /// One transcript row, as the projection hands it to a prompt.
 fn message(sequence: u64, author: &str, content: &str) -> tinyhivemind_hive::SessionMessage {

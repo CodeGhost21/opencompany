@@ -1,11 +1,11 @@
-use super::*;
-use crate::ports::types::Verdict;
-use serde_json::json;
-use super::consequence_fetch_grant_tests::*;
 use super::consequence_composio_tests::*;
+use super::consequence_fetch_grant_tests::*;
 use super::consequence_mcp_roster_tests::*;
 use super::consequence_scope_labels_tests::*;
 use super::consequence_shell_git_mcp_tests::*;
+use super::*;
+use crate::ports::types::Verdict;
+use serde_json::json;
 
 use super::*;
 use crate::ports::types::Verdict;
@@ -157,4 +157,3 @@ pub(super) fn the_fallback_cannot_see_a_read_verb_behind_a_namespace() {
         "the same verb at the front is seen, which is what makes the namespace the problem"
     );
 }
-
