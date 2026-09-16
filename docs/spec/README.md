@@ -100,6 +100,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/harnesses-acp.md](runtime/harnesses-acp.md) | The ACP transports in detail: `local` vs `runner`, readiness probing, resuming a teammate's session across a restart, and streaming its execution state while the turn runs |
 | [runtime/providers.md](runtime/providers.md) | Inference providers, dual-mode OpenRouter, per-harness credentials |
 | [../key-reworks/README.md](../key-reworks/README.md) | The keys rework plan (issue #2306): provider + model everywhere, company default and agent pairs, Composio and search key names, routing removal — phased, slice by slice |
+| [../onboarding-redesign/README.md](../onboarding-redesign/README.md) | Onboarding redesign plan: a setup-way branch point, both paths reusing the real Connections fan-out instead of a separate wizard mechanism, and the post-build checklist removed — depends on issue #2342 |
 | [runtime/globals.md](runtime/globals.md) | The global baseline every company gets: agents, workflows, skills, the starting tool belt, and `[globals].disable` |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
