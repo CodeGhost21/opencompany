@@ -7,18 +7,20 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use super::tests_mcp_manifest::{
+    mcp_manifest, state_with_manifest, state_with_manifest_and_defaults,
+};
+use super::write_test_support::*;
 use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::{TaskRecord, TaskTitle};
 use crate::ports::types::{CompanyId, CompanyRecord, CompressedTrace, ContextChunk};
 use crate::runtime::RuntimeBuilder;
-use super::tests_mcp_manifest::{mcp_manifest, state_with_manifest, state_with_manifest_and_defaults};
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use super::write_test_support::*;
 
 fn home() -> tempfile::TempDir {
     tempfile::Builder::new()

@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// `PUT …/workflows/{wid}/enabled` round-trips through the API and shows
 /// up on the list read (issue #276).
@@ -69,7 +68,6 @@ async fn the_enabled_route_toggles_and_the_list_reports_it() {
     assert_eq!(json_body(armed).await["enabled"], serde_json::json!(true));
 }
 
-
 /// **Issue #276's safety half, over the wire.** Creating a workflow with
 /// a schedule answers `enabled: false` on its own response, so a console
 /// learns about the disarm from the write it made rather than from a
@@ -117,7 +115,6 @@ async fn creating_a_scheduled_workflow_answers_switched_off() {
     assert_eq!(json_body(read).await["enabled"], serde_json::json!(false));
 }
 
-
 /// An unknown id is a 404 rather than a silently-created disable entry —
 /// a switch that accepted any string would let a typo look like a
 /// successful pause.
@@ -138,7 +135,6 @@ async fn toggling_an_unknown_workflow_is_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-
 /// A missing workflow is a missing nested resource, not a missing
 /// company. Both variants are 404, so the envelope code pins the
 /// distinction that operators and clients actually consume.
@@ -157,7 +153,6 @@ async fn reading_an_unknown_workflow_reports_resource_not_found() {
     assert_eq!(body["code"], "not_found", "{body}");
     assert_eq!(body["error"], "not found: workflow ghost", "{body}");
 }
-
 
 /// A **global-only** workflow — no seed file, no overlay body, just the
 /// baseline every company gets — must still be toggleable: it has a
@@ -222,7 +217,6 @@ async fn the_enabled_route_toggles_a_global_only_workflow() {
         .unwrap();
     assert_eq!(read.status(), StatusCode::OK);
 }
-
 
 /// A workflow this company has explicitly dropped via
 /// `[globals].disable` no longer exists as far as this company is
@@ -290,7 +284,6 @@ async fn toggling_a_company_disabled_global_is_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-
 /// Restart survival: a workflow created through the API is still listed
 /// by a completely fresh `AppState` rebuilt over the same store — proving
 /// the body is durable, not process-local.
@@ -323,7 +316,6 @@ async fn a_created_workflow_survives_a_state_rebuild() {
     assert_eq!(items[0]["id"], "greeter");
     assert_eq!(items[0]["name"], "Greeter");
 }
-
 
 /// **The issue, at the HTTP boundary.** A run's delivery rows read back
 /// after the fact, newest first — which is what survives a console
@@ -377,7 +369,6 @@ async fn run_history_reads_back_newest_first_with_its_rows() {
     // A run that finished carries no `error` key at all.
     assert!(rows[0].get("error").is_none(), "{body}");
 }
-
 
 /// **Issue #981, part 2, at the HTTP boundary.** The history's own
 /// reading of the three runs the issue distinguishes.
@@ -441,7 +432,6 @@ async fn the_history_scores_a_dropped_report_without_calling_the_run_a_failure()
     assert!(rows[2].get("cancelled").is_none(), "{body}");
 }
 
-
 /// Every row carries a verdict, including one still in flight — the
 /// field is unconditional precisely so no reader has to fall back to
 /// re-deriving it from the six fields around it.
@@ -487,7 +477,6 @@ async fn a_run_still_in_flight_is_scored_running_not_ok() {
     assert_eq!(rows[0]["running"], true, "{body}");
     assert_eq!(rows[0]["verdict"], "running", "{body}");
 }
-
 
 /// Issue #596: the run-output route serves a stored snapshot (200) and
 /// 404s a run with none. Runs in the DEFAULT lane, which also proves the
@@ -547,4 +536,3 @@ async fn run_output_route_serves_a_snapshot_and_404s_an_unknown_run() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
-

@@ -7,6 +7,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use super::write_test_support::*;
 use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
@@ -17,7 +18,6 @@ use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use super::write_test_support::*;
 
 /// The sorted node names in a workspace tree body.
 ///
@@ -155,7 +155,10 @@ pub(super) fn mcp_manifest() -> CompanyManifest {
 
 /// Boots an fs-backed company from a caller-supplied manifest (mirrors
 /// `state_with_company`, which pins the default manifest).
-pub(super) async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
+pub(super) async fn state_with_manifest(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+) -> AppState {
     state_with_manifest_and_defaults(home, manifest, Vec::new()).await
 }
 

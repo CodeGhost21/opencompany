@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// **Route-ordering pin.** `runs` is a syntactically valid `wid`, so
 /// `GET /workflows/runs` overlaps `GET /workflows/{wid}`. Axum prefers
@@ -32,7 +31,6 @@ async fn run_history_is_not_shadowed_by_the_graph_read() {
         "graph read shadowed the history: {body}"
     );
 }
-
 
 /// **The issue #1012 follow-up pin.** Paging must reach every run, and
 /// a run whose `at_millis` regressed below the page boundary's is the
@@ -73,7 +71,6 @@ fn a_clock_regressed_run_is_reachable_on_a_later_page() {
     );
 }
 
-
 /// The property the design rests on, asserted directly rather than
 /// inferred from a walk: the page and the cursor **partition** the
 /// candidate set. Everything served is at or above the cursor,
@@ -108,7 +105,6 @@ fn the_page_cursor_partitions_the_run_set() {
     );
 }
 
-
 /// Issue #228 / #1272's ordering is untouched: the cut is keyed on
 /// `seq`, but what comes back is still sorted newest **finish** first,
 /// on the very `(at_millis, seq)` pair each row displays.
@@ -124,7 +120,6 @@ fn a_page_is_still_displayed_newest_finish_first() {
         "the page must be listed by finish time, not by the key it was cut on"
     );
 }
-
 
 /// No older page, no cursor. A cursor for a page that does not exist
 /// invites a caller to ask for it, and an absent field is also what
@@ -143,7 +138,6 @@ fn next_before_seq_is_absent_when_there_is_no_older_page() {
     assert!(!has_more);
     assert_eq!(next, None);
 }
-
 
 /// The one part the pure function cannot cover: the cursor reaches the
 /// console, under the camelCase name the client reads, and feeding it
@@ -233,7 +227,6 @@ async fn run_history_issues_the_page_cursor_on_the_wire() {
     );
 }
 
-
 /// **The issue #262 pin.** `0 9 * * *` and `9 0 * * *` are two
 /// characters apart, both valid, and nine hours different. The preview
 /// is the only thing that tells them apart before the report arrives at
@@ -255,7 +248,6 @@ async fn cron_preview_distinguishes_nine_am_from_nine_past_midnight() {
     assert_ne!(morning["next"][0], midnight["next"][0]);
 }
 
-
 /// A shape the humaniser declines to paraphrase still previews: the
 /// description is `null` and the fire times carry the meaning. The
 /// console shows "Next runs: …" rather than nothing.
@@ -268,7 +260,6 @@ async fn cron_preview_returns_fires_without_a_description() {
     assert!(body["description"].is_null(), "{body}");
     assert_eq!(body["next"].as_array().unwrap().len(), 3, "{body}");
 }
-
 
 /// **Malformed input answers 200, not 4xx.** The console previews while
 /// the author is still typing, so a half-written expression is the
@@ -296,7 +287,6 @@ async fn cron_preview_reports_a_parse_error_as_a_200_body() {
     assert!(body["next"].is_null(), "no fire times on a parse error");
 }
 
-
 /// **Route-ordering pin**, the same trade `/workflows/runs` takes:
 /// `cron` is a syntactically valid `wid`, so the static preview path is
 /// registered before `/workflows/{wid}`. A regression would route the
@@ -323,7 +313,6 @@ async fn cron_preview_is_not_shadowed_by_the_graph_read() {
     assert_eq!(body["description"], "Every Mon at 09:00 UTC", "{body}");
 }
 
-
 /// Both scope forms serve the history — the platform
 /// `…/companies/{id}/…` address as well as the prosumer alias.
 #[tokio::test]
@@ -345,7 +334,6 @@ async fn run_history_serves_both_scope_forms() {
     let body = json_body(response).await;
     assert_eq!(body["runs"][0]["workflowId"], "digest");
 }
-
 
 /// **Regression, issue #1882 review — the round-trip data-loss bug.**
 /// An `ownerDesk` set on create must survive an edit that never
@@ -413,7 +401,6 @@ async fn owner_desk_survives_an_unrelated_edit() {
     );
 }
 
-
 /// **The issue, at the HTTP boundary.** A saved workflow's cron was
 /// permanent; now it can be corrected and the correction reads back.
 #[tokio::test]
@@ -457,4 +444,3 @@ async fn edit_replaces_the_graph_and_reads_back() {
     let items = json_body(response).await;
     assert_eq!(own_rows(&items).len(), 1, "{items}");
 }
-

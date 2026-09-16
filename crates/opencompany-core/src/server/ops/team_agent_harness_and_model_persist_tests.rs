@@ -2,11 +2,10 @@ use axum::http::StatusCode;
 use serde_json::json;
 
 use super::team_agent_test_support::*;
+use crate::AppState;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::CompanyId;
 use crate::runtime::RuntimeBuilder;
-use crate::AppState;
-
 
 /// The same edit against a **manifest** teammate, which is the common case
 /// and the one that silently did nothing.

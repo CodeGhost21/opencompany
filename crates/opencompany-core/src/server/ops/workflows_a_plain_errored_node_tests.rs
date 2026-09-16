@@ -1,8 +1,8 @@
 use super::*;
 // The globals-unaware readers: these tests assert the company's own two
 // sources, so they call the form that resolves no baseline.
-use crate::company::{list_workflows_union, load_workflow_union};
 use super::workflows_test_support::*;
+use crate::company::{list_workflows_union, load_workflow_union};
 
 /// A settled `Error` node status is a fact `derive_verdict` already reads
 /// off `self.nodes` on its own — `settle_history_verdicts` must not ALSO

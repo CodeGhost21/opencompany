@@ -1,8 +1,8 @@
 use super::*;
 // The globals-unaware readers: these tests assert the company's own two
 // sources, so they call the form that resolves no baseline.
-use crate::company::{list_workflows_union, load_workflow_union};
 use super::workflows_test_support::*;
+use crate::company::{list_workflows_union, load_workflow_union};
 
 /// FAIL-axis: unlike the list route above (which skips a broken graph and
 /// carries on), addressing the broken one directly is a single-resource

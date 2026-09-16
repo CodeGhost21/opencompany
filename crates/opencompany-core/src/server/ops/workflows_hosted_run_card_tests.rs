@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// The join: a run's files are the artifacts of every card it opened,
 /// and only those. Two cards stamped with the run (one carrying two
@@ -72,7 +71,6 @@ async fn run_artifacts_joins_cards_by_origin_run_id() {
     );
 }
 
-
 /// The contract difference from `output`'s 404: a run that opened no
 /// cards (or whose cards published nothing) answers `200 { files: [] }`,
 /// not a 404. A fileless run is normal, not an error.
@@ -102,7 +100,6 @@ async fn run_artifacts_empty_run_returns_200_empty() {
         "{body}"
     );
 }
-
 
 /// `latestVersion` pins the newest revision, so the deep-link opens the
 /// version an operator edit produced, not v1. A v1(agent)+v2(operator)
@@ -144,7 +141,6 @@ async fn run_artifacts_latest_version_is_pinned() {
     assert_eq!(body["files"][0]["updatedAtMillis"], 6, "{body}");
 }
 
-
 /// `workspaceNodeId` rides through from the newest revision when the
 /// file was mirrored into the tree (issue #552), so the console can
 /// offer the `#/workspace/<id>` link — and is absent otherwise.
@@ -185,7 +181,6 @@ async fn run_artifacts_carries_workspace_node_when_mirrored() {
         "an unmirrored file omits the workspace link: {body}"
     );
 }
-
 
 /// A card opened by run A and re-owned by run B keeps `origin_run_id ==
 /// A` (the field is stamped once, at creation), so its files list under
@@ -247,7 +242,6 @@ async fn run_artifacts_reowned_card_lists_under_opening_run() {
     );
 }
 
-
 /// A legacy record with `source == None` (a pre-#244 auto-captured chat
 /// reply) is still returned — with `source` absent — so the console can
 /// label it rather than the history silently dropping it.
@@ -296,7 +290,6 @@ async fn run_artifacts_includes_legacy_source_none_labeled() {
     );
 }
 
-
 /// The route resolves to `run_artifacts`, not the dynamic
 /// `/workflows/{wid}` graph read — the static-before-dynamic slot holds
 /// (mirrors `run_history_is_not_shadowed_by_the_graph_read`).
@@ -333,7 +326,6 @@ async fn run_artifacts_route_is_not_shadowed() {
     let body = json_body(response).await;
     assert_eq!(body["files"][0]["artifactId"], "art-a1", "{body}");
 }
-
 
 /// A run whose file count passes [`MAX_RUN_ARTIFACTS`] reports
 /// `truncated: true` instead of silently dropping the older rows — so
@@ -391,7 +383,6 @@ async fn run_artifacts_exposes_truncation_at_the_cap() {
     );
 }
 
-
 /// A run that died outright reads back with its reason. This is the
 /// outcome that previously left nothing behind but a host-stdout warning.
 #[tokio::test]
@@ -421,4 +412,3 @@ async fn run_history_carries_a_failed_run_error() {
     );
     assert_eq!(body["runs"][0]["deliveries"].as_array().unwrap().len(), 0);
 }
-

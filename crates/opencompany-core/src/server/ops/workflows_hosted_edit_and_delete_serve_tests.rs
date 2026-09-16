@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// The write verbs are reachable under the platform scope form too, not
 /// just the prosumer alias.
@@ -38,7 +37,6 @@ async fn edit_and_delete_serve_both_scope_forms() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
-
 
 /// A manifest-`enabled` id with no saved graph is listed but NOT
 /// editable — there is nothing to replace or remove, and the console
@@ -118,7 +116,6 @@ async fn a_bodiless_enabled_id_is_listed_but_not_editable() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
-
 /// **The decisive case (issue #1009, path B).** A run whose start was
 /// journaled but whose finish never landed — and whose id is absent from
 /// the live run set — is settled by `list_runs` itself, between boots.
@@ -165,7 +162,6 @@ async fn a_run_absent_from_the_live_set_is_settled_by_the_read() {
     assert!(!finishes[0].1, "a host-restart settle is not a cancel");
 }
 
-
 /// **The mandatory negative (issue #1009, rebuild/clean guard).** A run
 /// the current process is genuinely running is registered on the
 /// supervisor, so its id is in `live()` — and `list_runs` must leave it
@@ -205,4 +201,3 @@ async fn a_run_in_the_live_set_is_left_running() {
         "a live run gets no synthetic finish appended"
     );
 }
-

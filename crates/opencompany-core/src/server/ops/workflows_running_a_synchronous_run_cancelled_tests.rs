@@ -1,7 +1,6 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::running::*;
-
+use super::workflows_test_support::*;
+use super::*;
 
 /// **A synchronous run can be cancelled mid-request, and its response
 /// has to say so.**
@@ -64,7 +63,6 @@ async fn a_synchronous_run_cancelled_mid_request_says_so_in_its_response() {
     );
 }
 
-
 /// …and the flag is omitted entirely on a run nobody stopped, so an
 /// existing caller's body is byte-unchanged.
 #[tokio::test]
@@ -86,7 +84,6 @@ async fn an_uncancelled_synchronous_response_omits_the_flag() {
         "a run nobody stopped carries no flag at all: {body}"
     );
 }
-
 
 /// The history fold reports it, so the console can render a stopped run
 /// as stopped rather than as a clean success.
@@ -140,7 +137,6 @@ async fn a_cancelled_run_reads_back_as_cancelled_and_not_running() {
     );
 }
 
-
 /// Unknown and already-settled are the same `404`: there is nothing to
 /// stop. Keeping a tombstone to tell them apart would mean choosing an
 /// expiry for it, and the run history already says what became of a
@@ -186,7 +182,6 @@ async fn cancelling_an_unknown_or_settled_run_is_not_found() {
     );
 }
 
-
 /// The cancel route is behind the same `ScopedCompany` guard as every
 /// other route in this module — an unauthenticated caller cannot stop a
 /// company's work.
@@ -219,7 +214,6 @@ async fn cancelling_without_a_session_is_rejected() {
     );
 }
 
-
 /// The cancel path is a static prefix under `/workflows`, and `runs` is
 /// a syntactically valid workflow id — so this pins that it is not
 /// shadowed by the dynamic `/workflows/{wid}` routes, the same guarantee
@@ -244,4 +238,3 @@ async fn the_cancel_route_is_not_shadowed_by_the_dynamic_workflow_routes() {
         "the 404 should come from the cancel handler: {body}"
     );
 }
-

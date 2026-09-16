@@ -126,7 +126,9 @@ pub(super) async fn state_with_registry(home: &std::path::Path) -> AppState {
         .with_skills_root(repo_skills_root())
 }
 
-pub(super) async fn persisted_skills(state: &AppState) -> Vec<crate::ports::skills_state::SkillState> {
+pub(super) async fn persisted_skills(
+    state: &AppState,
+) -> Vec<crate::ports::skills_state::SkillState> {
     let runtime = state
         .registry()
         .get(&CompanyId::new("acme"))
@@ -209,7 +211,9 @@ pub(super) async fn workspace_changes(
         .collect()
 }
 
-pub(super) async fn journal_len(runtime: &std::sync::Arc<crate::company::runtime::CompanyRuntime>) -> usize {
+pub(super) async fn journal_len(
+    runtime: &std::sync::Arc<crate::company::runtime::CompanyRuntime>,
+) -> usize {
     runtime
         .events()
         .read_from(
@@ -257,7 +261,10 @@ pub(super) fn mcp_manifest() -> CompanyManifest {
     .unwrap()
 }
 
-pub(super) async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
+pub(super) async fn state_with_manifest(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+) -> AppState {
     state_with_manifest_and_defaults(home, manifest, Vec::new()).await
 }
 
@@ -620,7 +627,11 @@ pub(super) async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
     seed_proposal_card_assigned(state, ops, "ceo").await
 }
 
-pub(super) async fn seed_proposal_card_assigned(state: &AppState, ops: Value, assignee: &str) -> String {
+pub(super) async fn seed_proposal_card_assigned(
+    state: &AppState,
+    ops: Value,
+    assignee: &str,
+) -> String {
     let runtime = state
         .registry()
         .get(&CompanyId::new("acme"))

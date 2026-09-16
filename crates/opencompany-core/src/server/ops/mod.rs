@@ -118,9 +118,6 @@ pub(crate) use scope::{AdminScopedCompany, ScopedCompany, scoped};
 #[cfg(test)]
 mod setup_tests;
 #[cfg(test)]
-#[path = "write_test_support.rs"]
-mod write_test_support;
-#[cfg(test)]
 #[path = "write_a_resolved_approval_reports_tests.rs"]
 mod tests_a_resolved_approval_reports;
 #[cfg(test)]
@@ -192,6 +189,9 @@ mod tests_workspace_sweep_previews_then;
 #[cfg(test)]
 #[path = "write_workspace_tree_and_file_tests.rs"]
 mod tests_workspace_tree_and_file;
+#[cfg(test)]
+#[path = "write_test_support.rs"]
+mod write_test_support;
 
 use std::sync::Arc;
 

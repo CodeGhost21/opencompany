@@ -1,7 +1,6 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::running::*;
-
+use super::workflows_test_support::*;
+use super::*;
 
 /// T8 — `{"dry_run":true}` answers 200 carrying `dryRun:true` and the
 /// per-node `nodes`; a plain body carries neither `dryRun` (a real run's
@@ -36,7 +35,6 @@ async fn dry_run_request_echoes_the_marker_and_nodes_a_plain_body_omits_it() {
     // The node trail rides every settled run, dry or not.
     assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
 }
-
 
 /// **The defect, at the HTTP boundary.** A run whose report was refused
 /// answers `200` with every node `ok` and no error — and before this
@@ -73,7 +71,6 @@ async fn a_run_whose_report_was_dropped_does_not_answer_as_a_clean_run() {
     );
 }
 
-
 /// Issue #981, the second half: a **test run** is not a run that lost
 /// its report.
 ///
@@ -105,7 +102,6 @@ async fn a_test_run_is_not_a_run_that_lost_its_report() {
     assert_eq!(body["deliveries"][0]["status"], "skipped", "{body}");
 }
 
-
 /// The other direction, which is the one that must not regress: a run
 /// that delivered everything still reads `ok`.
 #[tokio::test]
@@ -121,4 +117,3 @@ async fn a_run_that_delivered_fine_still_answers_ok() {
     let body = json_body(response).await;
     assert_eq!(body["verdict"], "ok", "{body}");
 }
-

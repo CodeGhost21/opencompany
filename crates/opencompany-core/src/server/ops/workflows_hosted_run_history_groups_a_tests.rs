@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// **The issue's durable half at the HTTP boundary.** A run's start,
 /// its per-node rows and its outcome come back as ONE history entry
@@ -57,7 +56,6 @@ async fn run_history_groups_a_runs_nodes_under_one_entry() {
     assert_eq!(nodes[1]["nodeId"], "send");
     assert_eq!(nodes[1]["status"], "error");
 }
-
 
 /// **The issue.** A run still in flight comes back naming the node it
 /// is standing on, not just the ones it is done with.
@@ -117,7 +115,6 @@ async fn run_history_names_the_node_a_running_run_is_executing() {
     assert_eq!(nodes[0]["nodeId"], "ceo");
 }
 
-
 /// A start whose run has no entry is dropped, not turned into a run of
 /// its own — the same rule the finish arm follows.
 ///
@@ -152,7 +149,6 @@ async fn a_started_node_of_a_filtered_out_run_is_dropped() {
     assert_eq!(started[0], "draft");
 }
 
-
 /// A run journaled before #382 — no starts at all — keeps the wire shape
 /// it had: `startedNodes` is omitted entirely rather than sent empty.
 #[tokio::test]
@@ -183,7 +179,6 @@ async fn a_run_with_no_started_rows_omits_the_field() {
         "an empty trail is absent, not `[]`: {body}"
     );
 }
-
 
 /// The receipt SURVIVES the finish, so a run that was cancelled or lost
 /// mid-node still says which node it was standing on.
@@ -229,7 +224,6 @@ async fn a_settled_run_keeps_the_node_it_was_standing_on() {
     let nodes = body["runs"][0]["nodes"].as_array().expect("nodes");
     assert_eq!(nodes.len(), 1, "`draft` never finished: {body}");
 }
-
 
 /// Issues #881 / #880 at the HTTP boundary: a blocked run reads as
 /// blocked in the history, and **its node chip is relabelled too**.
@@ -313,7 +307,6 @@ async fn run_history_reports_a_blocked_node_and_the_approvals_it_parked() {
     );
 }
 
-
 /// Issue #1143. The run's receipt names a card the queue no longer
 /// holds, so the history says so instead of offering it as a decision.
 ///
@@ -379,7 +372,6 @@ async fn run_history_marks_a_blocked_approval_the_queue_no_longer_holds() {
         "the verdict must be derived after the reconciliation, not before it: {body}"
     );
 }
-
 
 /// The other direction, and the reason the test above proves anything.
 ///
@@ -471,7 +463,6 @@ async fn run_history_leaves_a_live_approval_decidable() {
     );
 }
 
-
 /// Issue #1189, THE regression test for the bigger half of the defect.
 ///
 /// The marketing tenant's shape, verbatim: gate nodes on
@@ -525,7 +516,6 @@ async fn run_history_scores_a_gate_run_with_no_live_card_as_stranded() {
         "nothing in the queue is waiting on this run: {body}"
     );
 }
-
 
 /// The negative twin, and the reason the test above proves anything.
 ///
@@ -610,4 +600,3 @@ async fn run_history_leaves_a_gate_run_with_a_live_card_awaiting() {
         "a decidable gate is still awaiting a person: {body}"
     );
 }
-

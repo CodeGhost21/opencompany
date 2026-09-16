@@ -1,6 +1,6 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
 
 #[test]
@@ -329,7 +329,6 @@ async fn fix_from_run_notes_a_dropped_postcondition_declaration() {
     );
 }
 
-
 /// Issue #783: the per-workflow copilot's tool-grounding read answers
 /// `200 {"slugs":[…],"unwired":[…]}` on **both** scope forms — which also
 /// proves the static prefix is wired ahead of the dynamic
@@ -462,4 +461,3 @@ async fn tool_slugs_omits_a_granted_but_unwired_tool_and_says_why() {
         "the prose reason is servable as-is: {body}"
     );
 }
-

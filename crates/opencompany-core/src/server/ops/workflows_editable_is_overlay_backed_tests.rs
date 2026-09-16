@@ -1,8 +1,8 @@
 use super::*;
 // The globals-unaware readers: these tests assert the company's own two
 // sources, so they call the form that resolves no baseline.
-use crate::company::{list_workflows_union, load_workflow_union};
 use super::workflows_test_support::*;
+use crate::company::{list_workflows_union, load_workflow_union};
 
 /// **The `editable` predicate, including the case the route harness can't
 /// reach** (its runtimes are hosted, so they have no source directory).

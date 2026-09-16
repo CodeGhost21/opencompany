@@ -373,7 +373,6 @@ async fn null_instructions_resets_a_manifest_teammate_to_blueprint() {
     assert_eq!(blanked["instructionsOverridden"], false, "{blanked}");
 }
 
-
 /// Picking one of the shipped mascots, and putting it back. `null` resets to
 /// "nobody has chosen", which is what makes the console's hashed default
 /// reachable again — a stored empty string could not express it.

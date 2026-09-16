@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// A row journaled before issue #371 carries no `run_id`, so the
 /// `(run, node)` join has no key at all.
@@ -56,7 +55,6 @@ async fn run_history_leaves_a_pre_371_row_unreconciled() {
     );
 }
 
-
 /// A run the process is genuinely executing — registered on the
 /// supervisor, so its id is in `live()` — folds as `running: true` with
 /// the nodes it has completed so far. Since #1009 a start with no finish
@@ -94,7 +92,6 @@ async fn run_history_reports_an_unsettled_run_as_running() {
     assert_eq!(body["runs"][0]["nodes"].as_array().unwrap().len(), 1);
     assert!(body["runs"][0].get("error").is_none(), "{body}");
 }
-
 
 /// **A run that finishes while the read is folding must not be buried.**
 ///
@@ -256,7 +253,6 @@ async fn a_run_that_settles_during_the_read_is_not_buried_by_a_synthetic_finish(
     assert_eq!(next["runs"][0]["deliveries"][0]["status"], "sent", "{next}");
 }
 
-
 /// **A settled row keeps one identity across reads.** The response that
 /// performs the settle and every response after it carry the same `seq`
 /// and `atMillis` — the appended finish's, not the start's.
@@ -313,7 +309,6 @@ async fn a_settled_dead_run_keeps_its_seq_and_time_across_reads() {
     );
 }
 
-
 /// **The compatibility claim, pinned.** A journal written before #371
 /// carries finished rows with no run id and no starts. Those fold
 /// exactly as they always did — one row in, one entry out, no `nodes`
@@ -339,7 +334,6 @@ async fn run_history_folds_pre_371_rows_unchanged() {
     assert!(rows[0].get("startedAtMillis").is_none(), "{body}");
     assert!(rows[0].get("runId").is_none(), "{body}");
 }
-
 
 /// Two runs interleaving on one journal — the shape two concurrent
 /// workflows produce — attach their nodes to the right entry. This is
@@ -375,7 +369,6 @@ async fn run_history_keeps_interleaved_runs_apart() {
     assert_eq!(by_id("run-b")["nodes"][0]["nodeId"], "b1");
     assert_eq!(by_id("run-b")["nodes"].as_array().unwrap().len(), 1);
 }
-
 
 /// Issue #1012. Two interleaved runs — `run-a` starts first but
 /// `run-b` finishes last — must come back ordered by **finish**, the
@@ -415,7 +408,6 @@ async fn run_history_orders_by_finish_not_start() {
     assert_eq!(ids, vec!["run-b", "run-a", "run-c"], "{body}");
 }
 
-
 /// `?limit=` now cuts **runs**, not journal rows — the number the caller
 /// was asking about all along. Without the group-aware cut, a limit of 2
 /// over three 4-row runs would return fragments.
@@ -450,7 +442,6 @@ async fn run_history_limit_counts_runs_not_journal_rows() {
     assert_eq!(rows[1]["runId"], "run-1");
 }
 
-
 /// `?workflow=` narrows to one graph, and does so BEFORE the limit cut —
 /// otherwise asking for one workflow would return "whichever of the last
 /// N happen to match", which for a busy company is usually none.
@@ -480,7 +471,6 @@ async fn run_history_filters_by_workflow_before_the_limit_cut() {
     assert_eq!(rows.len(), 1, "body: {body}");
     assert_eq!(rows[0]["workflowId"], "digest");
 }
-
 
 /// `?limit=` caps the page from the newest end, defaults when absent or
 /// zero, and clamps above the ceiling rather than folding the whole log.
@@ -535,7 +525,6 @@ async fn run_history_limit_defaults_caps_and_clamps() {
     assert_eq!(huge["runs"].as_array().unwrap().len(), 25, "{huge}");
 }
 
-
 /// A company that has never run a workflow gets an empty list, not a
 /// 404 — the history panel renders "nothing yet" rather than an error.
 #[tokio::test]
@@ -554,4 +543,3 @@ async fn run_history_is_empty_before_any_run() {
         0
     );
 }
-

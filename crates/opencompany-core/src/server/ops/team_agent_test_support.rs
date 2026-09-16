@@ -350,7 +350,11 @@ pub(super) fn bomb_png() -> Vec<u8> {
 }
 
 /// Posts `bytes` to the avatar upload route as a `file` part named `name`.
-pub(super) async fn upload_avatar(state: &AppState, name: &str, bytes: &[u8]) -> (StatusCode, Value) {
+pub(super) async fn upload_avatar(
+    state: &AppState,
+    name: &str,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
     const BOUNDARY: &str = "----ocavatartest";
     let mut body: Vec<u8> = Vec::new();
     body.extend_from_slice(

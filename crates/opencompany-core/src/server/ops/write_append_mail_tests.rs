@@ -7,6 +7,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use super::write_test_support::*;
 use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
@@ -17,7 +18,6 @@ use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use super::write_test_support::*;
 
 /// The regression for issue #173: two teammates' inboxes must read back as two
 /// *different* sets of mail. The console used to render a client-side fixture —

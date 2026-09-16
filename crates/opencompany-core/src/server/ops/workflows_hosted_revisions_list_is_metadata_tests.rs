@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// `GET …/revisions` returns metadata only — id, name, version,
 /// createdAtMillis — and never a graph body. Leaking the TOML/nodes here
@@ -40,7 +39,6 @@ async fn revisions_list_is_metadata_only_and_newest_first() {
         "the raw body must never leak: {row}"
     );
 }
-
 
 /// `POST …/revisions/{rev}/restore` reverts the live graph to the
 /// snapshot and answers with the restored body + a fresh token. The
@@ -119,7 +117,6 @@ async fn restore_reverts_the_live_graph() {
     );
 }
 
-
 /// Restoring a revision id that does not exist is a clean `404`.
 #[tokio::test]
 async fn restore_unknown_revision_is_not_found() {
@@ -140,7 +137,6 @@ async fn restore_unknown_revision_is_not_found() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
-
 
 /// **The silent-clobber guard on restore (issue #1013).** A restore with
 /// no token — like an omitted body — used to overwrite unconditionally,
@@ -185,7 +181,6 @@ async fn a_restore_without_a_token_is_rejected() {
     );
 }
 
-
 /// A workflow that was never edited has an empty history — `200 []`, not
 /// a `404`.
 #[tokio::test]
@@ -207,7 +202,6 @@ async fn revisions_of_an_unedited_workflow_are_empty() {
     let body = json_body(response).await;
     assert_eq!(body["revisions"].as_array().unwrap().len(), 0, "{body}");
 }
-
 
 /// **The silent-overwrite guard.** Two consoles hold the same graph; one
 /// saves, then the other saves its stale copy. The second must be
@@ -253,7 +247,6 @@ async fn a_stale_expected_version_is_a_conflict() {
     let graph = json_body(response).await;
     assert_eq!(graph["description"], "Say hi, every morning.");
 }
-
 
 /// CONC-axis: restore inherits `PUT`'s optimistic-concurrency check —
 /// the doc on [`restore_workflow_revision`] says so — but only `PUT`'s
@@ -330,7 +323,6 @@ async fn a_stale_expected_version_is_a_conflict_on_restore() {
     );
 }
 
-
 /// **The silent-clobber guard, at the front door (issue #1013).** Omitting
 /// the token used to be an unconditional write; a stale editor could then
 /// overwrite a concurrent save without ever seeing a `409`. A tokenless
@@ -368,7 +360,6 @@ async fn an_edit_without_a_token_is_rejected() {
     assert_eq!(graph["description"], "Say hi.");
 }
 
-
 /// A `PUT` that would rename the id is a 400, not a silent create — the
 /// id keys the saved graph, its schedule and its run history.
 #[tokio::test]
@@ -401,7 +392,6 @@ async fn an_id_mismatch_is_a_bad_request() {
     assert_eq!(own[0]["id"], "greeter");
 }
 
-
 #[tokio::test]
 async fn editing_an_unknown_workflow_is_not_found() {
     let home_dir = home();
@@ -422,7 +412,6 @@ async fn editing_an_unknown_workflow_is_not_found() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
-
 
 /// A bad edit is refused on the same terms as a bad create — the shared
 /// validation, at the HTTP boundary.
@@ -452,7 +441,6 @@ async fn a_structurally_invalid_edit_is_a_bad_request() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
-
 
 /// **The delete, and its durability.** A removed workflow leaves the
 /// picker AND stays gone across a full state rebuild — the property that
@@ -504,7 +492,6 @@ async fn delete_removes_it_from_the_picker_and_survives_a_rebuild() {
     );
 }
 
-
 /// **Run history is orphaned, not reaped.** What a workflow did stays
 /// true after the workflow is gone, and the journal is append-only.
 #[tokio::test]
@@ -548,7 +535,6 @@ async fn deleting_a_workflow_keeps_its_run_history() {
     assert_eq!(rows[0]["workflowId"], "greeter");
 }
 
-
 #[tokio::test]
 async fn deleting_with_a_stale_version_is_a_conflict() {
     let home_dir = home();
@@ -587,7 +573,6 @@ async fn deleting_with_a_stale_version_is_a_conflict() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-
 #[tokio::test]
 async fn deleting_an_unknown_workflow_is_not_found() {
     let home_dir = home();
@@ -606,7 +591,6 @@ async fn deleting_an_unknown_workflow_is_not_found() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
-
 
 /// **The silent-clobber guard on delete (issue #1013).** A tokenless
 /// `DELETE` used to remove unconditionally; a stale editor could drop a
@@ -638,4 +622,3 @@ async fn a_delete_without_a_token_is_rejected() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
-

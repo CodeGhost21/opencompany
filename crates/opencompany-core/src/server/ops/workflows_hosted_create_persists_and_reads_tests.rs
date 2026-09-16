@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// **The #168 regression test.** Creating a workflow on a tenant with no
 /// (writable) source directory used to fail with
@@ -53,7 +52,6 @@ async fn create_persists_and_reads_back_with_no_source_dir() {
     assert_eq!(graph["id"], "greeter");
     assert_eq!(graph["edges"][0]["label"], "ok");
 }
-
 
 /// Codex review on #1937 (issue #1866, thread 1) — the RED-on-old
 /// proof for BOTH halves the finding names: `CreateNode` never
@@ -123,7 +121,6 @@ async fn a_postcondition_survives_create_get_put_get() {
     );
 }
 
-
 /// **The #981 story, resolved by #1757.** `operator` was in the picker
 /// the console showed the author while delivery refused it by name — so
 /// the graph saved, ran green, and dropped its report. Now `operator` is a
@@ -150,7 +147,6 @@ async fn a_report_routed_to_operator_saves() {
     assert_eq!(graph["nodes"][1]["destination"]["target"], "operator");
 }
 
-
 /// A channel nobody wired is refused the same way. The author's typo and
 /// the author's `operator` are the same mistake — a destination this
 /// company cannot deliver to — and get one answer.
@@ -168,7 +164,6 @@ async fn a_report_routed_to_an_unwired_channel_is_refused_at_save() {
     );
     assert!(message.contains("engineering"), "{message}");
 }
-
 
 /// Issue #1191: the refusal is the SAME envelope every sibling node-config
 /// rule answers with — `workflow_invalid` plus a `problems` array whose
@@ -204,7 +199,6 @@ async fn an_undeliverable_channel_answers_with_a_located_problem() {
     );
 }
 
-
 /// The sibling rule on the same field: a `channel` destination with no
 /// `target` is located too (issue #1191). It was always a
 /// `workflow_invalid`, but the entry carried `node_id: null` and
@@ -229,7 +223,6 @@ async fn a_channel_destination_with_no_target_is_located_too() {
     );
 }
 
-
 /// The guard refuses what delivery would refuse and nothing more: a real
 /// desk saves, and reads back with its destination intact.
 #[tokio::test]
@@ -252,7 +245,6 @@ async fn a_report_routed_to_a_real_desk_saves() {
     assert_eq!(graph["nodes"][1]["destination"]["kind"], "channel");
     assert_eq!(graph["nodes"][1]["destination"]["target"], "engineering");
 }
-
 
 /// An edit is a save too. The create route was never the only way in —
 /// `PUT` replaces the graph wholesale, so a destination refused on
@@ -291,7 +283,6 @@ async fn an_edit_cannot_introduce_an_undeliverable_destination() {
         "{message}"
     );
 }
-
 
 /// A company with no desks and no provider channels has nowhere to
 /// deliver (#963), and says so in its own words rather than trailing off
@@ -344,7 +335,6 @@ async fn a_company_with_no_desks_still_offers_the_operator_channel() {
     );
 }
 
-
 /// The guard stays out of everything that is not a channel destination
 /// on an `output` node: a graph that routes nowhere saves, and a
 /// `destination` on a non-`output` node is still `parse_workflow`'s
@@ -379,7 +369,6 @@ async fn the_guard_leaves_non_channel_graphs_alone() {
     );
 }
 
-
 /// A duplicate id is a clean 409, not a 500 — the id-uniqueness check
 /// that replaced the filesystem's `create_new(true)`.
 #[tokio::test]
@@ -408,7 +397,6 @@ async fn duplicate_create_is_a_conflict() {
         .unwrap();
     assert_eq!(second.status(), StatusCode::CONFLICT);
 }
-
 
 /// Issue #753: an empty description is a `400` on **both** scope forms —
 /// which also proves the route is wired under each (a route-miss would be
@@ -440,7 +428,6 @@ async fn draft_from_description_rejects_empty_on_both_scope_forms() {
         );
     }
 }
-
 
 /// Issue #753: with a real description but no builder wired on the running
 /// runtime, the copilot classifies the gap exactly as the run route does —
@@ -478,7 +465,6 @@ async fn draft_from_description_reports_a_builder_gap() {
         "gap response carries a known code, got: {body}"
     );
 }
-
 
 /// Issue #840 (PR-3): with a real body but no builder wired, the
 /// fix-from-run route classifies the gap exactly as the draft + run routes
@@ -523,4 +509,3 @@ async fn fix_from_run_reports_a_builder_gap_on_both_scope_forms() {
         );
     }
 }
-

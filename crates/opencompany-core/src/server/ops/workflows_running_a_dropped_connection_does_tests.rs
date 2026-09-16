@@ -1,7 +1,6 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::running::*;
-
+use super::workflows_test_support::*;
+use super::*;
 
 /// **The keystone.** A client that walks away mid-run must not take the
 /// run with it.
@@ -52,7 +51,6 @@ async fn a_dropped_connection_does_not_cancel_a_synchronous_run() {
     assert!(!cancelled, "nobody cancelled this run");
 }
 
-
 /// The same proof over a **real socket**, so the keystone rests on
 /// hyper's actual behaviour rather than on `oneshot` modelling it well.
 ///
@@ -102,7 +100,6 @@ async fn a_real_socket_close_does_not_cancel_a_synchronous_run() {
     server.abort();
 }
 
-
 /// `detach: true` answers `202` with the run id while the run is
 /// demonstrably still going — the half that removes the wait.
 #[tokio::test]
@@ -137,7 +134,6 @@ async fn a_detached_run_answers_202_before_the_run_finishes() {
     assert!(await_finished(&c.runtime).await.is_some());
 }
 
-
 /// The wire-compat guarantee in the other direction: a caller that sends
 /// no `detach` gets exactly the response it always got — a `200`
 /// carrying the settled run — so an older console is untouched.
@@ -167,7 +163,6 @@ async fn a_body_without_detach_still_gets_the_synchronous_response() {
     );
     assert!(body["runId"].as_str().is_some(), "{body}");
 }
-
 
 /// Codex review finding on PR #2140 (`3952230576`): the emergency stop
 /// is a separate switch from `lifecycle` (a stopped company still
@@ -207,7 +202,6 @@ async fn an_emergency_stopped_company_refuses_a_manual_run() {
         "the refusal must return before the runner ever ran, let alone finished"
     );
 }
-
 
 /// Cancel a live run: `200`, and it settles as cancelled rather than as
 /// an error.
@@ -263,7 +257,6 @@ async fn cancelling_a_live_run_stops_it_and_records_it_as_cancelled() {
         "the run must not have completed its work"
     );
 }
-
 
 /// **B-121: deleting a workflow stops the run of it still in flight.**
 ///
@@ -349,7 +342,6 @@ async fn deleting_a_workflow_stops_the_run_of_it_still_in_flight() {
     );
 }
 
-
 /// The mirror: a delete with **no** run in flight cancels nothing.
 /// Without it the sweep above could quietly grow into "delete stops
 /// something" for a company that had nothing to stop.
@@ -382,4 +374,3 @@ async fn deleting_an_idle_workflow_stops_nothing() {
         "nothing was in flight, so nothing was stopped"
     );
 }
-

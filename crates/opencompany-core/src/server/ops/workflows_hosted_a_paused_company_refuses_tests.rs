@@ -1,8 +1,7 @@
-use super::*;
-use super::workflows_test_support::*;
 use super::workflows_test_support::hosted_mode::*;
+use super::workflows_test_support::*;
+use super::*;
 use crate::server::router;
-
 
 /// **A paused company refuses Run**, the same way chat already refuses.
 ///
@@ -54,7 +53,6 @@ async fn a_paused_company_refuses_to_start_a_run() {
     );
 }
 
-
 #[tokio::test]
 async fn manifest_enabled_workflow_lists_with_no_source_dir() {
     let home_dir = home();
@@ -88,7 +86,6 @@ async fn manifest_enabled_workflow_lists_with_no_source_dir() {
     assert_eq!(items[0]["name"], "demo");
 }
 
-
 /// **The point of the route.** A draft validate accepts is one create
 /// accepts, and nothing is persisted in between — so the console can ask
 /// before it submits and get the answer the submit would give.
@@ -116,7 +113,6 @@ async fn a_draft_validate_accepts_is_one_create_accepts_and_validate_saves_nothi
     let created = post_create_on(&state, create_body()).await;
     assert_eq!(created.status(), StatusCode::OK, "create must agree");
 }
-
 
 /// An unreachable node is refused by validate in **exactly** the words
 /// and status create refuses it with — the same error value, so a console
@@ -147,7 +143,6 @@ async fn validate_refuses_an_unreachable_node_exactly_as_create_does() {
     );
 }
 
-
 /// The condition branch-label rule, the other one a client cannot
 /// pre-empt without owning a copy of it. Same status, same body.
 #[tokio::test]
@@ -176,7 +171,6 @@ async fn validate_refuses_an_illegal_condition_label_exactly_as_create_does() {
     );
 }
 
-
 /// `yes` passes, and so does the `error` branch of a condition that is
 /// also `on_error = "route"` — the narrow exception. Pinned here because
 /// it is the part of the rule a hand-written client check gets wrong, and
@@ -201,7 +195,6 @@ async fn validate_accepts_yes_and_the_error_branch_of_a_route_condition() {
     let response = post_validate(&state, body_with_condition("error", None)).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
-
 
 /// A draft that breaks a **record** rule and a **graph** rule at once
 /// must be refused by validate for the same one create refuses it for.
@@ -241,7 +234,6 @@ async fn a_doubly_invalid_draft_is_refused_for_the_same_reason_on_both_routes() 
     );
 }
 
-
 /// **The review finding on #1074.** `courtesy_validate_draft` passed
 /// `None` for `source_dir` while create passes
 /// `company.runtime.source_dir()`. That argument feeds exactly one rule —
@@ -275,7 +267,6 @@ async fn validate_accepts_a_seed_file_sub_workflow_because_create_does() {
     );
 }
 
-
 /// The other half: a `sub_workflow` naming nothing at all is still
 /// refused, and by both routes. Threading the source directory must widen
 /// what the probe can see, not switch it off.
@@ -297,7 +288,6 @@ async fn validate_still_refuses_a_sub_workflow_that_names_nothing() {
         "the pre-flight must answer with the submit's own body"
     );
 }
-
 
 /// The over-cap refusal, which the two routes used to word differently
 /// ("the proposed workflow is N bytes" here, "the rendered workflow is N
@@ -334,4 +324,3 @@ async fn validate_and_create_refuse_an_over_cap_draft_in_the_same_words() {
         "{from_validate}"
     );
 }
-

@@ -5,7 +5,6 @@ use serde_json::json;
 use super::team_agent_test_support::*;
 use crate::server::router;
 
-
 /// The authority line this route draws (`docs/modules/server/authority.md`):
 /// a member may pick a colleague's face — it decides nothing about what the
 /// company reaches the world as — while `tools` stays admin-only. Verified
