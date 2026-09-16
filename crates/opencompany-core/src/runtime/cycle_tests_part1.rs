@@ -1,6 +1,5 @@
 use super::tests_core::*;
 use super::tests_core2::*;
-use super::*;
 
 /// `single_agent` picks an agent slot only when the batch is one addressed
 /// operator message, and falls back to the whole-company lock otherwise —

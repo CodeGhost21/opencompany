@@ -1,6 +1,5 @@
 use super::tests_core::*;
 use super::tests_core2::*;
-use super::*;
 
 /// The conversation key (#379): which chat thread a cycle is answering, read
 /// off its own trigger events.

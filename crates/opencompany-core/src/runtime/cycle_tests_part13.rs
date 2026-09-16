@@ -1,7 +1,6 @@
 use super::tests_core::*;
 use super::tests_core2::*;
 use super::tests_core3::*;
-use super::*;
 
 /// A card still running is never called finished — the "concluded the work
 /// had finished when it had in fact parked" misreading #377 exists to

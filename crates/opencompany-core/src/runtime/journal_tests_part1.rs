@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 #[tokio::test]
 async fn effect_key_commits_once_and_survives_reload() {

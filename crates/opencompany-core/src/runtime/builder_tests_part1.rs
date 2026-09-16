@@ -1,5 +1,4 @@
 use super::tests_core::*;
-use super::*;
 
 /// A manifest upgrade that widens the allow-list into a BYO namespace must
 /// not hand billing to persisted teammates whose grant was left unstated

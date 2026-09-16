@@ -1,6 +1,5 @@
 use super::tests_core::*;
 use super::tests_core2::*;
-use super::*;
 
 #[tokio::test]
 async fn send_email_runs_without_policy_hitl_for_a_new_recipient() {
