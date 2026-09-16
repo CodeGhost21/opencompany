@@ -133,18 +133,6 @@ fn admin_cookie() -> String {
     crate::server::test_support::fixed_cookie("acme")
 }
 
-/// `PUT …/team/{id}/budget` as the seeded admin.
-async fn put_budget(state: &AppState, agent: &str, body: Value) -> (StatusCode, Value) {
-    send(
-        state,
-        "PUT",
-        &format!("/api/v1/company/team/{agent}/budget"),
-        Some(body),
-        Some(&admin_cookie()),
-    )
-    .await
-}
-
 /// One roster row from `GET …/team`.
 async fn team_row(state: &AppState, agent: &str) -> Value {
     let (status, body) = get_team(state).await;
