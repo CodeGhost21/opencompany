@@ -623,13 +623,3 @@ impl crate::ports::journal::JournalStore for RefusingExtendStore {
     }
 }
 
-/// `extend_approval` moves the gate's live deadline **before**
-/// it journals the extension. When the journal append then fails, the
-/// caller sees the error, but the live view already reflects the later
-/// deadline — and nothing durable backs that, so a restart from the same
-/// journal comes back believing the approval was never extended at all.
-/// This pins that sequence exactly, as the real, current consequence: a
-/// caller told the extend failed still sees the live queue disagree with
-/// it until the next restart quietly settles the disagreement in the
-/// caller's favor.
-#[tokio::test]
