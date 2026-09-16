@@ -3,8 +3,8 @@
 
 use std::sync::atomic::Ordering;
 
-use super::*;
 use super::fan_out_tests_support::*;
+use super::*;
 
 #[test]
 fn decide_copy_follows_the_q7_table() {

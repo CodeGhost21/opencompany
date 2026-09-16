@@ -3,8 +3,8 @@
 
 use std::sync::atomic::Ordering;
 
-use super::*;
 use super::fan_out_tests_support::*;
+use super::*;
 
 #[tokio::test]
 async fn matrix_m8() {
