@@ -87,7 +87,7 @@ pub(crate) fn validate_display_name(name: &str) -> Result<(), OpenCompanyError> 
 #[cfg(test)]
 mod auth_test;
 #[cfg(test)]
-mod hub_test;
+mod hub_tests;
 #[cfg(test)]
 mod mode_test;
 #[cfg(test)]

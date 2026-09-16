@@ -30,9 +30,9 @@ pub(crate) const FOLDER_REV: u64 = 1_000;
 /// agent actually reads.
 pub(crate) struct Home {
     _dir: tempfile::TempDir,
-    store: Arc<dyn WorkspaceStore>,
-    artifacts: Arc<dyn ArtifactStore>,
-    company: CompanyId,
+    pub(crate) store: Arc<dyn WorkspaceStore>,
+    pub(crate) artifacts: Arc<dyn ArtifactStore>,
+    pub(crate) company: CompanyId,
 }
 
 pub(crate) async fn own_home(company: &str) -> Home {
