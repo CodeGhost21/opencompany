@@ -73,3 +73,4 @@ async fn a_wholly_refused_blocked_node_prunes_its_checkpoint_lineage() {
         "a wholly refused blocked node starts no continuation, so its checkpoint lineage \
          must be pruned: {remaining:?}"
     );
+}
