@@ -232,7 +232,27 @@ pub(crate) fn hosted_endpoint_from_env_at(
         Some(key) => Credential::from_value(key),
         None => Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?)),
     };
-    let base_url = env.get("OPENCOMPANY_INFERENCE_URL").unwrap_or_else(|| {
+    Some((credential, platform_inference_url_at(env, api_url)))
+}
+
+/// The managed inference endpoint this deployment talks to, credential or no
+/// credential: `OPENCOMPANY_INFERENCE_URL` when set, else the TinyHumans
+/// OpenRouter proxy on `api_url` — the host's resolved `TINYHUMANS_API_URL` /
+/// `config.toml` `api_url` — else the same proxy on the `TINYHUMANS_API_URL`
+/// variable, else production.
+///
+/// Split from [`hosted_endpoint_from_env_at`] because the endpoint and the
+/// instance credential are two different questions, and every resolver that
+/// conflated them fell back to **production** the moment the credential was
+/// absent: a desktop with no `TINYHUMANS_API_KEY` in its environment — the
+/// ordinary case, since its identity is the company's own account key — got
+/// `EnvDefault = None` at boot, and `resolve_endpoint`'s managed arm then
+/// used the built-in constant. A staging key was presented to production,
+/// and the LLM page said so while nothing on the host could be pointed
+/// anywhere else. The endpoint follows `api_url` whether or not a credential
+/// does; what decides whether a company can *think* stays the credential.
+pub fn platform_inference_url_at(env: &dyn EnvSource, api_url: Option<&str>) -> String {
+    env.get("OPENCOMPANY_INFERENCE_URL").unwrap_or_else(|| {
         let platform_url = api_url
             .map(str::trim)
             .filter(|url| !url.is_empty())
@@ -243,8 +263,35 @@ pub(crate) fn hosted_endpoint_from_env_at(
                 )
             });
         crate::company::inference::catalogue::tinyhumans_proxy_url(&platform_url)
-    });
-    Some((credential, base_url))
+    })
+}
+
+/// The platform managed default as the runtime builder wants it: **always** an
+/// endpoint ([`platform_inference_url_at`]), and the instance credential when
+/// the environment holds one, else [`Credential::None`].
+///
+/// Where [`harness_inference_from_env_at`] answers "can this deployment think
+/// on its own identity?", this answers "which platform is this deployment
+/// on?" — a question with an answer even when the first is no. A
+/// [`EnvDefault`](crate::company::inference::EnvDefault) built from it carries
+/// a credential that reports `configured() == false`, which is exactly what
+/// every managed-source gate already tests (`managed_source`, the legacy
+/// chain's step 3), so an endpoint without a credential still routes nowhere.
+pub fn platform_inference_default_at(
+    env: &dyn EnvSource,
+    api_url: Option<&str>,
+) -> (HostedProviderConfig, Option<String>) {
+    match harness_inference_from_env_at(env, api_url) {
+        Some(resolved) => resolved,
+        None => (
+            HostedProviderConfig {
+                base_url: platform_inference_url_at(env, api_url),
+                credential: Credential::None,
+                extra_headers: Vec::new(),
+            },
+            None,
+        ),
+    }
 }
 
 /// Default media-generation backend base URL when only a bare
