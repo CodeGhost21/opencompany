@@ -43,6 +43,21 @@ export function useRedeemKeyGrant(
   // (CodeRabbit review).
   const latest = useRef({ client, company, onConnected });
   latest.current = { client, company, onConnected };
+  // Whether `ApiKeyView` is still mounted — a company change remounts it, but
+  // navigating away from the Account page entirely just unmounts it with
+  // nothing left to remount into. `latest.current` alone does not catch that:
+  // it still holds whatever `client`/`company` this hook last rendered with,
+  // which still equals `startClient`/`startCompany` after unmount, so a
+  // response that settles post-unmount would otherwise still pass the scope
+  // check below and pop a toast (and, on success, run `onConnected`) for a
+  // view nobody can see (CodeRabbit review).
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const finish = useCallback(async (state: string, code: string) => {
     const { client: startClient, company: startCompany } = latest.current;
@@ -53,14 +68,28 @@ export function useRedeemKeyGrant(
       // — that part is correct no matter what changes underneath it. What
       // must not happen is announcing that result, or handing it to
       // `onConnected`, against a *different* scope than the one that earned
-      // it: discard rather than let a stale grant surface as "connected" on
-      // whatever host/company is current by the time the request returns.
-      if (latest.current.client !== startClient || latest.current.company !== startCompany) {
+      // it, or once nothing is mounted to show it to: discard rather than let
+      // a stale grant surface as "connected" on whatever host/company is
+      // current by the time the request returns, or after the view is gone.
+      if (
+        !mounted.current ||
+        latest.current.client !== startClient ||
+        latest.current.company !== startCompany
+      ) {
         return;
       }
       toast.success("Connected to TinyHumans.", { description: result.note });
       latest.current.onConnected?.(result);
     } catch (err) {
+      // Same guard as the success path: an unmounted or rescoped view must
+      // not surface a stale failure toast either.
+      if (
+        !mounted.current ||
+        latest.current.client !== startClient ||
+        latest.current.company !== startCompany
+      ) {
+        return;
+      }
       // The host's own words where it sent them: "that connection attempt has
       // expired" tells an operator to click again, which a generic failure
       // does not.
