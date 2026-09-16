@@ -41,17 +41,6 @@ async fn seed(secrets: &MemSecrets, pairs: &[(&str, &str)]) {
     }
 }
 
-fn stored_index(secrets: &MemSecrets) -> serde_json::Value {
-    let raw = secrets
-        .map
-        .lock()
-        .unwrap()
-        .get(PROVIDER_INDEX_KEY)
-        .cloned()
-        .expect("index written");
-    serde_json::from_str(&raw).expect("index is JSON")
-}
-
 /// A store that yields on every call, so concurrent callers genuinely interleave.
 ///
 /// [`MemSecrets`] never awaits anything real, so two tasks driven by the same
