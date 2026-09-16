@@ -76,7 +76,7 @@ enum Turn {
 }
 
 /// A scripted OpenAI-compatible `/chat/completions` endpoint.
-struct Script {
+pub(super) struct Script {
     turns: Mutex<Vec<Turn>>,
     seen: Mutex<Vec<Value>>,
     /// `prompt_tokens` echoed on every response — the knob that decides whether
