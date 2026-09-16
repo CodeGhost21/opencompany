@@ -2330,13 +2330,6 @@ pub(crate) mod workflow_build_fixtures_tests;
 #[path = "workflow_build/workflow_build_shared_tests.rs"]
 pub(crate) mod workflow_build_shared_tests;
 
-/// Compatibility shim: re-exports the fixtures other crate-internal test
-/// targets (e.g. `server/ops`'s hosted-fix-error-resolution tests) reached via
-/// the old flat `workflow_build::test` path before the split into topical
-/// `workflow_build_*_tests` files above.
 #[cfg(test)]
-pub(crate) mod test {
-    pub(crate) use super::tests_pass_1::agent_deps;
-    pub(crate) use super::workflow_build_fixtures_tests::{NativeCopilotModel, NativeStep};
-    pub(crate) use super::workflow_build_shared_tests::propose_step;
-}
+#[path = "workflow_build/workflow_build_test.rs"]
+pub(crate) mod test;
