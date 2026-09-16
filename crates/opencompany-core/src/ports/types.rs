@@ -6188,3 +6188,6 @@ mod tests_task_discussion_effects;
 #[cfg(test)]
 #[path = "types_task_lifecycle_tests.rs"]
 mod tests_task_lifecycle;
+#[cfg(test)]
+#[path = "types_test_support.rs"]
+mod types_test_support;
