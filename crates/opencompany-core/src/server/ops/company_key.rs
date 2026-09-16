@@ -653,9 +653,13 @@ async fn set_model(
     .await
     .map_err(ApiError)?;
     super::composio::evict_catalog_cache(runtime);
-    journal_fan_out(&company, false, &report).await?;
+    // Same ordering as `set_key`: rebuild before propagating a journal
+    // failure, so a retry of an already-configured save is not the only way
+    // this company ever leaves the echo brain (CodeRabbit review).
+    let journal_result = journal_fan_out(&company, false, &report).await;
 
     let live = rebuild_if_pending(&state, &company, &report).await;
+    journal_result?;
     Ok(Json(MutationResponse {
         status: effective_status(&state, live.as_ref()).await?,
         note: company_key::fan_out_note(false, &report, Some(&body.model)),
