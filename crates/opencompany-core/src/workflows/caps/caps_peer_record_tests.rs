@@ -627,9 +627,9 @@ pub(super) fn record_with_peer() -> CompanyRecord {
 /// A [`RunTurn`] whose node turn refuses for want of a fact, and whose peer
 /// consultation answers with `peer_reply` — optionally staging board work
 /// on the way, standing in for a consulted teammate whose tools wrote.
-struct ConsultedPeerTurn {
-    peer_reply: &'static str,
-    consults: std::sync::atomic::AtomicUsize,
-    node_turns: std::sync::atomic::AtomicUsize,
-    stage: Option<HarnessDeps>,
+pub(super) struct ConsultedPeerTurn {
+    pub(super) peer_reply: &'static str,
+    pub(super) consults: std::sync::atomic::AtomicUsize,
+    pub(super) node_turns: std::sync::atomic::AtomicUsize,
+    pub(super) stage: Option<HarnessDeps>,
 }
