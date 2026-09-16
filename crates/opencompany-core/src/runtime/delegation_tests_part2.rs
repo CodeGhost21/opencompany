@@ -397,13 +397,21 @@ async fn a_hand_off_whose_turn_parks_also_leaves_its_card_blocked() {
 #[tokio::test]
 async fn a_message_the_chat_handler_already_carded_opens_no_second_card() {
     let fx = Fixture::new();
-    fx.seed_handler_card("handler-card", EventSeq::new(41)).await;
+    let mut handler = handler_card_in("Draft the launch plan".to_string(), COLUMN_TODO);
+    handler.id = "handler-card".to_string();
+    TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
+        .await
+        .expect("seed the handler card");
     let turns = ScriptedTurns::new(&fx, vec![Turn::reply("planned")]);
     let turn = fx
         .runner(&turns)
-        .answering(Some(EventSeq::new(41)))
+        .answering(Some(handler_seq()))
         .requested(Some(crate::ports::types::MessageIntent::Workflow))
-        .handle_operator_message("engineer", "draft the launch plan for next quarter", Some("eng_desk"))
+        .handle_operator_message(
+            "engineer",
+            "draft the launch plan for next quarter",
+            Some("eng_desk"),
+        )
         .await
         .expect("operator message handled");
     assert_eq!(
