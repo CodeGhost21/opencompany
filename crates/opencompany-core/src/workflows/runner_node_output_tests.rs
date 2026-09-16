@@ -215,7 +215,7 @@ impl crate::runtime::delegation::RunTurn for ScalarJsonReplyTurn {
 /// `a_structured_agent_reply_is_readable_by_a_downstream_json_binding`
 /// above). A prior round added an emission arm that replaced `value`
 /// wholesale for a scalar reply too, mirroring the array case, and
-/// asserted only `run_turn`'s OWN return value (`workflows::caps::tests`)
+/// asserted only `run_turn`'s OWN return value (`workflows::caps::tests_field_present`)
 /// — which DID come back as the bare `42`. That test missed the actual
 /// defect: tinyflows' own envelope construction
 /// (`finish_agent_run`/`envelope::structured_of`, vendored) clamps
