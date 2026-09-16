@@ -522,7 +522,7 @@ impl EventLog for FailingEventLog {
 /// path. Every other method is unreachable for these tests (the `owner`
 /// resolver reads only `list_users`) and panics if a future caller leans on
 /// it, rather than quietly returning an empty result that would hide a bug.
-struct FailingUserStore;
+pub(super) struct FailingUserStore;
 
 #[async_trait]
 impl UserStore for FailingUserStore {
