@@ -1,6 +1,7 @@
 //! Credential-scrubbing, paged-catalog and catalog-body-cap tests
 //! (split out of `probe_tests.rs`).
 
+use super::tests_ssrf::LOCAL_OFFERED;
 use super::*;
 
 // ---- what a failure may write down ---------------------------------------
