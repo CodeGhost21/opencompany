@@ -14,6 +14,50 @@ use axum::http::{Request, StatusCode};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+/// The workflow summaries a company itself has: the global baseline is listed
+/// in every company, and these tests are about the company's own graphs.
+///
+/// This is an **id heuristic**, not provenance: `WorkflowSummary` carries no
+/// `global` flag over GraphQL, so a row is classified as "the baseline's" by
+/// whether its id matches one of `crate::globals::workflows()`. A company
+/// definition of the *same* id supersedes the global one (see
+/// `crate::company::list_workflows_with_globals`) and would be wrongly
+/// excluded here — none of the fixtures below give a company workflow an id
+/// that collides with a global, so that gap does not fire in this suite, but
+/// see `graphql_lists_a_company_override_of_a_global_id_by_its_own_content`
+/// for the same-id case asserted directly, without this helper.
+pub(super) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .as_array()
+        .expect("summaries")
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::workflows().iter().any(|w| w.id == id)
+        })
+        .collect()
+}
+
+/// The skills a company itself has: the global baseline is installed in every
+/// company, and these tests are about what the company adds to it.
+///
+/// An **id heuristic**, like [`own_workflows`]: a `Skill` row carries no
+/// baseline flag, so a row is classified as the baseline's by whether its slug
+/// is one of `crate::globals::skills()`. A company bundle or delta of the same
+/// slug supersedes the global and would be wrongly excluded — the fixtures that
+/// exercise that case assert on the row directly instead.
+pub(super) fn own_skills(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .as_array()
+        .expect("skills")
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::skills().iter().any(|doc| doc.slug == id)
+        })
+        .collect()
+}
+
 pub(super) async fn state_with_builder(
     home: &std::path::Path,
     manifest: CompanyManifest,
