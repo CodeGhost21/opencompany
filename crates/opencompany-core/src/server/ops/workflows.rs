@@ -3932,6 +3932,9 @@ fn relabel_blocked(nodes: &mut [WorkflowRunNode], blocked: &[crate::ports::Workf
 }
 
 #[cfg(test)]
+#[path = "workflows_test_support.rs"]
+mod workflows_test_support;
+#[cfg(test)]
 #[path = "workflows_a_plain_errored_node_tests.rs"]
 mod tests_a_plain_errored_node;
 #[cfg(test)]
