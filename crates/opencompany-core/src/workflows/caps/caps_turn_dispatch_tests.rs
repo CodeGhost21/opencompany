@@ -14,7 +14,7 @@ pub(super) fn single_turn(deps: &HarnessDeps) -> Arc<dyn RunTurn> {
 /// so the #1702 dispatch test can assert the run and node ids actually reach
 /// the turn rather than being silently dropped by a fallback to the
 /// un-streamed `run_background`.
-struct RecordingWorkflowTurn {
+pub(super) struct RecordingWorkflowTurn {
     /// `(agent_ref, workflow_run_id, node_id)` per call, in order.
     calls: std::sync::Mutex<Vec<(String, String, String)>>,
 }
