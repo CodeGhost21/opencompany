@@ -1,5 +1,5 @@
 use super::*;
-use super::{opens_aside, party, spent_and_unsettled, surfaces};
+use super::aside::{opens_aside, party, spent_and_unsettled, surfaces};
 use tinyhivemind_hive::aside::{AsidePolicy, Audience};
 use tinyhivemind_hive::{Sequence, SessionAuthor, SessionMessage};
 
