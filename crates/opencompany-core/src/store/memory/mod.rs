@@ -385,8 +385,8 @@ mod tests_behavior;
 #[path = "memory_upstream_conformance_tests.rs"]
 mod tests_upstream_conformance;
 #[cfg(test)]
-#[path = "memory_upstream_conformance_vendors_tests.rs"]
-mod tests_upstream_conformance_vendors;
-#[cfg(test)]
 #[path = "memory_upstream_conformance_hosted_tests.rs"]
 mod tests_upstream_conformance_hosted;
+#[cfg(test)]
+#[path = "memory_upstream_conformance_vendors_tests.rs"]
+mod tests_upstream_conformance_vendors;

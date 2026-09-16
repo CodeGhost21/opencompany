@@ -4,7 +4,8 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use super::tests_upstream_conformance::{
-    Backend, Row, Store, assert_retains_then_conforms, facade_round_trip, open, remote_config, serve,
+    Backend, Row, Store, assert_retains_then_conforms, facade_round_trip, open, remote_config,
+    serve,
 };
 
 mod mem0 {

@@ -4,8 +4,8 @@ use tinymemory::mandatory::MemoryTraitProvider;
 use tinymemory::registry::DriverClass;
 use tinymemory_api::types::MemoryTaint;
 
-use super::tests::{FakeEngine, FlakyStore, a_fact, acme_id, engine, globex_id};
 use super::BoundMemory;
+use super::tests::{FakeEngine, FlakyStore, a_fact, acme_id, engine, globex_id};
 use crate::ports::{CompressedTrace, ContextChunk, EvictionPolicy};
 
 #[tokio::test]
@@ -635,4 +635,3 @@ type ConformanceStores = (
     Arc<dyn crate::ports::MemoryStore>,
     Arc<dyn crate::ports::ContextStore>,
 );
-
