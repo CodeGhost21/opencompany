@@ -5,15 +5,15 @@
 //! 750-line file limit.
 
 use super::*;
-use std::sync::Mutex as StdMutex;
+pub(super) use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;
-use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+pub(super) use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
-use crate::company::CompanyManifest;
-use crate::harness::provider::MockProvider;
-use crate::ports::UsageSample;
-use crate::ports::types::{
+pub(super) use crate::company::CompanyManifest;
+pub(super) use crate::harness::provider::MockProvider;
+pub(super) use crate::ports::UsageSample;
+pub(super) use crate::ports::types::{
     ChunkAddr, ChunkHit, ChunkMeta, CompanySummary, ContextChunk, LedgerEntry,
 };
 // The two-level resolver. Test-only now: the roster build goes through
