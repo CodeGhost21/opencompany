@@ -89,9 +89,8 @@ to the operator, and vice versa. They are REST twins of `Company.workspaceTree`
 every other console read, rather than ISO-8601 strings). The backlink scan is
 literally shared code (`company::workspace_links`), so the two surfaces cannot
 report different backlinks for the same note. The tree read carries metadata
-only — bodies are fetched per file, so a navigation read does not grow with the
-size of the workspace. Reading a folder id as a file is a `404`, never an empty
-note.
+only — bodies are fetched per file, so a navigation read does not grow with
+the workspace. Reading a folder id as a file is a `404`, never an empty note.
 
 `GET …/workspace/search?q=…` (#607) is the **third workspace read**: it answers
 which notes mention a phrase, so discovery costs one call rather than a listing
