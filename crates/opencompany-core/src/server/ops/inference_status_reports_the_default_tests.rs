@@ -1,16 +1,12 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
-use tower::ServiceExt;
+use axum::http::StatusCode;
+use serde_json::json;
 
 use super::inference_test_support::*;
 use super::*;
 
 use crate::company::CompanyManifest;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::CompanyId;
 use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
 #[tokio::test]

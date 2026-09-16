@@ -1,4 +1,4 @@
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -6,12 +6,8 @@ use tower::ServiceExt;
 use super::inference_test_support::*;
 use super::*;
 
-use crate::company::CompanyManifest;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
+use crate::ports::types::CompanyId;
 use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
 
 /// `POST …/inference/restart` rebuilds the runtime in place, so the console's
 /// "Restart required" notice has an action behind it rather than being a
