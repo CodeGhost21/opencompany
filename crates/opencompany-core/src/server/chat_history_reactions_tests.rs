@@ -7,7 +7,7 @@ fn user(id: &str) -> Option<Actor> {
     })
 }
 
-fn at(seq: u64, event: CompanyEvent) -> StoredEvent {
+pub(super) fn at(seq: u64, event: CompanyEvent) -> StoredEvent {
     StoredEvent {
         seq: EventSeq::new(seq),
         company: crate::ports::types::CompanyId::new("acme"),
