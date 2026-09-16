@@ -79,14 +79,14 @@ pub(crate) struct RecordingReads {
 }
 
 impl RecordingReads {
-    fn new(inner: std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>) -> Self {
+    pub(crate) fn new(inner: std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>) -> Self {
         Self {
             inner,
             read_bytes: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    fn bytes_read(&self, id: &str) -> u64 {
+    pub(crate) fn bytes_read(&self, id: &str) -> u64 {
         self.read_bytes
             .lock()
             .unwrap()
