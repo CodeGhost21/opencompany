@@ -559,6 +559,7 @@ impl<'a> EpisodeDriver<'a> {
                         .with_elsewhere(&elsewhere)
                         .with_unspoken(&unspoken)
                         .with_peers(peers.clone())
+                        .able_to_ask(referrals.is_some())
                         .with_trigger(Sequence(trigger.value()))
                         .render(&turn, &visible);
 
@@ -765,14 +766,37 @@ impl<'a> EpisodeDriver<'a> {
                     // — `forward` appends the answer to the very conversation
                     // the asker is reading — so that continuation is legitimate
                     // and gating on `returned` would suppress it.
-                    let answered = {
+                    let (answered, held_in) = {
                         let ledger = queue.ledger().await;
-                        ledger.asked.len() > answered_before
-                            && ledger
-                                .asked
-                                .last()
-                                .is_some_and(|asked| asked.returned || !asked.crossed)
+                        let last = ledger.asked.last();
+                        (
+                            ledger.asked.len() > answered_before
+                                && last.is_some_and(|asked| asked.returned || !asked.crossed),
+                            last.and_then(|asked| asked.conversation.clone()),
+                        )
                     };
+                    // **The exchange the asker is about to speak on, when it
+                    // happened somewhere the asker cannot otherwise read.**
+                    //
+                    // A question put to a person by name runs in the pair's own
+                    // thread. Nothing puts that thread in front of either
+                    // participant again — `elsewhere_for` gathers a seat's other
+                    // desks and its own direct line, and a `dm:<a>+<b>` pair is
+                    // neither — so the pair agreed on something and the room
+                    // watched both seats re-derive it in the open, line by line.
+                    //
+                    // Handed to the continuation as `elsewhere` because that is
+                    // exactly what it is: rows from outside this fold, which the
+                    // asker may quote and which move no option here. The desk
+                    // record stays private; what reaches the floor is whatever
+                    // the asker chooses to say in its own words.
+                    let mut carried = elsewhere.clone();
+                    if let Some(thread) = held_in.as_deref()
+                        && answered
+                        && let Some(rows) = self.conversation_rows(thread, &turn.agent_id).await
+                    {
+                        carried.push((format!("Your exchange with @{thread}"), rows));
+                    }
                     // **The asker's turn continues on the answer it paid for.**
                     //
                     // Landing the answer before the *next* speaker is chosen
@@ -801,9 +825,10 @@ impl<'a> EpisodeDriver<'a> {
                             &pins,
                         )
                         .with_recall(&recall)
-                        .with_elsewhere(&elsewhere)
+                        .with_elsewhere(&carried)
                         .with_unspoken(&unspoken)
                         .with_peers(peers.clone())
+                        .able_to_ask(referrals.is_some())
                         .with_trigger(Sequence(trigger.value()))
                         .continuing()
                         .render(&turn, &visible);
@@ -1063,6 +1088,46 @@ impl<'a> EpisodeDriver<'a> {
             )
             .await?;
         Ok(Some(seq))
+    }
+
+    /// One conversation's recent rows, projected for a seat that was in it.
+    ///
+    /// Used for a pair thread the asker cannot otherwise read: its rows live in
+    /// `dm:<a>+<b>`, which is neither a desk this seat sits on nor its own
+    /// direct line, so `elsewhere_for` never gathers it.
+    ///
+    /// `None` when the projection fails or the thread is empty, which the
+    /// caller treats as nothing to carry — the same best-effort stance
+    /// `elsewhere_for` takes.
+    async fn conversation_rows(
+        &self,
+        conversation: &str,
+        viewer_id: &str,
+    ) -> Option<Vec<tinyhivemind_hive::SessionMessage>> {
+        let log = EventLogSessionLog::new(
+            Arc::clone(&self.events),
+            self.company.clone(),
+            conversation.to_string(),
+            conversation.to_string(),
+        );
+        let rows = tinyhivemind_hive::project_session(
+            &log,
+            &SessionQuery {
+                conversation: Conversation {
+                    desk_id: conversation.to_string(),
+                    desk_name: conversation.to_string(),
+                    thread_root: None,
+                },
+                viewer: Viewer::Agent {
+                    id: viewer_id.to_string(),
+                },
+                before: None,
+                window: SESSION_WINDOW,
+            },
+        )
+        .await
+        .ok()?;
+        (!rows.is_empty()).then_some(rows)
     }
 
     async fn refolded(
