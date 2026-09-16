@@ -19,8 +19,8 @@ use super::*;
 use crate::Result;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, EventSeq};
-use super::tests_fixtures::*;
-use super::tests_prompt::*;
+use super::referral_fixtures_tests::*;
+use super::referral_prompt_tests::*;
 
 // ---------------------------------------------------------------------------
 // What actually crosses
