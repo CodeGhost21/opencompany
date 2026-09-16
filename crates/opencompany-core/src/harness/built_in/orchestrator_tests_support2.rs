@@ -259,7 +259,7 @@ impl ArtifactStore for BrokenArtifactStore {
 /// real backend promises — so a lookup under one company can never answer
 /// with a row filed under another.
 pub(super) struct TenantScopedRunStore {
-    rows: std::sync::Mutex<Vec<RunRecord>>,
+    pub(super) rows: std::sync::Mutex<Vec<RunRecord>>,
 }
 
 #[async_trait]
@@ -335,7 +335,7 @@ pub(super) fn tenant_run(company: &str, id: &str) -> RunRecord {
 /// rather than happening to work because every test fixture only ever
 /// holds one company's record.
 pub(super) struct TenantScopedCompanyStore {
-    records: std::collections::HashMap<String, CompanyRecord>,
+    pub(super) records: std::collections::HashMap<String, CompanyRecord>,
 }
 
 #[async_trait::async_trait]
@@ -358,7 +358,7 @@ impl CompanyStore for TenantScopedCompanyStore {
 /// concurrent `add_agent` calls genuinely interleave their load → push →
 /// save cycle rather than each running to completion uncontended.
 pub(super) struct YieldingStore {
-    record: StdMutex<Option<CompanyRecord>>,
+    pub(super) record: StdMutex<Option<CompanyRecord>>,
 }
 
 #[async_trait::async_trait]

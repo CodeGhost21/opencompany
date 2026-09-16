@@ -237,7 +237,7 @@ pub(super) fn member_teammate_tool(
 /// path (load → push overlay → save).
 #[derive(Default)]
 pub(super) struct MemStore {
-    record: StdMutex<Option<CompanyRecord>>,
+    pub(super) record: StdMutex<Option<CompanyRecord>>,
 }
 
 impl MemStore {
@@ -341,8 +341,8 @@ pub(super) const DEMO_WF: &str = r#"
 /// A [`WorkflowRunner`] test double: records the ids it was asked to run and
 /// returns a canned [`WorkflowRun`].
 pub(super) struct StubRunner {
-    calls: Arc<Mutex<Vec<String>>>,
-    run: WorkflowRun,
+    pub(super) calls: Arc<Mutex<Vec<String>>>,
+    pub(super) run: WorkflowRun,
 }
 
 impl StubRunner {
