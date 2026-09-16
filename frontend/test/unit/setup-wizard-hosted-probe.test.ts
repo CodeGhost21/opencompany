@@ -208,8 +208,21 @@ async function goToReview() {
   await settle();
 }
 
+/**
+ * Gets past step 0 onto the model step, and is a no-op where step 0 is absent.
+ *
+ * The flow opens on the setup-way choice, and the provider picker sits behind
+ * "Set it up yourself".
+ */
+async function chooseSelfManaged() {
+  if (!find("setup-way-self-managed")) return;
+  await click("setup-way-self-managed");
+  await next();
+}
+
 /** Answer the model step with "No model", which settles it without a key. */
 async function chooseNoModel() {
+  await chooseSelfManaged();
   await click("setup-provider-select");
   await act(async () => {
     (document.body.querySelector('[data-testid="setup-provider-none"]') as HTMLElement).click();
@@ -267,20 +280,23 @@ describe("a host whose credential resolves but no longer reaches", () => {
 
   it("keeps the model step rather than skipping the only live check", async () => {
     await show(unreachable());
+    await chooseSelfManaged();
 
     expect(slots()).toEqual([
-      "step-power",
+      "step-setup-way",
+      "step-self-managed-connect",
       "step-business",
       "step-signin",
       "step-account",
       "step-review",
     ]);
-    expect(container.textContent).toContain("step 1 of 5");
+    expect(container.textContent).toContain("step 2 of 6");
     expect(find("setup-provider-select"), "the model step must render").toBeTruthy();
   });
 
   it("shows the failure, and names whose model did not answer", async () => {
     await show(unreachable());
+    await chooseSelfManaged();
 
     expect(text("setup-test-failed")).toContain(DEAD);
     // Not "This host already has a model" — it has a credential that no longer
@@ -290,6 +306,7 @@ describe("a host whose credential resolves but no longer reaches", () => {
 
   it("still gates the step, so the failure cannot be walked past", async () => {
     await show(unreachable());
+    await chooseSelfManaged();
 
     await next();
     expect(find("setup-problem"), "a failed connection must hold the step").toBeTruthy();
@@ -299,6 +316,7 @@ describe("a host whose credential resolves but no longer reaches", () => {
   it("is completable once the operator supplies a key of their own", async () => {
     const seen: Seen = { probes: [] };
     await show(unreachable(seen));
+    await chooseSelfManaged();
 
     await click("setup-key-override");
     await fill("setup-field-key", "sk-mine");
@@ -348,14 +366,16 @@ describe("a host that reaches no model of its own", () => {
     await show(clientWith(status(), { seen }));
 
     expect(seen.probes, "nothing to prove, so nothing to call").toHaveLength(0);
+    await chooseSelfManaged();
     expect(slots()).toEqual([
-      "step-power",
+      "step-setup-way",
+      "step-self-managed-connect",
       "step-business",
       "step-signin",
       "step-account",
       "step-review",
     ]);
-    expect(container.textContent).toContain("step 1 of 5");
+    expect(container.textContent).toContain("step 2 of 6");
     // Read off the page rather than a test id, so this says the same thing
     // against the flow as it stands today.
     expect(container.textContent).toContain("Your agents need a model to work");
@@ -363,6 +383,7 @@ describe("a host that reaches no model of its own", () => {
 
   it("still gates that step on a verdict the operator earns", async () => {
     await show(clientWith(status()));
+    await chooseSelfManaged();
 
     await next();
     expect(find("setup-problem"), "an untested connection must hold the step").toBeTruthy();

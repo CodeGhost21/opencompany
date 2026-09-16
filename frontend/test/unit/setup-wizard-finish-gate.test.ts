@@ -133,13 +133,31 @@ const next = async () =>
   });
 
 /**
- * Skips the model step, which is now FIRST and is a gate.
+ * Gets past step 0 onto the model step, and is a no-op once already there.
+ *
+ * The flow opens on the setup-way choice, and the provider picker sits behind
+ * "Set it up yourself".
+ */
+async function chooseSelfManaged() {
+  const option = container.querySelector('[data-testid="setup-way-self-managed"]') as
+    | HTMLElement
+    | null;
+  if (!option) return;
+  await act(async () => {
+    option.click();
+  });
+  await next();
+}
+
+/**
+ * Skips the model step, which is a gate.
  *
  * The skip is the honest path for a test with no provider to reach: the step
  * refuses to advance on an untested credential, which is the whole reason it
- * moved to the front.
+ * sits in front of the questions.
  */
 async function skipModel() {
+  await chooseSelfManaged();
   await selectProvider("none");
   await next(); // -> business
 }
@@ -288,6 +306,7 @@ describe("finishing setup with no companies on the host", () => {
    */
   it("will not pass the model step on an untested connection", async () => {
     await show(clientWith(status()));
+    await chooseSelfManaged();
 
     await act(async () => {
       button("Next").click();
@@ -326,6 +345,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
+    await chooseSelfManaged();
     await fill("setup-field-key", "rejected-key");
     await act(async () => {
       (
@@ -356,6 +376,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
+    await chooseSelfManaged();
     await fill("setup-field-key", "working-key");
     await act(async () => {
       (
@@ -384,6 +405,7 @@ describe("finishing setup with no companies on the host", () => {
       }),
     );
 
+    await chooseSelfManaged();
     expect(button("Test connection").disabled).toBe(true);
     await act(async () => {
       button("Test connection").click();
@@ -401,6 +423,7 @@ describe("finishing setup with no companies on the host", () => {
 
   it("requires an endpoint before testing Ollama", async () => {
     await show(clientWith(status()));
+    await chooseSelfManaged();
 
     await selectProvider("ollama");
     expect(button("Test connection").disabled).toBe(true);

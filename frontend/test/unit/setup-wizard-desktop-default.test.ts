@@ -115,7 +115,20 @@ async function click(testId: string) {
  * whose popup portals onto `document.body` and does not exist until the
  * trigger opens it.
  */
+/**
+ * Gets past step 0 onto the model step, and is a no-op once already there.
+ *
+ * The flow opens on the setup-way choice, and the provider picker sits behind
+ * "Set it up yourself".
+ */
+async function chooseSelfManaged() {
+  if (!find("setup-way-self-managed")) return;
+  await click("setup-way-self-managed");
+  await next();
+}
+
 async function skipModel() {
+  await chooseSelfManaged();
   await click("setup-provider-select");
   const none = document.body.querySelector('[data-testid="setup-provider-none"]') as
     | HTMLElement
@@ -191,7 +204,13 @@ describe("the sign-in a desktop install starts from", () => {
     // The consequence of the seeded answer, and the reason it is seeded: the
     // address step is gone from the bar before the operator has pressed
     // anything, rather than appearing and then being taken away.
-    expect(slots()).toEqual(["step-power", "step-business", "step-signin", "step-review"]);
+    expect(slots()).toEqual([
+      "step-setup-way",
+      "step-self-managed-connect",
+      "step-business",
+      "step-signin",
+      "step-review",
+    ]);
 
     await next();
     // Review, asserted first: both checks below are absences, and an absence on
