@@ -15,8 +15,8 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
-    WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
+    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
+    WorkflowRunVerdict, select_run_page,
 };
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
@@ -53,10 +53,7 @@ async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
 
 /// The same fixture at a chosen lifecycle, so a paused company is
 /// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(
-    home: &std::path::Path,
-    lifecycle: &str,
-) -> AppState {
+async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -105,11 +102,7 @@ async fn state_with_hosted_company_lifecycle(
 /// (`origin_run_id`) — the field [`run_artifacts`] joins on (issue
 /// #1684). Everything else is the neutral shape the board's own tests
 /// use.
-fn run_card(
-    id: &str,
-    title: &str,
-    origin_run_id: Option<&str>,
-) -> crate::ports::TaskRecord {
+fn run_card(id: &str, title: &str, origin_run_id: Option<&str>) -> crate::ports::TaskRecord {
     crate::ports::TaskRecord {
         id: id.into(),
         title: crate::ports::tasks::TaskTitle::authored(title),
@@ -678,4 +671,3 @@ async fn journal_finish(
         .await
         .expect("append");
 }
-

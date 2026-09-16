@@ -409,12 +409,9 @@ const GRANTED: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
 async fn a_member_cannot_change_what_the_company_connects_through() {
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), GRANTED).await;
-    let member = crate::server::test_support::seed_session(
-        &state,
-        "acme",
-        crate::ports::UserRole::Member,
-    )
-    .await;
+    let member =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Member)
+            .await;
 
     let (status, body, raw) = send_as(
         &state,
@@ -516,12 +513,9 @@ async fn an_admin_is_unaffected() {
 async fn a_member_may_still_read_the_composio_status_and_connections() {
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), GRANTED).await;
-    let member = crate::server::test_support::seed_session(
-        &state,
-        "acme",
-        crate::ports::UserRole::Member,
-    )
-    .await;
+    let member =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Member)
+            .await;
 
     let (status, dto, raw) = send_as(
         &state,
@@ -723,4 +717,3 @@ async fn disconnect_route_conflicts_without_build_or_token() {
     #[cfg(feature = "composio")]
     assert_eq!(body["code"], "not_configured", "{body}");
 }
-

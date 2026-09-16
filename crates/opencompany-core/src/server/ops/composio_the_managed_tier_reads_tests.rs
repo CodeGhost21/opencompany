@@ -692,4 +692,3 @@ async fn read_slot(runtime: &super::CompanyRuntime, key: &'static str) -> Option
         .unwrap()
         .map(|crate::ports::types::SecretValue(v)| v)
 }
-

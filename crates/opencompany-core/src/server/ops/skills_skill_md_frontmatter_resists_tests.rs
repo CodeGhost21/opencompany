@@ -365,4 +365,3 @@ async fn write_lock_serializes_same_company_writes() {
         "the second acquirer must not have run until the first released"
     );
 }
-

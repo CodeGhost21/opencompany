@@ -626,4 +626,3 @@ async fn task_discussion_rejects_an_empty_message_and_an_unknown_card() {
     let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
     assert_eq!(body["discussion"].as_array().unwrap().len(), 1);
 }
-

@@ -541,8 +541,8 @@ fn the_grounding_is_this_teammate_and_its_neighbours() {
         instructions: None,
         ..Default::default()
     };
-    let fell_back = super::subject_for(&record, "ceo", Vec::new(), cleared)
-        .expect("the ceo is on the roster");
+    let fell_back =
+        super::subject_for(&record, "ceo", Vec::new(), cleared).expect("the ceo is on the roster");
     assert_eq!(
         fell_back.description.as_deref(),
         Some("Sets direction and delegates."),
@@ -722,4 +722,3 @@ fn plan_with(total_tokens: Option<u64>) -> crate::company::Plan {
         ..Default::default()
     }
 }
-

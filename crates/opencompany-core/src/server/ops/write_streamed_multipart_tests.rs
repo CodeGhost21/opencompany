@@ -710,4 +710,3 @@ async fn a_company_that_raised_its_blob_cap_can_use_it() {
 // ---------------------------------------------------------------------------
 // Issue #705 — an irreversible effect's amount is admin-only
 // ---------------------------------------------------------------------------
-

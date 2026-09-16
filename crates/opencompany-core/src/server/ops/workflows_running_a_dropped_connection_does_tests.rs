@@ -287,9 +287,7 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
 }
 
 /// Every event the company journaled, oldest first.
-async fn journal(
-    runtime: &Arc<crate::company::runtime::CompanyRuntime>,
-) -> Vec<CompanyEvent> {
+async fn journal(runtime: &Arc<crate::company::runtime::CompanyRuntime>) -> Vec<CompanyEvent> {
     runtime
         .events()
         .read_from(runtime.id(), EventSeq::new(0), usize::MAX)
@@ -689,4 +687,3 @@ async fn deleting_an_idle_workflow_stops_nothing() {
         "nothing was in flight, so nothing was stopped"
     );
 }
-

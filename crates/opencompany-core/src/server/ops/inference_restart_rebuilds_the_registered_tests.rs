@@ -117,11 +117,7 @@ async fn state_with_company_named(home: &std::path::Path, name: &str) -> AppStat
 /// so this can plant a manifest a fresh company would now be refused. That
 /// is the point: an endpoint stored before the refusal existed is exactly
 /// the case the redaction half of the rule is for.
-async fn state_with_manifest(
-    home: &std::path::Path,
-    name: &str,
-    manifest_toml: &str,
-) -> AppState {
+async fn state_with_manifest(home: &std::path::Path, name: &str, manifest_toml: &str) -> AppState {
     let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
     let id = CompanyId::new(name);
     save_record(home, &id, &manifest).await;
@@ -192,8 +188,7 @@ async fn restart_rebuilds_the_registered_runtime() {
     state.set_boot_inputs(id.clone(), crate::runtime::BootInputs::default());
     let before = state.registry().get(&id).expect("registered");
 
-    let (status, resp, raw) =
-        send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+    let (status, resp, raw) = send(&state, "POST", "/api/v1/company/inference/restart", None).await;
     assert_eq!(status, StatusCode::OK, "{raw}");
 
     // A genuinely different runtime is registered — the point of the route.
@@ -240,8 +235,7 @@ async fn a_host_that_cannot_rebuild_says_so() {
     let home_dir = home();
     let state = state_with_company(home_dir.path()).await;
 
-    let (status, _, raw) =
-        send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+    let (status, _, raw) = send(&state, "POST", "/api/v1/company/inference/restart", None).await;
     assert_ne!(status, StatusCode::OK, "{raw}");
     assert!(
         raw.contains("restart the process"),
@@ -311,12 +305,11 @@ async fn the_status_says_whether_this_host_can_rebuild_in_place() {
     );
 
     let wired_home = home();
-    let wired =
-        state_with_company(wired_home.path())
-            .await
-            .with_rebuilder(std::sync::Arc::new(Working {
-                home: wired_home.path().to_path_buf(),
-            }));
+    let wired = state_with_company(wired_home.path())
+        .await
+        .with_rebuilder(std::sync::Arc::new(Working {
+            home: wired_home.path().to_path_buf(),
+        }));
     let (status, body, raw) = send(&wired, "GET", "/api/v1/company/inference", None).await;
     assert_eq!(status, StatusCode::OK, "{raw}");
     assert_eq!(
@@ -349,8 +342,7 @@ async fn a_probe_with_no_credential_is_refused_before_it_is_sent() {
     .await;
     assert_eq!(status, StatusCode::OK, "{raw}");
 
-    let (status, body, raw) =
-        send(&state, "POST", "/api/v1/company/inference/test", None).await;
+    let (status, body, raw) = send(&state, "POST", "/api/v1/company/inference/test", None).await;
     assert_eq!(status, StatusCode::CONFLICT, "{raw}");
     assert_eq!(body["code"], json!("no_key"), "{raw}");
     assert!(
@@ -381,8 +373,7 @@ async fn a_keyless_custom_endpoint_is_still_probed() {
     .await;
     assert_eq!(status, StatusCode::OK, "{raw}");
 
-    let (status, body, raw) =
-        send(&state, "POST", "/api/v1/company/inference/test", None).await;
+    let (status, body, raw) = send(&state, "POST", "/api/v1/company/inference/test", None).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{raw}");
     assert_eq!(body["code"], json!("probe_failed"), "{raw}");
 }
@@ -423,8 +414,7 @@ async fn saved_company_probe_sends_its_resolved_model() {
     .await;
     assert_eq!(status, StatusCode::OK, "{raw}");
 
-    let (status, body, raw) =
-        send(&state, "POST", "/api/v1/company/inference/test", None).await;
+    let (status, body, raw) = send(&state, "POST", "/api/v1/company/inference/test", None).await;
     server.abort();
 
     assert_eq!(status, StatusCode::OK, "{raw}");
@@ -472,8 +462,7 @@ async fn saved_company_probe_keeps_typed_credential_failures() {
     .await;
     assert_eq!(status, StatusCode::OK, "{raw}");
 
-    let (status, body, raw) =
-        send(&state, "POST", "/api/v1/company/inference/test", None).await;
+    let (status, body, raw) = send(&state, "POST", "/api/v1/company/inference/test", None).await;
     server.abort();
 
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{raw}");
@@ -672,4 +661,3 @@ async fn model_catalog_route_lists_the_configured_endpoints_own_catalog() {
         "{raw}"
     );
 }
-

@@ -15,8 +15,8 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
-    WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
+    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
+    WorkflowRunVerdict, select_run_page,
 };
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
@@ -53,10 +53,7 @@ async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
 
 /// The same fixture at a chosen lifecycle, so a paused company is
 /// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(
-    home: &std::path::Path,
-    lifecycle: &str,
-) -> AppState {
+async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -349,8 +346,7 @@ async fn a_report_routed_to_an_unwired_channel_is_refused_at_save() {
     let home_dir = home();
     let state = desk_state(home_dir.path()).await;
 
-    let response =
-        post_create(state, body_with_destination("channel", Some("enginering"))).await;
+    let response = post_create(state, body_with_destination("channel", Some("enginering"))).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let message = json_body(response).await.to_string();
     assert!(
@@ -704,4 +700,3 @@ async fn fix_from_run_reports_a_builder_gap_on_both_scope_forms() {
         );
     }
 }
-

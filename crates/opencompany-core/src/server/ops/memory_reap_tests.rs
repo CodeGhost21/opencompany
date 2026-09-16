@@ -12,8 +12,7 @@ use std::sync::Arc;
 #[tokio::test]
 async fn the_mirror_is_reaped_and_a_shared_body_survives_under_its_other_label() {
     let dir = tempfile::tempdir().unwrap();
-    let context: Arc<dyn ContextStore> =
-        Arc::new(FsContextStore::new(dir.path().to_path_buf()));
+    let context: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(dir.path().to_path_buf()));
     let company = CompanyId::new("acme");
 
     let lone = context

@@ -694,4 +694,3 @@ async fn an_overlay_teammate_reports_the_standard_grant() {
         "{agent}"
     );
 }
-

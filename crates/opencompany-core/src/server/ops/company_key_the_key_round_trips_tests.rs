@@ -710,4 +710,3 @@ async fn put_credential_answers_slots_and_needs_model() {
         "no row without a model: {raw}"
     );
 }
-

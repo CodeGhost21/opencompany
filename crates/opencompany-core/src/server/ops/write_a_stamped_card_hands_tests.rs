@@ -661,4 +661,3 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(stats["taskOutcomes"], 0);
     assert_eq!(stats["documentMemory"], 0);
 }
-

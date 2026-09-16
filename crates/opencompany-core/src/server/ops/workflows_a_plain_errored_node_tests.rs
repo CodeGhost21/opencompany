@@ -415,4 +415,3 @@ fn one_malformed_workflow_does_not_break_the_list() {
     let ids: Vec<_> = files.iter().map(|f| f.id.as_str()).collect();
     assert_eq!(ids, vec!["demo"]);
 }
-

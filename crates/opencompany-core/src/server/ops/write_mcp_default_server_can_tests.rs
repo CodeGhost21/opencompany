@@ -693,4 +693,3 @@ async fn mcp_test_route_is_not_wired_without_the_feature() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_wired");
 }
-

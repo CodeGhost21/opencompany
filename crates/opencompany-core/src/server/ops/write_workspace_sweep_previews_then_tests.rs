@@ -723,4 +723,3 @@ async fn journal_len(runtime: &std::sync::Arc<crate::company::runtime::CompanyRu
         .unwrap()
         .len()
 }
-

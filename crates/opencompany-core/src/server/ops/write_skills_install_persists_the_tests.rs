@@ -699,4 +699,3 @@ async fn inbox_read_marks_and_reports_unread() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["unread"], 0);
 }
-

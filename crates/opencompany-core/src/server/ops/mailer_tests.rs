@@ -165,9 +165,7 @@ fn tenant_mailbox_config_absent_is_none() {
 
 #[test]
 fn tenant_mailbox_config_partial_is_error() {
-    let env = crate::app::config::MapEnv::new([(
-        "OPENCOMPANY_MAIL_ADDRESS",
-        "acme@opencompany.work",
-    )]);
+    let env =
+        crate::app::config::MapEnv::new([("OPENCOMPANY_MAIL_ADDRESS", "acme@opencompany.work")]);
     assert!(TenantMailboxConfig::from_env_source(&env).is_err());
 }

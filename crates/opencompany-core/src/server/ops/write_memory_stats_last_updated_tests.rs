@@ -571,4 +571,3 @@ async fn workspace_rename_cannot_claim_a_siblings_physical_path() {
         );
     }
 }
-

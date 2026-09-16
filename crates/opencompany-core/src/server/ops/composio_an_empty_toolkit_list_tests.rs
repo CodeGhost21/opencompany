@@ -269,9 +269,7 @@ fn hundred_slugs() -> Vec<String> {
 /// exists.
 #[cfg(feature = "composio")]
 fn composio_backend_env_guard() -> crate::test_support::EnvVarGuard {
-    crate::test_support::EnvVarGuard::capture(&[
-        crate::company::composio::TINYHUMANS_API_URL_ENV,
-    ])
+    crate::test_support::EnvVarGuard::capture(&[crate::company::composio::TINYHUMANS_API_URL_ENV])
 }
 
 /// The heart of the reopened issue: in open mode the console is offered the
@@ -699,4 +697,3 @@ async fn the_managed_tier_is_reported_while_byok_is_selected() {
         "the boolean surface stays gone (#886): {dto}"
     );
 }
-

@@ -411,8 +411,7 @@ async fn instructions_are_editable_on_a_manifest_teammate_without_a_409() {
     // native fields are editable through the same override layer — a role
     // edit returns 200 and lands as an overlay, `company.toml` untouched —
     // and it composes with the instructions override set above.
-    let (status, edited_role) =
-        patch_agent(&state, "ceo", json!({"role": "Chief Vibes"})).await;
+    let (status, edited_role) = patch_agent(&state, "ceo", json!({"role": "Chief Vibes"})).await;
     assert_eq!(status, StatusCode::OK, "{edited_role}");
     assert_eq!(edited_role["role"], "Chief Vibes", "{edited_role}");
     assert_eq!(
@@ -434,8 +433,7 @@ async fn null_instructions_resets_a_manifest_teammate_to_blueprint() {
     let state = state_with_manifest(home_dir.path(), PERSONA_MANIFEST).await;
 
     // Override, then reset.
-    let (status, _) =
-        patch_agent(&state, "ceo", json!({"instructions": "Custom voice."})).await;
+    let (status, _) = patch_agent(&state, "ceo", json!({"instructions": "Custom voice."})).await;
     assert_eq!(status, StatusCode::OK);
     let (status, reset) = patch_agent(&state, "ceo", json!({"instructions": null})).await;
     assert_eq!(status, StatusCode::OK, "{reset}");
@@ -450,8 +448,7 @@ async fn null_instructions_resets_a_manifest_teammate_to_blueprint() {
 
     // A blank string is a reset too, so an emptied editor never blanks the
     // persona.
-    let (status, _) =
-        patch_agent(&state, "ceo", json!({"instructions": "Custom voice."})).await;
+    let (status, _) = patch_agent(&state, "ceo", json!({"instructions": "Custom voice."})).await;
     assert_eq!(status, StatusCode::OK);
     let (status, blanked) = patch_agent(&state, "ceo", json!({"instructions": "   "})).await;
     assert_eq!(status, StatusCode::OK, "{blanked}");
@@ -706,4 +703,3 @@ async fn an_upload_that_decodes_to_a_huge_size_is_refused() {
         "a named refusal: {refused}"
     );
 }
-

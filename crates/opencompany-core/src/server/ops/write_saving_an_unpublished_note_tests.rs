@@ -723,4 +723,3 @@ async fn applying_a_proposal_defaults_the_owner_desk_from_the_assignees_desk() {
         "the assignee's desk fills the omitted owner_desk"
     );
 }
-

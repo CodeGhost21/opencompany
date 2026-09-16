@@ -631,4 +631,3 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         bounced: None,
     }
 }
-

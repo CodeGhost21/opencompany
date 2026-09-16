@@ -589,12 +589,9 @@ async fn clearing_a_choice_needs_no_client_and_is_idempotent() {
 async fn a_member_cannot_choose_the_account_the_company_acts_as() {
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), GRANTED).await;
-    let member = crate::server::test_support::seed_session(
-        &state,
-        "acme",
-        crate::ports::UserRole::Member,
-    )
-    .await;
+    let member =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Member)
+            .await;
 
     for method in ["PUT", "DELETE"] {
         let (status, body, raw) = send_as(
@@ -714,4 +711,3 @@ async fn a_confirmed_clear_of_the_managed_token_succeeds_and_echoes_used_by() {
         "the confirmed clear must have landed"
     );
 }
-

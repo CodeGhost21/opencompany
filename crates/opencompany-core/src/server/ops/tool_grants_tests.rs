@@ -127,8 +127,7 @@ async fn get_reports_the_manifest_grants_and_what_may_be_added() {
 async fn granting_a_namespace_widens_the_effective_allow_list() {
     let dir = home();
     let state = state(dir.path()).await;
-    let (status, body) =
-        call(&state, "PUT", URI, Some(json!({"namespace": "chargebee"}))).await;
+    let (status, body) = call(&state, "PUT", URI, Some(json!({"namespace": "chargebee"}))).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["allow"], json!(["*", "search", "chargebee"]));
     assert_eq!(body["added"], json!(["chargebee"]));
@@ -626,8 +625,7 @@ async fn clear_grants_does_not_deadlock_against_its_own_rebuild() {
     let guard = lock.lock().await;
 
     let state_for_task = state.clone();
-    let mut task =
-        tokio::spawn(async move { call(&state_for_task, "DELETE", URI, None).await });
+    let mut task = tokio::spawn(async move { call(&state_for_task, "DELETE", URI, None).await });
 
     let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task)
         .await

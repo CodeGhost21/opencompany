@@ -703,4 +703,3 @@ async fn a_blank_tool_glob_is_refused() {
         "and nothing was written: {unchanged}"
     );
 }
-

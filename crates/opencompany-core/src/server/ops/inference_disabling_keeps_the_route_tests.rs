@@ -117,11 +117,7 @@ async fn state_with_company_named(home: &std::path::Path, name: &str) -> AppStat
 /// so this can plant a manifest a fresh company would now be refused. That
 /// is the point: an endpoint stored before the refusal existed is exactly
 /// the case the redaction half of the rule is for.
-async fn state_with_manifest(
-    home: &std::path::Path,
-    name: &str,
-    manifest_toml: &str,
-) -> AppState {
+async fn state_with_manifest(home: &std::path::Path, name: &str, manifest_toml: &str) -> AppState {
     let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
     let id = CompanyId::new(name);
     save_record(home, &id, &manifest).await;
@@ -601,7 +597,9 @@ async fn setting_a_default_requires_a_model() {
         &state,
         "POST",
         "/api/v1/company/inference/providers",
-        Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        Some(
+            json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" }),
+        ),
     )
     .await;
 
@@ -628,7 +626,9 @@ async fn a_default_model_may_not_be_a_tier_name_or_contain_spaces() {
         &state,
         "POST",
         "/api/v1/company/inference/providers",
-        Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        Some(
+            json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" }),
+        ),
     )
     .await;
 
@@ -696,7 +696,9 @@ async fn editing_a_providers_model_is_no_longer_silently_dropped() {
         &state,
         "POST",
         "/api/v1/company/inference/providers",
-        Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        Some(
+            json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" }),
+        ),
     )
     .await;
 
@@ -721,4 +723,3 @@ async fn editing_a_providers_model_is_no_longer_silently_dropped() {
     // row (2c: editing the default row's model moves the default too).
     assert_eq!(resp["status"]["defaultChoice"]["model"], "acme-2");
 }
-

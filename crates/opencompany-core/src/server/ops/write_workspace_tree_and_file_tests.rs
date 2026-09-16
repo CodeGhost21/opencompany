@@ -580,4 +580,3 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(results["total"], json!(1));
 }
-

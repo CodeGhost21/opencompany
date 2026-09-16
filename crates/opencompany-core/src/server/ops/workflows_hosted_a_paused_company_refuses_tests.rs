@@ -15,8 +15,8 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
-    WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
+    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
+    WorkflowRunVerdict, select_run_page,
 };
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
@@ -53,10 +53,7 @@ async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
 
 /// The same fixture at a chosen lifecycle, so a paused company is
 /// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(
-    home: &std::path::Path,
-    lifecycle: &str,
-) -> AppState {
+async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -289,10 +286,7 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
 // `POST …/workflows/validate` — the author-time verdict, no save (#1074)
 // ------------------------------------------------------------------
 
-async fn post_validate(
-    state: &AppState,
-    body: serde_json::Value,
-) -> axum::response::Response {
+async fn post_validate(state: &AppState, body: serde_json::Value) -> axum::response::Response {
     router(state.clone())
         .oneshot(request(
             "POST",
@@ -303,10 +297,7 @@ async fn post_validate(
         .unwrap()
 }
 
-async fn post_create_on(
-    state: &AppState,
-    body: serde_json::Value,
-) -> axum::response::Response {
+async fn post_create_on(state: &AppState, body: serde_json::Value) -> axum::response::Response {
     router(state.clone())
         .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
         .await
@@ -677,4 +668,3 @@ async fn validate_and_create_refuse_an_over_cap_draft_in_the_same_words() {
         "{from_validate}"
     );
 }
-

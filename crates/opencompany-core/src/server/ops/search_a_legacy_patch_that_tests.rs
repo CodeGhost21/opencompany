@@ -328,8 +328,7 @@ async fn removing_the_search_default_is_refused_without_confirmation_and_succeed
 }
 
 #[tokio::test]
-async fn clearing_the_search_defaults_key_is_refused_without_confirmation_and_succeeds_with_it()
-{
+async fn clearing_the_search_defaults_key_is_refused_without_confirmation_and_succeeds_with_it() {
     let home = ::tempfile::tempdir().expect("tempdir");
     let (state, admin) = state_with_two_providers_exa_default(home.path()).await;
 

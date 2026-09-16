@@ -108,8 +108,7 @@ async fn an_unconfigured_company_reports_managed_search() {
     let state = state_with_company(home.path(), true).await;
     let admin = crate::server::test_support::seed_admin(&state, "acme").await;
 
-    let (status, body) =
-        call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+    let (status, body) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["provider"], "managed");
@@ -142,8 +141,7 @@ async fn a_company_that_fails_to_load_reports_ungranted_instead_of_500() {
     let admin = crate::server::test_support::seed_admin(&state, "acme").await;
 
     // Baseline: the manifest grants `search`, so the route reports it.
-    let (status, body) =
-        call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+    let (status, body) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["granted"], true);
 
@@ -152,8 +150,7 @@ async fn a_company_that_fails_to_load_reports_ungranted_instead_of_500() {
         .await
         .expect("corrupt company.toml");
 
-    let (status, body) =
-        call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
+    let (status, body) = call(&state, "GET", "/api/v1/companies/acme/search", &admin, None).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -723,4 +720,3 @@ async fn a_check_cannot_send_an_account_providers_key_to_an_address_of_your_choo
         "a self-hosted instance still takes an address"
     );
 }
-

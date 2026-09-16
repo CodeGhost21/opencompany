@@ -722,4 +722,3 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
         assert_eq!(rows.len(), 1, "{task}: {rows:?}");
     }
 }
-

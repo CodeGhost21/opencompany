@@ -164,8 +164,7 @@ async fn a_blob_reference_is_refused_when_the_bytes_are_not_an_image() {
     // A PDF labelled `image/png` — stored as a binary node whose declared
     // type is exactly the claim the referent check must not trust.
     let (status, uploaded) =
-        upload_workspace_binary(&state, "face.png", "image/png", b"%PDF-1.7 not an image")
-            .await;
+        upload_workspace_binary(&state, "face.png", "image/png", b"%PDF-1.7 not an image").await;
     assert_eq!(status, StatusCode::OK, "{uploaded}");
     let id = uploaded["id"].as_str().expect("a node id");
 
@@ -210,8 +209,7 @@ async fn a_blob_reference_is_accepted_when_the_bytes_are_an_image() {
     assert_eq!(status, StatusCode::OK, "{uploaded}");
     let id = uploaded["id"].as_str().expect("a node id");
 
-    let (status, worn) =
-        patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
+    let (status, worn) = patch_agent(&state, "ceo", json!({"avatar": format!("blob:{id}")})).await;
     assert_eq!(status, StatusCode::OK, "{worn}");
     let reference = worn["avatar"].as_str().expect("a reference");
     let copy_id = reference
@@ -556,8 +554,7 @@ async fn a_model_override_is_refused_off_an_acp_harness() {
     let state = state_with_manifest(home_dir.path(), ROSTER).await;
     let jamie = add_overlay(&state, "Jamie", "Growth").await;
 
-    let (status, refusal) =
-        patch_agent(&state, &jamie, json!({"model": "claude-opus-4-5"})).await;
+    let (status, refusal) = patch_agent(&state, &jamie, json!({"model": "claude-opus-4-5"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
 
     let (_, unchanged) = get_agent(&state, &jamie).await;
@@ -594,8 +591,7 @@ async fn an_admin_can_pin_and_clear_a_teammates_harness() {
 
     // An unknown id is refused, not silently accepted into a binding
     // that would orphan the teammate from every harness's serve set.
-    let (status, refusal) =
-        patch_agent(&state, &jamie, json!({"harness": "does-not-exist"})).await;
+    let (status, refusal) = patch_agent(&state, &jamie, json!({"harness": "does-not-exist"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
 
     // An admin may pin it to a declared harness.
@@ -671,8 +667,7 @@ async fn an_undeclared_coding_cli_is_bindable_only_where_this_host_can_run_one()
     }
 
     // A factory must not widen the vocabulary beyond the coding CLIs.
-    let (status, refusal) =
-        patch_agent(&desktop, &jamie, json!({"harness": "not-a-cli"})).await;
+    let (status, refusal) = patch_agent(&desktop, &jamie, json!({"harness": "not-a-cli"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
 }
 
@@ -722,4 +717,3 @@ agent = "claude"
     assert_eq!(set["harness"], "laptop");
     assert_eq!(set["model"], "claude-opus-4-5");
 }
-

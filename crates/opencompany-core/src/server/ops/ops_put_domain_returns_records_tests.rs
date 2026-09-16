@@ -723,4 +723,3 @@ async fn saving_the_from_name_alone_keeps_the_stored_password() {
     assert_eq!(creds.password.expose(), "the-original-pw");
     assert_eq!(creds.from_name, "Acme Inc");
 }
-

@@ -118,12 +118,6 @@ pub(crate) use scope::{AdminScopedCompany, ScopedCompany, scoped};
 #[cfg(test)]
 mod setup_tests;
 #[cfg(test)]
-#[path = "ops_put_domain_returns_records_tests.rs"]
-mod tests_put_domain_returns_records;
-#[cfg(test)]
-#[path = "ops_put_smtp_without_a_tests.rs"]
-mod tests_put_smtp_without_a;
-#[cfg(test)]
 #[path = "write_a_resolved_approval_reports_tests.rs"]
 mod tests_a_resolved_approval_reports;
 #[cfg(test)]
@@ -171,6 +165,12 @@ mod tests_parent_task_id_rejects;
 #[cfg(test)]
 #[path = "write_parked_effect_tests.rs"]
 mod tests_parked_effect;
+#[cfg(test)]
+#[path = "ops_put_domain_returns_records_tests.rs"]
+mod tests_put_domain_returns_records;
+#[cfg(test)]
+#[path = "ops_put_smtp_without_a_tests.rs"]
+mod tests_put_smtp_without_a;
 #[cfg(test)]
 #[path = "write_saving_an_unpublished_note_tests.rs"]
 mod tests_saving_an_unpublished_note;

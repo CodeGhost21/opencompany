@@ -117,11 +117,7 @@ async fn state_with_company_named(home: &std::path::Path, name: &str) -> AppStat
 /// so this can plant a manifest a fresh company would now be refused. That
 /// is the point: an endpoint stored before the refusal existed is exactly
 /// the case the redaction half of the rule is for.
-async fn state_with_manifest(
-    home: &std::path::Path,
-    name: &str,
-    manifest_toml: &str,
-) -> AppState {
+async fn state_with_manifest(home: &std::path::Path, name: &str, manifest_toml: &str) -> AppState {
     let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
     let id = CompanyId::new(name);
     save_record(home, &id, &manifest).await;
@@ -189,7 +185,9 @@ async fn status_reports_the_default_choice_and_each_rows_model() {
         &state,
         "POST",
         "/api/v1/company/inference/providers",
-        Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        Some(
+            json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" }),
+        ),
     )
     .await;
     let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
@@ -212,8 +210,7 @@ fn the_status_maps_a_bare_slug_default_to_a_null_model() {
 
     assert!(default_choice_dto(&DefaultChoice::Unset, false).is_none());
 
-    let bare =
-        default_choice_dto(&DefaultChoice::ProviderOnly("acme".to_string()), false).unwrap();
+    let bare = default_choice_dto(&DefaultChoice::ProviderOnly("acme".to_string()), false).unwrap();
     assert_eq!(bare.provider, "acme");
     assert!(bare.model.is_none());
     assert!(!bare.broken, "a bare-slug default is never reported broken");
@@ -453,7 +450,9 @@ async fn deleting_the_default_provider_is_refused_without_confirmation() {
         &state,
         "POST",
         "/api/v1/company/inference/providers",
-        Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        Some(
+            json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" }),
+        ),
     )
     .await;
 
@@ -684,7 +683,9 @@ async fn disabling_the_default_provider_is_refused_without_confirmation() {
         &state,
         "POST",
         "/api/v1/company/inference/providers",
-        Some(json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" })),
+        Some(
+            json!({ "kind": "custom", "label": "Acme", "baseUrl": UNREACHABLE, "model": "acme-1" }),
+        ),
     )
     .await;
 
@@ -708,4 +709,3 @@ async fn disabling_the_default_provider_is_refused_without_confirmation() {
     assert_eq!(status, StatusCode::OK, "{raw}");
     assert_eq!(resp["usedBy"]["default"], true);
 }
-

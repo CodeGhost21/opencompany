@@ -282,8 +282,7 @@ fn a_static_api_key_is_not_a_hosted_connection_route() {
     use crate::app::config::MapEnv;
 
     // Inference credential only, nothing else: NOT attested.
-    let inference_only =
-        MapEnv::new([(crate::company::credentials::API_KEY_ENV, "th_fake_key")]);
+    let inference_only = MapEnv::new([(crate::company::credentials::API_KEY_ENV, "th_fake_key")]);
     assert_eq!(
         connect_route("github", false, &inference_only),
         CredentialSource::None,

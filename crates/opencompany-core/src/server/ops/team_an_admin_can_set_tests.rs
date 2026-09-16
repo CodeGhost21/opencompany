@@ -367,8 +367,7 @@ async fn a_non_admin_cannot_change_a_cap() {
 
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), ROSTER).await;
-    let member =
-        crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+    let member = crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
 
     for (method, body) in [
         ("PUT", Some(json!({"budgetUsdDaily": 999.0}))),
@@ -419,8 +418,7 @@ async fn a_new_teammate_can_be_created_with_a_cap() {
 
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), ROSTER).await;
-    let member =
-        crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+    let member = crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
 
     // A member may still add a teammate — no permission was taken away.
     let (status, plain) = send(
@@ -488,8 +486,7 @@ async fn add_member_refuses_a_blank_name_or_role() {
     use crate::ports::UserRole;
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), ROSTER).await;
-    let member =
-        crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+    let member = crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
 
     // Whitespace as well as empty: `"   "` is what a form sends when
     // somebody tabs through a field, and it stores just as blank.
@@ -561,8 +558,7 @@ async fn add_member_with_instructions_persists_the_override() {
     use crate::ports::UserRole;
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), ROSTER).await;
-    let member =
-        crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+    let member = crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
 
     let (status, created) = send(
         &state,
@@ -617,8 +613,7 @@ async fn a_teammate_created_with_a_focus_is_scoped_to_that_focus_belt() {
          \"files.*\", \"web.*\", \"search\", \"mcp:*\"]\n",
     )
     .await;
-    let member =
-        crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+    let member = crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
 
     // A Research teammate: reads the workspace and browses, but has no
     // business writing the company's own guidance tree.
@@ -680,4 +675,3 @@ async fn a_teammate_created_with_a_focus_is_scoped_to_that_focus_belt() {
         "a focus-less add still inherits the company grant: {effective:?}"
     );
 }
-

@@ -142,8 +142,7 @@ mod http {
         let before = slugs(&state).await;
 
         // `install` rejects the uppercase slug without writing.
-        let (status, _, raw) =
-            send(&state, "POST", "/api/v1/company/skills/A/install", None).await;
+        let (status, _, raw) = send(&state, "POST", "/api/v1/company/skills/A/install", None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "install A: {raw}");
         assert!(
             raw.contains("not a valid skill slug"),
@@ -366,8 +365,7 @@ mod http {
         })
         .to_string();
 
-        let (status, resp, raw) =
-            send(&state, "POST", "/api/v1/company/skills", Some(&body)).await;
+        let (status, resp, raw) = send(&state, "POST", "/api/v1/company/skills", Some(&body)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
         assert_eq!(resp["code"], "invalid_request", "{raw}");
 
@@ -520,8 +518,7 @@ mod http {
             "body": "x".repeat(MAX_SKILL_DOC_BYTES),
         })
         .to_string();
-        let (status, _, raw) =
-            send(&state, "POST", "/api/v1/company/skills", Some(&body)).await;
+        let (status, _, raw) = send(&state, "POST", "/api/v1/company/skills", Some(&body)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
 
         let next = tokio::time::timeout(

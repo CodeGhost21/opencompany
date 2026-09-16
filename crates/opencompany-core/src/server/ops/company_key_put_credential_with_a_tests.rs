@@ -666,4 +666,3 @@ async fn p1_1_managed_mode_with_a_matching_composio_copy_is_refused() {
         .collect();
     assert_eq!(surfaces, vec!["composio"], "{body}");
 }
-

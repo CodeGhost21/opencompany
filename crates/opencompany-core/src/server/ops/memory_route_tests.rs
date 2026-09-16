@@ -168,10 +168,7 @@ impl crate::store::MemoryScopes for ScriptedScopes {
         panic!("the archives route never touches desk context")
     }
 
-    async fn archived_traces(
-        &self,
-        _company: &CompanyId,
-    ) -> crate::Result<Vec<CompressedTrace>> {
+    async fn archived_traces(&self, _company: &CompanyId) -> crate::Result<Vec<CompressedTrace>> {
         Ok(self.archived.clone())
     }
 }
@@ -500,8 +497,7 @@ async fn the_archives_route_serializes_camelcase_newest_last() {
         ],
     });
     let state =
-        state_over_with_scopes(home.path(), ScriptedContext::with_labels(&[]), Some(scopes))
-            .await;
+        state_over_with_scopes(home.path(), ScriptedContext::with_labels(&[]), Some(scopes)).await;
 
     let (status, body) = get_json(&state, "/api/v1/company/memory/archives").await;
 

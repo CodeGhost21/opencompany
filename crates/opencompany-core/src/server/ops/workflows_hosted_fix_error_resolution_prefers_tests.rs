@@ -15,8 +15,8 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
-    WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
+    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
+    WorkflowRunVerdict, select_run_page,
 };
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
@@ -53,10 +53,7 @@ async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
 
 /// The same fixture at a chosen lifecycle, so a paused company is
 /// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(
-    home: &std::path::Path,
-    lifecycle: &str,
-) -> AppState {
+async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -674,4 +671,3 @@ fn scheduled_create_body() -> serde_json::Value {
         "edges": [ { "from": "start", "to": "done", "label": "ok" } ]
     })
 }
-

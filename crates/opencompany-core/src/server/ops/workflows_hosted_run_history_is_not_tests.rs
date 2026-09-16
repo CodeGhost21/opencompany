@@ -15,8 +15,8 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
-    WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
+    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
+    WorkflowRunVerdict, select_run_page,
 };
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
@@ -53,10 +53,7 @@ async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
 
 /// The same fixture at a chosen lifecycle, so a paused company is
 /// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(
-    home: &std::path::Path,
-    lifecycle: &str,
-) -> AppState {
+async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -348,8 +345,7 @@ async fn run_history_issues_the_page_cursor_on_the_wire() {
             .collect()
     };
 
-    let first =
-        fetch("/api/v1/company/workflows/runs?workflow=digest&limit=2".to_string()).await;
+    let first = fetch("/api/v1/company/workflows/runs?workflow=digest&limit=2".to_string()).await;
     assert_eq!(first["hasMore"], true, "{first}");
     let cursor = first["nextBeforeSeq"]
         .as_u64()
@@ -706,4 +702,3 @@ async fn create_then_edit_greeter(state: &AppState) -> String {
         .expect("new token")
         .to_string()
 }
-

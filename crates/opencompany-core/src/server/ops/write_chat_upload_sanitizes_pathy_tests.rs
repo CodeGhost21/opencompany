@@ -705,4 +705,3 @@ async fn chat_attachment_note_text_is_extracted_and_journaled() {
         "a note's content must reach the durable event, not just its node id"
     );
 }
-

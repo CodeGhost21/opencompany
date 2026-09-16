@@ -117,11 +117,7 @@ async fn state_with_company_named(home: &std::path::Path, name: &str) -> AppStat
 /// so this can plant a manifest a fresh company would now be refused. That
 /// is the point: an endpoint stored before the refusal existed is exactly
 /// the case the redaction half of the rule is for.
-async fn state_with_manifest(
-    home: &std::path::Path,
-    name: &str,
-    manifest_toml: &str,
-) -> AppState {
+async fn state_with_manifest(home: &std::path::Path, name: &str, manifest_toml: &str) -> AppState {
     let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
     let id = CompanyId::new(name);
     save_record(home, &id, &manifest).await;
@@ -341,8 +337,7 @@ async fn model_catalog_route_reports_an_unreachable_provider_rather_than_blankin
     .await;
     assert_eq!(status, StatusCode::OK, "{raw}");
 
-    let (status, body, raw) =
-        send(&state, "GET", "/api/v1/company/inference/models", None).await;
+    let (status, body, raw) = send(&state, "GET", "/api/v1/company/inference/models", None).await;
 
     assert_eq!(
         status,
@@ -445,8 +440,7 @@ async fn an_endpoint_carrying_a_credential_is_refused_before_anything_is_written
 #[tokio::test]
 async fn a_catalog_read_failure_names_the_endpoint_without_its_credential() {
     let home_dir = home();
-    let state =
-        state_with_manifest(home_dir.path(), "credurl-models", CREDENTIALED_MANIFEST).await;
+    let state = state_with_manifest(home_dir.path(), "credurl-models", CREDENTIALED_MANIFEST).await;
 
     let (status, body, raw) = send_as(
         &state,
@@ -477,8 +471,7 @@ async fn a_catalog_read_failure_names_the_endpoint_without_its_credential() {
 #[tokio::test]
 async fn the_company_status_read_redacts_an_endpoint_credential() {
     let home_dir = home();
-    let state =
-        state_with_manifest(home_dir.path(), "credurl-status", CREDENTIALED_MANIFEST).await;
+    let state = state_with_manifest(home_dir.path(), "credurl-status", CREDENTIALED_MANIFEST).await;
 
     let (status, body, raw) = send_as(
         &state,
@@ -717,4 +710,3 @@ async fn the_status_reports_whether_a_design_pass_can_run() {
         "the DTO must report the same fact `build_design` acts on"
     );
 }
-

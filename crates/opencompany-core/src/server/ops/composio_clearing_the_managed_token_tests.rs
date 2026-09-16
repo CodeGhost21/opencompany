@@ -370,8 +370,7 @@ async fn switching_back_to_managed_while_mode_is_byok_is_refused_without_confirm
 #[tokio::test]
 async fn a_confirmed_switch_back_to_managed_succeeds_and_echoes_used_by() {
     let home_dir = home();
-    let state =
-        state_with_manifest_id(home_dir.path(), "managedswitchconfirmed", GRANTED).await;
+    let state = state_with_manifest_id(home_dir.path(), "managedswitchconfirmed", GRANTED).await;
     let runtime = runtime_of(&state, "managedswitchconfirmed");
     crate::company::composio::store_api_key(
         runtime.id(),

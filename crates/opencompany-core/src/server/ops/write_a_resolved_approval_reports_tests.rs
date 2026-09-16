@@ -684,4 +684,3 @@ async fn a_pre_333_approval_falls_back_to_the_run_window() {
         "the resolved legacy row keeps the original park-to-resolve wait",
     );
 }
-

@@ -596,10 +596,9 @@ fn an_owner_destination_omits_the_target_key() {
     }))
     .unwrap();
     let raw = RawWorkflow::try_from(body).expect("converts");
-    let file = crate::company::parse_workflow(
-        &crate::company::render_workflow(&raw).expect("renders"),
-    )
-    .expect("re-parses");
+    let file =
+        crate::company::parse_workflow(&crate::company::render_workflow(&raw).expect("renders"))
+            .expect("re-parses");
     let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
     let node = &json["nodes"][1];
     assert_eq!(node["destination"]["kind"], "owner");
@@ -682,4 +681,3 @@ fn run_response_serializes_a_degraded_verdict() {
     assert_eq!(json["verdict"], "degraded", "the HTTP contract is explicit");
     assert_eq!(json["nodes"][0]["status"], "error");
 }
-

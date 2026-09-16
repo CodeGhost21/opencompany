@@ -711,4 +711,3 @@ async fn chat_upload_stores_binary_and_returns_ref() {
     let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert_eq!(got.to_vec(), png, "the bytes must survive the round trip");
 }
-

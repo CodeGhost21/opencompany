@@ -714,4 +714,3 @@ async fn post_upload(state: &AppState, body: Body) -> (StatusCode, Value) {
     let value = serde_json::from_slice(&out).unwrap_or(Value::Null);
     (status, value)
 }
-

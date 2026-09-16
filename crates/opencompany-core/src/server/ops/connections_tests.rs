@@ -40,11 +40,9 @@ async fn callback_ends_an_inflight_flow_without_accepting_its_code() {
     let response = router()
         .with_state(AppState::new(AppConfig::default()))
         .oneshot(
-            Request::get(
-                "/api/v1/oauth/callback?code=CANARY-authz-code&state=CANARY-signed-state",
-            )
-            .body(Body::empty())
-            .unwrap(),
+            Request::get("/api/v1/oauth/callback?code=CANARY-authz-code&state=CANARY-signed-state")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -122,8 +120,7 @@ async fn store_token(runtime: &CompanyRuntime, provider: &str, access_token: &st
             runtime.id(),
             &oauth_key(provider),
             SecretValue(
-                json!({ "token": { "access_token": access_token }, "account": "acc" })
-                    .to_string(),
+                json!({ "token": { "access_token": access_token }, "account": "acc" }).to_string(),
             ),
         )
         .await
@@ -181,8 +178,7 @@ async fn disconnect_invokes_provider_revoke() {
     use axum::extract::State;
     use axum::routing::post;
 
-    let hits: Arc<tokio::sync::Mutex<Vec<String>>> =
-        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let hits: Arc<tokio::sync::Mutex<Vec<String>>> = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let app = Router::new()
         .route(
             "/revoke",

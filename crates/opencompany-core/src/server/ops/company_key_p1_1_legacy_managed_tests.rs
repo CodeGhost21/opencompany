@@ -716,4 +716,3 @@ async fn a_company_with_no_key_reports_unconfigured_billing_not_a_fallback_balan
     assert_eq!(dto["configured"], false, "{raw}");
     assert!(dto["summary"].is_null(), "{raw}");
 }
-

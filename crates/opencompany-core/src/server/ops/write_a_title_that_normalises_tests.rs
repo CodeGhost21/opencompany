@@ -688,4 +688,3 @@ async fn a_task_detail_response_carries_the_thread_root_of_a_threaded_origin() {
         .unwrap();
     assert_eq!(card["originParent"], 41, "{card}");
 }
-

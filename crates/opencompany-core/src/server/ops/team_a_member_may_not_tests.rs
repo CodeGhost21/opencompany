@@ -177,8 +177,7 @@ async fn a_member_may_not_create_a_teammate_with_a_billing_grant() {
          \"search\", \"mcp:*\", \"chargebee\"]\n",
     )
     .await;
-    let member =
-        crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
+    let member = crate::server::test_support::seed_session(&state, "acme", UserRole::Member).await;
 
     let (status, body) = send(
         &state,
@@ -727,4 +726,3 @@ async fn spend_today_excludes_yesterday() {
         "a capped teammate with no spend today reads $0, not yesterday's $9: {analyst}"
     );
 }
-

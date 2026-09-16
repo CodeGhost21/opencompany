@@ -718,4 +718,3 @@ async fn saving_a_published_note_records_the_operators_edit_on_the_artifact() {
         "an edit the tree cannot take"
     );
 }
-

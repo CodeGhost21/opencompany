@@ -254,12 +254,9 @@ async fn the_api_key_test_route_reads_a_legacy_byok_key() {
 async fn a_member_cannot_test_the_company_s_composio_key() {
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), GRANTED).await;
-    let member = crate::server::test_support::seed_session(
-        &state,
-        "acme",
-        crate::ports::UserRole::Member,
-    )
-    .await;
+    let member =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Member)
+            .await;
     let (code, body, raw) = send_as(
         &state,
         "POST",
@@ -522,12 +519,9 @@ async fn a_build_without_the_composio_client_stores_the_key_and_says_it_could_no
 async fn a_member_cannot_bring_its_own_composio_account() {
     let home_dir = home();
     let state = state_with_manifest(home_dir.path(), GRANTED).await;
-    let member = crate::server::test_support::seed_session(
-        &state,
-        "acme",
-        crate::ports::UserRole::Member,
-    )
-    .await;
+    let member =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Member)
+            .await;
 
     let (status, body, raw) = send_as(
         &state,
@@ -651,4 +645,3 @@ async fn credential_source_for(
 ) -> Result<CredentialSource, ApiError> {
     Ok(access_for(runtime, token_source).await?.1)
 }
-

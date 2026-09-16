@@ -678,4 +678,3 @@ fn platform_identity() -> std::sync::Arc<TinyhumansTokenSource> {
         "/var/run/secrets/tinyhumans.ai/token",
     ))
 }
-

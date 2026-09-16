@@ -475,4 +475,3 @@ async fn an_oversized_always_approve_list_is_refused() {
         MAX_ALWAYS_APPROVE_ENTRIES
     );
 }
-

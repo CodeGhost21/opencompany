@@ -716,4 +716,3 @@ async fn mcp_reachability_is_empty_for_a_disabled_server() {
         "the list reader applies the same enabled filter as the harness"
     );
 }
-

@@ -117,11 +117,7 @@ async fn state_with_company_named(home: &std::path::Path, name: &str) -> AppStat
 /// so this can plant a manifest a fresh company would now be refused. That
 /// is the point: an endpoint stored before the refusal existed is exactly
 /// the case the redaction half of the rule is for.
-async fn state_with_manifest(
-    home: &std::path::Path,
-    name: &str,
-    manifest_toml: &str,
-) -> AppState {
+async fn state_with_manifest(home: &std::path::Path, name: &str, manifest_toml: &str) -> AppState {
     let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
     let id = CompanyId::new(name);
     save_record(home, &id, &manifest).await;
@@ -632,4 +628,3 @@ async fn configuring_inference_after_boot_reports_restart_required() {
     assert_eq!(status, StatusCode::CONFLICT, "{raw}");
     assert_eq!(err["code"], "inference_required");
 }
-
