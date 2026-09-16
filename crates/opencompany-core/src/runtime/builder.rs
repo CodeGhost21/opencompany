@@ -1583,6 +1583,18 @@ impl RuntimeBuilder {
         // boot-only side effects are skipped. Absent ⇒ an ordinary boot, byte for
         // byte as before.
         let handover = self.handover.take();
+        // `attach_harness` runs for every build and therefore supplies a fresh
+        // Search handle. A rebuild must keep the outgoing handle instead: its
+        // clones own the process-lifetime daily-call ledger shared by roster
+        // agents and workflows. Replacing it here would reset the company's
+        // allowance every time an unrelated runtime setting changed.
+        #[cfg(feature = "openhuman")]
+        if let Some(search_backend) = handover
+            .as_ref()
+            .and_then(|handover| handover.search_backend.clone())
+        {
+            self.search_backend = Some(search_backend);
+        }
         // On a rebuild the *brain* must be built over the inherited harness pool,
         // not a freshly minted one. The boot path mints a pool per build, so
         // without this the successor's brain would talk to a new pool while the

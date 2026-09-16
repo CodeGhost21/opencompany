@@ -1348,8 +1348,10 @@ pub fn fan_out_note(clearing: bool, report: &FanOutReport, model: Option<&str>) 
         .iter()
         .any(|s| matches!(s.outcome, SlotOutcome::Failed))
     {
-        sentences
-            .push("Some copies could not be saved — check the LLM and Composio pages.".to_string());
+        sentences.push(
+            "Some copies could not be saved — check the LLM, Composio, and Search pages."
+                .to_string(),
+        );
     }
 
     sentences.join(" ")

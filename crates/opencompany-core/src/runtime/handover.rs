@@ -118,6 +118,11 @@ pub struct RuntimeHandover {
     pub(crate) blocker_resolutions: Arc<TokioMutex<()>>,
     #[cfg(feature = "openhuman")]
     pub(crate) harness: Option<Arc<crate::harness::HarnessPool>>,
+    /// Issue #2342: the process-lifetime managed Search handle. Its clones
+    /// share the daily-call ledger, so a rebuild must not replace it and give
+    /// the company a fresh allowance in the same process/day.
+    #[cfg(feature = "openhuman")]
+    pub(crate) search_backend: Option<crate::harness::search::SearchBackend>,
     #[cfg(feature = "mcp")]
     pub(crate) mcp: Option<Arc<crate::harness::mcp::McpRuntime>>,
 }
@@ -162,6 +167,11 @@ impl CompanyRuntime {
             blocker_resolutions: self.blocker_resolutions.clone(),
             #[cfg(feature = "openhuman")]
             harness: self.harness.clone(),
+            #[cfg(feature = "openhuman")]
+            search_backend: self
+                .workflow_harness_deps
+                .as_ref()
+                .and_then(|deps| deps.search.clone()),
             #[cfg(feature = "mcp")]
             mcp: self.mcp.clone(),
         }
