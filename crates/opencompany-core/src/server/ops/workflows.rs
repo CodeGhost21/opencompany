@@ -3949,7 +3949,7 @@ mod tests_hosted_create_persists_and_reads;
 #[cfg(test)]
 #[path = "workflows_hosted_edit_and_delete_serve_tests.rs"]
 mod tests_hosted_edit_and_delete_serve;
-#[cfg(test)]
+#[cfg(all(test, feature = "openhuman"))]
 #[path = "workflows_hosted_fix_error_resolution_prefers_tests.rs"]
 mod tests_hosted_fix_error_resolution_prefers;
 #[cfg(test)]
