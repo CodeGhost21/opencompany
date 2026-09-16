@@ -162,83 +162,12 @@ impl Default for HarnessScope {
 /// and [`OPENROUTER_BASE_URL`] serve the same catalogue; only who pays differs.
 pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/agent-integrations/openrouter";
 
-/// The TinyHumans platform this process was configured for (`AppConfig::api_url`,
-/// from `TINYHUMANS_API_URL` / `config.toml`), recorded once at boot so the
-/// managed chain follows it without every resolver growing an `api_url`
-/// parameter. Unset (tests, early boot) reads as the production default.
-///
-/// **A process-wide value, deliberately** — every real entry point
-/// (`opencompany serve`, the desktop shell's embedded server) constructs
-/// exactly one [`AppState`](crate::AppState) for the whole life of the
-/// process, which is also this workload's documented deployment shape: the
-/// hosting manager builds one per-tenant *container*, so "one process, one
-/// platform" already holds without this static enforcing it. Threading
-/// `api_url` as an explicit parameter through [`resolve_endpoint`] and every
-/// caller of [`resolve_effective`] down to the turn path would remove the
-/// global outright, but every one of those is also the harness-build and
-/// turn-resolution seam multiple other subsystems share — CodeRabbit's own
-/// review tagged that refactor a "heavy lift", and reworking a hot, widely
-/// shared signature under review pressure is how a global mutable gets
-/// traded for a wrong-provider turn. Tracked as a follow-up rather than done
-/// here (PR #2338 review: Codex P2, CodeRabbit Major, tinysweeper high).
-///
-/// **This must stay wired up.** A prior revision on this PR deleted this
-/// static outright and made [`platform_base_url`] return the bare production
-/// constant — which silently undid the entire feature this PR ships (the
-/// `tinyhumans` row and the managed/legacy fallback chain following
-/// `TINYHUMANS_API_URL`) for every caller that resolves with no explicit
-/// `EnvDefault`, which is the real turn path
-/// (`harness/built_in/provider.rs`) and the boot path
-/// (`runtime/builder.rs`) — neither passes one. No test caught it because
-/// the affected assertions compared against `platform_base_url()` itself
-/// rather than an independently derived expectation. Removing the global for
-/// real requires the parameter-threading refactor described above, not
-/// deleting the fallback it backs.
-///
-/// **Set-once, not last-write-wins**, which is the part of the finding this
-/// PR *does* close: a test binary constructs many [`AppState`]s with many
-/// unrelated `api_url`s in one process (`hub_test.rs`'s
-/// `https://hub.example.com`, `desktop.rs`'s ephemeral
-/// `http://127.0.0.1:<port>`), and last-write-wins semantics meant whichever
-/// happened to run last decided what every *other* test's "no platform
-/// configured" assertion saw — a real, reproducible source of
-/// order-dependent flakiness, not merely a theoretical one. First-write-wins
-/// matches the one-`AppState`-per-process production invariant exactly (the
-/// first, and only, real call is the only one that should ever count) and
-/// turns the test-suite race into "whichever test's setup runs first stays
-/// harmless", because none of those other configs feed `platform_base_url()`
-/// for their own purposes — only a caller resolving *managed* inference does,
-/// and no such caller runs inside `hub_test.rs` or `desktop.rs`'s own tests.
-static PLATFORM_API_URL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
-
-/// Records the platform `api_url` this instance talks to. Called from
-/// [`AppState::new`](crate::AppState::new); idempotent, and the first call
-/// wins — see [`PLATFORM_API_URL`]'s doc for why that is the safe direction
-/// for a process-wide value rather than a bug to route around.
-pub fn set_platform_api_url(api_url: &str) {
-    let trimmed = api_url.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return;
-    }
-    if let Ok(mut slot) = PLATFORM_API_URL.write()
-        && slot.is_none()
-    {
-        *slot = Some(trimmed.to_string());
-    }
-}
-
-/// The TinyHumans OpenRouter proxy base this instance resolves managed
-/// inference against: `{api_url}/agent-integrations/openrouter` for the
-/// configured platform, which with the default `api_url` is exactly
-/// [`PLATFORM_BASE_URL`]. This — not the constant — is what a fallback must
-/// use, or a staging or local platform's key is presented to production.
+/// The production TinyHumans OpenRouter proxy base used only when a resolver
+/// has no per-runtime managed default. AppState carries its own `api_url` into
+/// every attached runtime as that default, so separate AppStates cannot affect
+/// one another's inference endpoint.
 pub fn platform_base_url() -> String {
-    PLATFORM_API_URL
-        .read()
-        .ok()
-        .and_then(|slot| slot.clone())
-        .map(|api_url| catalogue::tinyhumans_proxy_url(&api_url))
-        .unwrap_or_else(|| PLATFORM_BASE_URL.to_string())
+    PLATFORM_BASE_URL.to_string()
 }
 
 /// The provider kind removed when OpenCompany stopped exposing its own model
