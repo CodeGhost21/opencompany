@@ -6,6 +6,7 @@
 //! [`super::built_in_test_fixtures_2`].
 
 use super::built_in_test_fixtures::*;
+use crate::runtime::builder::agent_effective_grants;
 use super::built_in_test_fixtures_2::*;
 use super::*;
 use crate::ports::types::ContextChunk;
