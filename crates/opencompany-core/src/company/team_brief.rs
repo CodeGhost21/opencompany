@@ -184,4 +184,5 @@ fn desk_label(record: &CompanyRecord, desk_id: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "team_brief_tests.rs"]
 mod tests;

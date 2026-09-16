@@ -92,6 +92,10 @@ pub mod mcp_oauth;
 // rules are ordinary text handling with real edge cases, and they are worth
 // testing in the default build rather than only where the agent runtime links.
 pub mod prompt;
+// The team section of every agent's prompt: the roster, the desks, and who
+// this agent may hand work to. Always compiled for the same reason `prompt`
+// is — `opencompany prompt` renders it from a manifest alone.
+pub mod team_brief;
 // The shape of one drafted teammate mandate or persona (issue #1776). Same
 // always-compiled argument as `prompt` above: the model call that produces a
 // draft is behind `openhuman`, but what a draft IS — which fields are

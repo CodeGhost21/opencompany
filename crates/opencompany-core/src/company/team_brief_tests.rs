@@ -1,0 +1,151 @@
+use super::*;
+use crate::ports::types::CompanyId;
+
+fn record(manifest: &str) -> CompanyRecord {
+    CompanyRecord {
+        overlay_desk_hive: Vec::new(),
+        overlay_retired_agents: Vec::new(),
+        overlay_agent_edits: Vec::new(),
+        id: CompanyId::new("acme"),
+        manifest: toml::from_str(manifest).expect("valid manifest"),
+        ledger: Vec::new(),
+        lifecycle: "running".to_string(),
+        overlay_agents: Vec::new(),
+        overlay_desk_members: Vec::new(),
+        overlay_desk_order: Vec::new(),
+        overlay_desks: Vec::new(),
+        overlay_workflows: Vec::new(),
+        overlay_budgets: Vec::new(),
+        overlay_policy: None,
+        overlay_desk_tools: Default::default(),
+        disabled_workflows: Vec::new(),
+        template_provenance: None,
+        setup: None,
+        activation_completed_at: None,
+        created_at_millis: None,
+        name_confirmed: false,
+        overlay_tool_grants: Default::default(),
+    }
+}
+
+const TEAM: &str = r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "pm"
+role = "Product Manager"
+tier = "orchestrator"
+description = "Own the roadmap."
+
+[[agent]]
+id = "backend"
+role = "Backend Engineer"
+description = "Build the services."
+delegates_to = ["engineering"]
+
+[[agent]]
+id = "designer"
+role = "Designer"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+name = "Sam"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["backend", "designer"]
+
+[[group_chat]]
+id = "content"
+name = "Content"
+members = ["writer"]
+"#;
+
+#[test]
+fn a_solo_roster_gets_no_section() {
+    let record = record(
+        r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "solo"
+role = "Everything"
+"#,
+    );
+    assert_eq!(team_section(&record, "solo"), "");
+}
+
+#[test]
+fn every_other_teammate_is_listed_with_role_and_mandate_but_not_the_agent_itself() {
+    let section = team_section(&record(TEAM), "designer");
+    assert!(section.starts_with("\n\n## Your team"), "{section}");
+    assert!(section.contains("one of 4 teammates at Acme"), "{section}");
+    assert!(section.contains("- `pm` — Product Manager (the orchestrator"), "{section}");
+    assert!(section.contains("owns the board): Own the roadmap.\n"), "{section}");
+    assert!(section.contains("- `backend` — Backend Engineer: Build the services.\n"), "{section}");
+    // A named teammate is listed by name AND role, as the console addresses it.
+    assert!(section.contains("- `writer` — Sam, Writer\n"), "{section}");
+    assert!(!section.contains("- `designer`"), "{section}");
+}
+
+#[test]
+fn desks_list_their_members_and_lead_and_the_agents_own_seat() {
+    let section = team_section(&record(TEAM), "designer");
+    assert!(section.contains("- `engineering` — Engineering: backend (lead), designer\n"), "{section}");
+    assert!(section.contains("- `content` — Content: writer (lead)\n"), "{section}");
+    assert!(section.contains("\nYou sit on: engineering.\n"), "{section}");
+}
+
+#[test]
+fn an_unrestricted_reach_is_stated_once_at_the_top_and_not_as_a_list() {
+    // `designer` declares no `delegates_to`, so it may reach everyone.
+    let section = team_section(&record(TEAM), "designer");
+    assert!(section.contains("Every teammate below is a real agent you can hand work to"), "{section}");
+    assert!(!section.contains("You may hand work to:"), "{section}");
+    assert!(!section.contains("does not let you hand work"), "{section}");
+}
+
+#[test]
+fn a_narrowed_reach_names_exactly_who_the_tool_would_accept() {
+    // `backend` may reach the engineering desk only: its desk-mate `designer`,
+    // and nobody on the content desk or the orchestrator.
+    let section = team_section(&record(TEAM), "backend");
+    assert!(section.contains("\nYou may hand work to: `designer`."), "{section}");
+    let reach = teammate_targets(&record(TEAM), "backend", &["engineering".to_string()]);
+    assert_eq!(reach, vec!["designer".to_string()]);
+}
+
+#[test]
+fn the_section_names_the_tools_by_their_real_names() {
+    let section = team_section(&record(TEAM), "writer");
+    assert!(section.contains(&format!("`{DELEGATE_TO_TEAMMATE_TOOL}`")), "{section}");
+    assert!(section.contains(&format!("`{DELEGATE_TO_DESK_TOOL}`")), "{section}");
+}
+
+#[test]
+fn a_company_without_desks_lists_no_desk_block() {
+    let section = team_section(
+        &record(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "a"
+role = "A"
+
+[[agent]]
+id = "b"
+role = "B"
+"#,
+        ),
+        "a",
+    );
+    assert!(section.contains("- `b` — B\n"), "{section}");
+    assert!(!section.contains("Desks ("), "{section}");
+    assert!(!section.contains("You sit on"), "{section}");
+}
