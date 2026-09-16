@@ -1,103 +1,7 @@
-fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
-    listed
-        .as_array()
-        .expect("array response")
-        .iter()
-        .filter(|row| {
-            let id = row["id"].as_str().unwrap_or_default();
-            !crate::globals::workflows().iter().any(|w| w.id == id)
-        })
-        .collect()
-}
-
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use super::*;
 use super::workflows_test_support::*;
-use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
-    WorkflowRunVerdict, select_run_page,
-};
-use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+use super::workflows_test_support::hosted_mode::*;
 
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("oc-workflows-hosted-")
-        .tempdir()
-        .expect("tempdir")
-}
-
-/// A manifest declaring one enabled workflow — mirrors what a
-/// platform tenant provisions with, minus any `workflows/` directory
-/// on disk (there isn't one: hosted tenants have no source dir).
-fn manifest_with_enabled() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[workflows]\nenabled = [\"demo\"]\n",
-    )
-    .unwrap()
-}
-
-/// Builds a running company whose runtime has **no source directory**
-/// (built without `with_seed_dir`, matching how the platform builds a
-/// provisioned tenant) but whose persisted record declares an enabled
-/// workflow — the exact hosted-mode gap #70 reports.
-async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
-    state_with_hosted_company_lifecycle(home, "running").await
-}
-
-/// The same fixture at a chosen lifecycle, so a paused company is
-/// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest_with_enabled(),
-            ledger: Vec::new(),
-            lifecycle: lifecycle.to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest_with_enabled())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert!(
-        runtime.source_dir().is_none(),
-        "test setup must simulate hosted mode: no source dir"
-    );
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
 
 /// **The #168 regression test.** Creating a workflow on a tenant with no
 /// (writable) source directory used to fail with
@@ -149,101 +53,6 @@ async fn create_persists_and_reads_back_with_no_source_dir() {
     assert_eq!(graph["edges"][0]["label"], "ok");
 }
 
-// --- Save-time channel-destination guard (issue #981) ---------------
-
-/// A hosted tenant WITH a desk, so it has one real delivery channel.
-/// `hosted_state`'s manifest declares none, which makes its deliverable
-/// set empty — fine for the nowhere-to-deliver case below, useless for
-/// telling an accepted target from a refused one.
-fn desk_manifest() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
-         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
-         [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n",
-    )
-    .unwrap()
-}
-
-/// `hosted_state` over [`desk_manifest`] — a running company whose
-/// deliverable set is exactly `["engineering"]`.
-async fn desk_state(home: &std::path::Path) -> AppState {
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: desk_manifest(),
-            ledger: Vec::new(),
-            lifecycle: "running".to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), desk_manifest())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert_eq!(
-        runtime.deliverable_channel_ids(),
-        vec!["operator".to_string(), "engineering".to_string()],
-        "the fixture must have the operator channel plus exactly one desk channel, or \
-         these tests prove nothing"
-    );
-    let state = AppState::new(AppConfig::default());
-    state
-        .registry()
-        .insert(id.clone(), std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
-
-/// [`create_body`] with the output node routing its report to `target`
-/// on `kind`.
-fn body_with_destination(kind: &str, target: Option<&str>) -> serde_json::Value {
-    let mut destination = serde_json::json!({ "kind": kind });
-    if let Some(target) = target {
-        destination["target"] = serde_json::Value::String(target.to_string());
-    }
-    let mut body = create_body();
-    body["nodes"][1]["destination"] = destination;
-    body
-}
-
-async fn post_create(state: AppState, body: serde_json::Value) -> axum::response::Response {
-    router(state)
-        .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
-        .await
-        .unwrap()
-}
-
-/// [`create_body`] with `done` turned into an `agent` node naming the
-/// roster teammate [`desk_manifest`] declares (`ceo`), carrying a
-/// declared `postcondition` — the shape a real create/edit sends.
-fn body_with_postcondition() -> serde_json::Value {
-    let mut body = create_body();
-    body["nodes"][1]["kind"] = serde_json::json!("agent");
-    body["nodes"][1]["agent"] = serde_json::json!("ceo");
-    body["nodes"][1]["postcondition"] = serde_json::json!({ "require": "non_empty" });
-    body
-}
 
 /// Codex review on #1937 (issue #1866, thread 1) — the RED-on-old
 /// proof for BOTH halves the finding names: `CreateNode` never
@@ -313,6 +122,7 @@ async fn a_postcondition_survives_create_get_put_get() {
     );
 }
 
+
 /// **The #981 story, resolved by #1757.** `operator` was in the picker
 /// the console showed the author while delivery refused it by name — so
 /// the graph saved, ran green, and dropped its report. Now `operator` is a
@@ -339,6 +149,7 @@ async fn a_report_routed_to_operator_saves() {
     assert_eq!(graph["nodes"][1]["destination"]["target"], "operator");
 }
 
+
 /// A channel nobody wired is refused the same way. The author's typo and
 /// the author's `operator` are the same mistake — a destination this
 /// company cannot deliver to — and get one answer.
@@ -356,6 +167,7 @@ async fn a_report_routed_to_an_unwired_channel_is_refused_at_save() {
     );
     assert!(message.contains("engineering"), "{message}");
 }
+
 
 /// Issue #1191: the refusal is the SAME envelope every sibling node-config
 /// rule answers with — `workflow_invalid` plus a `problems` array whose
@@ -391,6 +203,7 @@ async fn an_undeliverable_channel_answers_with_a_located_problem() {
     );
 }
 
+
 /// The sibling rule on the same field: a `channel` destination with no
 /// `target` is located too (issue #1191). It was always a
 /// `workflow_invalid`, but the entry carried `node_id: null` and
@@ -415,6 +228,7 @@ async fn a_channel_destination_with_no_target_is_located_too() {
     );
 }
 
+
 /// The guard refuses what delivery would refuse and nothing more: a real
 /// desk saves, and reads back with its destination intact.
 #[tokio::test]
@@ -437,6 +251,7 @@ async fn a_report_routed_to_a_real_desk_saves() {
     assert_eq!(graph["nodes"][1]["destination"]["kind"], "channel");
     assert_eq!(graph["nodes"][1]["destination"]["target"], "engineering");
 }
+
 
 /// An edit is a save too. The create route was never the only way in —
 /// `PUT` replaces the graph wholesale, so a destination refused on
@@ -475,6 +290,7 @@ async fn an_edit_cannot_introduce_an_undeliverable_destination() {
         "{message}"
     );
 }
+
 
 /// A company with no desks and no provider channels has nowhere to
 /// deliver (#963), and says so in its own words rather than trailing off
@@ -527,6 +343,7 @@ async fn a_company_with_no_desks_still_offers_the_operator_channel() {
     );
 }
 
+
 /// The guard stays out of everything that is not a channel destination
 /// on an `output` node: a graph that routes nowhere saves, and a
 /// `destination` on a non-`output` node is still `parse_workflow`'s
@@ -561,6 +378,7 @@ async fn the_guard_leaves_non_channel_graphs_alone() {
     );
 }
 
+
 /// A duplicate id is a clean 409, not a 500 — the id-uniqueness check
 /// that replaced the filesystem's `create_new(true)`.
 #[tokio::test]
@@ -589,6 +407,7 @@ async fn duplicate_create_is_a_conflict() {
         .unwrap();
     assert_eq!(second.status(), StatusCode::CONFLICT);
 }
+
 
 /// Issue #753: an empty description is a `400` on **both** scope forms —
 /// which also proves the route is wired under each (a route-miss would be
@@ -620,6 +439,7 @@ async fn draft_from_description_rejects_empty_on_both_scope_forms() {
         );
     }
 }
+
 
 /// Issue #753: with a real description but no builder wired on the running
 /// runtime, the copilot classifies the gap exactly as the run route does —
@@ -657,6 +477,7 @@ async fn draft_from_description_reports_a_builder_gap() {
         "gap response carries a known code, got: {body}"
     );
 }
+
 
 /// Issue #840 (PR-3): with a real body but no builder wired, the
 /// fix-from-run route classifies the gap exactly as the draft + run routes
@@ -701,3 +522,4 @@ async fn fix_from_run_reports_a_builder_gap_on_both_scope_forms() {
         );
     }
 }
+

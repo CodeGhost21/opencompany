@@ -1,103 +1,7 @@
-fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
-    listed
-        .as_array()
-        .expect("array response")
-        .iter()
-        .filter(|row| {
-            let id = row["id"].as_str().unwrap_or_default();
-            !crate::globals::workflows().iter().any(|w| w.id == id)
-        })
-        .collect()
-}
-
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use super::*;
 use super::workflows_test_support::*;
-use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
-    WorkflowRunVerdict, select_run_page,
-};
-use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+use super::workflows_test_support::hosted_mode::*;
 
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("oc-workflows-hosted-")
-        .tempdir()
-        .expect("tempdir")
-}
-
-/// A manifest declaring one enabled workflow — mirrors what a
-/// platform tenant provisions with, minus any `workflows/` directory
-/// on disk (there isn't one: hosted tenants have no source dir).
-fn manifest_with_enabled() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[workflows]\nenabled = [\"demo\"]\n",
-    )
-    .unwrap()
-}
-
-/// Builds a running company whose runtime has **no source directory**
-/// (built without `with_seed_dir`, matching how the platform builds a
-/// provisioned tenant) but whose persisted record declares an enabled
-/// workflow — the exact hosted-mode gap #70 reports.
-async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
-    state_with_hosted_company_lifecycle(home, "running").await
-}
-
-/// The same fixture at a chosen lifecycle, so a paused company is
-/// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest_with_enabled(),
-            ledger: Vec::new(),
-            lifecycle: lifecycle.to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest_with_enabled())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert!(
-        runtime.source_dir().is_none(),
-        "test setup must simulate hosted mode: no source dir"
-    );
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
 
 /// `PUT …/workflows/{wid}/enabled` round-trips through the API and shows
 /// up on the list read (issue #276).
@@ -164,6 +68,7 @@ async fn the_enabled_route_toggles_and_the_list_reports_it() {
     assert_eq!(json_body(armed).await["enabled"], serde_json::json!(true));
 }
 
+
 /// **Issue #276's safety half, over the wire.** Creating a workflow with
 /// a schedule answers `enabled: false` on its own response, so a console
 /// learns about the disarm from the write it made rather than from a
@@ -211,6 +116,7 @@ async fn creating_a_scheduled_workflow_answers_switched_off() {
     assert_eq!(json_body(read).await["enabled"], serde_json::json!(false));
 }
 
+
 /// An unknown id is a 404 rather than a silently-created disable entry —
 /// a switch that accepted any string would let a typo look like a
 /// successful pause.
@@ -231,6 +137,7 @@ async fn toggling_an_unknown_workflow_is_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+
 /// A missing workflow is a missing nested resource, not a missing
 /// company. Both variants are 404, so the envelope code pins the
 /// distinction that operators and clients actually consume.
@@ -249,6 +156,7 @@ async fn reading_an_unknown_workflow_reports_resource_not_found() {
     assert_eq!(body["code"], "not_found", "{body}");
     assert_eq!(body["error"], "not found: workflow ghost", "{body}");
 }
+
 
 /// A **global-only** workflow — no seed file, no overlay body, just the
 /// baseline every company gets — must still be toggleable: it has a
@@ -313,6 +221,7 @@ async fn the_enabled_route_toggles_a_global_only_workflow() {
         .unwrap();
     assert_eq!(read.status(), StatusCode::OK);
 }
+
 
 /// A workflow this company has explicitly dropped via
 /// `[globals].disable` no longer exists as far as this company is
@@ -380,6 +289,7 @@ async fn toggling_a_company_disabled_global_is_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+
 /// Restart survival: a workflow created through the API is still listed
 /// by a completely fresh `AppState` rebuilt over the same store — proving
 /// the body is durable, not process-local.
@@ -413,63 +323,6 @@ async fn a_created_workflow_survives_a_state_rebuild() {
     assert_eq!(items[0]["name"], "Greeter");
 }
 
-// ── Issue #228: the run-history read ────────────────────────────────
-
-/// Journals a finished-run outcome directly on the company's event log,
-/// the way both entry points do via `record_run_finished`.
-async fn journal_run(
-    state: &AppState,
-    id: &CompanyId,
-    workflow_id: &str,
-    scheduled: bool,
-    deliveries: Vec<crate::ports::DeliveryReport>,
-    error: Option<&str>,
-) {
-    let runtime = state.registry().get(id).expect("registered");
-    runtime
-        .events()
-        .append(
-            id,
-            CompanyEvent::WorkflowRunFinished {
-                workflow_id: workflow_id.to_string(),
-                scheduled,
-                run_id: None,
-                deliveries,
-                pending_approvals: Vec::new(),
-                error: error.map(str::to_string),
-                cancelled: false,
-                notices: Vec::new(),
-                board: Vec::new(),
-                blocked_nodes: Vec::new(),
-                approvals: Vec::new(),
-            },
-        )
-        .await
-        .expect("append");
-}
-
-/// A report that reached its destination.
-fn sent_row(node: &str) -> crate::ports::DeliveryReport {
-    crate::ports::DeliveryReport {
-        node: node.to_string(),
-        kind: "owner".to_string(),
-        target: Some("ada@example.com".to_string()),
-        status: crate::ports::DeliveryStatus::Sent,
-        detail: "emailed the company's admin".to_string(),
-        reason: crate::ports::DeliveryReason::OwnerEmailed,
-    }
-}
-
-fn undelivered_row(node: &str) -> crate::ports::DeliveryReport {
-    crate::ports::DeliveryReport {
-        node: node.to_string(),
-        kind: "email".to_string(),
-        target: Some("ada@example.com".to_string()),
-        status: crate::ports::DeliveryStatus::Skipped,
-        detail: "this recipient has never written to the company".to_string(),
-        reason: crate::ports::DeliveryReason::RecipientNotEstablished,
-    }
-}
 
 /// **The issue, at the HTTP boundary.** A run's delivery rows read back
 /// after the fact, newest first — which is what survives a console
@@ -523,6 +376,7 @@ async fn run_history_reads_back_newest_first_with_its_rows() {
     // A run that finished carries no `error` key at all.
     assert!(rows[0].get("error").is_none(), "{body}");
 }
+
 
 /// **Issue #981, part 2, at the HTTP boundary.** The history's own
 /// reading of the three runs the issue distinguishes.
@@ -586,6 +440,7 @@ async fn the_history_scores_a_dropped_report_without_calling_the_run_a_failure()
     assert!(rows[2].get("cancelled").is_none(), "{body}");
 }
 
+
 /// Every row carries a verdict, including one still in flight — the
 /// field is unconditional precisely so no reader has to fall back to
 /// re-deriving it from the six fields around it.
@@ -631,6 +486,7 @@ async fn a_run_still_in_flight_is_scored_running_not_ok() {
     assert_eq!(rows[0]["running"], true, "{body}");
     assert_eq!(rows[0]["verdict"], "running", "{body}");
 }
+
 
 /// Issue #596: the run-output route serves a stored snapshot (200) and
 /// 404s a run with none. Runs in the DEFAULT lane, which also proves the
@@ -691,7 +547,3 @@ async fn run_output_route_serves_a_snapshot_and_404s_an_unknown_run() {
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
-// ------------------------------------------------------------------
-// `GET …/workflows/runs/{rid}/artifacts` — the files one run produced,
-// joined through `origin_run_id` (issue #1684).
-// ------------------------------------------------------------------

@@ -1,103 +1,7 @@
-fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
-    listed
-        .as_array()
-        .expect("array response")
-        .iter()
-        .filter(|row| {
-            let id = row["id"].as_str().unwrap_or_default();
-            !crate::globals::workflows().iter().any(|w| w.id == id)
-        })
-        .collect()
-}
-
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use super::*;
 use super::workflows_test_support::*;
-use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
-    WorkflowRunVerdict, select_run_page,
-};
-use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+use super::workflows_test_support::hosted_mode::*;
 
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("oc-workflows-hosted-")
-        .tempdir()
-        .expect("tempdir")
-}
-
-/// A manifest declaring one enabled workflow — mirrors what a
-/// platform tenant provisions with, minus any `workflows/` directory
-/// on disk (there isn't one: hosted tenants have no source dir).
-fn manifest_with_enabled() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[workflows]\nenabled = [\"demo\"]\n",
-    )
-    .unwrap()
-}
-
-/// Builds a running company whose runtime has **no source directory**
-/// (built without `with_seed_dir`, matching how the platform builds a
-/// provisioned tenant) but whose persisted record declares an enabled
-/// workflow — the exact hosted-mode gap #70 reports.
-async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
-    state_with_hosted_company_lifecycle(home, "running").await
-}
-
-/// The same fixture at a chosen lifecycle, so a paused company is
-/// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest_with_enabled(),
-            ledger: Vec::new(),
-            lifecycle: lifecycle.to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest_with_enabled())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert!(
-        runtime.source_dir().is_none(),
-        "test setup must simulate hosted mode: no source dir"
-    );
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
 
 /// **Route-ordering pin.** `runs` is a syntactically valid `wid`, so
 /// `GET /workflows/runs` overlaps `GET /workflows/{wid}`. Axum prefers
@@ -128,82 +32,6 @@ async fn run_history_is_not_shadowed_by_the_graph_read() {
     );
 }
 
-// -------------------------------------------------------------------
-// Page cut / cursor partition (issue #1012 follow-up)
-//
-// `select_run_page` is exercised directly because the anomaly these
-// tests are about — a run journaled with an `at_millis` OLDER than the
-// row before it, after the clock stepped backwards — cannot be staged
-// through the router at all: `FileStore::append` stamps
-// `at_millis: now_millis()` itself, and `journal_start`/`journal_finish`
-// hand it only a `CompanyEvent`. There is no seam to fake a clock
-// regression end-to-end, so the cut is tested where it lives and the
-// route is tested for the one thing the pure function cannot carry —
-// the serialized field.
-// -------------------------------------------------------------------
-
-/// A settled run at `(seq, at_millis)`, with every other field at its
-/// nothing-happened value. Only the two keys `select_run_page` reads
-/// matter here.
-fn page_run(seq: u64, at_millis: u64) -> WorkflowRunOutcome {
-    WorkflowRunOutcome {
-        seq,
-        at_millis,
-        workflow_id: "wf".to_string(),
-        scheduled: false,
-        run_id: Some(format!("run-{seq}")),
-        resume_semantic: None,
-        deliveries: Vec::new(),
-        pending_approvals: Vec::new(),
-        error: None,
-        nodes: Vec::new(),
-        started_nodes: Vec::new(),
-        started_at_millis: Some(at_millis),
-        running: false,
-        cancelled: false,
-        notices: Vec::new(),
-        board: Vec::new(),
-        blocked_nodes: Vec::new(),
-        approvals: Vec::new(),
-        degraded: false,
-        stranded_approvals: 0,
-        verdict: WorkflowRunVerdict::Ok,
-    }
-}
-
-/// One request's worth of the read, as the route performs it: everything
-/// strictly older than the cursor is a candidate (that is exactly what
-/// `EventLog::read_before` bounds by), and the cut runs over it.
-///
-/// Handing the whole candidate set in is a faithful superset of what the
-/// backward walk accumulates — it stops once it has settled `limit + 1`
-/// runs, and because it walks by descending `seq` those are the highest
-/// `seq`s among the candidates, which is precisely the set the cut keeps.
-fn page(
-    journal: &[(u64, u64)],
-    before_seq: Option<u64>,
-    limit: usize,
-) -> (Vec<WorkflowRunOutcome>, bool, Option<u64>) {
-    let candidates: Vec<WorkflowRunOutcome> = journal
-        .iter()
-        .filter(|(seq, _)| before_seq.is_none_or(|bound| *seq < bound))
-        .map(|(seq, at_millis)| page_run(*seq, *at_millis))
-        .collect();
-    select_run_page(candidates, limit)
-}
-
-/// A journal whose clock stepped backwards: `seq` 40 was appended after
-/// 30 but carries a wall-clock time older than both 30 and 20. Every
-/// other row is well-behaved.
-const REGRESSED: [(u64, u64); 5] = [
-    (10, 1_000),
-    (20, 2_000),
-    (30, 3_000),
-    // NTP correction / VM resume / an operator setting the date: the
-    // append order is unchanged, the timestamp goes backwards.
-    (40, 1_500),
-    (50, 5_000),
-];
 
 /// **The issue #1012 follow-up pin.** Paging must reach every run, and
 /// a run whose `at_millis` regressed below the page boundary's is the
@@ -244,6 +72,7 @@ fn a_clock_regressed_run_is_reachable_on_a_later_page() {
     );
 }
 
+
 /// The property the design rests on, asserted directly rather than
 /// inferred from a walk: the page and the cursor **partition** the
 /// candidate set. Everything served is at or above the cursor,
@@ -278,6 +107,7 @@ fn the_page_cursor_partitions_the_run_set() {
     );
 }
 
+
 /// Issue #228 / #1272's ordering is untouched: the cut is keyed on
 /// `seq`, but what comes back is still sorted newest **finish** first,
 /// on the very `(at_millis, seq)` pair each row displays.
@@ -293,6 +123,7 @@ fn a_page_is_still_displayed_newest_finish_first() {
         "the page must be listed by finish time, not by the key it was cut on"
     );
 }
+
 
 /// No older page, no cursor. A cursor for a page that does not exist
 /// invites a caller to ask for it, and an absent field is also what
@@ -311,6 +142,7 @@ fn next_before_seq_is_absent_when_there_is_no_older_page() {
     assert!(!has_more);
     assert_eq!(next, None);
 }
+
 
 /// The one part the pure function cannot cover: the cursor reaches the
 /// console, under the camelCase name the client reads, and feeding it
@@ -400,28 +232,6 @@ async fn run_history_issues_the_page_cursor_on_the_wire() {
     );
 }
 
-// -------------------------------------------------------------------
-// Cron preview (issue #262)
-// -------------------------------------------------------------------
-
-/// 2026-08-02 12:00 UTC, as epoch millis — the `after` pin every
-/// preview test searches forward from, so the answers are fixed rather
-/// than relative to whenever CI runs.
-const AFTER: u64 = 1_785_672_000_000;
-
-async fn preview(state: &AppState, expr: &str) -> serde_json::Value {
-    json_body(
-        router(state.clone())
-            .oneshot(request(
-                "POST",
-                "/api/v1/company/workflows/cron/preview",
-                Some(serde_json::json!({ "expr": expr, "after": AFTER })),
-            ))
-            .await
-            .unwrap(),
-    )
-    .await
-}
 
 /// **The issue #262 pin.** `0 9 * * *` and `9 0 * * *` are two
 /// characters apart, both valid, and nine hours different. The preview
@@ -444,6 +254,7 @@ async fn cron_preview_distinguishes_nine_am_from_nine_past_midnight() {
     assert_ne!(morning["next"][0], midnight["next"][0]);
 }
 
+
 /// A shape the humaniser declines to paraphrase still previews: the
 /// description is `null` and the fire times carry the meaning. The
 /// console shows "Next runs: …" rather than nothing.
@@ -456,6 +267,7 @@ async fn cron_preview_returns_fires_without_a_description() {
     assert!(body["description"].is_null(), "{body}");
     assert_eq!(body["next"].as_array().unwrap().len(), 3, "{body}");
 }
+
 
 /// **Malformed input answers 200, not 4xx.** The console previews while
 /// the author is still typing, so a half-written expression is the
@@ -483,6 +295,7 @@ async fn cron_preview_reports_a_parse_error_as_a_200_body() {
     assert!(body["next"].is_null(), "no fire times on a parse error");
 }
 
+
 /// **Route-ordering pin**, the same trade `/workflows/runs` takes:
 /// `cron` is a syntactically valid `wid`, so the static preview path is
 /// registered before `/workflows/{wid}`. A regression would route the
@@ -509,6 +322,7 @@ async fn cron_preview_is_not_shadowed_by_the_graph_read() {
     assert_eq!(body["description"], "Every Mon at 09:00 UTC", "{body}");
 }
 
+
 /// Both scope forms serve the history — the platform
 /// `…/companies/{id}/…` address as well as the prosumer alias.
 #[tokio::test]
@@ -531,46 +345,6 @@ async fn run_history_serves_both_scope_forms() {
     assert_eq!(body["runs"][0]["workflowId"], "digest");
 }
 
-// ── Issue #259: edit + delete at the HTTP boundary ──────────────────
-
-/// Creates `greeter` and returns its current version token.
-async fn create_greeter(state: &AppState) -> String {
-    let response = router(state.clone())
-        .oneshot(request(
-            "POST",
-            "/api/v1/company/workflows",
-            Some(create_body()),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let created = json_body(response).await;
-    // A freshly created overlay graph is editable and carries a token.
-    assert_eq!(created["editable"], true, "{created}");
-    created["version"]
-        .as_str()
-        .unwrap_or_else(|| panic!("create must return a version token: {created}"))
-        .to_string()
-}
-
-/// `create_body()` with a schedule on the trigger and a changed
-/// description — the exact "I typo'd my cron" edit the issue is about.
-fn edited_body(expected_version: Option<&str>) -> serde_json::Value {
-    let mut body = serde_json::json!({
-        "id": "greeter",
-        "name": "Greeter",
-        "description": "Say hi, every morning.",
-        "nodes": [
-            { "id": "start", "kind": "trigger", "name": "Start", "schedule": "0 9 * * *" },
-            { "id": "done", "kind": "output", "name": "Report" }
-        ],
-        "edges": [ { "from": "start", "to": "done", "label": "ok" } ]
-    });
-    if let Some(v) = expected_version {
-        body["expectedVersion"] = serde_json::json!(v);
-    }
-    body
-}
 
 /// **Regression, issue #1882 review — the round-trip data-loss bug.**
 /// An `ownerDesk` set on create must survive an edit that never
@@ -638,6 +412,7 @@ async fn owner_desk_survives_an_unrelated_edit() {
     );
 }
 
+
 /// **The issue, at the HTTP boundary.** A saved workflow's cron was
 /// permanent; now it can be corrected and the correction reads back.
 #[tokio::test]
@@ -682,24 +457,3 @@ async fn edit_replaces_the_graph_and_reads_back() {
     assert_eq!(own_rows(&items).len(), 1, "{items}");
 }
 
-// ── Issue #274: revision history + rollback at the HTTP boundary ────
-
-/// Edits `greeter` once (adding a schedule) so exactly one revision — the
-/// original, schedule-less body — is captured, and returns the token of
-/// the now-current (scheduled) graph.
-async fn create_then_edit_greeter(state: &AppState) -> String {
-    let version = create_greeter(state).await;
-    let response = router(state.clone())
-        .oneshot(request(
-            "PUT",
-            "/api/v1/company/workflows/greeter",
-            Some(edited_body(Some(&version))),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    json_body(response).await["version"]
-        .as_str()
-        .expect("new token")
-        .to_string()
-}

@@ -1,103 +1,7 @@
-fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
-    listed
-        .as_array()
-        .expect("array response")
-        .iter()
-        .filter(|row| {
-            let id = row["id"].as_str().unwrap_or_default();
-            !crate::globals::workflows().iter().any(|w| w.id == id)
-        })
-        .collect()
-}
-
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use super::*;
 use super::workflows_test_support::*;
-use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
-    WorkflowRunVerdict, select_run_page,
-};
-use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+use super::workflows_test_support::hosted_mode::*;
 
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("oc-workflows-hosted-")
-        .tempdir()
-        .expect("tempdir")
-}
-
-/// A manifest declaring one enabled workflow — mirrors what a
-/// platform tenant provisions with, minus any `workflows/` directory
-/// on disk (there isn't one: hosted tenants have no source dir).
-fn manifest_with_enabled() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[workflows]\nenabled = [\"demo\"]\n",
-    )
-    .unwrap()
-}
-
-/// Builds a running company whose runtime has **no source directory**
-/// (built without `with_seed_dir`, matching how the platform builds a
-/// provisioned tenant) but whose persisted record declares an enabled
-/// workflow — the exact hosted-mode gap #70 reports.
-async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
-    state_with_hosted_company_lifecycle(home, "running").await
-}
-
-/// The same fixture at a chosen lifecycle, so a paused company is
-/// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest_with_enabled(),
-            ledger: Vec::new(),
-            lifecycle: lifecycle.to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest_with_enabled())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert!(
-        runtime.source_dir().is_none(),
-        "test setup must simulate hosted mode: no source dir"
-    );
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
 
 /// A row journaled before issue #371 carries no `run_id`, so the
 /// `(run, node)` join has no key at all.
@@ -151,6 +55,7 @@ async fn run_history_leaves_a_pre_371_row_unreconciled() {
     );
 }
 
+
 /// A run the process is genuinely executing — registered on the
 /// supervisor, so its id is in `live()` — folds as `running: true` with
 /// the nodes it has completed so far. Since #1009 a start with no finish
@@ -189,58 +94,6 @@ async fn run_history_reports_an_unsettled_run_as_running() {
     assert!(body["runs"][0].get("error").is_none(), "{body}");
 }
 
-/// An event log that lets exactly one run settle **inside** `list_runs`'
-/// window.
-///
-/// `read_from` delegates, and on its FIRST call appends `finish` to the
-/// inner log *after* taking the snapshot it returns. That is precisely
-/// the interleaving the race needs and the only way to get it
-/// deterministically: the run's real finish is missing from the snapshot
-/// the fold sees, and its supervisor entry is already gone by the time
-/// `live()` is consulted — so on those two facts alone it is
-/// indistinguishable from a run that died.
-///
-/// Every later `read_from` — including the settle's own re-read of the
-/// tail — sees the finish, which is exactly what lets the read tell the
-/// two apart.
-struct FinishesDuringTheRead {
-    inner: std::sync::Arc<dyn crate::ports::EventLog>,
-    finish: std::sync::Mutex<Option<(CompanyId, CompanyEvent)>>,
-}
-
-#[async_trait::async_trait]
-impl crate::ports::EventLog for FinishesDuringTheRead {
-    async fn append(
-        &self,
-        id: &CompanyId,
-        event: CompanyEvent,
-    ) -> crate::Result<crate::ports::types::EventSeq> {
-        self.inner.append(id, event).await
-    }
-
-    async fn read_from(
-        &self,
-        id: &CompanyId,
-        seq: crate::ports::types::EventSeq,
-        limit: usize,
-    ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
-        let snapshot = self.inner.read_from(id, seq, limit).await?;
-        // Taken out under the lock, so the append happens once however
-        // many readers race here.
-        let pending = self.finish.lock().expect("poisoned").take();
-        if let Some((company, event)) = pending {
-            self.inner.append(&company, event).await?;
-        }
-        Ok(snapshot)
-    }
-
-    fn subscribe(
-        &self,
-        id: &CompanyId,
-    ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
-        self.inner.subscribe(id)
-    }
-}
 
 /// **A run that finishes while the read is folding must not be buried.**
 ///
@@ -402,6 +255,7 @@ async fn a_run_that_settles_during_the_read_is_not_buried_by_a_synthetic_finish(
     assert_eq!(next["runs"][0]["deliveries"][0]["status"], "sent", "{next}");
 }
 
+
 /// **A settled row keeps one identity across reads.** The response that
 /// performs the settle and every response after it carry the same `seq`
 /// and `atMillis` — the appended finish's, not the start's.
@@ -458,6 +312,7 @@ async fn a_settled_dead_run_keeps_its_seq_and_time_across_reads() {
     );
 }
 
+
 /// **The compatibility claim, pinned.** A journal written before #371
 /// carries finished rows with no run id and no starts. Those fold
 /// exactly as they always did — one row in, one entry out, no `nodes`
@@ -483,6 +338,7 @@ async fn run_history_folds_pre_371_rows_unchanged() {
     assert!(rows[0].get("startedAtMillis").is_none(), "{body}");
     assert!(rows[0].get("runId").is_none(), "{body}");
 }
+
 
 /// Two runs interleaving on one journal — the shape two concurrent
 /// workflows produce — attach their nodes to the right entry. This is
@@ -518,6 +374,7 @@ async fn run_history_keeps_interleaved_runs_apart() {
     assert_eq!(by_id("run-b")["nodes"][0]["nodeId"], "b1");
     assert_eq!(by_id("run-b")["nodes"].as_array().unwrap().len(), 1);
 }
+
 
 /// Issue #1012. Two interleaved runs — `run-a` starts first but
 /// `run-b` finishes last — must come back ordered by **finish**, the
@@ -557,6 +414,7 @@ async fn run_history_orders_by_finish_not_start() {
     assert_eq!(ids, vec!["run-b", "run-a", "run-c"], "{body}");
 }
 
+
 /// `?limit=` now cuts **runs**, not journal rows — the number the caller
 /// was asking about all along. Without the group-aware cut, a limit of 2
 /// over three 4-row runs would return fragments.
@@ -591,6 +449,7 @@ async fn run_history_limit_counts_runs_not_journal_rows() {
     assert_eq!(rows[1]["runId"], "run-1");
 }
 
+
 /// `?workflow=` narrows to one graph, and does so BEFORE the limit cut —
 /// otherwise asking for one workflow would return "whichever of the last
 /// N happen to match", which for a busy company is usually none.
@@ -620,6 +479,7 @@ async fn run_history_filters_by_workflow_before_the_limit_cut() {
     assert_eq!(rows.len(), 1, "body: {body}");
     assert_eq!(rows[0]["workflowId"], "digest");
 }
+
 
 /// `?limit=` caps the page from the newest end, defaults when absent or
 /// zero, and clamps above the ceiling rather than folding the whole log.
@@ -674,6 +534,7 @@ async fn run_history_limit_defaults_caps_and_clamps() {
     assert_eq!(huge["runs"].as_array().unwrap().len(), 25, "{huge}");
 }
 
+
 /// A company that has never run a workflow gets an empty list, not a
 /// 404 — the history panel renders "nothing yet" rather than an error.
 #[tokio::test]
@@ -692,3 +553,4 @@ async fn run_history_is_empty_before_any_run() {
         0
     );
 }
+

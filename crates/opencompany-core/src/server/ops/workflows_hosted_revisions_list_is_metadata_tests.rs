@@ -1,103 +1,7 @@
-fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
-    listed
-        .as_array()
-        .expect("array response")
-        .iter()
-        .filter(|row| {
-            let id = row["id"].as_str().unwrap_or_default();
-            !crate::globals::workflows().iter().any(|w| w.id == id)
-        })
-        .collect()
-}
-
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use super::*;
 use super::workflows_test_support::*;
-use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
-    WorkflowRunVerdict, select_run_page,
-};
-use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+use super::workflows_test_support::hosted_mode::*;
 
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("oc-workflows-hosted-")
-        .tempdir()
-        .expect("tempdir")
-}
-
-/// A manifest declaring one enabled workflow — mirrors what a
-/// platform tenant provisions with, minus any `workflows/` directory
-/// on disk (there isn't one: hosted tenants have no source dir).
-fn manifest_with_enabled() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[workflows]\nenabled = [\"demo\"]\n",
-    )
-    .unwrap()
-}
-
-/// Builds a running company whose runtime has **no source directory**
-/// (built without `with_seed_dir`, matching how the platform builds a
-/// provisioned tenant) but whose persisted record declares an enabled
-/// workflow — the exact hosted-mode gap #70 reports.
-async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
-    state_with_hosted_company_lifecycle(home, "running").await
-}
-
-/// The same fixture at a chosen lifecycle, so a paused company is
-/// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest_with_enabled(),
-            ledger: Vec::new(),
-            lifecycle: lifecycle.to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest_with_enabled())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert!(
-        runtime.source_dir().is_none(),
-        "test setup must simulate hosted mode: no source dir"
-    );
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
 
 /// `GET …/revisions` returns metadata only — id, name, version,
 /// createdAtMillis — and never a graph body. Leaking the TOML/nodes here
@@ -135,6 +39,7 @@ async fn revisions_list_is_metadata_only_and_newest_first() {
         "the raw body must never leak: {row}"
     );
 }
+
 
 /// `POST …/revisions/{rev}/restore` reverts the live graph to the
 /// snapshot and answers with the restored body + a fresh token. The
@@ -213,6 +118,7 @@ async fn restore_reverts_the_live_graph() {
     );
 }
 
+
 /// Restoring a revision id that does not exist is a clean `404`.
 #[tokio::test]
 async fn restore_unknown_revision_is_not_found() {
@@ -233,6 +139,7 @@ async fn restore_unknown_revision_is_not_found() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
 
 /// **The silent-clobber guard on restore (issue #1013).** A restore with
 /// no token — like an omitted body — used to overwrite unconditionally,
@@ -277,6 +184,7 @@ async fn a_restore_without_a_token_is_rejected() {
     );
 }
 
+
 /// A workflow that was never edited has an empty history — `200 []`, not
 /// a `404`.
 #[tokio::test]
@@ -298,6 +206,7 @@ async fn revisions_of_an_unedited_workflow_are_empty() {
     let body = json_body(response).await;
     assert_eq!(body["revisions"].as_array().unwrap().len(), 0, "{body}");
 }
+
 
 /// **The silent-overwrite guard.** Two consoles hold the same graph; one
 /// saves, then the other saves its stale copy. The second must be
@@ -343,6 +252,7 @@ async fn a_stale_expected_version_is_a_conflict() {
     let graph = json_body(response).await;
     assert_eq!(graph["description"], "Say hi, every morning.");
 }
+
 
 /// CONC-axis: restore inherits `PUT`'s optimistic-concurrency check —
 /// the doc on [`restore_workflow_revision`] says so — but only `PUT`'s
@@ -419,6 +329,7 @@ async fn a_stale_expected_version_is_a_conflict_on_restore() {
     );
 }
 
+
 /// **The silent-clobber guard, at the front door (issue #1013).** Omitting
 /// the token used to be an unconditional write; a stale editor could then
 /// overwrite a concurrent save without ever seeing a `409`. A tokenless
@@ -456,6 +367,7 @@ async fn an_edit_without_a_token_is_rejected() {
     assert_eq!(graph["description"], "Say hi.");
 }
 
+
 /// A `PUT` that would rename the id is a 400, not a silent create — the
 /// id keys the saved graph, its schedule and its run history.
 #[tokio::test]
@@ -488,6 +400,7 @@ async fn an_id_mismatch_is_a_bad_request() {
     assert_eq!(own[0]["id"], "greeter");
 }
 
+
 #[tokio::test]
 async fn editing_an_unknown_workflow_is_not_found() {
     let home_dir = home();
@@ -508,6 +421,7 @@ async fn editing_an_unknown_workflow_is_not_found() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
 
 /// A bad edit is refused on the same terms as a bad create — the shared
 /// validation, at the HTTP boundary.
@@ -537,6 +451,7 @@ async fn a_structurally_invalid_edit_is_a_bad_request() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
 
 /// **The delete, and its durability.** A removed workflow leaves the
 /// picker AND stays gone across a full state rebuild — the property that
@@ -588,6 +503,7 @@ async fn delete_removes_it_from_the_picker_and_survives_a_rebuild() {
     );
 }
 
+
 /// **Run history is orphaned, not reaped.** What a workflow did stays
 /// true after the workflow is gone, and the journal is append-only.
 #[tokio::test]
@@ -631,6 +547,7 @@ async fn deleting_a_workflow_keeps_its_run_history() {
     assert_eq!(rows[0]["workflowId"], "greeter");
 }
 
+
 #[tokio::test]
 async fn deleting_with_a_stale_version_is_a_conflict() {
     let home_dir = home();
@@ -669,6 +586,7 @@ async fn deleting_with_a_stale_version_is_a_conflict() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+
 #[tokio::test]
 async fn deleting_an_unknown_workflow_is_not_found() {
     let home_dir = home();
@@ -687,6 +605,7 @@ async fn deleting_an_unknown_workflow_is_not_found() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
 
 /// **The silent-clobber guard on delete (issue #1013).** A tokenless
 /// `DELETE` used to remove unconditionally; a stale editor could drop a
@@ -718,3 +637,4 @@ async fn a_delete_without_a_token_is_rejected() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+

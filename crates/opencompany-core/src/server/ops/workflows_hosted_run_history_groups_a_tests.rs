@@ -1,103 +1,7 @@
-fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
-    listed
-        .as_array()
-        .expect("array response")
-        .iter()
-        .filter(|row| {
-            let id = row["id"].as_str().unwrap_or_default();
-            !crate::globals::workflows().iter().any(|w| w.id == id)
-        })
-        .collect()
-}
-
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use super::*;
 use super::workflows_test_support::*;
-use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
-    WorkflowRunVerdict, select_run_page,
-};
-use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+use super::workflows_test_support::hosted_mode::*;
 
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("oc-workflows-hosted-")
-        .tempdir()
-        .expect("tempdir")
-}
-
-/// A manifest declaring one enabled workflow — mirrors what a
-/// platform tenant provisions with, minus any `workflows/` directory
-/// on disk (there isn't one: hosted tenants have no source dir).
-fn manifest_with_enabled() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[workflows]\nenabled = [\"demo\"]\n",
-    )
-    .unwrap()
-}
-
-/// Builds a running company whose runtime has **no source directory**
-/// (built without `with_seed_dir`, matching how the platform builds a
-/// provisioned tenant) but whose persisted record declares an enabled
-/// workflow — the exact hosted-mode gap #70 reports.
-async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
-    state_with_hosted_company_lifecycle(home, "running").await
-}
-
-/// The same fixture at a chosen lifecycle, so a paused company is
-/// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest_with_enabled(),
-            ledger: Vec::new(),
-            lifecycle: lifecycle.to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest_with_enabled())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert!(
-        runtime.source_dir().is_none(),
-        "test setup must simulate hosted mode: no source dir"
-    );
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
 
 /// **The issue's durable half at the HTTP boundary.** A run's start,
 /// its per-node rows and its outcome come back as ONE history entry
@@ -153,7 +57,6 @@ async fn run_history_groups_a_runs_nodes_under_one_entry() {
     assert_eq!(nodes[1]["status"], "error");
 }
 
-// ── Issue #1010: the node executing RIGHT NOW ──────────────────────
 
 /// **The issue.** A run still in flight comes back naming the node it
 /// is standing on, not just the ones it is done with.
@@ -213,6 +116,7 @@ async fn run_history_names_the_node_a_running_run_is_executing() {
     assert_eq!(nodes[0]["nodeId"], "ceo");
 }
 
+
 /// A start whose run has no entry is dropped, not turned into a run of
 /// its own — the same rule the finish arm follows.
 ///
@@ -247,6 +151,7 @@ async fn a_started_node_of_a_filtered_out_run_is_dropped() {
     assert_eq!(started[0], "draft");
 }
 
+
 /// A run journaled before #382 — no starts at all — keeps the wire shape
 /// it had: `startedNodes` is omitted entirely rather than sent empty.
 #[tokio::test]
@@ -277,6 +182,7 @@ async fn a_run_with_no_started_rows_omits_the_field() {
         "an empty trail is absent, not `[]`: {body}"
     );
 }
+
 
 /// The receipt SURVIVES the finish, so a run that was cancelled or lost
 /// mid-node still says which node it was standing on.
@@ -322,6 +228,7 @@ async fn a_settled_run_keeps_the_node_it_was_standing_on() {
     let nodes = body["runs"][0]["nodes"].as_array().expect("nodes");
     assert_eq!(nodes.len(), 1, "`draft` never finished: {body}");
 }
+
 
 /// Issues #881 / #880 at the HTTP boundary: a blocked run reads as
 /// blocked in the history, and **its node chip is relabelled too**.
@@ -405,6 +312,7 @@ async fn run_history_reports_a_blocked_node_and_the_approvals_it_parked() {
     );
 }
 
+
 /// Issue #1143. The run's receipt names a card the queue no longer
 /// holds, so the history says so instead of offering it as a decision.
 ///
@@ -470,6 +378,7 @@ async fn run_history_marks_a_blocked_approval_the_queue_no_longer_holds() {
         "the verdict must be derived after the reconciliation, not before it: {body}"
     );
 }
+
 
 /// The other direction, and the reason the test above proves anything.
 ///
@@ -561,6 +470,7 @@ async fn run_history_leaves_a_live_approval_decidable() {
     );
 }
 
+
 /// Issue #1189, THE regression test for the bigger half of the defect.
 ///
 /// The marketing tenant's shape, verbatim: gate nodes on
@@ -614,6 +524,7 @@ async fn run_history_scores_a_gate_run_with_no_live_card_as_stranded() {
         "nothing in the queue is waiting on this run: {body}"
     );
 }
+
 
 /// The negative twin, and the reason the test above proves anything.
 ///
@@ -698,3 +609,4 @@ async fn run_history_leaves_a_gate_run_with_a_live_card_awaiting() {
         "a decidable gate is still awaiting a person: {body}"
     );
 }
+

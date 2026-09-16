@@ -1,103 +1,7 @@
-fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
-    listed
-        .as_array()
-        .expect("array response")
-        .iter()
-        .filter(|row| {
-            let id = row["id"].as_str().unwrap_or_default();
-            !crate::globals::workflows().iter().any(|w| w.id == id)
-        })
-        .collect()
-}
-
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use super::*;
 use super::workflows_test_support::*;
-use super::{
-    CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus, WorkflowRunOutcome,
-    WorkflowRunVerdict, select_run_page,
-};
-use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+use super::workflows_test_support::hosted_mode::*;
 
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("oc-workflows-hosted-")
-        .tempdir()
-        .expect("tempdir")
-}
-
-/// A manifest declaring one enabled workflow — mirrors what a
-/// platform tenant provisions with, minus any `workflows/` directory
-/// on disk (there isn't one: hosted tenants have no source dir).
-fn manifest_with_enabled() -> CompanyManifest {
-    toml::from_str(
-        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[workflows]\nenabled = [\"demo\"]\n",
-    )
-    .unwrap()
-}
-
-/// Builds a running company whose runtime has **no source directory**
-/// (built without `with_seed_dir`, matching how the platform builds a
-/// provisioned tenant) but whose persisted record declares an enabled
-/// workflow — the exact hosted-mode gap #70 reports.
-async fn state_with_hosted_company(home: &std::path::Path) -> AppState {
-    state_with_hosted_company_lifecycle(home, "running").await
-}
-
-/// The same fixture at a chosen lifecycle, so a paused company is
-/// reachable without a second copy of the record literal.
-async fn state_with_hosted_company_lifecycle(home: &std::path::Path, lifecycle: &str) -> AppState {
-    let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
-    store
-        .save(&CompanyRecord {
-            overlay_desk_hive: Vec::new(),
-            overlay_retired_agents: Vec::new(),
-            overlay_agent_edits: Vec::new(),
-            id: id.clone(),
-            manifest: manifest_with_enabled(),
-            ledger: Vec::new(),
-            lifecycle: lifecycle.to_string(),
-            overlay_agents: Vec::new(),
-            overlay_desk_members: Vec::new(),
-            overlay_desk_order: Vec::new(),
-            overlay_desks: Vec::new(),
-            overlay_workflows: Vec::new(),
-            overlay_budgets: Vec::new(),
-            overlay_policy: None,
-            overlay_tool_grants: None,
-            overlay_desk_tools: Default::default(),
-            disabled_workflows: Vec::new(),
-            template_provenance: None,
-            setup: None,
-            name_confirmed: false,
-            activation_completed_at: None,
-            created_at_millis: None,
-        })
-        .await
-        .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest_with_enabled())
-        .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
-    assert!(
-        runtime.source_dir().is_none(),
-        "test setup must simulate hosted mode: no source dir"
-    );
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
-    state
-}
 
 /// The write verbs are reachable under the platform scope form too, not
 /// just the prosumer alias.
@@ -133,6 +37,7 @@ async fn edit_and_delete_serve_both_scope_forms() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
 
 /// A manifest-`enabled` id with no saved graph is listed but NOT
 /// editable — there is nothing to replace or remove, and the console
@@ -212,32 +117,6 @@ async fn a_bodiless_enabled_id_is_listed_but_not_editable() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
-// ── Issue #1009: settle eternal-`running` rows on the read ─────────
-
-/// Every `WorkflowRunFinished` the company journaled carrying `run_id`.
-async fn finishes_for(
-    state: &AppState,
-    id: &CompanyId,
-    run_id: &str,
-) -> Vec<(Option<String>, bool)> {
-    let runtime = state.registry().get(id).expect("registered");
-    runtime
-        .events()
-        .read_from(id, crate::ports::types::EventSeq::new(0), usize::MAX)
-        .await
-        .expect("read")
-        .into_iter()
-        .filter_map(|s| match s.event {
-            CompanyEvent::WorkflowRunFinished {
-                run_id: Some(rid),
-                error,
-                cancelled,
-                ..
-            } if rid == run_id => Some((error, cancelled)),
-            _ => None,
-        })
-        .collect()
-}
 
 /// **The decisive case (issue #1009, path B).** A run whose start was
 /// journaled but whose finish never landed — and whose id is absent from
@@ -285,6 +164,7 @@ async fn a_run_absent_from_the_live_set_is_settled_by_the_read() {
     assert!(!finishes[0].1, "a host-restart settle is not a cancel");
 }
 
+
 /// **The mandatory negative (issue #1009, rebuild/clean guard).** A run
 /// the current process is genuinely running is registered on the
 /// supervisor, so its id is in `live()` — and `list_runs` must leave it
@@ -324,3 +204,4 @@ async fn a_run_in_the_live_set_is_left_running() {
         "a live run gets no synthetic finish appended"
     );
 }
+
