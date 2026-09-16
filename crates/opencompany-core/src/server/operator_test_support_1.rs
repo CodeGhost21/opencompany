@@ -490,6 +490,33 @@ pub(super) fn chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
 /// The same send, typed inside a thread — `parent` is the root the console
 /// sends when the operator answers in an open thread (#1890 B).
 pub(super) fn chat_in_thread(text: &str, chat: Option<&str>, parent: Option<u64>) -> Request<Body> {
+    chat_request(text, chat, parent, None)
+}
+
+/// A send with the composer's "Build me the workflow" control pressed — the
+/// one signal on which the chat route still opens a card by itself. The tests
+/// that pin what a route-opened card *records* (its assignee, its origin
+/// thread) send this, because a plain message no longer opens one: tracking
+/// is the agent's own tool call.
+pub(super) fn workflow_chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
+    chat_request(text, chat, None, Some("workflow"))
+}
+
+/// [`workflow_chat_to`], typed inside a thread.
+pub(super) fn workflow_chat_in_thread(
+    text: &str,
+    chat: Option<&str>,
+    parent: Option<u64>,
+) -> Request<Body> {
+    chat_request(text, chat, parent, Some("workflow"))
+}
+
+fn chat_request(
+    text: &str,
+    chat: Option<&str>,
+    parent: Option<u64>,
+    deliverable: Option<&str>,
+) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri("/api/v1/company/chat")
@@ -502,6 +529,7 @@ pub(super) fn chat_in_thread(text: &str, chat: Option<&str>, parent: Option<u64>
                 // A string, like every other message id on this API — the
                 // field's own note says so, and a number is a 422.
                 "parent": parent.map(|seq| seq.to_string()),
+                "deliverable": deliverable,
             })
             .to_string(),
         ))
