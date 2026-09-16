@@ -58,6 +58,33 @@ pub(crate) fn own_skills(value: &serde_json::Value) -> Vec<&serde_json::Value> {
         .collect()
 }
 
+pub(crate) fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("opencompany-gql-")
+        .tempdir()
+        .expect("tempdir")
+}
+
+pub(crate) fn manifest() -> CompanyManifest {
+    toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
+}
+
+pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
+    state_with_manifest(home, manifest()).await
+}
+
+/// [`state_with_company`] over an explicit manifest, for a test that needs the
+/// company configured differently from [`manifest`] and should not have to
+/// restate the whole record to get there.
+pub(crate) async fn state_with_manifest(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+) -> AppState {
+    state_with_builder(home, manifest, |builder| builder).await
+}
+
+/// [`state_with_manifest`] with a runtime-builder override, for a test that
+/// swaps a store the runtime owns — e.g. a counting deep-trace store.
 pub(super) async fn state_with_builder(
     home: &std::path::Path,
     manifest: CompanyManifest,
