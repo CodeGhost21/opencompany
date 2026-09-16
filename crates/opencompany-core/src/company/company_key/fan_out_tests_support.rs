@@ -35,7 +35,7 @@ pub(super) fn llm_key_key() -> String {
 
 #[derive(Default)]
 pub(super) struct MemSecrets {
-    map: Mutex<HashMap<String, String>>,
+    pub(super) map: Mutex<HashMap<String, String>>,
 }
 
 #[async_trait]
@@ -57,8 +57,8 @@ impl SecretStore for MemSecrets {
 /// A store whose writes to one key always fail — for the rollback and
 /// failure-isolation rules.
 pub(super) struct FailsWriting {
-    inner: MemSecrets,
-    failing_key: String,
+    pub(super) inner: MemSecrets,
+    pub(super) failing_key: String,
 }
 
 #[async_trait]
@@ -79,7 +79,7 @@ impl SecretStore for FailsWriting {
 /// two `fan_out` calls to actually interleave rather than one finishing
 /// before the other starts.
 pub(super) struct SlowSecrets {
-    inner: MemSecrets,
+    pub(super) inner: MemSecrets,
 }
 
 #[async_trait]
