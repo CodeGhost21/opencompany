@@ -104,6 +104,7 @@ const DEGRADED: &str = "No credential is set for this company and this instance 
 /// Builds the company-credential route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/credential", get(get_status).put(set_key))
+        .merge(scoped("/credential/model", put(set_model)))
         .merge(scoped("/credential/link/start", post(start_link)))
         .merge(scoped("/credential/link/finish", post(finish_link)))
         .merge(scoped("/credential/billing", get(get_billing)))
@@ -573,6 +574,73 @@ async fn set_key(
         sets_default: report.sets_default,
         models: report.models.clone(),
         used_by,
+        restart_required: restart_required_for(live.as_ref()).await,
+    }))
+}
+
+/// `PUT …/credential/model` body: the model that finishes setting up TinyHumans
+/// for LLM with the account key **already stored** — write-only, so the console
+/// cannot resend it. The key-grant flow is the case: `finish_link` stores a key
+/// the console never saw and answers `needsModel`, and until this route existed
+/// the only way on from there was the LLM page's add flow, which asks for the
+/// very key nobody has.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetModel {
+    model: String,
+}
+
+/// `PUT …/credential/model` — re-runs the fan-out with the stored account key
+/// and the chosen model, which fills the `tinyhumans` row and the default
+/// exactly as a paste with a model would (every other slot reads
+/// `alreadyCurrent`), then rebuilds the runtime if that is what first
+/// configured inference. Refused when no account key is stored: there is
+/// nothing to finish.
+async fn set_model(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+    Json(body): Json<SetModel>,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let runtime = company.runtime.as_ref();
+    let Some(key) = runtime
+        .secrets()
+        .get(runtime.id(), company_key::KEY_KEY)
+        .await
+        .map_err(ApiError)?
+        .map(|crate::ports::SecretValue(v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "No TinyHumans account key is stored for this company; add one first.".to_string(),
+        )));
+    };
+
+    let prober = prober_for(runtime);
+    let report = company_key::fan_out(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        company_key::FanOutRequest {
+            key: &key,
+            model: Some(body.model.as_str()),
+            confirm_in_use: false,
+            proxy_base_url: Some(&state.config().api_url),
+        },
+        prober.as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
+    super::composio::evict_catalog_cache(runtime);
+    journal_fan_out(&company, false, &report).await?;
+
+    let live = rebuild_if_pending(&state, &company, &report).await;
+    Ok(Json(MutationResponse {
+        status: effective_status(&state, live.as_ref()).await?,
+        note: company_key::fan_out_note(false, &report, Some(&body.model)),
+        slots: report.slots.iter().map(SlotReportDto::from).collect(),
+        needs_model: report.needs_model,
+        sets_default: report.sets_default,
+        models: report.models.clone(),
+        used_by: None,
         restart_required: restart_required_for(live.as_ref()).await,
     }))
 }
