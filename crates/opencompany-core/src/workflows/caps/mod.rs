@@ -90,7 +90,7 @@ pub(crate) use self::tools::{
 };
 /// Issue #849: the ceiling on what one agent node's turn carries from upstream.
 /// Re-exported so the end-to-end fan-in proof
-/// ([`agent_upstream_input_test`](crate::workflows::agent_upstream_input_test))
+/// ([`agent_upstream_input_tests`](crate::workflows::agent_upstream_input_tests))
 /// asserts against the shipped number rather than a copy of it — which is the
 /// only caller outside this module, hence the `cfg`.
 #[cfg(test)]
