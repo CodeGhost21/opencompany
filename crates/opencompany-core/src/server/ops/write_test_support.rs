@@ -558,6 +558,7 @@ pub(super) struct FaultyArtifacts {
     pub(super) upsert_fails: bool,
 }
 
+#[async_trait::async_trait]
 impl crate::ports::artifacts::ArtifactStore for FaultyArtifacts {
     async fn list(
         &self,
@@ -942,6 +943,7 @@ impl RecordingReads {
     }
 }
 
+#[async_trait::async_trait]
 impl crate::ports::workspace::WorkspaceStore for RecordingReads {
     async fn admit_upload(&self, company: &CompanyId, name: &str, len: u64) -> crate::Result<()> {
         self.inner.admit_upload(company, name, len).await
