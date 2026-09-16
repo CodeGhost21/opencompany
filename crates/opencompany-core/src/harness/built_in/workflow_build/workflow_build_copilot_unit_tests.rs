@@ -22,6 +22,7 @@ use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
 use super::workflow_build_fixtures_tests::*;
+use super::workflow_build_shared_tests::*;
 
 // ---------------------------------------------------------------------------
 // Create-time copilot (issue #753)
@@ -36,31 +37,6 @@ const DESC_GRAPH: &str = r#"{"automatable":true,"summary":"email the weekly dige
         "edges":[{"from":"start","to":"draft"}]}}"#;
 
 /// Seeds a real overlay workflow through the create path, so the drafter's host
-/// authority has something to dedup an id and name against.
-async fn seed_workflow(runtime: &Arc<CompanyRuntime>, id: &str, name: &str) {
-    let spec: WorkflowGraphSpec = serde_json::from_value(serde_json::json!({
-        "id": id,
-        "name": name,
-        "nodes": [
-            { "id": "start", "kind": "trigger", "name": "Start" },
-            { "id": "done", "kind": "output", "name": "Report" }
-        ],
-        "edges": [{ "from": "start", "to": "done" }]
-    }))
-    .unwrap();
-    let raw = raw_workflow_from_spec(&spec).unwrap();
-    crate::company::create_company_workflow(
-        runtime.id(),
-        runtime.source_dir(),
-        runtime.store(),
-        Some(runtime.events()),
-        raw,
-        None,
-        None,
-    )
-    .await
-    .expect("seed workflow");
-}
 
 // ---------------------------------------------------------------------------
 // The three copilot tools — unit tier (issue #840)

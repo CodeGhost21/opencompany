@@ -22,19 +22,12 @@ use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
 use super::workflow_build_fixtures_tests::*;
+use super::workflow_build_shared_tests::*;
 
 // ---------------------------------------------------------------------------
 // The copilot agent — pass tier over the native tool-calling loop (issue #840)
 // ---------------------------------------------------------------------------
 
-/// A propose call carrying a valid graph, then a final reply — the happy path
-/// script.
-pub(crate) fn propose_step(summary: &str, workflow: Value) -> NativeStep {
-    NativeStep::call(
-        "propose_company_workflow",
-        json!({ "summary": summary, "workflow": workflow }),
-    )
-}
 
 /// The fixture's canonical good graph: a scheduled trigger → `maya` drafts.
 fn good_workflow() -> Value {

@@ -22,6 +22,7 @@ use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
 use openhuman_core::tools::traits::Tool;
 use super::workflow_build_fixtures_tests::*;
+use super::workflow_build_shared_tests::*;
 
 /// An unparseable answer returns the card to To-do with no proposal; the attempt
 /// settles Failed. Prose or nothing — a graph guessed from prose is exactly the
