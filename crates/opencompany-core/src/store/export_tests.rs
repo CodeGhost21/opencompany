@@ -4,7 +4,7 @@
     use crate::store::paths::Bundle;
     use crate::store::{FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore, FsSecretStore};
 
-    fn tmp_root(tag: &str) -> PathBuf {
+    pub(super) fn tmp_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "opencompany-export-{tag}-{}-{}",
             std::process::id(),
@@ -12,7 +12,7 @@
         ))
     }
 
-    fn manifest() -> CompanyManifest {
+    pub(super) fn manifest() -> CompanyManifest {
         let toml_src = r#"
             [company]
             name = "Export Co"
@@ -29,7 +29,7 @@
     }
 
     /// A minimal running company record for tests that only need one to exist.
-    fn company_record(id: &CompanyId) -> CompanyRecord {
+    pub(super) fn company_record(id: &CompanyId) -> CompanyRecord {
         CompanyRecord {
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -56,7 +56,7 @@
         }
     }
 
-    fn fs_ports(root: &Path) -> Ports {
+    pub(super) fn fs_ports(root: &Path) -> Ports {
         (
             Arc::new(FsCompanyStore::new(root.to_path_buf())),
             Arc::new(FsEventLog::new(root.to_path_buf())),
@@ -629,7 +629,7 @@
     /// A manifest naming two capped teammates, so a round-trip that dropped the
     /// overrides would fall back to real caps rather than to "uncapped" — the
     /// regression would still show as the *wrong* numbers, not as absent ones.
-    fn budget_manifest() -> CompanyManifest {
+    pub(super) fn budget_manifest() -> CompanyManifest {
         toml::from_str(
             r#"
             [company]
@@ -659,7 +659,7 @@
         .expect("parse manifest")
     }
 
-    fn admin_actor() -> Actor {
+    pub(super) fn admin_actor() -> Actor {
         Actor {
             kind: ActorKind::User,
             id: "user-admin".into(),
