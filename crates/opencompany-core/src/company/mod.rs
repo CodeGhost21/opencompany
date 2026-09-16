@@ -36,7 +36,13 @@ pub mod composio;
 /// that consumes it answers in every build. See [`composio_probe`].
 pub mod composio_probe;
 #[cfg(test)]
-mod content_tests;
+mod content_tests_support;
+#[cfg(test)]
+mod content_tests_grants;
+#[cfg(test)]
+mod content_tests_workflows;
+#[cfg(test)]
+mod content_tests_ledgers_mcp;
 // Which workspace documents each role is told to reason from
 // (`docs/spec/runtime/orchestration/context-routing.md`). Always compiled: the
 // per-tier default table and the class-based exclusions are pure decisions over
