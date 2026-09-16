@@ -2422,8 +2422,8 @@ fn minimal_status() -> super::CredentialStatusDto {
 // Where the grant comes back to
 // ---------------------------------------------------------------------------
 
-mod callback_origin {
-    use super::super::{callback_origin, is_loopback_origin};
+mod callback_base {
+    use super::super::{callback_base, is_loopback_origin};
     use crate::{AppConfig, AppState};
     use axum::http::{HeaderMap, HeaderValue, header::ORIGIN};
 
@@ -2446,8 +2446,8 @@ mod callback_origin {
         // A deployment that names its origin has said where its console is, and
         // that is not something a request gets to move.
         let state = state_with(Some("https://acme.opencompany.example/"));
-        let origin = callback_origin(&state, &headers_from("http://localhost:5173"));
-        assert_eq!(origin, "https://acme.opencompany.example");
+        let base = callback_base(&state, &headers_from("http://localhost:5173"));
+        assert_eq!(base, "https://acme.opencompany.example/");
     }
 
     #[test]
@@ -2456,8 +2456,8 @@ mod callback_origin {
         // was `http://127.0.0.1:8080`, where a dev host serves no page — so the
         // approval landed on a 404 holding a spent code.
         let state = state_with(None);
-        let origin = callback_origin(&state, &headers_from("http://localhost:5173"));
-        assert_eq!(origin, "http://localhost:5173");
+        let base = callback_base(&state, &headers_from("http://localhost:5173"));
+        assert_eq!(base, "http://localhost:5173/");
     }
 
     #[test]
@@ -2466,16 +2466,20 @@ mod callback_origin {
         // without this host's verifier, but a callback is not somewhere to take
         // an arbitrary address on a request's say-so.
         let state = state_with(None);
-        let origin = callback_origin(&state, &headers_from("https://evil.example"));
-        assert_eq!(origin, "http://127.0.0.1:8080");
+        let base = callback_base(&state, &headers_from("https://evil.example"));
+        assert_eq!(base, "http://127.0.0.1:8080/auth/key/callback");
     }
 
     #[test]
-    fn no_origin_header_falls_back_to_the_bind_address() {
+    fn no_origin_header_returns_to_the_hosts_own_route() {
+        // The desktop: requests arrive through the shell's proxy with no
+        // `Origin`, and the embedded host serves nothing at `/`. The bind
+        // fallback therefore names the route where the host redeems the code
+        // itself, not a page that does not exist.
         let state = state_with(None);
         assert_eq!(
-            callback_origin(&state, &HeaderMap::new()),
-            "http://127.0.0.1:8080"
+            callback_base(&state, &HeaderMap::new()),
+            "http://127.0.0.1:8080/auth/key/callback"
         );
     }
 
@@ -2484,8 +2488,8 @@ mod callback_origin {
         // A launcher that exported the variable with nothing in it has said
         // nothing, and must not produce a callback of `/?company=…`.
         let state = state_with(Some("   "));
-        let origin = callback_origin(&state, &headers_from("http://127.0.0.1:5173"));
-        assert_eq!(origin, "http://127.0.0.1:5173");
+        let base = callback_base(&state, &headers_from("http://127.0.0.1:5173"));
+        assert_eq!(base, "http://127.0.0.1:5173/");
     }
 
     #[test]
