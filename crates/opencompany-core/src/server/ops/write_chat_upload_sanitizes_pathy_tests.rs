@@ -7,7 +7,6 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use super::tests_detail_as::chat_upload;
 use super::write_test_support::*;
 use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};

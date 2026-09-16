@@ -7,9 +7,6 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use super::tests_mcp_manifest::{
-    mcp_manifest, state_with_manifest, state_with_manifest_and_defaults,
-};
 use super::write_test_support::*;
 use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
