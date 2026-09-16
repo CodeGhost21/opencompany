@@ -1131,9 +1131,6 @@ async fn emit_budget_exhausted(state: &AppState, id: &CompanyId) {
 }
 
 #[cfg(test)]
-#[path = "provision/provision_test_support_1.rs"]
-mod provision_test_support_1;
-#[cfg(test)]
 #[path = "provision/provision_test_group_1.rs"]
 mod provision_test_group_1;
 #[cfg(test)]
@@ -1145,3 +1142,6 @@ mod provision_test_group_3;
 #[cfg(test)]
 #[path = "provision/provision_test_group_4.rs"]
 mod provision_test_group_4;
+#[cfg(test)]
+#[path = "provision/provision_test_support_1.rs"]
+mod provision_test_support_1;

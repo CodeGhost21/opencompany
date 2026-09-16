@@ -1,12 +1,6 @@
 //! End-to-end axum tests for provisioning, per-tenant auth, lifecycle controls,
 //! quotas, and webhook emission. All offline (default build, no features).
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use async_trait::async_trait;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::Brain;
@@ -18,6 +12,12 @@ use crate::server::router;
 use crate::server::webhook::{WebhookConfig, WebhookKind};
 use crate::store::{FsCompanyStore, FsEventLog};
 use crate::{AppConfig, AppState};
+use async_trait::async_trait;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use std::collections::HashSet;
+use std::sync::Arc;
+use tower::ServiceExt;
 
 pub(super) const PLATFORM_SECRET: &str = "plat-secret";
 
@@ -148,7 +148,11 @@ pub(super) fn provision_req_json(token: Option<&str>, toml: &str, id: &str) -> R
 // ---------------------------------------------------------------------------
 
 /// A `POST` carrying a JSON body, for the step-up-confirmed emergency routes.
-pub(super) fn json_post_req(uri: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+pub(super) fn json_post_req(
+    uri: &str,
+    token: Option<&str>,
+    body: serde_json::Value,
+) -> Request<Body> {
     let mut builder = Request::builder()
         .method("POST")
         .uri(uri)
