@@ -2024,6 +2024,129 @@ async fn finishing_a_link_copies_the_minted_key_without_declaring_a_provider() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
 }
 
+/// The desktop's return leg: no console at the host's origin, so the hub is
+/// sent back to `/auth/key/callback`, where the host redeems the code itself
+/// with no session at all — the parked `state` and the verifier it never handed
+/// out are the whole of the authority. Same fan-out, same single use.
+#[tokio::test]
+async fn the_hosts_own_return_route_redeems_a_grant_without_a_session() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "acme").await;
+
+    // No `Origin` header: `send` sets none, which is exactly the desktop's
+    // proxy. The callback must therefore be the host's own route.
+    let (_, resp, _) = send(
+        &state,
+        "acme",
+        "POST",
+        "/api/v1/company/credential/link/start",
+        Some(json!({})),
+    )
+    .await;
+    let url = resp["authorizeUrl"].as_str().unwrap().to_string();
+    let state_value = state_param(&url);
+    let callback = url
+        .split_once("callback_url=")
+        .map(|(_, rest)| rest.split('&').next().unwrap_or(rest))
+        .expect("a callback_url");
+    let callback = percent_decode(callback);
+    assert!(
+        callback.starts_with("http://127.0.0.1:8080/auth/key/callback?"),
+        "with no origin to return to, the host's own route is the callback: {callback}"
+    );
+
+    let verifier = state
+        .hub_links()
+        .peek_verifier(&state_value)
+        .expect("the start parked a pending link");
+    let state = state.with_hub_identity(std::sync::Arc::new(
+        crate::server::hub_identity::MockHubIdentityExchange::new().with_grant(
+            "grant-code",
+            &verifier,
+            GRANTED_KEY,
+        ),
+    ));
+
+    // The browser arrives as the hub redirected it: a bare GET, no cookie.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/auth/key/callback?company=acme&key=link&state={state_value}&code=grant-code"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let page = String::from_utf8_lossy(&bytes).to_string();
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(page.contains("Connected"), "{page}");
+    assert!(
+        !page.contains(GRANTED_KEY),
+        "the minted key must never be shown to the tab: {page}"
+    );
+
+    // Stored exactly as the console's own finish would have stored it.
+    let (_, resp, _) = send(&state, "acme", "GET", "/api/v1/company/credential", None).await;
+    assert_eq!(resp["configured"], true);
+    assert_eq!(resp["source"], "company");
+
+    // Single-use: a replayed redirect finds nothing.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/auth/key/callback?company=acme&key=link&state={state_value}&code=grant-code"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A declined grant lands with `error=access_denied` and no code; the page
+/// says so instead of the extractor answering 422.
+#[tokio::test]
+async fn the_hosts_own_return_route_reports_a_declined_grant() {
+    let home_dir = home();
+    let state = state_with_hub(home_dir.path(), "acme").await;
+    let request = Request::builder()
+        .method("GET")
+        .uri("/auth/key/callback?company=acme&key=link&state=x&error=access_denied")
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let page = String::from_utf8_lossy(&bytes);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{page}");
+    assert!(page.contains("access_denied"), "{page}");
+}
+
+/// The smallest percent-decoder a test needs: `%XX` and `+`.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+                out.push(u8::from_str_radix(hex, 16).unwrap());
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
 #[tokio::test]
 async fn a_replayed_or_unknown_state_is_refused() {
     let home_dir = home();
