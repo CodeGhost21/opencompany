@@ -428,7 +428,7 @@ pub(super) struct ScriptedProvider {
 }
 
 impl ScriptedProvider {
-    fn new(outcomes: Vec<Result<String, String>>) -> Self {
+    pub(super) fn new(outcomes: Vec<Result<String, String>>) -> Self {
         Self {
             script: StdMutex::new(outcomes.into_iter().collect()),
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -438,7 +438,7 @@ impl ScriptedProvider {
     }
 
     /// Report `usage` on every scripted `Ok` response.
-    fn reporting_usage(mut self, usage: tinyinference::Usage) -> Self {
+    pub(super) fn reporting_usage(mut self, usage: tinyinference::Usage) -> Self {
         self.usage = Some(usage);
         self
     }
