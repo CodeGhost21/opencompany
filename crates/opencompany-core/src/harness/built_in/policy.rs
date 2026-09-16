@@ -2207,7 +2207,7 @@ mod tests_path_split;
 mod tests_scopes;
 #[cfg(test)]
 #[path = "policy/policy_spend_cap_tests.rs"]
-mod tests_spend_cap;
+mod policy_spend_cap_tests;
 #[cfg(test)]
 #[path = "policy/policy_ssrf_guardrail_tests.rs"]
 mod tests_ssrf_guardrail;
