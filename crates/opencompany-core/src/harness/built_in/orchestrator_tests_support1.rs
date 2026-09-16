@@ -142,16 +142,16 @@ pub(super) struct BrokenStore;
 
 #[async_trait::async_trait]
 impl CompanyStore for BrokenStore {
-    pub(super) async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+    async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
         Err(crate::OpenCompanyError::Store("store is down".to_string()))
     }
-    pub(super) async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+    async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
         Ok(())
     }
-    pub(super) async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
         Ok(Vec::new())
     }
-    pub(super) async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+    async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
         Ok(())
     }
 }
@@ -250,17 +250,17 @@ impl MemStore {
 
 #[async_trait::async_trait]
 impl CompanyStore for MemStore {
-    pub(super) async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+    async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
         Ok(self.record.lock().unwrap().clone())
     }
-    pub(super) async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+    async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
         *self.record.lock().unwrap() = Some(record.clone());
         Ok(())
     }
-    pub(super) async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
         Ok(Vec::new())
     }
-    pub(super) async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+    async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
         Ok(())
     }
 }
@@ -370,7 +370,7 @@ impl StubRunner {
 
 #[async_trait::async_trait]
 impl WorkflowRunner for StubRunner {
-    pub(super) async fn run(
+    async fn run(
         &self,
         _company: &CompanyId,
         workflow: &WorkflowFile,
@@ -392,7 +392,7 @@ pub(super) struct FailingRunner;
 
 #[async_trait::async_trait]
 impl WorkflowRunner for FailingRunner {
-    pub(super) async fn run(
+    async fn run(
         &self,
         _company: &CompanyId,
         _workflow: &WorkflowFile,

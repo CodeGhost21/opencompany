@@ -70,15 +70,15 @@ pub(super) struct BrokenTaskStore;
 
 #[async_trait]
 impl TaskStore for BrokenTaskStore {
-    pub(super) async fn list(&self, _company: &CompanyId) -> crate::Result<Vec<TaskRecord>> {
+    async fn list(&self, _company: &CompanyId) -> crate::Result<Vec<TaskRecord>> {
         Err(OpenCompanyError::Store(
             "simulated board read failure".into(),
         ))
     }
-    pub(super) async fn upsert(&self, _company: &CompanyId, _task: &TaskRecord) -> crate::Result<()> {
+    async fn upsert(&self, _company: &CompanyId, _task: &TaskRecord) -> crate::Result<()> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn update_if_column(
+    async fn update_if_column(
         &self,
         _company: &CompanyId,
         _task: &TaskRecord,
@@ -87,7 +87,7 @@ impl TaskStore for BrokenTaskStore {
     ) -> crate::Result<bool> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+    async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
         unimplemented!("not exercised by these tests")
     }
 }
@@ -99,14 +99,14 @@ pub(super) struct BrokenRunStore;
 
 #[async_trait]
 impl RunStore for BrokenRunStore {
-    pub(super) async fn create_run(
+    async fn create_run(
         &self,
         _company: &CompanyId,
         _spec: crate::ports::runs::NewRun,
     ) -> crate::Result<RunRecord> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn get_run(
+    async fn get_run(
         &self,
         _company: &CompanyId,
         _id: &str,
@@ -115,10 +115,10 @@ impl RunStore for BrokenRunStore {
             "simulated run-store read failure".into(),
         ))
     }
-    pub(super) async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+    async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn list_runs(
+    async fn list_runs(
         &self,
         _company: &CompanyId,
         _filter: &RunFilter,
@@ -127,14 +127,14 @@ impl RunStore for BrokenRunStore {
             "simulated run-history read failure".into(),
         ))
     }
-    pub(super) async fn append_run_step(
+    async fn append_run_step(
         &self,
         _company: &CompanyId,
         _step: &crate::ports::runs::RunStepRecord,
     ) -> crate::Result<()> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn list_run_steps(
+    async fn list_run_steps(
         &self,
         _company: &CompanyId,
         _run_id: &str,
@@ -149,14 +149,14 @@ pub(super) struct FailingGetRun;
 
 #[async_trait]
 impl RunStore for FailingGetRun {
-    pub(super) async fn create_run(
+    async fn create_run(
         &self,
         _company: &CompanyId,
         _spec: crate::ports::runs::NewRun,
     ) -> crate::Result<RunRecord> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn get_run(
+    async fn get_run(
         &self,
         _company: &CompanyId,
         _id: &str,
@@ -165,24 +165,24 @@ impl RunStore for FailingGetRun {
             "simulated run-store read failure".into(),
         ))
     }
-    pub(super) async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+    async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn list_runs(
+    async fn list_runs(
         &self,
         _company: &CompanyId,
         _filter: &RunFilter,
     ) -> crate::Result<Vec<RunRecord>> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn append_run_step(
+    async fn append_run_step(
         &self,
         _company: &CompanyId,
         _step: &crate::ports::runs::RunStepRecord,
     ) -> crate::Result<()> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn list_run_steps(
+    async fn list_run_steps(
         &self,
         _company: &CompanyId,
         _run_id: &str,
@@ -198,10 +198,10 @@ pub(super) struct BrokenEventLog;
 
 #[async_trait]
 impl EventLog for BrokenEventLog {
-    pub(super) async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
+    async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
         unreachable!("read_run only reads")
     }
-    pub(super) async fn read_from(
+    async fn read_from(
         &self,
         _id: &CompanyId,
         _seq: EventSeq,
@@ -211,7 +211,7 @@ impl EventLog for BrokenEventLog {
             "simulated event-log read failure".into(),
         ))
     }
-    pub(super) fn subscribe(
+    fn subscribe(
         &self,
         _id: &CompanyId,
     ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
@@ -225,7 +225,7 @@ pub(super) struct BrokenArtifactStore;
 
 #[async_trait]
 impl ArtifactStore for BrokenArtifactStore {
-    pub(super) async fn list(
+    async fn list(
         &self,
         _company: &CompanyId,
         _task_id: Option<&str>,
@@ -234,21 +234,21 @@ impl ArtifactStore for BrokenArtifactStore {
             "simulated artifact-store read failure".into(),
         ))
     }
-    pub(super) async fn get(
+    async fn get(
         &self,
         _company: &CompanyId,
         _id: &str,
     ) -> crate::Result<Option<crate::ports::artifacts::ArtifactRecord>> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn upsert(
+    async fn upsert(
         &self,
         _company: &CompanyId,
         _artifact: &crate::ports::artifacts::ArtifactRecord,
     ) -> crate::Result<()> {
         unimplemented!("not exercised by these tests")
     }
-    pub(super) async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+    async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
         unimplemented!("not exercised by these tests")
     }
 }
@@ -264,14 +264,14 @@ pub(super) struct TenantScopedRunStore {
 
 #[async_trait]
 impl RunStore for TenantScopedRunStore {
-    pub(super) async fn create_run(
+    async fn create_run(
         &self,
         _company: &CompanyId,
         _spec: crate::ports::runs::NewRun,
     ) -> crate::Result<RunRecord> {
         unimplemented!("not exercised by this test")
     }
-    pub(super) async fn get_run(&self, company: &CompanyId, id: &str) -> crate::Result<Option<RunRecord>> {
+    async fn get_run(&self, company: &CompanyId, id: &str) -> crate::Result<Option<RunRecord>> {
         Ok(self
             .rows
             .lock()
@@ -280,24 +280,24 @@ impl RunStore for TenantScopedRunStore {
             .find(|r| &r.company == company && r.id == id)
             .cloned())
     }
-    pub(super) async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
+    async fn put_run(&self, _company: &CompanyId, _run: &RunRecord) -> crate::Result<()> {
         unimplemented!("not exercised by this test")
     }
-    pub(super) async fn list_runs(
+    async fn list_runs(
         &self,
         _company: &CompanyId,
         _filter: &RunFilter,
     ) -> crate::Result<Vec<RunRecord>> {
         unimplemented!("not exercised by this test")
     }
-    pub(super) async fn append_run_step(
+    async fn append_run_step(
         &self,
         _company: &CompanyId,
         _step: &crate::ports::runs::RunStepRecord,
     ) -> crate::Result<()> {
         unimplemented!("not exercised by this test")
     }
-    pub(super) async fn list_run_steps(
+    async fn list_run_steps(
         &self,
         _company: &CompanyId,
         _run_id: &str,
@@ -340,16 +340,16 @@ pub(super) struct TenantScopedCompanyStore {
 
 #[async_trait::async_trait]
 impl CompanyStore for TenantScopedCompanyStore {
-    pub(super) async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+    async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
         Ok(self.records.get(id.as_ref()).cloned())
     }
-    pub(super) async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+    async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
         unimplemented!("not exercised by this test")
     }
-    pub(super) async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
         Ok(Vec::new())
     }
-    pub(super) async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+    async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
         Ok(())
     }
 }
@@ -363,20 +363,20 @@ pub(super) struct YieldingStore {
 
 #[async_trait::async_trait]
 impl CompanyStore for YieldingStore {
-    pub(super) async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+    async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
         let snapshot = self.record.lock().expect("record").clone();
         tokio::task::yield_now().await;
         Ok(snapshot)
     }
-    pub(super) async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+    async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
         tokio::task::yield_now().await;
         *self.record.lock().expect("record") = Some(record.clone());
         Ok(())
     }
-    pub(super) async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+    async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
         Ok(Vec::new())
     }
-    pub(super) async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+    async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
         Ok(())
     }
 }
