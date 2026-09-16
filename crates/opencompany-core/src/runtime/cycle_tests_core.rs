@@ -444,12 +444,12 @@ pub(super) async fn pending_run(
 /// work to a real fs store so the runtime behaves normally around it.
 pub(super) struct CountingMemory {
     inner: FsMemoryStore,
-    reads: AtomicUsize,
-    writes: AtomicUsize,
+    pub(super) reads: AtomicUsize,
+    pub(super) writes: AtomicUsize,
 }
 
 impl CountingMemory {
-    fn new(inner: FsMemoryStore) -> Self {
+    pub(super) fn new(inner: FsMemoryStore) -> Self {
         Self {
             inner,
             reads: AtomicUsize::new(0),
