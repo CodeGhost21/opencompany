@@ -44,7 +44,9 @@ pub(crate) async fn wait_blocked() {
     BLOCKED.notified().await;
 }
 
-static COMMIT_GATES: LazyLock<Mutex<HashMap<PathBuf, (Receiver<()>, Arc<Notify>)>>> =
+type CommitStall = (Receiver<()>, Arc<Notify>);
+
+static COMMIT_GATES: LazyLock<Mutex<HashMap<PathBuf, CommitStall>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// One armed commit stall and the notification that belongs only to it.
