@@ -4,8 +4,7 @@ use crate::app::config::MapEnv;
 /// Builds an unsigned-but-well-shaped JWT carrying `claims` as its payload.
 fn jwt(claims: serde_json::Value) -> String {
     let encode = |bytes: &[u8]| {
-        const ALPHA: &[u8] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         let mut out = String::new();
         for chunk in bytes.chunks(3) {
             let b = [
@@ -353,8 +352,7 @@ async fn credential_variants_report_status_and_resolve() {
 
     let (_path_dir, path) = temp_file("token");
     std::fs::write(&path, "projected-token").unwrap();
-    let source =
-        Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(&path)));
+    let source = Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(&path)));
     assert!(source.configured());
     assert_eq!(source.source(), CredentialSource::Attested);
     assert_eq!(
