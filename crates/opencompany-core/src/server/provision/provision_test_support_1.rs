@@ -148,7 +148,7 @@ pub(super) fn provision_req_json(token: Option<&str>, toml: &str, id: &str) -> R
 // ---------------------------------------------------------------------------
 
 /// A `POST` carrying a JSON body, for the step-up-confirmed emergency routes.
-fn json_post_req(uri: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+pub(super) fn json_post_req(uri: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
     let mut builder = Request::builder()
         .method("POST")
         .uri(uri)
@@ -165,8 +165,8 @@ fn json_post_req(uri: &str, token: Option<&str>, body: serde_json::Value) -> Req
 
 /// A brain that emits one supervised effect per operator message (parks under a
 /// explicit request), so a cycle produces an `approval.requested` webhook.
-struct EffectBrain {
-    effect: Effect,
+pub(super) struct EffectBrain {
+    pub(super) effect: Effect,
 }
 
 #[async_trait]
@@ -212,7 +212,7 @@ impl Brain for EffectBrain {
 /// The record is what matters here: it is the manifest a rebuild re-reads and
 /// the only place a platform-provisioned tenant's tier is written down at all,
 /// since it has no `company.toml` anywhere on disk.
-async fn recorded_mode(state: &AppState, id: &str) -> String {
+pub(super) async fn recorded_mode(state: &AppState, id: &str) -> String {
     let id = CompanyId::new(id);
     let runtime = state.registry().get(&id).expect("company is registered");
     runtime
@@ -231,7 +231,7 @@ async fn recorded_mode(state: &AppState, id: &str) -> String {
 /// An [`OwnershipStore`](crate::store::select::OwnershipStore) that fails its
 /// first `fail_first` `set_owner` calls, then succeeds — the transient blip
 /// (mongo election, timeout) issue #1050 names as the cause.
-struct FlakyOwnership {
+pub(super) struct FlakyOwnership {
     fail_first: std::sync::Mutex<usize>,
     attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -354,7 +354,7 @@ pub(super) async fn build_runtime_with_status_read_failing(
 /// `runtime.status()` read. `set_lifecycle`'s `store.save` — like `build()`'s
 /// — is unaffected by a later `load` failing, so by the time this third read
 /// fails, `lifecycle: "archived"` is already durably on disk.
-async fn build_runtime_with_archive_status_read_failing(
+pub(super) async fn build_runtime_with_archive_status_read_failing(
     home: &std::path::Path,
     id: &CompanyId,
 ) -> crate::runtime::CompanyRuntime {
@@ -379,7 +379,7 @@ async fn build_runtime_with_archive_status_read_failing(
 /// here, so `transition` returns an ordinary `200` whose body already
 /// confirms `lifecycle: "archived"`. The fourth load is `archive`'s own
 /// extra, redundant `runtime.status()` re-read on top of that.
-async fn build_runtime_with_redundant_archive_read_failing(
+pub(super) async fn build_runtime_with_redundant_archive_read_failing(
     home: &std::path::Path,
     id: &CompanyId,
 ) -> crate::runtime::CompanyRuntime {
@@ -403,7 +403,7 @@ async fn build_runtime_with_redundant_archive_read_failing(
 /// fail — modeling `transition`'s own post-`set_lifecycle` status() read AND
 /// one or more attempts of `archive`'s retrying reconciliation read landing
 /// back to back.
-struct FlakyLoadStoreOnCalls {
+pub(super) struct FlakyLoadStoreOnCalls {
     inner: Arc<dyn CompanyStore>,
     fail_on: HashSet<usize>,
     load_calls: std::sync::atomic::AtomicUsize,
@@ -484,7 +484,7 @@ pub(super) async fn build_runtime_with_archive_status_read_failing_twice(
 /// An [`OwnershipStore`](crate::store::select::OwnershipStore) whose
 /// `remove_owner` always fails — models a persisted-store hiccup landing
 /// exactly on eviction's durable ownership cleanup step.
-struct FailingOwnershipRemoval {
+pub(super) struct FailingOwnershipRemoval {
     remove_owner_calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -533,7 +533,7 @@ pub(super) async fn evict_test_runtime(id: &CompanyId) -> Arc<crate::runtime::Co
 // ---------------------------------------------------------------------------
 
 /// A `POST` carrying a signed-in human's session cookie.
-fn post_req_as(uri: &str, cookie: &str) -> Request<Body> {
+pub(super) fn post_req_as(uri: &str, cookie: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(uri)
