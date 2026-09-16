@@ -1,7 +1,7 @@
 //! The document→declaration rules: what an entry inherits, what counts as an
 //! override, and how a credential header is read.
 //!
-//! Feature-free by construction (see `mcp_registry/tests.rs` for why): these
+//! Feature-free by construction (see `mcp_registry/mcp_registry_tests.rs` for why): these
 //! exercise the pure projection, which is where every rule this surface adds
 //! actually lives.
 
