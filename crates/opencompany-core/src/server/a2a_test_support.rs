@@ -181,7 +181,11 @@ pub(super) fn siwx_header(signer: &LocalSigner, handle: &str, body: &[u8], ts: i
 
 /// Builds a SIWX-signed `seo.audit` request carrying `auth` as its payment.
 /// `site` varies the body so each request has its own SIWX signature.
-pub(super) fn paid_request(client: &LocalSigner, auth: &X402Authorization, site: &str) -> Request<Body> {
+pub(super) fn paid_request(
+    client: &LocalSigner,
+    auth: &X402Authorization,
+    site: &str,
+) -> Request<Body> {
     let rpc = JsonRpcRequest::new(
         "tasks/send",
         json!({ "skill": "seo.audit", "input": { "site": site }, "payment": auth }),
