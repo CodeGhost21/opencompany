@@ -138,7 +138,7 @@ pub(super) fn smtp_creds() -> SmtpCredentials {
 
 /// A [`MailSender`] that always refuses, for the "a send failure does not
 /// fail the run" case.
-struct RefusingMailSender;
+pub(super) struct RefusingMailSender;
 
 #[async_trait]
 impl MailSender for RefusingMailSender {
