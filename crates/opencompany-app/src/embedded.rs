@@ -193,7 +193,11 @@ pub async fn start_with(
                 "could not bind `127.0.0.1:0`: {error}"
             ))
         })?;
-    let address = listener.local_addr()?;
+    let address = listener.local_addr().map_err(|error| {
+        opencompany::error::OpenCompanyError::Config(format!(
+            "could not read the embedded host's bound address: {error}"
+        ))
+    })?;
 
     let config = AppConfig {
         bind: address.to_string(),
