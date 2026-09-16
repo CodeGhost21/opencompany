@@ -1167,5 +1167,5 @@ fn strip_current_message(seed: &mut Vec<SeedEntry>, current_message: &str) {
 }
 
 #[cfg(test)]
-#[path = "chat_seed_tests_full.rs"]
+#[path = "chat_seed_tests.rs"]
 mod tests;

@@ -2816,5 +2816,5 @@ mod live {
 }
 
 #[cfg(test)]
-#[path = "composio_tests_full.rs"]
+#[path = "composio_tests.rs"]
 mod tests;

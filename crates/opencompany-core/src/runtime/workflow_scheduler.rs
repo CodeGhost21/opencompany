@@ -1060,11 +1060,11 @@ mod tests_core;
 #[path = "workflow_scheduler_tests_part1.rs"]
 mod tests_part1;
 #[cfg(test)]
-#[path = "workflow_scheduler_tests_path_1_the_cron_fire.rs"]
-mod tests_path_1_the_cron_fire;
-#[cfg(test)]
 #[path = "workflow_scheduler_tests_part3.rs"]
 mod tests_part3;
 #[cfg(test)]
 #[path = "workflow_scheduler_tests_part4.rs"]
 mod tests_part4;
+#[cfg(test)]
+#[path = "workflow_scheduler_tests_path_1_the_cron_fire.rs"]
+mod tests_path_1_the_cron_fire;

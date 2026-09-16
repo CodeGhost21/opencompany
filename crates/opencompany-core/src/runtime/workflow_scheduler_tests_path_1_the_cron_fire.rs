@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// **Issue #440: the cron path and the shared path record the same thing.**
 ///

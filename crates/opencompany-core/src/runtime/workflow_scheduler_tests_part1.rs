@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// The headline: a workflow that exists ONLY as a record overlay (no source
 /// file — the console-created shape #168 introduced) is picked up and fired
@@ -51,8 +50,7 @@ async fn fires_a_global_only_workflow() {
     let home_dir = tmp_home();
     let home = home_dir.path().to_path_buf();
     let (runner, started, _completed) = RecordingRunner::new();
-    let registry =
-        company_with_overlays(&home, "acme", Vec::new(), Some(runner), "running").await;
+    let registry = company_with_overlays(&home, "acme", Vec::new(), Some(runner), "running").await;
     let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
     let mut scheduler = WorkflowScheduler::new(registry, clock);
     let workflows = [global("global_digest", "* * * * *")];
@@ -69,8 +67,7 @@ async fn a_disabled_global_workflow_does_not_fire() {
     let home_dir = tmp_home();
     let home = home_dir.path().to_path_buf();
     let (runner, started, _completed) = RecordingRunner::new();
-    let registry =
-        company_with_overlays(&home, "acme", Vec::new(), Some(runner), "running").await;
+    let registry = company_with_overlays(&home, "acme", Vec::new(), Some(runner), "running").await;
     let company = CompanyId::new("acme");
     let runtime = registry.get(&company).unwrap();
     let store = runtime.store().clone();

@@ -1680,14 +1680,14 @@ pub fn budget_pauses_for(company: &CompanyId) -> Arc<BudgetPauseSet> {
 }
 
 #[cfg(test)]
+#[path = "grants_tests_budget_pause_markers_issue_184.rs"]
+mod tests_budget_pause_markers_issue_184;
+#[cfg(test)]
 #[path = "grants_tests_core.rs"]
 mod tests_core;
 #[cfg(test)]
 #[path = "grants_tests_part1.rs"]
 mod tests_part1;
-#[cfg(test)]
-#[path = "grants_tests_budget_pause_markers_issue_184.rs"]
-mod tests_budget_pause_markers_issue_184;
 #[cfg(test)]
 #[path = "grants_tests_part3.rs"]
 mod tests_part3;

@@ -2851,11 +2851,11 @@ mod tests_core;
 #[path = "journal_tests_part1.rs"]
 mod tests_part1;
 #[cfg(test)]
-#[path = "journal_tests_the_cycle_bracket_issue_390.rs"]
-mod tests_the_cycle_bracket_issue_390;
-#[cfg(test)]
 #[path = "journal_tests_part3.rs"]
 mod tests_part3;
 #[cfg(test)]
 #[path = "journal_tests_part4.rs"]
 mod tests_part4;
+#[cfg(test)]
+#[path = "journal_tests_the_cycle_bracket_issue_390.rs"]
+mod tests_the_cycle_bracket_issue_390;

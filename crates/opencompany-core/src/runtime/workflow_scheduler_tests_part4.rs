@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// A switched-off workflow (#276) gets NO catch-up: it is filtered before the
 /// catch-up check, so its anchor is never touched.

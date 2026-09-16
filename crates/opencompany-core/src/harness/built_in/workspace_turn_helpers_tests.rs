@@ -43,7 +43,7 @@ use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
 /// What the scripted model does on each successive call.
 #[derive(Clone, Debug)]
-enum Turn {
+pub(crate) enum Turn {
     /// Emit a tool call with these literal arguments.
     Call { tool: &'static str, args: Value },
     /// Emit a tool call whose args are built from the revision the conversation
@@ -61,7 +61,7 @@ enum Turn {
 }
 
 /// A scripted OpenAI-compatible `/chat/completions` endpoint.
-struct Script {
+pub(crate) struct Script {
     turns: Mutex<Vec<Turn>>,
     /// Every request body the harness sent, for post-hoc assertions.
     seen: Mutex<Vec<Value>>,
@@ -76,12 +76,12 @@ struct Script {
 /// when the read → model → write round trip it exists to prove was broken. No
 /// real note can carry this revision, so asserting it never appears in a tool
 /// result turns that silent pass into a failure.
-const UNOBSERVED_REV: u64 = u64::MAX;
+pub(crate) const UNOBSERVED_REV: u64 = u64::MAX;
 
 /// Pull the most recent `rev=<digits>` out of the conversation the stub was
 /// sent. This is the model's-eye view: the revision is only available because
 /// `workspace_read`'s result was fed back into the context.
-fn observed_rev(body: &Value) -> Option<u64> {
+pub(crate) fn observed_rev(body: &Value) -> Option<u64> {
     let messages = body.get("messages")?.as_array()?;
     let mut found = None;
     for message in messages {
@@ -104,7 +104,7 @@ fn observed_rev(body: &Value) -> Option<u64> {
 }
 
 /// Serve the script on loopback and return its base URL plus the shared handle.
-async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
+pub(crate) async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
     let script = Arc::new(Script {
         turns: Mutex::new(turns),
         seen: Mutex::new(Vec::new()),
@@ -166,7 +166,7 @@ async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
 
 /// One assistant message carrying a native `tool_calls` array — the shape the
 /// provider's `tool_calling: true` profile puts the turn loop on.
-fn tool_call_message(tool: &str, args: &Value) -> Value {
+pub(crate) fn tool_call_message(tool: &str, args: &Value) -> Value {
     json!({
         "role": "assistant",
         "content": null,
@@ -178,7 +178,7 @@ fn tool_call_message(tool: &str, args: &Value) -> Value {
     })
 }
 
-fn folder(id: &str, name: &str) -> WorkspaceNode {
+pub(crate) fn folder(id: &str, name: &str) -> WorkspaceNode {
     WorkspaceNode {
         id: id.to_string(),
         name: name.to_string(),
@@ -194,7 +194,7 @@ fn folder(id: &str, name: &str) -> WorkspaceNode {
     }
 }
 
-fn note(id: &str, name: &str, parent: &str) -> WorkspaceNode {
+pub(crate) fn note(id: &str, name: &str, parent: &str) -> WorkspaceNode {
     WorkspaceNode {
         id: id.to_string(),
         name: name.to_string(),
@@ -211,13 +211,13 @@ fn note(id: &str, name: &str, parent: &str) -> WorkspaceNode {
 }
 
 /// A one-agent company, with `grants` controlling the workspace surface.
-fn manifest(grants: &str) -> CompanyManifest {
+pub(crate) fn manifest(grants: &str) -> CompanyManifest {
     // `full` so an ordinary turn is not parked; the write tool's own
     // compare-and-swap token is what guards the write in this mode.
     manifest_in_mode(grants, "full")
 }
 
-fn manifest_in_mode(grants: &str, mode: &str) -> CompanyManifest {
+pub(crate) fn manifest_in_mode(grants: &str, mode: &str) -> CompanyManifest {
     toml::from_str(&format!(
         r#"
 [company]
@@ -242,7 +242,7 @@ tier = "orchestrator"
 ///
 /// Returns the pool, deps, record and the live store so a test can read back
 /// what the turn actually persisted.
-async fn harness(
+pub(crate) async fn harness(
     base_url: String,
     grants: &str,
     dir: &std::path::Path,
@@ -361,7 +361,7 @@ async fn harness(
 }
 
 /// Every tool name the scripted model was offered across the whole turn.
-fn advertised_tools(script: &Script) -> Vec<String> {
+pub(crate) fn advertised_tools(script: &Script) -> Vec<String> {
     let mut names: Vec<String> = script
         .seen
         .lock()
@@ -382,7 +382,7 @@ fn advertised_tools(script: &Script) -> Vec<String> {
 }
 
 /// Every tool *result* the harness fed back to the model.
-fn tool_results(script: &Script) -> Vec<String> {
+pub(crate) fn tool_results(script: &Script) -> Vec<String> {
     script
         .seen
         .lock()

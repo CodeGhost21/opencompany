@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 #[test]
 fn gate_inner_call_reads_the_call_the_card_shows() {
@@ -615,9 +614,8 @@ fn a_later_answer_supersedes_an_earlier_one_for_the_same_node() {
         &resolution(BlockerVerdict::Retry, ""),
     )
     .expect("continues");
-    let second =
-        blocker_continuation_input(first, "draft", &resolution(BlockerVerdict::Skip, ""))
-            .expect("continues");
+    let second = blocker_continuation_input(first, "draft", &resolution(BlockerVerdict::Skip, ""))
+        .expect("continues");
     assert_eq!(
         blocker_answers_in_input(&second).expect("readable").len(),
         1,

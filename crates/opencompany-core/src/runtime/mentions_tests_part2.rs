@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 #[test]
 fn an_agent_does_not_mention_itself_in_its_own_reply() {

@@ -563,15 +563,9 @@ pub(super) async fn assert_siblings_admit_exactly_the_cap_and_burn_no_minute(cap
         .iter()
         .map(|id| overlay(id, Some("0 9 * * *")))
         .collect();
-    let registry = company_with_overlays_capped(
-        &home,
-        "acme",
-        overlays,
-        Some(runner),
-        "running",
-        Some(cap),
-    )
-    .await;
+    let registry =
+        company_with_overlays_capped(&home, "acme", overlays, Some(runner), "running", Some(cap))
+            .await;
     let company = CompanyId::new("acme");
     let runtime = registry.get(&company).unwrap();
 

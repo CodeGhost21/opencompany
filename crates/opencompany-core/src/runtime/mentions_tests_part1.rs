@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 // -----------------------------------------------------------------------
 // What is, and is not, a mention

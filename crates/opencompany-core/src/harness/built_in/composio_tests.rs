@@ -269,5 +269,5 @@ fn tool_named(config: &TenantComposio, name: &str) -> Box<dyn Tool> {
 mod tests_part1;
 #[path = "composio_tests_part2.rs"]
 mod tests_part2;
-#[path = "composio_tests_fail_axis_what_each_composio_t.rs"]
-mod tests_fail_axis_what_each_composio_t;
+#[path = "composio_tests_part3.rs"]
+mod tests_part3;

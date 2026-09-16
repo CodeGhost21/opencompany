@@ -1,6 +1,5 @@
-use super::*;
 use super::tests_core::*;
-
+use super::*;
 
 /// Issue #1458, the reconcile: newest standing decision wins. An approval
 /// minted after a live denial of the same scope takes the denial back, or
@@ -321,8 +320,7 @@ fn the_scope_round_trips_and_is_omitted_when_absent() {
 
     let grant = scoped("g2", "ops", "composio_execute", "github", 10_000);
     let round: StandingGrant =
-        serde_json::from_value(serde_json::to_value(&grant).expect("json"))
-            .expect("round trip");
+        serde_json::from_value(serde_json::to_value(&grant).expect("json")).expect("round trip");
     assert_eq!(round, grant);
 }
 
