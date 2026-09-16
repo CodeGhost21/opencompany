@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use serde_json::{Value, json};
 
+use super::workflow_admin_fixtures_tests::*;
 use super::*;
 use crate::company::{CompanyManifest, update_company_workflow};
 use crate::error::Result;
@@ -13,7 +14,6 @@ use crate::ports::types::{
     StoredEvent,
 };
 use crate::ports::workflow_revisions::WorkflowRevisionRecord;
-use super::workflow_admin_fixtures_tests::*;
 
 // ---------------------------------------------------------------------------
 // 5. delete

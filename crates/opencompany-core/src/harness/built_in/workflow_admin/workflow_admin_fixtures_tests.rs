@@ -438,4 +438,3 @@ pub(crate) fn data(result: &ToolResult) -> Value {
     }
     panic!("no JSON block in {result:?}");
 }
-

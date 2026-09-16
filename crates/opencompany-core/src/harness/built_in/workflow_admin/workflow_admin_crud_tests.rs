@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use serde_json::{Value, json};
 
+use super::workflow_admin_fixtures_tests::*;
 use super::*;
 use crate::company::{CompanyManifest, update_company_workflow};
 use crate::error::Result;
@@ -13,7 +14,6 @@ use crate::ports::types::{
     StoredEvent,
 };
 use crate::ports::workflow_revisions::WorkflowRevisionRecord;
-use super::workflow_admin_fixtures_tests::*;
 
 // ---------------------------------------------------------------------------
 // 1. create → read → update round trip
@@ -574,4 +574,3 @@ async fn an_update_can_explicitly_clear_owner_desk_with_blank_string() {
         "an agent explicitly sending a blank ownerDesk must clear the stored desk, not restore it"
     );
 }
-
