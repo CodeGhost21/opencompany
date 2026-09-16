@@ -1,8 +1,8 @@
 use super::super::*;
 use super::*;
-use crate::company::steer::{InflightKind, InflightRegistry};
-use crate::ports::TaskStore;
-use crate::ports::tasks::TaskTitle;
+pub(super) use crate::company::steer::{InflightKind, InflightRegistry};
+pub(super) use crate::ports::TaskStore;
+pub(super) use crate::ports::tasks::TaskTitle;
 use std::collections::VecDeque;
 use std::sync::Mutex as StdMutex;
 use tinyinference::Result as TaResult;
