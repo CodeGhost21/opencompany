@@ -109,7 +109,7 @@ pub(super) struct ScriptedMemory {
 }
 
 impl ScriptedMemory {
-    fn with_hits(hits: &[&str]) -> Self {
+    pub(super) fn with_hits(hits: &[&str]) -> Self {
         Self {
             hits: hits.iter().map(|hit| (*hit).to_owned()).collect(),
             ..Self::default()
