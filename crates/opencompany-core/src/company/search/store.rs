@@ -897,5 +897,5 @@ pub async fn clear_default_slug(company: &CompanyId, secrets: &dyn SecretStore) 
 }
 
 #[cfg(test)]
-#[path = "store_test.rs"]
-mod store_test;
+#[path = "store_tests.rs"]
+mod tests;
