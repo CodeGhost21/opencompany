@@ -354,4 +354,5 @@ impl std::fmt::Debug for SidecarBrain {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "sidecar_tests.rs"]
+mod tests;

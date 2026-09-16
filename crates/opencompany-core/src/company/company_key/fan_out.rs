@@ -1479,4 +1479,20 @@ pub async fn copy_account_key_to_composio(
 }
 
 #[cfg(test)]
-mod test;
+#[path = "fan_out_tests_support.rs"]
+mod fan_out_tests_support;
+#[cfg(test)]
+#[path = "fan_out_tests_concurrency.rs"]
+mod tests_concurrency;
+#[cfg(test)]
+#[path = "fan_out_tests_isolation.rs"]
+mod tests_isolation;
+#[cfg(test)]
+#[path = "fan_out_tests_matrix_a.rs"]
+mod tests_matrix_a;
+#[cfg(test)]
+#[path = "fan_out_tests_matrix_b.rs"]
+mod tests_matrix_b;
+#[cfg(test)]
+#[path = "fan_out_tests_proxy_url.rs"]
+mod tests_proxy_url;

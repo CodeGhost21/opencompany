@@ -458,5 +458,5 @@ fn rejected(spec: &LedgerSpec, existing: &[LedgerSpec]) -> Option<String> {
 }
 
 #[cfg(test)]
-#[path = "registry_test.rs"]
-mod test;
+#[path = "registry_tests.rs"]
+mod tests;

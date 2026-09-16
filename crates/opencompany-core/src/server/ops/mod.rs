@@ -116,11 +116,82 @@ pub mod connections;
 pub(crate) use scope::{AdminScopedCompany, ScopedCompany, scoped};
 
 #[cfg(test)]
-mod setup_test;
+mod setup_tests;
 #[cfg(test)]
-mod test;
+#[path = "write_a_resolved_approval_reports_tests.rs"]
+mod tests_a_resolved_approval_reports;
 #[cfg(test)]
-mod write_test;
+#[path = "write_a_stamped_card_hands_tests.rs"]
+mod tests_a_stamped_card_hands;
+#[cfg(test)]
+#[path = "write_a_title_that_normalises_tests.rs"]
+mod tests_a_title_that_normalises;
+#[cfg(test)]
+#[path = "write_a_withdrawn_discussion_message_tests.rs"]
+mod tests_a_withdrawn_discussion_message;
+#[cfg(test)]
+#[path = "write_an_uploaded_image_round_tests.rs"]
+mod tests_an_uploaded_image_round;
+#[cfg(test)]
+#[path = "write_append_mail_tests.rs"]
+mod tests_append_mail;
+#[cfg(test)]
+#[path = "write_applying_a_proposal_with_tests.rs"]
+mod tests_applying_a_proposal_with;
+#[cfg(test)]
+#[path = "write_chat_message_rejects_a_tests.rs"]
+mod tests_chat_message_rejects_a;
+#[cfg(test)]
+#[path = "write_chat_upload_sanitizes_pathy_tests.rs"]
+mod tests_chat_upload_sanitizes_pathy;
+#[cfg(test)]
+#[path = "write_detail_as_tests.rs"]
+mod tests_detail_as;
+#[cfg(test)]
+#[path = "write_mcp_add_probes_without_tests.rs"]
+mod tests_mcp_add_probes_without;
+#[cfg(test)]
+#[path = "write_mcp_default_server_can_tests.rs"]
+mod tests_mcp_default_server_can;
+#[cfg(test)]
+#[path = "write_mcp_manifest_tests.rs"]
+mod tests_mcp_manifest;
+#[cfg(test)]
+#[path = "write_memory_stats_last_updated_tests.rs"]
+mod tests_memory_stats_last_updated;
+#[cfg(test)]
+#[path = "write_parent_task_id_rejects_tests.rs"]
+mod tests_parent_task_id_rejects;
+#[cfg(test)]
+#[path = "write_parked_effect_tests.rs"]
+mod tests_parked_effect;
+#[cfg(test)]
+#[path = "ops_put_domain_returns_records_tests.rs"]
+mod tests_put_domain_returns_records;
+#[cfg(test)]
+#[path = "ops_put_smtp_without_a_tests.rs"]
+mod tests_put_smtp_without_a;
+#[cfg(test)]
+#[path = "write_saving_an_unpublished_note_tests.rs"]
+mod tests_saving_an_unpublished_note;
+#[cfg(test)]
+#[path = "write_skills_install_persists_the_tests.rs"]
+mod tests_skills_install_persists_the;
+#[cfg(test)]
+#[path = "write_streamed_multipart_tests.rs"]
+mod tests_streamed_multipart;
+#[cfg(test)]
+#[path = "write_task_discussion_is_paged_tests.rs"]
+mod tests_task_discussion_is_paged;
+#[cfg(test)]
+#[path = "write_workspace_sweep_previews_then_tests.rs"]
+mod tests_workspace_sweep_previews_then;
+#[cfg(test)]
+#[path = "write_workspace_tree_and_file_tests.rs"]
+mod tests_workspace_tree_and_file;
+#[cfg(test)]
+#[path = "write_test_support.rs"]
+mod write_test_support;
 
 use std::sync::Arc;
 

@@ -2325,10 +2325,17 @@ fn is_external_test_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
+    // `_tests.rs` is the sibling-test convention; `_test_support.rs`,
+    // `_test_fixtures.rs` and `_tests_<topic>.rs` are the shared-fixture and
+    // topic-split files that convention produces. All are `#[cfg(test)]` by
+    // declaration rather than by an attribute inside the file, so the token
+    // pass cannot tell — the name has to.
     name == "test.rs"
         || name == "tests.rs"
         || name.ends_with("_test.rs")
         || name.ends_with("_tests.rs")
+        || name.contains("_test_")
+        || name.contains("_tests_")
 }
 
 fn allowed_nonliteral_route(

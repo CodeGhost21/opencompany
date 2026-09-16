@@ -674,4 +674,5 @@ fn sanitize_id(id: &str) -> String {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "task_export_tests.rs"]
+mod tests;

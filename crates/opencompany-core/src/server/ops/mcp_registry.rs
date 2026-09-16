@@ -463,4 +463,5 @@ use unwired::{connect_server, disconnect_server, entry, install, search, uninsta
 pub(super) use unwired::{installs, remove_install};
 
 #[cfg(test)]
+#[path = "mcp_registry/mcp_registry_tests.rs"]
 mod tests;

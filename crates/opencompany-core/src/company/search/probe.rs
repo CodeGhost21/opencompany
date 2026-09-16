@@ -650,5 +650,5 @@ pub fn log_detail(failure: &ProbeFailure) -> String {
 }
 
 #[cfg(test)]
-#[path = "probe_test.rs"]
-mod probe_test;
+#[path = "probe_tests.rs"]
+mod tests;
