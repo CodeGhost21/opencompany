@@ -559,7 +559,10 @@ mod test {
             !url.contains("127.0.0.1%3A0") && !url.contains("127.0.0.1:0"),
             "the return leg must not name port 0: {url}"
         );
-        let expected = format!("127.0.0.1%3A{}%2Fauth%2Fkey%2Fcallback", host.address().port());
+        let expected = format!(
+            "127.0.0.1%3A{}%2Fauth%2Fkey%2Fcallback",
+            host.address().port()
+        );
         assert!(
             url.contains(&expected),
             "the return leg must be this host's own callback on its bound port: {url}"

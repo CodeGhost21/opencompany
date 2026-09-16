@@ -610,7 +610,8 @@ async fn set_key(
     // journal-failure-then-retry sequence would otherwise never rebuild a
     // company that has been on the echo brain since the first, unlogged
     // attempt (CodeRabbit review).
-    let journal_result = journal_fan_out(&company.runtime, &company.actor(), clearing, &report).await;
+    let journal_result =
+        journal_fan_out(&company.runtime, &company.actor(), clearing, &report).await;
 
     // Read off whichever runtime is live after this write — the successor if
     // the fan-out configured inference for a company that booted without any.
@@ -892,9 +893,15 @@ async fn finish_link(
     company: AdminScopedCompany,
     Json(body): Json<FinishLink>,
 ) -> Result<Json<MutationResponse>, ApiError> {
-    redeem_link(&state, &company.runtime, &company.actor(), &body.state, &body.code)
-        .await
-        .map(Json)
+    redeem_link(
+        &state,
+        &company.runtime,
+        &company.actor(),
+        &body.state,
+        &body.code,
+    )
+    .await
+    .map(Json)
 }
 
 /// The whole of a key-grant redemption, shared by [`finish_link`] and the
