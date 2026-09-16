@@ -4195,6 +4195,14 @@ pub(crate) async fn journal_chat_replies(
         if response.message_id.is_some() {
             continue;
         }
+        let response_desk = if response.channel == crate::runtime::OPERATOR_CHANNEL {
+            desk
+        } else {
+            response.channel.as_str()
+        };
+        let response_parent = (response.channel == crate::runtime::OPERATOR_CHANNEL)
+            .then_some(parent)
+            .flatten();
         // Scanned host-side from the reply text — the console's picker never
         // touched this message. The author is passed so a teammate naming
         // itself in its own answer does not chip itself.
@@ -4226,7 +4234,7 @@ pub(crate) async fn journal_chat_replies(
                     mention_depth: 0,
                     // The answer joins the thread its question was asked in,
                     // rather than opening one under the question (issue #364).
-                    parent,
+                    parent: response_parent,
                     // Issue #246: carry the card this turn opened onto the
                     // durable record, so the console's "card opened" chip
                     // survives a transcript reload instead of living only on
@@ -4237,7 +4245,7 @@ pub(crate) async fn journal_chat_replies(
                     // which is the lineage an operator wants and costs no
                     // schema change.
                     task_id: response.task_id.clone(),
-                    chat_id: desk.to_string(),
+                    chat_id: response_desk.to_string(),
                     // Issue #885: the author, falling back to the channel only
                     // when the producer did not name one. `agent_id`'s contract
                     // is "the agent that produced the reply"; `channel` is the
@@ -4272,7 +4280,7 @@ pub(crate) async fn journal_chat_replies(
                 // offline when the reply lands.
                 if !reply_mentions.is_empty() {
                     runtime
-                        .notify_mentions(id, &reply_mentions, &seq, None, desk)
+                        .notify_mentions(id, &reply_mentions, &seq, None, response_desk)
                         .await;
                 }
             }
