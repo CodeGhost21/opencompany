@@ -799,7 +799,7 @@ pub async fn fan_out(
 
     // 8. Health, before any row or default write (Q6 by construction).
     let mut probe_ids: Option<Vec<String>> = None;
-    let health_outcome = if legacy_managed {
+    let mut health_outcome = if legacy_managed {
         SlotOutcome::Skipped(SkipReason::LegacyManagedConfig)
     } else if !holds_new {
         match inference_outcome {
