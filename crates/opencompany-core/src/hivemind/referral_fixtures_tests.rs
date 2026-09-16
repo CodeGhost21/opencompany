@@ -133,7 +133,7 @@ pub(super) struct Room {
 }
 
 impl Room {
-    fn answering(conclusion: &str) -> Self {
+    pub(super) fn answering(conclusion: &str) -> Self {
         Self {
             conclusion: Some(conclusion.to_owned()),
             broken: false,
@@ -143,7 +143,7 @@ impl Room {
     }
 
     /// A desk that cannot deliberate, so the crossing must ask its seat.
-    fn cannot() -> Self {
+    pub(super) fn cannot() -> Self {
         Self {
             conclusion: None,
             broken: false,
