@@ -3569,6 +3569,7 @@ fn kind_label(delegation: &Delegation) -> &'static str {
         Delegation::SpawnTask { .. } => "spawn_task",
         Delegation::DelegateToDesk { .. } => "delegate_to_desk",
         Delegation::DelegateToTeammate { .. } => "delegate_to_teammate",
+        Delegation::ConversationDispatch { .. } => "conversation_dispatch",
         Delegation::AssignTask { .. } => "assign_task",
         Delegation::ReviewTask { .. } => "review_task",
     }
@@ -3589,6 +3590,7 @@ fn hand_off_target_of(delegation: &Delegation) -> Option<&str> {
     match delegation {
         Delegation::DelegateToDesk { desk, .. } => Some(desk),
         Delegation::DelegateToTeammate { teammate, .. } => Some(teammate),
+        Delegation::ConversationDispatch { target, .. } => Some(target),
         _ => None,
     }
 }
