@@ -8035,5 +8035,53 @@ impl std::fmt::Debug for CompanyRuntime {
 }
 
 #[cfg(test)]
-#[path = "runtime"]
-mod tests;
+#[path = "runtime_core_tests.rs"]
+mod tests_core;
+#[cfg(test)]
+#[path = "runtime_dispatch_tests.rs"]
+mod tests_dispatch;
+#[cfg(test)]
+#[path = "runtime_conversation_tests.rs"]
+mod tests_conversation;
+#[cfg(test)]
+#[path = "runtime_approval_tests.rs"]
+mod tests_approval;
+#[cfg(test)]
+#[path = "runtime_blocker_claim_tests.rs"]
+mod tests_blocker_claim;
+#[cfg(test)]
+#[path = "runtime_blocker_race_tests.rs"]
+mod tests_blocker_race;
+#[cfg(test)]
+#[path = "runtime_review_tests.rs"]
+mod tests_review;
+#[cfg(test)]
+#[path = "runtime_blocked_node_tests.rs"]
+mod tests_blocked_node;
+#[cfg(test)]
+#[path = "runtime_ambiguous_mentions_tests.rs"]
+mod tests_ambiguous_mentions;
+#[cfg(test)]
+#[path = "runtime_notify_mentions_tests.rs"]
+mod tests_notify_mentions;
+#[cfg(test)]
+#[path = "runtime_blocker_dms_reply_tests.rs"]
+mod tests_blocker_dms_reply;
+#[cfg(test)]
+#[path = "runtime_blocker_dms_concurrency_tests.rs"]
+mod tests_blocker_dms_concurrency;
+#[cfg(test)]
+#[path = "runtime_blocker_resume_card_tests.rs"]
+mod tests_blocker_resume_card;
+#[cfg(test)]
+#[path = "runtime_blocker_resume_console_tests.rs"]
+mod tests_blocker_resume_console;
+#[cfg(test)]
+#[path = "runtime_node_blocker_resume_retry_tests.rs"]
+mod tests_node_blocker_resume_retry;
+#[cfg(test)]
+#[path = "runtime_node_blocker_resume_stash_tests.rs"]
+mod tests_node_blocker_resume_stash;
+#[cfg(test)]
+#[path = "runtime_emergency_stop_tests.rs"]
+mod tests_emergency_stop;
