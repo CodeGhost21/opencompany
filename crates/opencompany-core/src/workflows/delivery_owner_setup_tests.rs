@@ -49,7 +49,7 @@ to = "done"
 
 /// The same graph with **no** `[node.destination]` stanza at all — the
 /// pre-#170 shape every seeded company template still ships (issue #925).
-fn graph_without_destination() -> WorkflowFile {
+pub(super) fn graph_without_destination() -> WorkflowFile {
     let src = r#"
 id = "report_flow"
 name = "Report flow"
