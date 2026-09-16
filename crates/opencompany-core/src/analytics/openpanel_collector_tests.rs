@@ -8,7 +8,7 @@ use crate::analytics::config::{
     CLIENT_ID_ENV, CLIENT_SECRET_ENV, ENDPOINT_ENV, resolve,
 };
 use crate::analytics::types::OpaqueId;
-use crate::analytics::{Event, Outcome, Trigger};
+use crate::analytics::Event;
 use crate::app::config::MapEnv;
 use crate::app::deployment::{DEPLOYMENT_ENV, Deployment};
 use crate::ports::brain::Cognition;
