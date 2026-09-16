@@ -1,13 +1,11 @@
-//! Shared fixtures and helpers for the `composio` test files split out of
-//! the original single inline `#[cfg(test)] mod tests { ... }` module. Every
-//! item here was duplicated verbatim across the split siblings (or used
-//! unqualified from a sibling that never defined it); this file is the one
-//! copy they all import from now.
+//! Shared fixtures for the `composio.rs` test-file split.
+//!
+//! Every `composio_*_tests.rs` sibling module pulls its request helpers,
+//! manifest fixtures, and catalog builders from here rather than redefining
+//! them, so the mechanical split into one-file-per-test-group did not leave
+//! several divergent copies of the same fixture.
 
-use super::{
-    CatalogEntry, CatalogSource, ComposioMode, ComposioStatusDto, CredentialSource,
-    TinyhumansTokenSource, access_for,
-};
+use super::{CatalogEntry, CredentialSource, TinyhumansTokenSource, access_for};
 use crate::company::runtime::CompanyRuntime;
 use crate::server::error::ApiError;
 use crate::server::ops::composio_toolkits;
@@ -29,11 +27,6 @@ use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
 pub(super) const TOKEN: &str = "composio-tenant-bearer-SECRET-xyz";
-
-/// A company granting composio with one provider — the shape every
-/// authorization test below drives.
-pub(super) const GRANTED: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
-     [tools]\nallow = [\"composio\"]\n[tools.composio]\ntoolkits = [\"gmail\"]\n";
 
 pub(super) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -234,23 +227,11 @@ pub(super) fn hundred_slugs() -> Vec<String> {
 /// exists.
 #[cfg(feature = "composio")]
 pub(super) fn composio_backend_env_guard() -> crate::test_support::EnvVarGuard {
-    crate::test_support::EnvVarGuard::capture(&[crate::company::composio::TINYHUMANS_API_URL_ENV])
+    crate::test_support::EnvVarGuard::capture(&[
+        crate::company::composio::TINYHUMANS_API_URL_ENV,
+    ])
 }
 
-/// The credential tier alone.
-///
-/// The matrix below is about credential *precedence*; which route a company
-/// takes is a separate question, asserted separately. Projecting here keeps
-/// each test about one of them.
-pub(super) async fn credential_source_for(
-    runtime: &CompanyRuntime,
-    token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
-) -> Result<CredentialSource, ApiError> {
-    Ok(access_for(runtime, token_source).await?.1)
-}
-
-/// Raw slot contents for a company's runtime, blank-or-absent collapsed to
-/// `None` only when truly absent (a stored `""` reads back as `Some("")`).
 pub(super) async fn read_slot(runtime: &super::CompanyRuntime, key: &'static str) -> Option<String> {
     runtime
         .secrets()
@@ -259,3 +240,13 @@ pub(super) async fn read_slot(runtime: &super::CompanyRuntime, key: &'static str
         .unwrap()
         .map(|crate::ports::types::SecretValue(v)| v)
 }
+
+pub(super) async fn credential_source_for(
+    runtime: &CompanyRuntime,
+    token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
+) -> Result<CredentialSource, ApiError> {
+    Ok(access_for(runtime, token_source).await?.1)
+}
+
+pub(super) const GRANTED: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+     [tools]\nallow = [\"composio\"]\n[tools.composio]\ntoolkits = [\"gmail\"]\n";
