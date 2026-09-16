@@ -3,8 +3,8 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use super::*;
 use super::tests_redeem_replays_the_markers::FailingRedispatchBrain;
+use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
 use crate::ports::types::{
