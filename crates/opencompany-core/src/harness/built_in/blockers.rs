@@ -270,7 +270,6 @@ pub const AGENT_QUESTION_BLOCKER: BlockerClass = BlockerClass {
     needed: "an answer to the question on this card",
 };
 
-
 // ───────────────────────────────────────────────────────────────────────────
 // The agent's own door (issue #1861)
 // ───────────────────────────────────────────────────────────────────────────

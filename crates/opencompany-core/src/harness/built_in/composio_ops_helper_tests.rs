@@ -138,8 +138,7 @@ async fn authorize_returns_hosted_connect_url() {
 async fn authorize_rejects_toolkit_outside_allowlist_before_any_network_call() {
     // Backend URL is unreachable — the allowlist rejection must fire first.
     let out =
-        authorize_connect_url(&config("http://127.0.0.1:1", vec!["gmail".into()]), "slack")
-            .await;
+        authorize_connect_url(&config("http://127.0.0.1:1", vec!["gmail".into()]), "slack").await;
     let err = out.expect_err("a toolkit outside the allowlist must be refused");
     assert!(err.to_string().contains("allowlist"), "{err}");
 }

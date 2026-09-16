@@ -91,10 +91,9 @@ async fn resolve_prefers_the_stored_token_then_the_token_source_then_fails_close
     );
 
     // Nothing stored, but this instance has an identity → it is used.
-    let attested =
-        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-            .await
-            .expect("the platform identity resolves");
+    let attested = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+        .await
+        .expect("the platform identity resolves");
     assert_eq!(
         token_of(&attested).await.as_deref(),
         Some("platform-identity")
@@ -105,10 +104,9 @@ async fn resolve_prefers_the_stored_token_then_the_token_source_then_fails_close
         .set(&company, TINYHUMANS_KEY_KEY, SecretValue("   ".to_string()))
         .await
         .unwrap();
-    let attested =
-        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-            .await
-            .expect("the platform identity resolves");
+    let attested = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+        .await
+        .expect("the platform identity resolves");
     assert_eq!(
         token_of(&attested).await.as_deref(),
         Some("platform-identity")
@@ -194,10 +192,9 @@ async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instan
 
     // And it outranks the instance's identity: the company acts as itself,
     // not as the pod it happens to run in.
-    let resolved =
-        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-            .await
-            .expect("resolves");
+    let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+        .await
+        .expect("resolves");
     assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
 
     // A pasted Composio token still outranks it — the BYO hatch survives.
@@ -209,10 +206,9 @@ async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instan
         )
         .await
         .unwrap();
-    let resolved =
-        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-            .await
-            .expect("resolves");
+    let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+        .await
+        .expect("resolves");
     assert_eq!(token_of(&resolved).await.as_deref(), Some("byo-composio"));
     assert_eq!(resolved.credential().source(), CredentialSource::Static);
 
@@ -234,10 +230,9 @@ async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instan
         )
         .await
         .unwrap();
-    let resolved =
-        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-            .await
-            .expect("resolves");
+    let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+        .await
+        .expect("resolves");
     assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
     assert_eq!(resolved.credential().source(), CredentialSource::Company);
 
@@ -245,10 +240,9 @@ async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instan
     company_key::store_key(&company, &secrets, "")
         .await
         .unwrap();
-    let resolved =
-        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-            .await
-            .expect("resolves");
+    let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+        .await
+        .expect("resolves");
     assert_eq!(
         token_of(&resolved).await.as_deref(),
         Some("platform-identity")
@@ -441,4 +435,3 @@ async fn rotating_the_company_key_moves_the_composio_fingerprint() {
         "a cleared credential resolves to nothing, so no tools are wired"
     );
 }
-

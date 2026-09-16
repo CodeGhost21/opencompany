@@ -57,7 +57,6 @@ fn toolkit_catalogue(count: usize) -> Vec<CatalogToolkit> {
 // The http_request deflection guardrail (issue #1759, slice S2)
 // -----------------------------------------------------------------------
 
-
 #[path = "composio_catalog_tests_part1.rs"]
 mod tests_part1;
 #[path = "composio_catalog_tests_part2.rs"]

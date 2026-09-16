@@ -229,8 +229,7 @@ fn discord_deflection_is_scoped_to_the_api_path_not_the_whole_domain() {
         "a real Discord API call must still be deflected"
     );
     assert!(
-        web_call_deflection(&connected, "https://discord.com/invite/somepublicserver")
-            .is_none(),
+        web_call_deflection(&connected, "https://discord.com/invite/somepublicserver").is_none(),
         "a public discord.com page outside /api/ must pass through"
     );
 }
@@ -264,8 +263,7 @@ fn drive_deflection_on_the_legacy_host_is_scoped_to_drive_paths() {
         "an unrelated Google API sharing the legacy gateway host must pass through"
     );
     assert!(
-        web_call_deflection(&connected, "https://drive.googleapis.com/drive/v3/files")
-            .is_some(),
+        web_call_deflection(&connected, "https://drive.googleapis.com/drive/v3/files").is_some(),
         "the dedicated Drive host stays deflected unscoped"
     );
     assert!(
@@ -377,8 +375,7 @@ fn calendar_deflection_on_the_legacy_host_is_scoped_to_calendar_paths() {
         "the dedicated Calendar host stays deflected unscoped"
     );
     assert!(
-        web_call_deflection(&connected, "https://www.googleapis.com/batch/calendar/v3")
-            .is_some(),
+        web_call_deflection(&connected, "https://www.googleapis.com/batch/calendar/v3").is_some(),
         "the batch endpoint on the legacy gateway host must also be deflected, the same as \
          Drive's sibling /batch/drive/ prefix"
     );
@@ -498,13 +495,11 @@ fn stripe_file_upload_host_is_deflected_alongside_the_api_host() {
 fn dropbox_is_deflected_across_its_api_and_content_hosts() {
     let connected = vec!["dropbox".to_string()];
     assert!(
-        web_call_deflection(&connected, "https://api.dropboxapi.com/2/files/list_folder")
-            .is_some(),
+        web_call_deflection(&connected, "https://api.dropboxapi.com/2/files/list_folder").is_some(),
         "the RPC API host must be deflected"
     );
     assert!(
-        web_call_deflection(&connected, "https://content.dropboxapi.com/2/files/upload")
-            .is_some(),
+        web_call_deflection(&connected, "https://content.dropboxapi.com/2/files/upload").is_some(),
         "the content-transfer host (upload/download) must also be deflected"
     );
 }
@@ -530,4 +525,3 @@ fn x_and_linkedin_are_deflected_across_their_api_hosts() {
         "the LinkedIn API host must be deflected"
     );
 }
-

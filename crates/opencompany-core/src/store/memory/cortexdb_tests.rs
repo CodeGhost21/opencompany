@@ -563,4 +563,3 @@ async fn forget_of_an_absent_key_is_false_not_an_error() {
         .expect("forget of an absent key does not error");
     assert!(!removed);
 }
-

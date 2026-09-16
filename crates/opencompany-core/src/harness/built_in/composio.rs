@@ -2815,7 +2815,12 @@ mod live {
     }
 }
 
-
+#[cfg(all(test, feature = "composio"))]
+#[path = "composio_isolation_tests.rs"]
+mod isolation_tests;
+#[cfg(all(test, feature = "composio"))]
+#[path = "composio_ops_helper_tests.rs"]
+mod ops_helper_tests;
 /// The console-facing ops helpers ([`authorize_connect_url`],
 /// [`list_connection_states`]) over a mock Composio backend: proves the connect
 /// URL is surfaced, the allowlist is enforced before any network call, and
@@ -2831,9 +2836,3 @@ mod live {
 #[cfg(test)]
 #[path = "composio_tests.rs"]
 mod tests;
-#[cfg(all(test, feature = "composio"))]
-#[path = "composio_ops_helper_tests.rs"]
-mod ops_helper_tests;
-#[cfg(all(test, feature = "composio"))]
-#[path = "composio_isolation_tests.rs"]
-mod isolation_tests;

@@ -292,4 +292,3 @@ async fn resolve_follows_the_stored_route() {
         "an operator who asked for their own account must never silently get the platform's"
     );
 }
-

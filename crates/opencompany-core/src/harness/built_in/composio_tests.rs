@@ -18,7 +18,6 @@ fn config_with(credential: Credential) -> Option<TenantComposio> {
     ))
 }
 
-
 #[path = "composio_tests_part1.rs"]
 mod tests_part1;
 #[path = "composio_tests_part2.rs"]
