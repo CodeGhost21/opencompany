@@ -718,4 +718,4 @@ async fn omitting_the_id_query_param_redeems_unconditionally() {
 
 /// A brain whose `run_cycle` always refuses — the redispatch never
 /// completes successfully.
-struct FailingRedispatchBrain;
+pub(super) struct FailingRedispatchBrain;
