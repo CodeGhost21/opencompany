@@ -8,6 +8,7 @@
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
 use super::*;
+use async_trait::async_trait;
 
 /// The roster builds end-to-end with the skill read surface wired: the
 /// effective set materializes, the read tools build, and the catalogue folds

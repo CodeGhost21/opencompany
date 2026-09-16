@@ -15,6 +15,7 @@ use super::*;
 
 use std::sync::Mutex as StdMutex;
 
+use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use tinyinference::model::{ModelRequest, ModelResponse};
 
