@@ -108,6 +108,7 @@ pub struct SpeechContext {
     agent_id: String,
     events: Arc<dyn EventLog>,
     store: Arc<dyn crate::ports::store::CompanyStore>,
+    dispatch: Option<crate::harness::orchestrator::DelegationQueue>,
 }
 
 impl SpeechContext {
@@ -122,7 +123,19 @@ impl SpeechContext {
             agent_id,
             events,
             store,
+            dispatch: None,
         }
+    }
+
+    /// Attach the post-turn drain that turns a committed `desk_dm` into one
+    /// bounded recipient turn. Tests and non-harness callers may omit it; the
+    /// durable message still lands and is picked up by a later session delta.
+    pub fn with_dispatch(
+        mut self,
+        dispatch: crate::harness::orchestrator::DelegationQueue,
+    ) -> Self {
+        self.dispatch = Some(dispatch);
+        self
     }
 
     /// The channel this turn is answering in.
