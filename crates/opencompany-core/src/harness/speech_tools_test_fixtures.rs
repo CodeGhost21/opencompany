@@ -12,8 +12,8 @@ pub(super) struct RecordingLog(Mutex<Vec<CompanyEvent>>);
 /// recipient's journal failure as a reason to report the whole call
 /// failed after earlier recipients already got a durable row.
 pub(super) struct FlakyLog {
-    events: Mutex<Vec<CompanyEvent>>,
-    refuses: &'static str,
+    pub(super) events: Mutex<Vec<CompanyEvent>>,
+    pub(super) refuses: &'static str,
 }
 
 #[async_trait]
