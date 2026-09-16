@@ -402,20 +402,20 @@ fn search_deployment_credential_configured() -> bool {
 /// Whether MANAGED search can resolve for this company through the same two
 /// tiers as the request path: its copied TinyHumans key first, then the
 /// deployment credential. Off the harness feature there is no search tool.
-async fn search_credential_configured(runtime: &CompanyRuntime) -> bool {
+async fn search_credential_configured(runtime: &CompanyRuntime) -> Result<bool, ApiError> {
     #[cfg(feature = "openhuman")]
     {
-        crate::company::search::load_managed_key(runtime.id(), runtime.secrets().as_ref())
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-            || search_deployment_credential_configured()
+        Ok(
+            crate::company::search::load_managed_key(runtime.id(), runtime.secrets().as_ref())
+                .await?
+                .is_some()
+                || search_deployment_credential_configured(),
+        )
     }
     #[cfg(not(feature = "openhuman"))]
     {
         let _ = runtime;
-        false
+        Ok(false)
     }
 }
 
@@ -516,7 +516,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         // ceiling, not a token budget — so both travel with the plan-independent
         // flags.
         search_granted: crate::company::grants_search_explicit(&record.manifest.tools.allow),
-        search_credential_configured: search_credential_configured(runtime).await,
+        search_credential_configured: search_credential_configured(runtime).await?,
         search_daily_call_cap: record
             .manifest
             .tools

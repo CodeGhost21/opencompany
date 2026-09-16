@@ -135,6 +135,7 @@ export function ProviderList({
   onTest,
   onReplaceKey,
   onManagedReplaceKey,
+  onManagedRemoveKey,
   onRemoveKey,
   onEditEndpoint,
   onMakeDefault,
@@ -156,6 +157,7 @@ export function ProviderList({
   onTest: (provider: SearchProvider) => void;
   onReplaceKey: (provider: SearchProvider) => void;
   onManagedReplaceKey: () => void;
+  onManagedRemoveKey: () => void;
   onRemoveKey: (provider: SearchProvider) => void;
   onEditEndpoint: (provider: SearchProvider) => void;
   onMakeDefault: (provider: SearchProvider) => void;
@@ -224,6 +226,7 @@ export function ProviderList({
               <DropdownMenuItem onClick={onManagedReplaceKey}>
                 Replace key
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={onManagedRemoveKey}>Remove key</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         )}

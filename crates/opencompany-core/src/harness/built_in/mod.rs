@@ -3856,7 +3856,15 @@ impl HarnessPool {
             return None;
         }
         let Some(secrets) = &deps.secrets else {
-            return deps.search.clone();
+            return deps.search.clone().map(|backend| {
+                backend.with_daily_call_cap(
+                    company
+                        .manifest
+                        .tools
+                        .search_daily_calls
+                        .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
+                )
+            });
         };
         let company_key = match crate::company::search::load_managed_key(
             &company.id,

@@ -44,6 +44,8 @@ remain per company and provider. Managed search may use the company's own
 TinyHumans account key from `search/managed/key` before the deployment identity;
 because that key belongs to the same company, this does not let one tenant spend
 through another tenant's ambient credential.
+When the company key is absent, the instance identity pays instead; the same
+per-company daily call cap still applies to that fallback.
 
 **The configuration surface is not feature-gated; the harness is.** `search_byo`
 is behind `openhuman`; `src/company/search.rs` and `src/server/ops/search.rs`

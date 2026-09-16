@@ -604,6 +604,13 @@ export function SearchView({ client, company }: Props) {
               onManagedReplaceKey={() =>
                 setIntent({ kind: "replace-key", slug: "managed" })
               }
+              onManagedRemoveKey={() =>
+                openConfirm({
+                  kind: "remove-key",
+                  slug: "managed",
+                  label: "Managed",
+                })
+              }
               // Destructive, so it asks first. Both of these are irreversible in
               // the only sense that matters here: the key is write-only and is
               // never shown back, so an operator who clears the wrong one cannot
