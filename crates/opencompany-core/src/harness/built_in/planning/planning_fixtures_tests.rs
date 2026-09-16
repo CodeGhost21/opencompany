@@ -38,7 +38,7 @@ use tempfile;
 /// The prompt capture is not incidental: two of the tests below assert on what
 /// the model was *shown*, which is the only way to check that the pass hands it
 /// no secret and no tool.
-struct ScriptedModel {
+pub(crate) struct ScriptedModel {
     reply: Option<String>,
     /// Token usage the call reports, mirrored onto the [`ModelResponse`] so a
     /// test can control what [`record_usage`] charges for this call.
@@ -50,7 +50,7 @@ struct ScriptedModel {
 }
 
 impl ScriptedModel {
-    fn replying(reply: impl Into<String>) -> Arc<Self> {
+    pub(crate) fn replying(reply: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             reply: Some(reply.into()),
             usage: None,
@@ -62,7 +62,7 @@ impl ScriptedModel {
 
     /// Same as [`Self::replying`], but the response carries `usage` — for
     /// tests that need [`record_usage`] to charge a specific token amount.
-    fn replying_with_usage(reply: impl Into<String>, usage: Usage) -> Arc<Self> {
+    pub(crate) fn replying_with_usage(reply: impl Into<String>, usage: Usage) -> Arc<Self> {
         Arc::new(Self {
             reply: Some(reply.into()),
             usage: Some(usage),
@@ -72,7 +72,7 @@ impl ScriptedModel {
         })
     }
 
-    fn failing() -> Arc<Self> {
+    pub(crate) fn failing() -> Arc<Self> {
         Arc::new(Self {
             reply: None,
             usage: None,
@@ -82,11 +82,11 @@ impl ScriptedModel {
         })
     }
 
-    fn calls(&self) -> usize {
+    pub(crate) fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
 
-    fn last_prompt(&self) -> String {
+    pub(crate) fn last_prompt(&self) -> String {
         self.prompts
             .lock()
             .unwrap()
@@ -142,7 +142,7 @@ impl HarnessModel for ScriptedModel {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const MANIFEST: &str = r#"
+pub(crate) const MANIFEST: &str = r#"
 [company]
 name = "Acme"
 
@@ -178,11 +178,11 @@ mode = "full"
 allow = ["docs", "web", "code"]
 "#;
 
-fn manifest() -> CompanyManifest {
+pub(crate) fn manifest() -> CompanyManifest {
     toml::from_str(MANIFEST).expect("the fixture manifest parses")
 }
 
-fn record() -> CompanyRecord {
+pub(crate) fn record() -> CompanyRecord {
     CompanyRecord {
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
@@ -211,7 +211,7 @@ fn record() -> CompanyRecord {
 
 /// A hand-built evidence pack, so each verification arm can be exercised
 /// against an exactly-known inventory.
-fn evidence() -> Evidence {
+pub(crate) fn evidence() -> Evidence {
     let record = record();
     let allow = record.manifest.tools.allow.clone();
     let teammates = record
@@ -319,7 +319,7 @@ fn an_addressed_chat_cards_assignee_passes_the_gates_validity_check() {
     );
 }
 
-fn claim(kind: PrereqKind, name: &str) -> PrereqClaim {
+pub(crate) fn claim(kind: PrereqKind, name: &str) -> PrereqClaim {
     PrereqClaim {
         kind,
         name: name.to_string(),
@@ -328,7 +328,7 @@ fn claim(kind: PrereqKind, name: &str) -> PrereqClaim {
 }
 
 /// A well-formed model answer that needs nothing.
-const CLEAN_PLAN: &str = r#"```json
+pub(crate) const CLEAN_PLAN: &str = r#"```json
 {
   "description": "Write the changelog entry for the release.",
   "steps": [{"title": "Draft it", "detail": "Against the tagged version", "estimatedMinutes": 15}],
