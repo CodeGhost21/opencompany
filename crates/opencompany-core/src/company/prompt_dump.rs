@@ -230,6 +230,33 @@ fn dump_agent(manifest: &CompanyManifest, agent: &Agent, orchestrator: bool) -> 
         });
     }
 
+    // The roster and desks, rendered from a bare record over this manifest —
+    // operator-added teammates and desks live on the running company's record
+    // and are not in a bundle, which the origin line says.
+    let team = crate::company::team_brief::team_section(
+        &crate::ports::types::CompanyRecord::from_manifest(
+            crate::ports::types::CompanyId::new(manifest.company.name.trim()),
+            manifest.clone(),
+        ),
+        &agent.id,
+    );
+    if team.is_empty() {
+        deferred.push(Deferred {
+            title: "Your team".to_string(),
+            reason: "this agent is the only one on the roster, so there is nobody to list"
+                .to_string(),
+        });
+    } else {
+        sections.push(Section {
+            title: "Your team".to_string(),
+            origin: "`company::team_brief::team_section` over the manifest roster and desks — \
+                     teammates and desks an operator added from the console are on the running \
+                     company's record and appear only there"
+                .to_string(),
+            body: team,
+        });
+    }
+
     harness_sections(&grants, agent, orchestrator, &mut sections, &mut deferred);
 
     deferred.push(Deferred {
@@ -364,16 +391,14 @@ fn harness_sections(
             origin: "`harness::built_in::orchestrator::orchestrator_brief`".to_string(),
             body: crate::harness::built_in::orchestrator::orchestrator_brief(),
         });
-    } else if !agent.delegates_to.is_empty() {
+    } else {
         sections.push(Section {
-            title: "Delegation".to_string(),
-            origin: format!(
-                "`harness::built_in::orchestrator::member_delegation_brief`, narrowed to {:?}",
-                agent.delegates_to
-            ),
-            body: crate::harness::built_in::orchestrator::member_delegation_brief(
-                &agent.delegates_to,
-            ),
+            title: "Handing work on".to_string(),
+            origin: "`harness::built_in::orchestrator::member_delegation_brief` — every \
+                     non-orchestrator teammate carries the hand-off tools; the reach is stated \
+                     under Your team"
+                .to_string(),
+            body: crate::harness::built_in::orchestrator::member_delegation_brief(),
         });
     }
 

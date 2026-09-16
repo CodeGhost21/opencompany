@@ -4877,6 +4877,42 @@ impl TeammateResolution {
 }
 
 impl CompanyRecord {
+    /// A record holding `manifest` and nothing else: no overlays, no ledger,
+    /// `running`, with every operator-owned field at its empty value.
+    ///
+    /// For readers that have a manifest and need a record to ask questions of
+    /// — `opencompany prompt` rendering the team section from a bundle alone —
+    /// and for tests that want the manifest to be the only fact in play.
+    /// Everything a running company accumulates on top (overlay teammates,
+    /// desks, budgets, policy, setup) starts absent here, exactly as it does
+    /// for a company that has just been loaded from its bundle.
+    pub fn from_manifest(id: CompanyId, manifest: CompanyManifest) -> Self {
+        Self {
+            id,
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_desk_hive: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            overlay_tool_grants: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            activation_completed_at: None,
+            created_at_millis: None,
+            name_confirmed: false,
+        }
+    }
+
     /// The effective member ids of a desk: the desk's declared members first
     /// (from the manifest `[[group_chat]]` or, for an operator-created desk, the
     /// [`OverlayDesk`]), then any operator-overlay member additions for that

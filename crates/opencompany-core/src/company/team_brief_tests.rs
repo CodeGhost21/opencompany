@@ -2,30 +2,10 @@ use super::*;
 use crate::ports::types::CompanyId;
 
 fn record(manifest: &str) -> CompanyRecord {
-    CompanyRecord {
-        overlay_desk_hive: Vec::new(),
-        overlay_retired_agents: Vec::new(),
-        overlay_agent_edits: Vec::new(),
-        id: CompanyId::new("acme"),
-        manifest: toml::from_str(manifest).expect("valid manifest"),
-        ledger: Vec::new(),
-        lifecycle: "running".to_string(),
-        overlay_agents: Vec::new(),
-        overlay_desk_members: Vec::new(),
-        overlay_desk_order: Vec::new(),
-        overlay_desks: Vec::new(),
-        overlay_workflows: Vec::new(),
-        overlay_budgets: Vec::new(),
-        overlay_policy: None,
-        overlay_desk_tools: Default::default(),
-        disabled_workflows: Vec::new(),
-        template_provenance: None,
-        setup: None,
-        activation_completed_at: None,
-        created_at_millis: None,
-        name_confirmed: false,
-        overlay_tool_grants: Default::default(),
-    }
+    CompanyRecord::from_manifest(
+        CompanyId::new("acme"),
+        toml::from_str(manifest).expect("valid manifest"),
+    )
 }
 
 const TEAM: &str = r#"
