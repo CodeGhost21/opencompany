@@ -81,7 +81,13 @@ mod concurrency_tests;
 #[cfg(test)]
 mod deliberation_tests;
 #[cfg(test)]
-mod moves_tests;
+mod moves_fixtures_tests;
+#[cfg(test)]
+mod moves_grammar_tests;
+#[cfg(test)]
+mod moves_memory_tests;
+#[cfg(test)]
+mod moves_misc_tests;
 #[cfg(test)]
 mod referral_tests;
 #[cfg(test)]
