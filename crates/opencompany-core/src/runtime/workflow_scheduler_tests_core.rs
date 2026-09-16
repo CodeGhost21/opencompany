@@ -150,7 +150,7 @@ pub(super) struct RecordingRunner {
 }
 
 impl RecordingRunner {
-    fn new() -> (Arc<Self>, Arc<Mutex<Vec<Recorded>>>, Arc<AtomicUsize>) {
+    pub(super) fn new() -> (Arc<Self>, Arc<Mutex<Vec<Recorded>>>, Arc<AtomicUsize>) {
         let started = Arc::new(Mutex::new(Vec::new()));
         let completed = Arc::new(AtomicUsize::new(0));
         let runner = Arc::new(Self {
@@ -162,7 +162,7 @@ impl RecordingRunner {
         (runner, started, completed)
     }
 
-    fn gated(gate: Arc<Semaphore>) -> (Arc<Self>, Arc<Mutex<Vec<Recorded>>>, Arc<AtomicUsize>) {
+    pub(super) fn gated(gate: Arc<Semaphore>) -> (Arc<Self>, Arc<Mutex<Vec<Recorded>>>, Arc<AtomicUsize>) {
         let started = Arc::new(Mutex::new(Vec::new()));
         let completed = Arc::new(AtomicUsize::new(0));
         let runner = Arc::new(Self {
@@ -175,7 +175,7 @@ impl RecordingRunner {
     }
 
     /// A runner whose every run reports `deliveries` back.
-    fn with_deliveries(deliveries: Vec<DeliveryReport>) -> (Arc<Self>, Arc<AtomicUsize>) {
+    pub(super) fn with_deliveries(deliveries: Vec<DeliveryReport>) -> (Arc<Self>, Arc<AtomicUsize>) {
         let completed = Arc::new(AtomicUsize::new(0));
         let runner = Arc::new(Self {
             started: Arc::new(Mutex::new(Vec::new())),
