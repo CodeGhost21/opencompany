@@ -42,6 +42,90 @@ use serde_json::{Value, json};
 use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::ports::types::{CompanyRecord, TeammateResolution};
 
+/// TinyHiveMind's active roster snapshot for one routing/dispatch decision.
+pub fn tinyhivemind_roster(
+    record: &CompanyRecord,
+) -> Vec<tinyhivemind_core::roster::RosterMember> {
+    record
+        .effective_agents()
+        .into_iter()
+        .filter(|agent| !record.is_retired(&agent.id))
+        .map(|agent| tinyhivemind_core::roster::RosterMember {
+            id: agent.id,
+            name: agent.name,
+        })
+        .collect()
+}
+
+pub struct TinyHiveDeskSnapshots {
+    declared: Vec<tinyhivemind_core::desk::Desk>,
+    added: Vec<tinyhivemind_core::desk::Desk>,
+    member_additions: Vec<tinyhivemind_core::desk::DeskMember>,
+    orders: Vec<tinyhivemind_core::desk::DeskOrder>,
+    retired: Vec<String>,
+}
+
+impl TinyHiveDeskSnapshots {
+    pub fn set(&self) -> tinyhivemind_core::desk::DeskSet<'_> {
+        tinyhivemind_core::desk::DeskSet::new(
+            &self.declared,
+            &self.added,
+            &self.member_additions,
+            &self.orders,
+            &self.retired,
+        )
+    }
+}
+
+pub fn tinyhivemind_desks(record: &CompanyRecord) -> TinyHiveDeskSnapshots {
+    use tinyhivemind_core::desk::{Desk, DeskMember, DeskOrder, ResponderMode};
+    TinyHiveDeskSnapshots {
+        declared: record
+            .manifest
+            .group_chats
+            .iter()
+            .map(|chat| Desk {
+                id: chat.id.clone(),
+                name: chat.name.clone(),
+                description: chat.description.clone(),
+                members: chat.members.clone(),
+                responder_mode: ResponderMode::Lead,
+            })
+            .collect(),
+        added: record
+            .overlay_desks
+            .iter()
+            .map(|desk| Desk {
+                id: desk.id.clone(),
+                name: desk.name.clone(),
+                description: desk.description.clone(),
+                members: desk.members.clone(),
+                responder_mode: match desk.responder {
+                    crate::ports::types::ResponderMode::Lead => ResponderMode::Lead,
+                    crate::ports::types::ResponderMode::Auto => ResponderMode::Auto,
+                },
+            })
+            .collect(),
+        member_additions: record
+            .overlay_desk_members
+            .iter()
+            .map(|member| DeskMember {
+                desk_id: member.desk_id.clone(),
+                agent_id: member.agent_id.clone(),
+            })
+            .collect(),
+        orders: record
+            .overlay_desk_order
+            .iter()
+            .map(|order| DeskOrder {
+                desk_id: order.desk_id.clone(),
+                ordered: order.ordered.clone(),
+            })
+            .collect(),
+        retired: record.overlay_retired_agents.clone(),
+    }
+}
+
 /// The `spawn_task` tool name — open a tracked task card on the board.
 pub const SPAWN_TASK_TOOL: &str = "spawn_task";
 /// The `delegate_to_desk` tool name — hand work to a desk's lead member.
