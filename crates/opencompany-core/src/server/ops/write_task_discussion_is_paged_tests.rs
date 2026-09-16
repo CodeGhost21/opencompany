@@ -469,4 +469,3 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
 // (an operator decided, or the TTL swept it) — plus the negative case, which is
 // an acceptance criterion in its own right: a task that never waited must
 // report no waiting figure at all rather than a zero.
-

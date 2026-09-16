@@ -419,4 +419,3 @@ async fn inflight_read_is_not_shadowed_by_task_detail() {
         "GET /tasks/inflight must hit list_inflight, not task_detail: {body}"
     );
 }
-

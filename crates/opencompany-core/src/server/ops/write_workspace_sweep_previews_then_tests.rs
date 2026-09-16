@@ -487,4 +487,3 @@ async fn workspace_merge_folds_duplicate_folders_and_reports_the_file_collision(
     assert_eq!(status, StatusCode::OK);
     assert_eq!(scoped["wouldMerge"], json!([]));
 }
-
