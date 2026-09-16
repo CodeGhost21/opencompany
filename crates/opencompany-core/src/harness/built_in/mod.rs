@@ -573,7 +573,7 @@ pub struct HarnessDeps {
     /// no `web_search` tool is wired and agents behave exactly as before.
     ///
     /// The runtime builder supplies the deployment fallback from
-    /// [`search_backend_from_env`](crate::harness::provider::search_backend_from_env),
+    /// [`search_backend_handle_from_env`](crate::harness::provider::search_backend_handle_from_env),
     /// and [`HarnessPool::ensure`] attaches the company's `search/managed/key`
     /// as the request-time first tier. Searches authenticated by that key bill
     /// the company's TinyHumans account; the deployment fallback bills the

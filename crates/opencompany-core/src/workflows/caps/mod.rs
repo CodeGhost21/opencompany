@@ -273,6 +273,11 @@ pub async fn build_capabilities(
     // deployment credential so a company key added later inherits its shared
     // ledger. Resolve the effective credential before using presence as the
     // workflow-wiring verdict.
+    let search_daily_call_cap = record
+        .manifest
+        .tools
+        .search_daily_calls
+        .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS);
     let managed_search = match (&deps.search, &deps.secrets) {
         (Some(backend), Some(secrets)) => {
             let company_key =
@@ -280,10 +285,13 @@ pub async fn build_capabilities(
             (backend.credential.configured() || company_key.is_some()).then(|| {
                 backend
                     .clone()
+                    .with_daily_call_cap(search_daily_call_cap)
                     .with_company_credential(company.clone(), secrets.clone())
             })
         }
-        (Some(backend), None) if backend.credential.configured() => Some(backend.clone()),
+        (Some(backend), None) if backend.credential.configured() => {
+            Some(backend.clone().with_daily_call_cap(search_daily_call_cap))
+        }
         _ => None,
     };
     let mut wiring_deps = deps.clone();
