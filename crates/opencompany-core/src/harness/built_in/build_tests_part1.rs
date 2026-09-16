@@ -16,7 +16,7 @@ async fn memory_tools_are_wired_to_the_company_context_store() {
     let context: Arc<dyn ContextStore> =
         Arc::new(crate::store::FsContextStore::new(dir.path().to_path_buf()));
     let company = CompanyId::new("acme");
-    let tools = super::super::super::memory_tools::memory_tools(
+    let tools = crate::harness::built_in::memory_tools::memory_tools(
         context.clone(),
         company.clone(),
         "ceo".to_string(),
