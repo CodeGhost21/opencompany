@@ -43,37 +43,19 @@ async fn spawn_collector_with(
     refusal: axum::http::StatusCode,
 ) -> Collector {
     let hits = Arc::new(AtomicUsize::new(0));
-    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let headers = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen_hits = hits.clone();
-    let seen_bodies = bodies.clone();
-    let seen_headers = headers.clone();
 
     let app = axum::Router::new().route(
         "/track",
         axum::routing::post(
-            move |received: axum::http::HeaderMap,
-                  axum::Json(body): axum::Json<serde_json::Value>| {
+            move |_received: axum::http::HeaderMap,
+                  axum::Json(_body): axum::Json<serde_json::Value>| {
                 let hits = seen_hits.clone();
-                let bodies = seen_bodies.clone();
-                let headers = seen_headers.clone();
                 async move {
                     if !delay.is_zero() {
                         tokio::time::sleep(delay).await;
                     }
                     let seen = hits.fetch_add(1, Ordering::SeqCst);
-                    bodies.lock().unwrap().push(body);
-                    headers.lock().unwrap().push(
-                        received
-                            .iter()
-                            .map(|(name, value)| {
-                                (
-                                    name.as_str().to_string(),
-                                    value.to_str().unwrap_or_default().to_string(),
-                                )
-                            })
-                            .collect(),
-                    );
                     if seen < refuse_first {
                         refusal
                     } else {
@@ -97,8 +79,6 @@ async fn spawn_collector_with(
 
     Collector {
         hits,
-        bodies,
-        headers,
         url,
         shutdown,
         handle,
@@ -109,13 +89,6 @@ impl Collector {
     async fn stop(self) {
         let _ = self.shutdown.send(());
         let _ = self.handle.await;
-    }
-
-    fn header(&self, request: usize, name: &str) -> Option<String> {
-        self.headers.lock().unwrap()[request]
-            .iter()
-            .find(|(seen, _)| seen == name)
-            .map(|(_, value)| value.clone())
     }
 }
 
