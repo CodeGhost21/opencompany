@@ -13,6 +13,7 @@ use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::{TaskRecord, TaskTitle};
 use crate::ports::types::{CompanyId, CompanyRecord, CompressedTrace, ContextChunk};
 use crate::runtime::RuntimeBuilder;
+use super::tests_mcp_manifest::{mcp_manifest, state_with_manifest, state_with_manifest_and_defaults};
 use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
 use crate::store::FsCompanyStore;
