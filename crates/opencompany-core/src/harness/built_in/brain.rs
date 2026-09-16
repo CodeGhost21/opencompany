@@ -3580,6 +3580,20 @@ impl HarnessBrain {
             }
         }
     }
+
+    #[cfg(test)]
+    async fn auto_channel_responder(&self, chat: Option<&str>, text: &str) -> Option<String> {
+        let chat = chat?;
+        let record = self.record();
+        let desk = record.resolve_desk_id(chat)?;
+        if record.desk_responder_mode(&desk).is_lead() {
+            return None;
+        }
+        drop(record);
+        self.tinyhivemind_responder(Some(chat), text, &[])
+            .await
+            .map(|decision| decision.responder_id)
+    }
 }
 
 struct TinyHiveSelector<'a>(&'a crate::harness::selector::MeteredSelector);
@@ -3630,7 +3644,7 @@ fn tinyhivemind_mention(
     }
 }
 
-/// One channel member as [`HarnessBrain::auto_channel_responder`] hands it to
+/// One channel member as [`HarnessBrain::tinyhivemind_responder`] hands it to
 /// the selection: the manifest half through
 /// [`CompanyRecord::effective_agent`] (stored edits applied), the overlay half
 /// from its row with any stored edit's role/description preferred — the same
