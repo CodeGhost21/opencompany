@@ -8,7 +8,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-
 /// The wire shape the console binds to.
 ///
 /// `fold_asides` is worthless if the field reaches the browser under a

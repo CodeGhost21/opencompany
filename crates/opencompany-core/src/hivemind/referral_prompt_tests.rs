@@ -10,7 +10,6 @@
 
 use std::sync::Arc;
 
-
 use super::moves_fixtures_tests::Runner;
 use super::referral;
 use super::referral_fixtures_tests::*;

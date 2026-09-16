@@ -1,7 +1,6 @@
 use super::tests_owner_setup::{FailingUserStore, Harness, graph, reached_output, record};
 use super::*;
 
-
 use crate::ports::UserRecord;
 use crate::runtime::channel::OPERATOR_CHANNEL;
 

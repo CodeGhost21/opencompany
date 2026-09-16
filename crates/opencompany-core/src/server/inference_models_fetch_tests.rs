@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// A catalog read is refused at an address a model endpoint is never on.
 ///
 /// The connect-time probe is not the guard for this call. A provider row

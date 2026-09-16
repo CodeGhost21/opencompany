@@ -1,7 +1,7 @@
 use super::*;
+use crate::AppConfig;
 use crate::ports::types::EventSeq;
 use crate::server::router;
-use crate::AppConfig;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;

@@ -7,12 +7,12 @@ use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
 use crate::ports::types::ApprovalId;
+use crate::ports::types::CompanyRecord;
 use crate::ports::users::{UserRecord, UserRole, UserStatus};
 use crate::ports::{CompanyStore, SessionKind, SessionRecord};
 use crate::server::users::cookie::session_cookie_name;
 use crate::server::users::token::{OsTokens, mint_session_token, sha256_hex};
 use crate::store::FsCompanyStore;
-use crate::ports::types::CompanyRecord;
 
 use super::test_support::*;
 

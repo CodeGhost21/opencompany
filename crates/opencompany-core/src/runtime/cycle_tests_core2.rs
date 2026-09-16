@@ -8,8 +8,7 @@ pub(super) use crate::policy::ManifestApprovalGate;
 pub(super) use crate::ports::brain::Brain;
 pub(super) use crate::ports::types::SecretValue;
 pub(super) use crate::ports::types::{
-    CompressedTrace, CycleResult,
-    EffectGroup, EventSeq, TokenUsage,
+    CompressedTrace, CycleResult, EffectGroup, EventSeq, TokenUsage,
 };
 pub(super) use crate::runtime::RuntimeBuilder;
 pub(super) use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};

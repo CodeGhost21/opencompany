@@ -16,7 +16,6 @@
 //! test files that need it).
 #![cfg(test)]
 
-
 /// The listed rows this company itself has, with the global baseline
 /// filtered out. Every company lists the baseline graphs; these tests are
 /// about what this one created, deleted, or declared.

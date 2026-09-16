@@ -1,11 +1,8 @@
 use super::tests_owner_setup::{Harness, graph, graph_without_destination, reached_output, record};
 use super::*;
 
-
 use crate::company::parse_workflow;
-use crate::runtime::channel::{
-    DeskChannel, OPERATOR_CHANNEL,
-};
+use crate::runtime::channel::{DeskChannel, OPERATOR_CHANNEL};
 
 /// A channel the deployment never wired cannot be conjured by a graph. The
 /// failure names what IS wired, so the fix is obvious from the run result.

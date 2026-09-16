@@ -39,7 +39,6 @@
 
 use std::sync::Arc;
 
-
 use super::spend_halt_turn_test_fixtures::*;
 use crate::harness::brain::{iteration_cap_pause_notice, spend_halt_notice};
 use crate::harness::{HarnessBrain, HarnessPool};

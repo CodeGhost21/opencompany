@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// A stub whose every mandatory read fails, so the probe has something to
 /// find. `NullMemoryProvider` answers everything, which is the right
 /// subject for the empty-instance case and useless for the failure one.

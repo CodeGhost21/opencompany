@@ -1,6 +1,5 @@
 use super::tests_core::*;
 
-
 fn bundle(body: &str) -> tempfile::TempDir {
     let dir = tmp_home("opencompany-seed-cards-");
     std::fs::write(dir.path().join("tasks.toml"), body).expect("write tasks.toml");

@@ -7,9 +7,7 @@ use super::tests_redeem_replays_the_markers::FailingRedispatchBrain;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::CompanyStore;
-use crate::ports::types::{
-    CompanyId, CompanyRecord,
-};
+use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::runtime::grants::RedeemContext;
 use crate::server::router;

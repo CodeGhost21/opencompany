@@ -8,9 +8,7 @@ use crate::policy::ManifestApprovalGate;
 use crate::ports::UserRecord;
 use crate::ports::types::CompanyId;
 use crate::ports::types::SecretValue;
-use crate::runtime::channel::{
-    DurableOperatorChannel, OperatorChannel,
-};
+use crate::runtime::channel::{DurableOperatorChannel, OperatorChannel};
 use crate::server::ops::mailer::{MailSender, RecordingMailSender};
 use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
 use crate::store::{FsInboxStore, FsOps};

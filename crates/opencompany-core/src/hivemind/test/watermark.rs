@@ -1,6 +1,5 @@
 //! Tests for the episode watermark divider rendered into a transcript.
 
-
 use tinyhivemind_hive::{Sequence, SessionAuthor};
 
 use super::super::*;

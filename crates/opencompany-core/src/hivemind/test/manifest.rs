@@ -1,7 +1,5 @@
 //! Tests for the [`HiveConfig`] manifest knob.
 
-
-
 use super::super::*;
 use super::fixtures::*;
 

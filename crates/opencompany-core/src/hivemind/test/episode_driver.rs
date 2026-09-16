@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-
 use super::super::*;
 use super::fixtures::*;
 use super::log_adapter::seed_desk;

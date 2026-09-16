@@ -1,6 +1,6 @@
-use super::tests::{admin_actor, budget_manifest, company_record, fs_ports, tmp_root};
 #[cfg(feature = "export")]
 use super::tests::manifest;
+use super::tests::{admin_actor, budget_manifest, company_record, fs_ports, tmp_root};
 use super::*;
 use crate::ports::types::{Actor, ActorKind};
 #[cfg(feature = "export")]

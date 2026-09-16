@@ -9,9 +9,7 @@ use crate::AppConfig;
 use crate::company::CompanyManifest;
 use crate::economy::signer::LocalSigner;
 use crate::economy::{MockTinyplaceClient, TinyplaceEconomy};
-use crate::ports::types::{
-    CompanyId, CompressedTrace, CycleRequest, CycleResult, TokenUsage,
-};
+use crate::ports::types::{CompanyId, CompressedTrace, CycleRequest, CycleResult, TokenUsage};
 use crate::ports::{AgentEconomy, Brain, CompanyStore, CycleHost};
 use crate::runtime::RuntimeBuilder;
 use crate::store::FsCompanyStore;

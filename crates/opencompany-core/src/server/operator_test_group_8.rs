@@ -1,7 +1,7 @@
 use super::*;
-use crate::server::router;
 #[cfg(feature = "openhuman")]
 use crate::AppConfig;
+use crate::server::router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;

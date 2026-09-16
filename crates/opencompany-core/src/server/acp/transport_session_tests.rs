@@ -1,8 +1,6 @@
 use super::*;
 use serde_json::json;
 
-
-
 use super::test_support::*;
 
 /// A colon is legal in both halves of the owner key, so the join has to be

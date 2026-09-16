@@ -1,6 +1,5 @@
 use super::tests_core::*;
 
-
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| v.to_string()).collect()
 }

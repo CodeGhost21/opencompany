@@ -1,6 +1,6 @@
-use super::*;
 use super::tests_moves::agent_reply;
 use super::tests_reactions::{at, labels};
+use super::*;
 
 fn mention(target: MentionTarget, text: &str, offset: usize) -> Mention {
     Mention {

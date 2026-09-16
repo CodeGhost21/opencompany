@@ -1,7 +1,6 @@
 use super::tests_resolution::{overlay, overlay_resolver, parent_of, store_with};
 use super::*;
 
-
 // ---- Issue #617: gating child calls -----------------------------------
 
 /// A child graph whose one working node is a `tool_call` the policy parks.

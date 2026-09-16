@@ -1,7 +1,6 @@
 use super::*;
 use serde_json::json;
 
-
 use crate::ports::users::UserRole;
 use crate::server::graphql::auth::UserPrincipal;
 use crate::server::platform_auth::PlatformClaims;

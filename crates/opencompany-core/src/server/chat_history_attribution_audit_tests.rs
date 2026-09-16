@@ -5,8 +5,8 @@
 //! generalisation — the same writer bug on another channel produces a
 //! different wrong string and still has to be counted.
 
-use super::*;
 use super::tests_reactions::at;
+use super::*;
 
 fn reply(seq: u64, agent_id: &str) -> StoredEvent {
     at(

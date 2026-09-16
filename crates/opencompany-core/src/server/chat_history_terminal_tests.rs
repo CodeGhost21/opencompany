@@ -1,8 +1,7 @@
-use super::*;
 use super::tests_reactions::{at, labels};
+use super::*;
 use crate::ports::tasks::{
-    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING,
-    COLUMN_TODO,
+    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
 };
 
 /// A settled dispatch, as the harness journals it. `desk` is deliberately

@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-
 use super::memory::HiveMemory;
 use super::moves_fixtures_tests::*;
 use super::test::{MemoryLog, desk_of};

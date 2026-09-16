@@ -8,8 +8,6 @@
 //! desk, under an author that cannot be counted as a supporter, and only when
 //! the desk opted in, is entirely ours.
 
-
-
 use super::referral_fixtures_tests::*;
 use super::*;
 

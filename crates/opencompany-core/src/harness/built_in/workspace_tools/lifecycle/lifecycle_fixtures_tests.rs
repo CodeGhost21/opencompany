@@ -7,9 +7,7 @@ use crate::company::workspace_scaffold::{ensure_agent_folder, ensure_workspace_s
 use crate::harness::workspace_tools::tests::{TEST_AGENT, agent_origin, file, folder, ws};
 use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
 use crate::ports::types::CompanyId;
-use crate::ports::workspace::{
-    WorkspaceNode, WorkspaceStore,
-};
+use crate::ports::workspace::{WorkspaceNode, WorkspaceStore};
 use crate::store::FsOps;
 
 /// The revision [`file`] stamps, and therefore the CAS token every note in

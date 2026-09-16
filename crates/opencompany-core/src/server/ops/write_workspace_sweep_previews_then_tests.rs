@@ -6,8 +6,8 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::write_test_support::*;
-use crate::ports::types::CompanyId;
 use crate::AppState;
+use crate::ports::types::CompanyId;
 
 /// `POST …/workspace/sweep-empty-agent-folders` (issue #700): the operator's
 /// one-time tidy of the empty `agents/<id>/` folders a pre-#570 company still

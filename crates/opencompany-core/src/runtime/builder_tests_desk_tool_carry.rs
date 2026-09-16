@@ -1,6 +1,5 @@
 use super::tests_core::*;
 
-
 fn desk(id: &str, tools: &[&str]) -> GroupChat {
     GroupChat {
         id: id.to_string(),

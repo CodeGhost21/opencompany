@@ -2,7 +2,6 @@ use super::tests_capped_halt::record;
 use super::tests_dry_run::GatedJournalStore;
 use super::*;
 
-
 /// Deps whose `DeliveryParking` journals over a caller-supplied store,
 /// otherwise wired exactly like [`deps_with_parking`] — a real gate, a
 /// fresh [`BlockedNodeQueue`], no continuations/gates state this test
