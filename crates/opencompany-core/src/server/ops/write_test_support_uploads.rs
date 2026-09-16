@@ -12,7 +12,7 @@ use tower::ServiceExt;
 use crate::AppState;
 use crate::server::router;
 
-pub(super) async fn upload_file(
+pub(crate) async fn upload_file(
     state: &AppState,
     filename: &str,
     content_type: Option<&str>,
@@ -61,7 +61,7 @@ pub(super) async fn upload_file(
     (status, value)
 }
 
-pub(super) async fn blob_response(state: &AppState, id: &str) -> axum::response::Response {
+pub(crate) async fn blob_response(state: &AppState, id: &str) -> axum::response::Response {
     let request = Request::builder()
         .method("GET")
         .uri(format!("/api/v1/company/workspace/blob/{id}"))
@@ -71,7 +71,7 @@ pub(super) async fn blob_response(state: &AppState, id: &str) -> axum::response:
     router(state.clone()).oneshot(request).await.unwrap()
 }
 
-pub(super) fn assert_not_executable(response: &axum::response::Response, context: &str) {
+pub(crate) fn assert_not_executable(response: &axum::response::Response, context: &str) {
     let content_type = response.headers()["content-type"].to_str().unwrap();
     let disposition = response.headers()["content-disposition"].to_str().unwrap();
     let nosniff = response
@@ -102,9 +102,9 @@ pub(super) fn assert_not_executable(response: &axum::response::Response, context
     }
 }
 
-pub(super) const OVERSIZE_BOUNDARY: &str = "----opencompany647boundary";
+pub(crate) const OVERSIZE_BOUNDARY: &str = "----opencompany647boundary";
 
-pub(super) async fn post_upload(state: &AppState, body: Body) -> (StatusCode, Value) {
+pub(crate) async fn post_upload(state: &AppState, body: Body) -> (StatusCode, Value) {
     let request = Request::builder()
         .method("POST")
         .uri("/api/v1/company/workspace/upload")
@@ -122,7 +122,7 @@ pub(super) async fn post_upload(state: &AppState, body: Body) -> (StatusCode, Va
     (status, value)
 }
 
-pub(super) fn streamed_multipart(prefix: Vec<u8>, payload: usize, suffix: Vec<u8>) -> Body {
+pub(crate) fn streamed_multipart(prefix: Vec<u8>, payload: usize, suffix: Vec<u8>) -> Body {
     const FRAME: usize = 1024 * 1024;
     let prefix = std::sync::Arc::new(prefix);
     let suffix = std::sync::Arc::new(suffix);
@@ -150,7 +150,7 @@ pub(super) fn streamed_multipart(prefix: Vec<u8>, payload: usize, suffix: Vec<u8
     Body::from_stream(stream)
 }
 
-pub(super) fn file_part_prefix(filename: &str) -> Vec<u8> {
+pub(crate) fn file_part_prefix(filename: &str) -> Vec<u8> {
     format!(
         "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
          filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
@@ -158,13 +158,13 @@ pub(super) fn file_part_prefix(filename: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-pub(super) async fn tree_names(state: &AppState) -> Vec<String> {
+pub(crate) async fn tree_names(state: &AppState) -> Vec<String> {
     let (status, tree) = send(state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
     provisioned_names(&tree)
 }
 
-pub(super) fn text_file_part_prefix(filename: &str) -> Vec<u8> {
+pub(crate) fn text_file_part_prefix(filename: &str) -> Vec<u8> {
     format!(
         "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
          filename=\"{filename}\"\r\nContent-Type: text/csv\r\n\r\n"
@@ -172,7 +172,7 @@ pub(super) fn text_file_part_prefix(filename: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-pub(super) async fn detail_as(state: &AppState, id: &str, cookie: String) -> Value {
+pub(crate) async fn detail_as(state: &AppState, id: &str, cookie: String) -> Value {
     let request = Request::builder()
         .method("GET")
         .uri(format!("/api/v1/company/tasks/{id}"))
@@ -185,7 +185,7 @@ pub(super) async fn detail_as(state: &AppState, id: &str, cookie: String) -> Val
     serde_json::from_slice(&bytes).unwrap()
 }
 
-pub(super) async fn chat_upload(
+pub(crate) async fn chat_upload(
     state: &AppState,
     filename: &str,
     content_type: Option<&str>,

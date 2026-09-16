@@ -9,10 +9,10 @@ use crate::AppState;
 use crate::ports::types::CompanyId;
 use serde_json::Value;
 
-pub(super) struct FaultyArtifacts {
-    pub(super) listed: Vec<crate::ports::artifacts::ArtifactRecord>,
-    pub(super) list_fails: bool,
-    pub(super) upsert_fails: bool,
+pub(crate) struct FaultyArtifacts {
+    pub(crate) listed: Vec<crate::ports::artifacts::ArtifactRecord>,
+    pub(crate) list_fails: bool,
+    pub(crate) upsert_fails: bool,
 }
 
 #[async_trait::async_trait]
@@ -53,7 +53,7 @@ impl crate::ports::artifacts::ArtifactStore for FaultyArtifacts {
     }
 }
 
-pub(super) async fn state_with_faulty_artifacts(
+pub(crate) async fn state_with_faulty_artifacts(
     home: &std::path::Path,
     artifacts: FaultyArtifacts,
 ) -> (AppState, CompanyId) {
@@ -73,7 +73,7 @@ pub(super) async fn state_with_faulty_artifacts(
     (state, company)
 }
 
-pub(super) struct RecordingReads {
+pub(crate) struct RecordingReads {
     inner: std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>,
     read_bytes: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
