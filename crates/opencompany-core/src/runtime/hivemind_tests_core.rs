@@ -12,7 +12,7 @@ pub(super) use tinyhivemind::session::{
 /// would pass these tests too, and would hide a page-contract mistake that
 /// only a real tail read makes: this port is specified newest-first, so the
 /// double it is tested against has to be newest-first for real.
-pub(super) struct Journal(Vec<StoredEvent>);
+pub(super) struct Journal(pub(super) Vec<StoredEvent>);
 
 #[async_trait]
 impl EventLog for Journal {
