@@ -196,7 +196,6 @@ async fn park_node_blocker_stashed(
     id.to_string()
 }
 
-
 async fn answer(rt: &Arc<CompanyRuntime>, id: &str, intent: BlockerReplyIntent, text: &str) {
     let ids = vec![crate::ports::types::ApprovalId::from(id.to_string())];
     rt.apply_blocker_reply(&ids, intent, text, None)
