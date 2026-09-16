@@ -255,7 +255,7 @@ pub(super) struct CountingBrain {
 }
 
 impl CountingBrain {
-    fn calls(&self) -> usize {
+    pub(super) fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
