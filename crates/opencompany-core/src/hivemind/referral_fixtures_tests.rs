@@ -161,11 +161,11 @@ impl Room {
         }
     }
 
-    fn convened(&self) -> Vec<(String, String, String)> {
+    pub(super) fn convened(&self) -> Vec<(String, String, String)> {
         self.convened.lock().expect("poisoned").clone()
     }
 
-    fn fell_back(&self) -> Vec<(String, String, String)> {
+    pub(super) fn fell_back(&self) -> Vec<(String, String, String)> {
         self.fell_back.lock().expect("poisoned").clone()
     }
 }
