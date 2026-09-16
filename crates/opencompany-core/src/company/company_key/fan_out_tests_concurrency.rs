@@ -2,8 +2,8 @@
 //! report or note ever carries a key, and the account-key copy rules
 //! (split out of `fan_out_tests.rs`).
 
-use super::*;
 use super::fan_out_tests_support::*;
+use super::*;
 
 #[tokio::test]
 async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {

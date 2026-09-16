@@ -135,7 +135,12 @@ impl InferenceProber for FakeProber {
     }
 }
 
-pub(super) async fn raw_set(secrets: &dyn SecretStore, company: &CompanyId, key: &str, value: &str) {
+pub(super) async fn raw_set(
+    secrets: &dyn SecretStore,
+    company: &CompanyId,
+    key: &str,
+    value: &str,
+) {
     secrets
         .set(company, key, SecretValue(value.to_string()))
         .await
@@ -186,4 +191,3 @@ pub(super) fn full(provider: &str, model: &str) -> inference_store::DefaultChoic
         model: model.to_string(),
     })
 }
-

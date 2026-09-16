@@ -13,7 +13,7 @@ use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq, Stor
 use super::fixtures::*;
 
 
-pub(super) async fn seed_desk(log: &MemoryLog) -> EventSeq {
+pub(crate) async fn seed_desk(log: &MemoryLog) -> EventSeq {
     let company = MemoryLog::company();
     // Rows the desk must not see, interleaved so the adapter has to filter
     // rather than merely truncate.
