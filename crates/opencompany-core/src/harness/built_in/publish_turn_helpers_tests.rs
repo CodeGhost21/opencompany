@@ -45,10 +45,10 @@ use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
 /// The agent this fixture dispatches to. Its workspace is
 /// `{root}/acme/ceo/workspace`.
-const AGENT: &str = "ceo";
+pub(crate) const AGENT: &str = "ceo";
 
 /// A marker unique to the nudge instruction, used to count nudge turns.
-const NUDGE_MARKER: &str = "published none of them";
+pub(crate) const NUDGE_MARKER: &str = "published none of them";
 
 // ---------------------------------------------------------------------------
 // The scripted model
@@ -81,7 +81,7 @@ struct Script {
 }
 
 /// Serve the script on loopback and return its base URL plus the shared handle.
-async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
+pub(crate) async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
     let script = Arc::new(Script {
         turns: Mutex::new(turns),
         seen: Mutex::new(Vec::new()),
@@ -144,7 +144,7 @@ async fn spawn_script(turns: Vec<Turn>) -> (String, Arc<Script>) {
 
 /// One assistant message carrying a native `tool_calls` array — the shape the
 /// provider's `tool_calling: true` profile puts the turn loop on.
-fn tool_call_message(tool: &str, args: &Value) -> Value {
+pub(crate) fn tool_call_message(tool: &str, args: &Value) -> Value {
     json!({
         "role": "assistant",
         "content": null,
@@ -157,7 +157,7 @@ fn tool_call_message(tool: &str, args: &Value) -> Value {
 }
 
 /// Every tool name the scripted model was offered across the whole cycle.
-fn advertised_tools(script: &Script) -> Vec<String> {
+pub(crate) fn advertised_tools(script: &Script) -> Vec<String> {
     let mut names: Vec<String> = script
         .seen
         .lock()
@@ -188,7 +188,7 @@ fn advertised_tools(script: &Script) -> Vec<String> {
 /// "requests that mention the nudge" would count the nudge turn's own tool
 /// round trips and report two where one ran — the exact assertion these tests
 /// exist to get right.
-fn nudge_turns(script: &Script) -> usize {
+pub(crate) fn nudge_turns(script: &Script) -> usize {
     script
         .seen
         .lock()
@@ -210,7 +210,7 @@ fn nudge_turns(script: &Script) -> usize {
 }
 
 /// The nudge instruction the model was actually sent, if any.
-fn nudge_text(script: &Script) -> Option<String> {
+pub(crate) fn nudge_text(script: &Script) -> Option<String> {
     script
         .seen
         .lock()
@@ -254,7 +254,7 @@ impl CycleHost for NoopHost {
 
 /// A one-agent company. `grants` controls whether the file/publish surface is
 /// wired at all.
-fn manifest(grants: &str) -> CompanyManifest {
+pub(crate) fn manifest(grants: &str) -> CompanyManifest {
     toml::from_str(&format!(
         r#"
 [company]
@@ -279,7 +279,7 @@ tier = "orchestrator"
 
 /// Wire a real brain against the scripted endpoint, with task and artifact
 /// stores on disk.
-fn brain(base_url: String, grants: &str, dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+pub(crate) fn brain(base_url: String, grants: &str, dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
     brain_with(base_url, grants, dir, true)
 }
 
@@ -287,11 +287,11 @@ fn brain(base_url: String, grants: &str, dir: &std::path::Path) -> (HarnessBrain
 ///
 /// The fail-closed case: nothing can record a deliverable, so `build_agent`
 /// does not offer the tool and the brain never claims the publish queue.
-fn brain_without_artifacts(base_url: String, dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+pub(crate) fn brain_without_artifacts(base_url: String, dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
     brain_with(base_url, "\"*\"", dir, false)
 }
 
-fn brain_with(
+pub(crate) fn brain_with(
     base_url: String,
     grants: &str,
     dir: &std::path::Path,
@@ -394,7 +394,7 @@ fn brain_with(
 
 /// Mints the `Pending` attempt row the dispatch choke point would have minted,
 /// so a cycle can be dispatched under a real run id (issue #339).
-async fn mint_run(ops: &Arc<FsOps>, run_id: &str, task_id: &str) {
+pub(crate) async fn mint_run(ops: &Arc<FsOps>, run_id: &str, task_id: &str) {
     use crate::ports::RunStore;
     use crate::ports::runs::NewRun;
     RunStore::create_run(&**ops, &company(), NewRun::for_task(run_id, task_id, AGENT))
@@ -402,12 +402,12 @@ async fn mint_run(ops: &Arc<FsOps>, run_id: &str, task_id: &str) {
         .expect("mint the attempt row");
 }
 
-fn company() -> CompanyId {
+pub(crate) fn company() -> CompanyId {
     CompanyId::new("acme")
 }
 
 /// A dispatched card, already in the column dispatch happens from.
-fn card(id: &str) -> TaskRecord {
+pub(crate) fn card(id: &str) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
         title: TaskTitle::authored("Draft the launch spec"),
@@ -430,17 +430,17 @@ fn card(id: &str) -> TaskRecord {
     }
 }
 
-fn dispatch(task_id: &str) -> CycleRequest {
+pub(crate) fn dispatch(task_id: &str) -> CycleRequest {
     dispatch_run(task_id, None)
 }
 
 /// A dispatch under a named attempt (issue #339) — what a real choke point
 /// sends, and the only shape that can produce an output stamp.
-fn dispatch_as(task_id: &str, run_id: &str) -> CycleRequest {
+pub(crate) fn dispatch_as(task_id: &str, run_id: &str) -> CycleRequest {
     dispatch_run(task_id, Some(run_id))
 }
 
-fn dispatch_run(task_id: &str, run_id: Option<&str>) -> CycleRequest {
+pub(crate) fn dispatch_run(task_id: &str, run_id: Option<&str>) -> CycleRequest {
     CycleRequest {
         cycle_id: "cycle-1".to_string(),
         company_id: company(),
@@ -453,13 +453,13 @@ fn dispatch_run(task_id: &str, run_id: Option<&str>) -> CycleRequest {
     }
 }
 
-async fn artifacts_on(ops: &Arc<FsOps>, task_id: &str) -> Vec<ArtifactRecord> {
+pub(crate) async fn artifacts_on(ops: &Arc<FsOps>, task_id: &str) -> Vec<ArtifactRecord> {
     ArtifactStore::list(&**ops, &company(), Some(task_id))
         .await
         .expect("list")
 }
 
-async fn card_after(ops: &Arc<FsOps>, task_id: &str) -> TaskRecord {
+pub(crate) async fn card_after(ops: &Arc<FsOps>, task_id: &str) -> TaskRecord {
     TaskStore::list(&**ops, &company())
         .await
         .expect("list")
@@ -469,14 +469,14 @@ async fn card_after(ops: &Arc<FsOps>, task_id: &str) -> TaskRecord {
 }
 
 /// Write a file, then publish it — the shape most of these scripts start with.
-fn write(path: &'static str, content: &'static str) -> Turn {
+pub(crate) fn write(path: &'static str, content: &'static str) -> Turn {
     Turn::Call {
         tool: "file_write",
         args: json!({ "path": path, "content": content }),
     }
 }
 
-fn publish(path: &'static str) -> Turn {
+pub(crate) fn publish(path: &'static str) -> Turn {
     Turn::Call {
         tool: PUBLISH_ARTIFACT_TOOL,
         args: json!({ "path": path }),
