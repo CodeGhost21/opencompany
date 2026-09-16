@@ -33,7 +33,6 @@ use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::app::config::EnvSource;
 use crate::company::IMPLICIT_HARNESS_ID;
 use crate::company::Inference;
 use crate::company::inference::catalogue;
