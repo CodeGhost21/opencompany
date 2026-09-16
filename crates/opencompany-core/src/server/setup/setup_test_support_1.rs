@@ -174,8 +174,8 @@ pub(super) fn field<'a>(dto: &'a serde_json::Value, key: &str) -> &'a serde_json
 /// A rebuilder that fails for exactly the company ids named in `fails`, and
 /// otherwise behaves like the production one.
 pub(super) struct SelectiveRebuilder {
-    home: std::path::PathBuf,
-    fails: Vec<String>,
+    pub(super) home: std::path::PathBuf,
+    pub(super) fails: Vec<String>,
 }
 
 #[async_trait]
@@ -205,7 +205,7 @@ impl RuntimeRebuilder for SelectiveRebuilder {
 // ---------------------------------------------------------------------------
 // The roster proposal, before any company exists
 // ---------------------------------------------------------------------------
-async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+pub(super) async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
     let response = router(state)
         .oneshot(
             Request::builder()
@@ -227,7 +227,7 @@ async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, s
 
 /// The manifest as it was persisted. `CompanyRuntime` exposes no accessor, and
 /// the record is the thing a restart would read back anyway.
-async fn seeded_manifest(home: &std::path::Path, id: &str) -> CompanyManifest {
+pub(super) async fn seeded_manifest(home: &std::path::Path, id: &str) -> CompanyManifest {
     let store = crate::store::FsCompanyStore::new(home.to_path_buf());
     store
         .load(&CompanyId::new(id))
