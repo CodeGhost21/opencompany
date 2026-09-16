@@ -1034,6 +1034,8 @@ async fn get_billing(
             configured: false,
             summary: None,
             unavailable: None,
+            unavailable_reason: None,
+            unavailable_code: None,
         }));
     };
 
@@ -1043,7 +1045,9 @@ async fn get_billing(
         return Ok(Json(BillingDto {
             configured: true,
             summary: None,
-            unavailable: Some("this host is not part of a TinyHumans ecosystem".to_string()),
+            unavailable: Some("This host is not part of a TinyHumans ecosystem.".to_string()),
+            unavailable_reason: Some("noHub"),
+            unavailable_code: None,
         }));
     };
 
@@ -1052,17 +1056,67 @@ async fn get_billing(
             configured: true,
             summary: Some(summary),
             unavailable: None,
+            unavailable_reason: None,
+            unavailable_code: None,
         })),
         // A hub that will not answer is reported as "not known right now", not
         // as a zero balance. The two look identical on a card and mean opposite
         // things: one is "top up", the other is "try again".
-        Err(error) => Ok(Json(BillingDto {
-            configured: true,
-            summary: None,
-            unavailable: Some(error.to_string()),
-        })),
+        Err(error) => {
+            let (reason, sentence, code) = billing_unavailable(&error);
+            tracing::warn!(
+                company = %runtime.id(),
+                reason,
+                code = code.as_deref().unwrap_or("none"),
+                error = %error,
+                "company billing summary unavailable"
+            );
+            Ok(Json(BillingDto {
+                configured: true,
+                summary: None,
+                unavailable: Some(sentence),
+                unavailable_reason: Some(reason),
+                unavailable_code: code,
+            }))
+        }
     }
 }
+
+/// Classifies a failed billing read into what the console may say about it.
+///
+/// Three values out: the machine-readable `reason` the console switches on, a
+/// sentence **this host owns**, and the hub's stable failure token. The hub's
+/// own `message` is not among them and never reaches the wire: it is a response
+/// body written for whoever reads a log, it can carry anything, and a console
+/// has no way to turn it into something a person can act on.
+///
+/// Only a 401 earns `rejected`, which is the one reason that tells somebody
+/// their key is dead. A 403 is a key the hub recognises and will not let
+/// through this route, and telling its owner to replace it would send them to
+/// mint a second key with the same standing; it goes to `unreachable` with
+/// everything else that means "ask again later". An unrecognised code is
+/// `unknown` rather than the nearest guess: the reasons differ in what they
+/// tell a person to *do*, so guessing between them is worse than declining to.
+fn billing_unavailable(error: &OpenCompanyError) -> (&'static str, String, Option<String>) {
+    let OpenCompanyError::TinyHumans { code, .. } = error else {
+        return ("unknown", BILLING_UNKNOWN.to_string(), None);
+    };
+    let reason = match code.as_str() {
+        "http_401" => "rejected",
+        "unreachable" | "decode" => "unreachable",
+        other if other.starts_with("http_4") || other.starts_with("http_5") => "unreachable",
+        _ => "unknown",
+    };
+    let sentence = match reason {
+        "rejected" => "TinyHumans refused this company's key.",
+        "unreachable" => "TinyHumans could not be reached just now.",
+        _ => BILLING_UNKNOWN,
+    };
+    (reason, sentence.to_string(), Some(code.clone()))
+}
+
+/// What this host says when it cannot tell why the figures are missing.
+const BILLING_UNKNOWN: &str = "The balance could not be read just now.";
 
 /// The billing panel's whole state, including the two ways it can have no
 /// figures to show.
@@ -1074,7 +1128,16 @@ struct BillingDto {
     /// The account's standing, when the hub answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<crate::server::hub_identity::BillingSummary>,
-    /// Why there are no figures, when there are none and a credential exists.
+    /// Why there are no figures, in this host's own words.
     #[serde(skip_serializing_if = "Option::is_none")]
     unavailable: Option<String>,
+    /// Which kind of failure it was: `rejected`, `unreachable`, `noHub` or
+    /// `unknown`. The field a console switches on, so that what it draws does
+    /// not depend on parsing prose — see [`billing_unavailable`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<&'static str>,
+    /// The hub's stable failure token (`http_401`, `unreachable`, …), for a
+    /// report or a log line. Never its message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_code: Option<String>,
 }
