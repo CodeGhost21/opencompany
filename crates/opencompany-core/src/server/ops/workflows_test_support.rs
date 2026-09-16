@@ -84,22 +84,22 @@ pub(super) fn seed_demo() -> tempfile::TempDir {
 }
 
 pub(crate) mod hosted_mode {
-        use super::own_rows;
-        use axum::body::{Body, to_bytes};
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt;
+        pub(crate) use super::own_rows;
+        pub(crate) use axum::body::{Body, to_bytes};
+        pub(crate) use axum::http::{Request, StatusCode};
+        pub(crate) use tower::ServiceExt;
 
-        use super::super::{
+        pub(crate) use super::super::{
             CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
             WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
         };
-        use crate::company::CompanyManifest;
-        use crate::ports::CompanyStore;
-        use crate::ports::types::{CompanyId, CompanyRecord};
-        use crate::runtime::RuntimeBuilder;
-        use crate::server::router;
-        use crate::store::FsCompanyStore;
-        use crate::{AppConfig, AppState};
+        pub(crate) use crate::company::CompanyManifest;
+        pub(crate) use crate::ports::CompanyStore;
+        pub(crate) use crate::ports::types::{CompanyId, CompanyRecord};
+        pub(crate) use crate::runtime::RuntimeBuilder;
+        pub(crate) use crate::server::router;
+        pub(crate) use crate::store::FsCompanyStore;
+        pub(crate) use crate::{AppConfig, AppState};
 
 
         pub(crate) fn home() -> tempfile::TempDir {
@@ -1091,20 +1091,20 @@ pub(crate) mod hosted_mode {
 }
 
 pub(crate) mod running {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        pub(crate) use std::sync::Arc;
+        pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
 
-        use axum::body::{Body, to_bytes};
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt;
+        pub(crate) use axum::body::{Body, to_bytes};
+        pub(crate) use axum::http::{Request, StatusCode};
+        pub(crate) use tower::ServiceExt;
 
-        use crate::company::CompanyManifest;
-        use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq};
-        use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunContext, WorkflowRunner};
-        use crate::runtime::RuntimeBuilder;
-        use crate::server::router;
-        use crate::store::FsCompanyStore;
-        use crate::{AppConfig, AppState};
+        pub(crate) use crate::company::CompanyManifest;
+        pub(crate) use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq};
+        pub(crate) use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunContext, WorkflowRunner};
+        pub(crate) use crate::runtime::RuntimeBuilder;
+        pub(crate) use crate::server::router;
+        pub(crate) use crate::store::FsCompanyStore;
+        pub(crate) use crate::{AppConfig, AppState};
 
 
         /// A runner that parks until released, and settles as cancelled if the
