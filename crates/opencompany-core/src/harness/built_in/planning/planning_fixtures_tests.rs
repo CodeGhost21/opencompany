@@ -609,4 +609,3 @@ fn composio_distinguishes_no_credential_from_no_account() {
         "the operator needs to know which of the two things is missing: {note}"
     );
 }
-

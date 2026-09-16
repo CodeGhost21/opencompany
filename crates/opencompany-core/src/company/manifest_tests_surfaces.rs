@@ -394,10 +394,7 @@ fn signals_opportunity_studio_template_passes_lint() {
     // demonstrate a gate that works on its own path, not merely a plausible
     // effect-kind string.
     assert!(
-        crate::policy::always_approve::matches(
-            &manifest.policy.always_approve,
-            "publish_artifact"
-        ),
+        crate::policy::always_approve::matches(&manifest.policy.always_approve, "publish_artifact"),
         "the template's fence names no declared tool, so nothing in it can \
          park a harness tool call — the shape of issue #684"
     );

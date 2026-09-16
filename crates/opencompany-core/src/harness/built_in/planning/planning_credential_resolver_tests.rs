@@ -6,12 +6,12 @@ use tinyinference::model::{ChatModel, ModelResponse};
 use tinyinference::usage::Usage;
 use tinyinference::{Error as InferenceError, Result as TaResult};
 
+use super::planning_fixtures_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use tempfile;
-use super::planning_fixtures_tests::*;
 
 // ---------------------------------------------------------------------------
 // Issue #886: the evidence pack's Composio credential is the resolver's answer
@@ -405,4 +405,3 @@ async fn the_hosts_finding_leads_and_the_models_reason_follows() {
     assert!(note.starts_with("slack is not connected"), "{note}");
     assert!(note.contains("needed because: the announcement"), "{note}");
 }
-

@@ -6,12 +6,12 @@ use tinyinference::model::{ChatModel, ModelResponse};
 use tinyinference::usage::Usage;
 use tinyinference::{Error as InferenceError, Result as TaResult};
 
+use super::planning_fixtures_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use tempfile;
-use super::planning_fixtures_tests::*;
 
 // ---------------------------------------------------------------------------
 // Native-first routing: a built-in tool pre-empts a Composio prerequisite
@@ -746,4 +746,3 @@ allow = ["shell"]
          dispatch on a belt that will have the tool stripped"
     );
 }
-

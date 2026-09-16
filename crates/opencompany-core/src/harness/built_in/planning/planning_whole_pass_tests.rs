@@ -6,18 +6,20 @@ use tinyinference::model::{ChatModel, ModelResponse};
 use tinyinference::usage::Usage;
 use tinyinference::{Error as InferenceError, Result as TaResult};
 
+use super::planning_fixtures_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyId;
 use tempfile;
-use super::planning_fixtures_tests::*;
 
 // ---------------------------------------------------------------------------
 // The whole pass
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+pub(crate) async fn runtime_with(
+    model: Arc<ScriptedModel>,
+) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
     let home = tempfile::Builder::new()
         .prefix("opencompany-planning-")
         .tempdir()
@@ -555,4 +557,3 @@ async fn a_card_with_no_valid_assignee_cannot_dispatch() {
     );
     assert!(after.note.unwrap().contains("nobody on the roster"));
 }
-

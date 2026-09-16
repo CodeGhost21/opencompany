@@ -1459,11 +1459,11 @@ fn join_backticked(values: &[&str]) -> String {
 }
 
 #[cfg(test)]
-#[path = "manifest_tests_roster.rs"]
-mod tests_roster;
-#[cfg(test)]
 #[path = "manifest_tests_grants.rs"]
 mod tests_grants;
+#[cfg(test)]
+#[path = "manifest_tests_roster.rs"]
+mod tests_roster;
 #[cfg(test)]
 #[path = "manifest_tests_surfaces.rs"]
 mod tests_surfaces;

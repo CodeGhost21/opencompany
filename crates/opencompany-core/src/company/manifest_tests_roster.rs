@@ -257,9 +257,8 @@ fn a_malformed_bootstrap_wallet_is_rejected() {
 /// ever stored under that exact key.
 #[test]
 fn a_bootstrap_admin_that_is_not_an_email_address_is_rejected() {
-    let manifest = parse(
-        "[company]\nname = \"X\"\n[users]\nmode = \"email\"\nadmins = [\"Local:Owner\"]\n",
-    );
+    let manifest =
+        parse("[company]\nname = \"X\"\n[users]\nmode = \"email\"\nadmins = [\"Local:Owner\"]\n");
     let problems = manifest.validate();
     assert!(
         problems.iter().any(|p| p.contains("`[users].admins`")),
@@ -338,8 +337,7 @@ fn workflows_run_cap_of_zero_is_rejected() {
     assert!(
         problems
             .iter()
-            .any(|p| p.contains("`[workflows].max_in_flight_runs`")
-                && p.contains("at least 1")),
+            .any(|p| p.contains("`[workflows].max_in_flight_runs`") && p.contains("at least 1")),
         "{problems:?}"
     );
 }
@@ -373,8 +371,7 @@ fn rejects_unknown_plan_name_in_prosumer_language() {
 
 #[test]
 fn rejects_bad_plan_period() {
-    let manifest =
-        parse("[company]\nname = \"X\"\n[plan]\nname = \"free\"\nperiod = \"hourly\"\n");
+    let manifest = parse("[company]\nname = \"X\"\n[plan]\nname = \"free\"\nperiod = \"hourly\"\n");
     let problems = manifest.validate();
     assert!(
         problems

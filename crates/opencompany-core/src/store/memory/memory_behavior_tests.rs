@@ -1,3 +1,13 @@
+use std::sync::Arc;
+
+use tinymemory::mandatory::MemoryTraitProvider;
+use tinymemory::registry::DriverClass;
+use tinymemory_api::types::MemoryTaint;
+
+use super::tests::{FakeEngine, FlakyStore, a_fact, acme_id, engine, globex_id};
+use super::BoundMemory;
+use crate::ports::{CompressedTrace, ContextChunk, EvictionPolicy};
+
 #[tokio::test]
 async fn binding_runs_the_capability_audit() {
     let provider = FakeEngine::provider();
