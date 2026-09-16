@@ -107,7 +107,7 @@ fn aside_body_strips_every_addressee_and_leaves_other_text_alone() {
     assert_eq!(aside_body("plain prose"), "plain prose");
 }
 
-fn agent_reply(chat_id: &str) -> CompanyEvent {
+pub(super) fn agent_reply(chat_id: &str) -> CompanyEvent {
     CompanyEvent::AgentReply {
         audience: Vec::new(),
         mentions: Vec::new(),
