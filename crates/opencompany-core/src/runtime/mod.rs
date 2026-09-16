@@ -83,9 +83,8 @@ pub mod handover;
 /// The `tinyhivemind` session adapter: this company's journal read as the
 /// vendored library's [`SessionLog`](tinyhivemind::session::SessionLog) port,
 /// so a turn's transcript can be projected **attributed** rather than collapsed
-/// into the reader's own voice. Off by default and wired to nothing yet; see
-/// [`hivemind`].
-#[cfg(feature = "hivemind")]
+/// into the reader's own voice. This is part of the default message path; the
+/// legacy `hivemind` feature remains as a compatibility no-op.
 pub mod hivemind;
 pub mod journal;
 /// Issue #1845: [`LifecycleScheduler`] — the process-wide daily tick that
