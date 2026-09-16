@@ -2331,5 +2331,5 @@ pub(crate) mod workflow_build_fixtures_tests;
 pub(crate) mod workflow_build_shared_tests;
 
 #[cfg(test)]
-#[path = "workflow_build/workflow_build_test.rs"]
+#[path = "workflow_build/workflow_build_compat_tests.rs"]
 pub(crate) mod test;
