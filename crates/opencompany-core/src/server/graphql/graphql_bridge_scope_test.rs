@@ -20,7 +20,7 @@ async fn state_with_two_companies(home: &std::path::Path) -> AppState {
     let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
     for name in ["acme", "globex"] {
         let id = CompanyId::new(name);
-        let manifest = super::test::manifest();
+        let manifest = super::graphql_test_support_1::manifest();
         store
             .save(&CompanyRecord {
                 overlay_retired_agents: Vec::new(),
