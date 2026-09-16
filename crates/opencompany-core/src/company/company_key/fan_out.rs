@@ -535,7 +535,23 @@ pub async fn fan_out(
         .unwrap_or_default();
 
     // 1. Validate. Nothing is written yet.
-    let new = request.key.trim().to_string();
+    //
+    // `FanOutKey::Stored` is resolved here, under the lock, rather than by a
+    // caller reading `KEY_KEY` beforehand and handing in the snapshot: that
+    // snapshot could go stale between the caller's read and this lock being
+    // taken if a concurrent rotation or clear won the race, and `fan_out`
+    // would then write the stale value back as though it were the intended
+    // new one (Codex P1 review). Resolving it here means the value this
+    // function treats as "new" is always read at the one point nothing else
+    // can be changing it.
+    let new = match request.key {
+        FanOutKey::Explicit(key) => key.trim().to_string(),
+        FanOutKey::Stored => secrets
+            .get(company, KEY_KEY)
+            .await?
+            .map(|SecretValue(v)| v.trim().to_string())
+            .unwrap_or_default(),
+    };
     let clearing = new.is_empty();
     let model: Option<String> = match request.model.map(str::trim).filter(|m| !m.is_empty()) {
         Some(_) if clearing => {
