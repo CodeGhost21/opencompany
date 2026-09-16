@@ -1607,5 +1607,14 @@ pub trait TaskStore: Send + Sync {
 }
 
 #[cfg(test)]
-#[path = "tasks_tests.rs"]
-mod tests;
+#[path = "tasks_titling_tests.rs"]
+mod tests_titling;
+#[cfg(test)]
+#[path = "tasks_board_tests.rs"]
+mod tests_board;
+#[cfg(test)]
+#[path = "tasks_plan_tests.rs"]
+mod tests_plan;
+#[cfg(test)]
+#[path = "tasks_record_tests.rs"]
+mod tests_record;
