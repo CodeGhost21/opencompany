@@ -18,13 +18,13 @@ pub(super) use crate::store::FsOps;
 /// shared delegation queue, and whether an operator cancels it mid-flight.
 #[derive(Default)]
 pub(super) struct Turn {
-    reply: String,
-    queues: Vec<Delegation>,
-    cancel: bool,
+    pub(super) reply: String,
+    pub(super) queues: Vec<Delegation>,
+    pub(super) cancel: bool,
     /// Tool calls this turn tried to make and had parked for approval
     /// (issue #465), pushed onto the shared approval queue exactly as the
     /// real [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) does.
-    parks: Vec<String>,
+    pub(super) parks: Vec<String>,
     /// Board writes this turn attempts **through the real tool boundary**
     /// ([`DelegationQueue::push_within_cap`]) rather than through
     /// [`queues`](Self::queues), which is the test escape hatch and bypasses
@@ -33,32 +33,32 @@ pub(super) struct Turn {
     /// Issue #267 needs the boundary: the whole gate is that a `spawn_task`
     /// on a question turn is REFUSED in the model's own turn, and a fixture
     /// that pushed straight onto the queue could never observe the refusal.
-    tool_pushes: Vec<Delegation>,
+    pub(super) tool_pushes: Vec<Delegation>,
     /// Desks this turn named that the tool REFUSED (issue #272 for the
     /// delegator, #176 for a member), recorded the way
     /// `DelegateToDeskTool` records them so the drain can report the
     /// attempt. A refusal never becomes a `Delegation`, so this is the only
     /// way a fixture can stand in for one.
-    refuses: Vec<String>,
+    pub(super) refuses: Vec<String>,
     /// Workflows this turn authors inline with `create_workflow`, staged onto
     /// the shared [`WorkflowRefQueue`] *while the turn runs* — which is the
     /// only honest place for it (issue #678). A fixture that staged before
     /// the call would be wiped by the pre-turn clear, and one that staged
     /// after would skip the boundary the drain reads.
-    authors: Vec<TaskOutputWorkflow>,
+    pub(super) authors: Vec<TaskOutputWorkflow>,
     /// The in-turn spend halt this turn reports (issue #1032), standing in
     /// for the real [`SpendStopHook`](crate::harness::spend::SpendStopHook)
     /// firing. There is no way to arm the real hook here — these fixtures
     /// run no model — so this is how a test scripts "this teammate ran out
     /// of money mid-turn" and then asserts where that fact ends up.
-    spend_halt: Option<crate::harness::SpendHalt>,
+    pub(super) spend_halt: Option<crate::harness::SpendHalt>,
     /// The budget pause this turn reports (issue #1846), standing in for
     /// `classify_turn` recognising a budget-exhausted `Err` from a real
     /// model turn. There is no way to arm that classification here either
     /// — these fixtures run no model — so this is how a test scripts "this
     /// teammate's turn ran out of inference credits" and then asserts the
     /// pause survives the delegation folds, including the nested one.
-    budget_paused: Option<crate::harness::BudgetPause>,
+    pub(super) budget_paused: Option<crate::harness::BudgetPause>,
 }
 
 impl Turn {
