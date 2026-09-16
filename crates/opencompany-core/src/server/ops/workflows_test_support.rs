@@ -84,22 +84,22 @@ pub(super) fn seed_demo() -> tempfile::TempDir {
 }
 
 pub(crate) mod hosted_mode {
-        pub(crate) use super::own_rows;
-        pub(crate) use axum::body::{Body, to_bytes};
-        pub(crate) use axum::http::{Request, StatusCode};
-        pub(crate) use tower::ServiceExt;
+        use super::own_rows;
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
 
-        pub(crate) use super::super::{
+        use super::super::{
             CompanyEvent, DEFAULT_RUN_LIMIT, MAX_RUN_ARTIFACTS, WorkflowNodeStatus,
             WorkflowRunOutcome, WorkflowRunVerdict, select_run_page,
         };
-        pub(crate) use crate::company::CompanyManifest;
-        pub(crate) use crate::ports::CompanyStore;
-        pub(crate) use crate::ports::types::{CompanyId, CompanyRecord};
-        pub(crate) use crate::runtime::RuntimeBuilder;
-        pub(crate) use crate::server::router;
-        pub(crate) use crate::store::FsCompanyStore;
-        pub(crate) use crate::{AppConfig, AppState};
+        use crate::company::CompanyManifest;
+        use crate::ports::CompanyStore;
+        use crate::ports::types::{CompanyId, CompanyRecord};
+        use crate::runtime::RuntimeBuilder;
+        use crate::server::router;
+        use crate::store::FsCompanyStore;
+        use crate::{AppConfig, AppState};
 
 
         pub(crate) fn home() -> tempfile::TempDir {
@@ -857,8 +857,8 @@ pub(crate) mod hosted_mode {
         /// tail — sees the finish, which is exactly what lets the read tell the
         /// two apart.
         pub(crate) struct FinishesDuringTheRead {
-            pub(crate) inner: std::sync::Arc<dyn crate::ports::EventLog>,
-                        pub(crate) finish: std::sync::Mutex<Option<(CompanyId, CompanyEvent)>>,
+            inner: std::sync::Arc<dyn crate::ports::EventLog>,
+            finish: std::sync::Mutex<Option<(CompanyId, CompanyEvent)>>,
         }
 
 
@@ -968,6 +968,14 @@ pub(crate) mod hosted_mode {
         /// 30 but carries a wall-clock time older than both 30 and 20. Every
         /// other row is well-behaved.
         pub(crate) const REGRESSED: [(u64, u64); 5] = [
+            (10, 1_000),
+            (20, 2_000),
+            (30, 3_000),
+            // NTP correction / VM resume / an operator setting the date: the
+            // append order is unchanged, the timestamp goes backwards.
+            (40, 1_500),
+            (50, 5_000),
+        ];
 
 
         // -------------------------------------------------------------------
@@ -1091,20 +1099,20 @@ pub(crate) mod hosted_mode {
 }
 
 pub(crate) mod running {
-        pub(crate) use std::sync::Arc;
-        pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
-        pub(crate) use axum::body::{Body, to_bytes};
-        pub(crate) use axum::http::{Request, StatusCode};
-        pub(crate) use tower::ServiceExt;
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
 
-        pub(crate) use crate::company::CompanyManifest;
-        pub(crate) use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq};
-        pub(crate) use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunContext, WorkflowRunner};
-        pub(crate) use crate::runtime::RuntimeBuilder;
-        pub(crate) use crate::server::router;
-        pub(crate) use crate::store::FsCompanyStore;
-        pub(crate) use crate::{AppConfig, AppState};
+        use crate::company::CompanyManifest;
+        use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, EventSeq};
+        use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunContext, WorkflowRunner};
+        use crate::runtime::RuntimeBuilder;
+        use crate::server::router;
+        use crate::store::FsCompanyStore;
+        use crate::{AppConfig, AppState};
 
 
         /// A runner that parks until released, and settles as cancelled if the
@@ -1117,12 +1125,12 @@ pub(crate) mod running {
         /// the engine (the engine's own cancel behaviour is pinned in
         /// `workflows::runner`).
         pub(crate) struct StalledRunner {
-            pub(crate) entered: Arc<tokio::sync::Notify>,
-                        pub(crate) release: Arc<tokio::sync::Notify>,
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
             /// Set only if the run was allowed to finish on its own terms —
             /// which is how a test tells "the run completed" from "the run was
             /// dropped with the connection".
-                        pub(crate) completed: Arc<AtomicBool>,
+            completed: Arc<AtomicBool>,
         }
 
 
@@ -1175,11 +1183,11 @@ pub(crate) mod running {
 
 
         pub(crate) struct Stalled {
-            pub(crate) app: axum::Router,
-                        pub(crate) runtime: Arc<crate::company::runtime::CompanyRuntime>,
-                        pub(crate) entered: Arc<tokio::sync::Notify>,
-                        pub(crate) release: Arc<tokio::sync::Notify>,
-                        pub(crate) completed: Arc<AtomicBool>,
+            app: axum::Router,
+            runtime: Arc<crate::company::runtime::CompanyRuntime>,
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+            completed: Arc<AtomicBool>,
         }
 
 
