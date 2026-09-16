@@ -1,5 +1,10 @@
 use super::*;
 
+// Used by the resolver tests below; the module body itself resolves its
+// credential through `company::composio::resolve_credential`.
+use crate::company::company_key;
+use crate::ports::types::SecretValue;
+
 // The three helper tests below follow their subjects behind the `composio`
 // feature: `toolkit_allowed` / `slug_toolkit` do not exist in an
 // `openhuman`-without-`composio` build.
@@ -91,9 +96,10 @@ async fn resolve_prefers_the_stored_token_then_the_token_source_then_fails_close
     );
 
     // Nothing stored, but this instance has an identity → it is used.
-    let attested = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-        .await
-        .expect("the platform identity resolves");
+    let attested =
+        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+            .await
+            .expect("the platform identity resolves");
     assert_eq!(
         token_of(&attested).await.as_deref(),
         Some("platform-identity")
@@ -104,9 +110,10 @@ async fn resolve_prefers_the_stored_token_then_the_token_source_then_fails_close
         .set(&company, TINYHUMANS_KEY_KEY, SecretValue("   ".to_string()))
         .await
         .unwrap();
-    let attested = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-        .await
-        .expect("the platform identity resolves");
+    let attested =
+        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+            .await
+            .expect("the platform identity resolves");
     assert_eq!(
         token_of(&attested).await.as_deref(),
         Some("platform-identity")
@@ -192,9 +199,10 @@ async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instan
 
     // And it outranks the instance's identity: the company acts as itself,
     // not as the pod it happens to run in.
-    let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-        .await
-        .expect("resolves");
+    let resolved =
+        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+            .await
+            .expect("resolves");
     assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
 
     // A pasted Composio token still outranks it — the BYO hatch survives.
@@ -206,9 +214,10 @@ async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instan
         )
         .await
         .unwrap();
-    let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-        .await
-        .expect("resolves");
+    let resolved =
+        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+            .await
+            .expect("resolves");
     assert_eq!(token_of(&resolved).await.as_deref(), Some("byo-composio"));
     assert_eq!(resolved.credential().source(), CredentialSource::Static);
 
@@ -230,9 +239,10 @@ async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instan
         )
         .await
         .unwrap();
-    let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-        .await
-        .expect("resolves");
+    let resolved =
+        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+            .await
+            .expect("resolves");
     assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
     assert_eq!(resolved.credential().source(), CredentialSource::Company);
 
@@ -240,9 +250,10 @@ async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instan
     company_key::store_key(&company, &secrets, "")
         .await
         .unwrap();
-    let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
-        .await
-        .expect("resolves");
+    let resolved =
+        TenantComposio::resolve(&company, &secrets, Vec::new(), None, Some(source()))
+            .await
+            .expect("resolves");
     assert_eq!(
         token_of(&resolved).await.as_deref(),
         Some("platform-identity")
@@ -436,6 +447,19 @@ async fn rotating_the_company_key_moves_the_composio_fingerprint() {
     );
 }
 
+/// The bearer a config would present right now.
+async fn token_of(config: &TenantComposio) -> Option<String> {
+    config.current_token().await.expect("resolves")
+}
+
+fn config_with(credential: Credential) -> Option<TenantComposio> {
+    Some(TenantComposio::new(
+        "https://api.tinyhumans.ai",
+        credential,
+        vec!["gmail".to_string()],
+    ))
+}
+
 /// The rotation contract: a projected platform token whose bytes change every
 /// few minutes must NOT move the roster fingerprint, or every agent's tool
 /// roster is rebuilt on the cluster's rotation schedule. A tier change or a
@@ -618,5 +642,113 @@ fn a_byok_credential_cannot_be_built_onto_the_managed_route() {
         config.endpoint(),
         DIRECT_BASE_URL,
         "the key must be presented to Composio, never to the managed backend"
+    );
+}
+
+/// A BYOK company still resolves the managed chain — not to act through, but
+/// to ask OpenHuman which providers to offer. The two credentials are kept
+/// apart: the Composio key is what calls present, the managed bearer is only
+/// ever the curated list's.
+#[tokio::test]
+async fn byok_keeps_the_managed_credential_for_the_curated_catalog_only() {
+    use crate::company::company_key;
+    use crate::company::composio::store_api_key;
+    use crate::store::FsSecretStore;
+
+    let dir = tempfile::Builder::new()
+        .prefix("oc-composio-catalog-")
+        .tempdir()
+        .expect("tempdir");
+    let secrets = FsSecretStore::new(dir.path());
+    let company = CompanyId::new("acme");
+
+    company_key::store_key(&company, &secrets, "th_company")
+        .await
+        .unwrap();
+    store_api_key(&company, &secrets, "ak_live").await.unwrap();
+
+    let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
+        .await
+        .expect("a BYOK company has a config");
+
+    assert_eq!(config.mode(), ComposioMode::Byok);
+    assert_eq!(
+        config.current_token().await.unwrap().as_deref(),
+        Some("ak_live"),
+        "calls present the company's own Composio key"
+    );
+    assert_eq!(
+        config.catalog_token().await.unwrap().as_deref(),
+        Some("th_company"),
+        "the curated list is fetched with the managed credential, not the Composio key"
+    );
+}
+
+/// With no managed tier at all — a standalone host carrying no TinyHumans
+/// identity — there is no curated list to fetch, and the config says so
+/// rather than presenting the Composio key to the OpenHuman backend.
+#[tokio::test]
+async fn byok_without_a_managed_tier_has_no_curated_catalog_credential() {
+    use crate::company::composio::store_api_key;
+    use crate::store::FsSecretStore;
+
+    let dir = tempfile::Builder::new()
+        .prefix("oc-composio-standalone-")
+        .tempdir()
+        .expect("tempdir");
+    let secrets = FsSecretStore::new(dir.path());
+    let company = CompanyId::new("acme");
+    store_api_key(&company, &secrets, "ak_live").await.unwrap();
+
+    let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
+        .await
+        .expect("a BYOK company has a config");
+    assert_eq!(
+        config.current_token().await.unwrap().as_deref(),
+        Some("ak_live")
+    );
+    assert!(
+        config.catalog_token().await.unwrap().is_none(),
+        "no managed tier means no curated list — never the Composio key standing in for one"
+    );
+}
+
+/// The roster path honours the stored route: a company that brought its own
+/// Composio account resolves to a BYOK config carrying that key, and one
+/// that selected BYOK without storing a key resolves to **no tools** rather
+/// than to the platform identity standing in for it.
+#[tokio::test]
+async fn resolve_follows_the_stored_route() {
+    use crate::company::composio::{BYOK_MODE, MODE_KEY, store_api_key};
+    use crate::store::FsSecretStore;
+
+    let dir = tempfile::Builder::new()
+        .prefix("oc-composio-byok-")
+        .tempdir()
+        .expect("tempdir");
+    let secrets = FsSecretStore::new(dir.path());
+    let company = CompanyId::new("acme");
+    store_api_key(&company, &secrets, "ak_live").await.unwrap();
+
+    let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
+        .await
+        .expect("a BYOK company has a config");
+    assert_eq!(config.mode(), ComposioMode::Byok);
+    assert_eq!(
+        config.current_token().await.unwrap().as_deref(),
+        Some("ak_live")
+    );
+
+    // BYOK selected with nothing stored: fail closed.
+    let bare = CompanyId::new("bare");
+    secrets
+        .set(&bare, MODE_KEY, SecretValue(BYOK_MODE.into()))
+        .await
+        .unwrap();
+    assert!(
+        TenantComposio::resolve(&bare, &secrets, vec![], None, None)
+            .await
+            .is_none(),
+        "an operator who asked for their own account must never silently get the platform's"
     );
 }

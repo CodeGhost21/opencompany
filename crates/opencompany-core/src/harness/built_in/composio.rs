@@ -2815,6 +2815,25 @@ mod live {
     }
 }
 
+
+/// The console-facing ops helpers ([`authorize_connect_url`],
+/// [`list_connection_states`]) over a mock Composio backend: proves the connect
+/// URL is surfaced, the allowlist is enforced before any network call, and
+/// connection rows aggregate to per-toolkit `connected` state filtered to the
+/// tenant grant.
+
+/// The mandatory tenant-isolation test (issue #110): two per-tenant configs (A
+/// and B) over a mock backend that records the `Authorization` header of each
+/// request and answers with tenant-specific data. Proves the ONLY isolation
+/// lever — which token the client is constructed with — actually holds: A's
+/// request carries token A (never B), and A's result carries only A's account.
+
 #[cfg(test)]
-#[path = "composio_tests.rs"]
+#[path = "composio_tests_full.rs"]
 mod tests;
+#[cfg(all(test, feature = "composio"))]
+#[path = "composio_ops_helper_tests_full.rs"]
+mod ops_helper_tests;
+#[cfg(all(test, feature = "composio"))]
+#[path = "composio_isolation_tests_full.rs"]
+mod isolation_tests;

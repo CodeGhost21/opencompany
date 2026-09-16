@@ -1,122 +1,129 @@
 use super::*;
 
-/// A BYOK company still resolves the managed chain — not to act through, but
-/// to ask OpenHuman which providers to offer. The two credentials are kept
-/// apart: the Composio key is what calls present, the managed bearer is only
-/// ever the curated list's.
-#[tokio::test]
-async fn byok_keeps_the_managed_credential_for_the_curated_catalog_only() {
-    use crate::company::company_key;
-    use crate::company::composio::store_api_key;
-    use crate::store::FsSecretStore;
+use std::net::SocketAddr;
 
-    let dir = tempfile::Builder::new()
-        .prefix("oc-composio-catalog-")
-        .tempdir()
-        .expect("tempdir");
-    let secrets = FsSecretStore::new(dir.path());
-    let company = CompanyId::new("acme");
+use crate::company::composio::CatalogEntry;
 
-    company_key::store_key(&company, &secrets, "th_company")
+use axum::Router;
+use axum::routing::{get, post};
+use serde_json::{Value, json};
+
+/// Mock `POST /agent-integrations/composio/authorize` — returns a hosted
+/// connect URL inside the backend's `{success,data}` envelope.
+async fn authorize_handler() -> axum::Json<Value> {
+    axum::Json(json!({
+        "success": true,
+        "data": { "connectUrl": "https://connect.composio.dev/abc", "connectionId": "conn-xyz" }
+    }))
+}
+
+/// Mock `GET /agent-integrations/composio/connections` — gmail has one
+/// active + one pending row (→ connected), slack only pending (→ not
+/// connected), notion active (filtered out unless allowlisted).
+///
+/// The identity fields exercise each arm of the account-label precedence
+/// (issue #404): `c1` publishes an email, `c2` only a blank one plus a
+/// workspace, `c3` only a username, `c4` nothing at all.
+async fn connections_handler() -> axum::Json<Value> {
+    axum::Json(json!({
+        "success": true,
+        "data": { "connections": [
+            {
+                "id": "c1", "toolkit": "gmail", "status": "ACTIVE",
+                "createdAt": "2026-08-01T10:00:00Z",
+                "accountEmail": " ops@acme.test ",
+                "username": "ignored-when-an-email-is-present"
+            },
+            {
+                "id": "c2", "toolkit": "gmail", "status": "INITIATED",
+                "accountEmail": "   ",
+                "workspace": "Acme Workspace"
+            },
+            { "id": "c3", "toolkit": "slack", "status": "INITIATED", "username": "acme-bot" },
+            { "id": "c4", "toolkit": "notion", "status": "ACTIVE" }
+        ] }
+    }))
+}
+
+/// Mock `GET /agent-integrations/composio/toolkits` — the dynamic catalog
+/// shape (backend #1012): a `toolkits` allowlist plus a `catalog[]` whose
+/// entries carry an `enabled` gate. `zendesk` is present but not connectable
+/// and must not be advertised; the casing and whitespace on `HubSpot` must
+/// normalise.
+///
+/// Entries carry the display metadata (`logo`, `description`, `categories`)
+/// the backend actually publishes — issue #600 is that all of it was dropped
+/// on the way through, so a mock that omitted it could not have caught the
+/// bug.
+async fn toolkits_handler() -> axum::Json<Value> {
+    axum::Json(json!({
+        "success": true,
+        "data": {
+            "toolkits": ["gmail", "slack"],
+            "catalog": [
+                {
+                    "slug": " HubSpot ",
+                    "name": "HubSpot",
+                    "enabled": true,
+                    "logo": " https://logos.composio.dev/api/hubspot ",
+                    "description": "  CRM and marketing automation.  ",
+                    "categories": ["crm", " marketing ", ""]
+                },
+                {
+                    "slug": "gmail",
+                    "name": "Gmail",
+                    "enabled": true,
+                    "description": "Send and read email.",
+                    "categories": ["email"]
+                },
+                { "slug": "zendesk", "name": "Zendesk", "enabled": false },
+                { "slug": "gmail", "name": "Gmail (dup)", "enabled": true }
+            ]
+        }
+    }))
+}
+
+/// Mock toolkits route for a backend predating the dynamic catalog: the
+/// plain slug allowlist and no `catalog[]` at all.
+async fn legacy_toolkits_handler() -> axum::Json<Value> {
+    axum::Json(json!({
+        "success": true,
+        "data": { "toolkits": ["Notion", "gmail", ""] }
+    }))
+}
+
+async fn spawn_backend() -> String {
+    spawn_backend_with(get(toolkits_handler)).await
+}
+
+async fn spawn_backend_with(toolkits: axum::routing::MethodRouter) -> String {
+    let app = Router::new()
+        .route(
+            "/agent-integrations/composio/authorize",
+            post(authorize_handler),
+        )
+        .route(
+            "/agent-integrations/composio/connections",
+            get(connections_handler),
+        )
+        .route("/agent-integrations/composio/toolkits", toolkits);
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
-    store_api_key(&company, &secrets, "ak_live").await.unwrap();
-
-    let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
-        .await
-        .expect("a BYOK company has a config");
-
-    assert_eq!(config.mode(), ComposioMode::Byok);
-    assert_eq!(
-        config.current_token().await.unwrap().as_deref(),
-        Some("ak_live"),
-        "calls present the company's own Composio key"
-    );
-    assert_eq!(
-        config.catalog_token().await.unwrap().as_deref(),
-        Some("th_company"),
-        "the curated list is fetched with the managed credential, not the Composio key"
-    );
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
 }
 
-/// With no managed tier at all — a standalone host carrying no TinyHumans
-/// identity — there is no curated list to fetch, and the config says so
-/// rather than presenting the Composio key to the OpenHuman backend.
-#[tokio::test]
-async fn byok_without_a_managed_tier_has_no_curated_catalog_credential() {
-    use crate::company::composio::store_api_key;
-    use crate::store::FsSecretStore;
-
-    let dir = tempfile::Builder::new()
-        .prefix("oc-composio-standalone-")
-        .tempdir()
-        .expect("tempdir");
-    let secrets = FsSecretStore::new(dir.path());
-    let company = CompanyId::new("acme");
-    store_api_key(&company, &secrets, "ak_live").await.unwrap();
-
-    let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
-        .await
-        .expect("a BYOK company has a config");
-    assert_eq!(
-        config.current_token().await.unwrap().as_deref(),
-        Some("ak_live")
-    );
-    assert!(
-        config.catalog_token().await.unwrap().is_none(),
-        "no managed tier means no curated list — never the Composio key standing in for one"
-    );
+fn config(url: &str, toolkits: Vec<String>) -> TenantComposio {
+    TenantComposio::new(
+        url.to_string(),
+        Credential::from_value("tenant-token"),
+        toolkits,
+    )
 }
-
-/// The roster path honours the stored route: a company that brought its own
-/// Composio account resolves to a BYOK config carrying that key, and one
-/// that selected BYOK without storing a key resolves to **no tools** rather
-/// than to the platform identity standing in for it.
-#[tokio::test]
-async fn resolve_follows_the_stored_route() {
-    use crate::company::composio::{BYOK_MODE, MODE_KEY, store_api_key};
-    use crate::store::FsSecretStore;
-
-    let dir = tempfile::Builder::new()
-        .prefix("oc-composio-byok-")
-        .tempdir()
-        .expect("tempdir");
-    let secrets = FsSecretStore::new(dir.path());
-    let company = CompanyId::new("acme");
-    store_api_key(&company, &secrets, "ak_live").await.unwrap();
-
-    let config = TenantComposio::resolve(&company, &secrets, vec![], None, None)
-        .await
-        .expect("a BYOK company has a config");
-    assert_eq!(config.mode(), ComposioMode::Byok);
-    assert_eq!(
-        config.current_token().await.unwrap().as_deref(),
-        Some("ak_live")
-    );
-
-    // BYOK selected with nothing stored: fail closed.
-    let bare = CompanyId::new("bare");
-    secrets
-        .set(&bare, MODE_KEY, SecretValue(BYOK_MODE.into()))
-        .await
-        .unwrap();
-    assert!(
-        TenantComposio::resolve(&bare, &secrets, vec![], None, None)
-            .await
-            .is_none(),
-        "an operator who asked for their own account must never silently get the platform's"
-    );
-}
-}
-
-/// The console-facing ops helpers ([`authorize_connect_url`],
-/// [`list_connection_states`]) over a mock Composio backend: proves the connect
-/// URL is surfaced, the allowlist is enforced before any network call, and
-/// connection rows aggregate to per-toolkit `connected` state filtered to the
-/// tenant grant.
-#[cfg(all(test, feature = "composio"))]
-mod ops_helper_tests {
-use super::*;
 
 #[tokio::test]
 async fn authorize_returns_hosted_connect_url() {
@@ -467,173 +474,3 @@ async fn list_connection_states_empty_allowlist_admits_every_toolkit() {
         ]
     );
 }
-}
-
-/// The mandatory tenant-isolation test (issue #110): two per-tenant configs (A
-/// and B) over a mock backend that records the `Authorization` header of each
-/// request and answers with tenant-specific data. Proves the ONLY isolation
-/// lever — which token the client is constructed with — actually holds: A's
-/// request carries token A (never B), and A's result carries only A's account.
-#[cfg(all(test, feature = "composio"))]
-mod isolation_tests {
-use super::*;
-
-#[tokio::test]
-async fn each_tenant_only_ever_carries_its_own_token_and_sees_its_own_accounts() {
-    let (url, log) = spawn_backend().await;
-
-    let tool_a = list_connections_tool(&config(&url, "token-a"));
-    let tool_b = list_connections_tool(&config(&url, "token-b"));
-
-    let out_a = tool_a.execute(json!({})).await.unwrap();
-    let text_a = out_a.output();
-    let out_b = tool_b.execute(json!({})).await.unwrap();
-    let text_b = out_b.output();
-
-    // A saw only A's account; never B's account nor B's token.
-    assert!(
-        text_a.contains("a@example.com"),
-        "A missing its account: {text_a}"
-    );
-    assert!(
-        !text_a.contains("b@example.com"),
-        "A leaked B's account: {text_a}"
-    );
-    assert!(!text_a.contains("token-b"), "A leaked B's token: {text_a}");
-    // Symmetrically for B.
-    assert!(
-        text_b.contains("b@example.com"),
-        "B missing its account: {text_b}"
-    );
-    assert!(
-        !text_b.contains("a@example.com"),
-        "B leaked A's account: {text_b}"
-    );
-
-    // A's own token is scrubbed out of its own successful output.
-    assert!(
-        !text_a.contains("token-a"),
-        "A leaked its own token: {text_a}"
-    );
-
-    // The backend received exactly the two distinct bearers — each request
-    // carried its own tenant's token, never the other's.
-    let seen = log.lock().unwrap().clone();
-    assert_eq!(seen.len(), 2, "expected one request per tenant: {seen:?}");
-    assert!(
-        seen.iter().any(|a| a == "Bearer token-a"),
-        "missing A bearer: {seen:?}"
-    );
-    assert!(
-        seen.iter().any(|a| a == "Bearer token-b"),
-        "missing B bearer: {seen:?}"
-    );
-    assert!(
-        !seen
-            .iter()
-            .any(|a| a.contains("token-a") && a.contains("token-b")),
-        "a single request must never carry both tokens: {seen:?}"
-    );
-}
-
-/// The rotation contract at the tool boundary: a projected platform token the
-/// cluster rewrites in place must reach the backend on the **next** call, with
-/// no roster rebuild — and the freshly-resolved value must be the one the
-/// scrub vector protects, so a backend that reflects it still cannot leak it.
-#[tokio::test]
-async fn a_rotated_projected_token_is_presented_and_scrubbed_per_call() {
-    use crate::company::credentials::TinyhumansTokenSource;
-
-    // Reflect the bearer back inside an envelope failure, and record it.
-    async fn reflect(State(log): State<AuthLog>, headers: HeaderMap) -> axum::Json<Value> {
-        let auth = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        log.lock().unwrap().push(auth.clone());
-        axum::Json(json!({ "success": false, "error": format!("upstream said: {auth}") }))
-    }
-    let log: AuthLog = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new()
-        .route("/agent-integrations/composio/connections", get(reflect))
-        .with_state(log.clone());
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-    let dir = tempfile::Builder::new()
-        .prefix("oc-composio-rot-")
-        .tempdir()
-        .expect("tempdir");
-    let path = dir.path().join("token");
-    std::fs::write(&path, "projected-secret-before").unwrap();
-
-    // ONE config, built once — exactly what a roster holds across turns.
-    let config = TenantComposio::new(
-        format!("http://{addr}"),
-        Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(&path))),
-        Vec::new(),
-    );
-    let tool = list_connections_tool(&config);
-
-    let first = tool.execute(json!({})).await.unwrap();
-    assert!(
-        !first.output().contains("projected-secret-before"),
-        "the resolved token leaked into agent-visible output: {}",
-        first.output()
-    );
-
-    // The kubelet rewrites the file in place; the SAME tool must present the
-    // new token and scrub that one.
-    std::fs::write(&path, "projected-secret-after").unwrap();
-    let second = tool.execute(json!({})).await.unwrap();
-    assert!(
-        !second.output().contains("projected-secret-after"),
-        "the rotated token leaked into agent-visible output: {}",
-        second.output()
-    );
-
-    let seen = log.lock().unwrap().clone();
-    assert_eq!(
-        seen,
-        vec![
-            "Bearer projected-secret-before".to_string(),
-            "Bearer projected-secret-after".to_string()
-        ],
-        "each call must carry the token the file held at that moment: {seen:?}"
-    );
-}
-
-/// A mock backend that echoes the caller's bearer inside an error body; the
-/// tool's scrub must strip it before the agent ever sees it.
-#[tokio::test]
-async fn error_body_reflecting_the_token_is_scrubbed() {
-    async fn reflect(headers: HeaderMap) -> axum::Json<Value> {
-        let auth = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        // A 2xx envelope failure whose message reflects the raw bearer.
-        axum::Json(json!({ "success": false, "error": format!("upstream said: {auth}") }))
-    }
-    let app = Router::new().route("/agent-integrations/composio/connections", get(reflect));
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let url = format!("http://{addr}");
-
-    let tool = list_connections_tool(&config(&url, "reflected-secret-token"));
-    let out = tool.execute(json!({})).await.unwrap();
-    let text = out.output();
-    assert!(
-        !text.contains("reflected-secret-token"),
-        "the reflected token leaked into agent-visible output: {text}"
-    );
-}
-
