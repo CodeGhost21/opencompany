@@ -160,6 +160,12 @@ async function walkToReview(client: OpenCompanyClient, template: string | null) 
   await act(async () => {
     root.render(createElement(SetupWizard, { client, onDone: () => {} }));
   });
+  // Step 0 is the setup-way choice; the provider picker sits behind "Set it up
+  // yourself".
+  await act(async () => {
+    (container.querySelector('[data-testid="setup-way-self-managed"]') as HTMLElement).click();
+  });
+  await next(); // -> model
   // "No model" — the picker's last option, whose popup base-ui portals onto
   // `document.body` and only mounts once the trigger opens it.
   await act(async () => {

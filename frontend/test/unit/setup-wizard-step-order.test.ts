@@ -90,6 +90,19 @@ async function click(testId: string) {
 }
 
 /**
+ * Gets past step 0 onto the model step, and is a no-op once already there.
+ *
+ * The flow opens on the setup-way choice, and the provider picker sits behind
+ * "Set it up yourself" — so a walk starting at the model step answers that
+ * first, while one that has navigated back to it must not answer it again.
+ */
+async function chooseSelfManaged() {
+  if (!find("setup-way-self-managed")) return;
+  await click("setup-way-self-managed");
+  await next();
+}
+
+/**
  * Answers the model step with "No model".
  *
  * The escape used to be a link under the step (`setup-skip-model`); it is the
@@ -98,6 +111,7 @@ async function click(testId: string) {
  * trigger opens it.
  */
 async function skipModel() {
+  await chooseSelfManaged();
   await click("setup-provider-select");
   const none = document.body.querySelector('[data-testid="setup-provider-none"]') as
     | HTMLElement
@@ -209,29 +223,36 @@ describe("where the sign-in question sits", () => {
 });
 
 describe("a step this host does not need gets no slot", () => {
-  it("draws five steps on a host that asks people to sign in", async () => {
+  it("draws six steps on a host that asks people to sign in", async () => {
     await show(clientWith(status()));
     await goToSignIn();
 
     expect(slots()).toEqual([
-      "step-power",
+      "step-setup-way",
+      "step-self-managed-connect",
       "step-business",
       "step-signin",
       "step-account",
       "step-review",
     ]);
-    expect(container.textContent).toContain("step 3 of 5");
+    expect(container.textContent).toContain("step 4 of 6");
   });
 
-  it("draws four, and never the address field, once no sign-in is chosen", async () => {
+  it("draws five, and never the address field, once no sign-in is chosen", async () => {
     await show(clientWith(status()));
     await goToSignIn();
     await click("auth-mode-none");
 
-    expect(slots()).toEqual(["step-power", "step-business", "step-signin", "step-review"]);
-    // The bar must renumber too: a four-step flow that says "of 5" is telling
+    expect(slots()).toEqual([
+      "step-setup-way",
+      "step-self-managed-connect",
+      "step-business",
+      "step-signin",
+      "step-review",
+    ]);
+    // The bar must renumber too: a five-step flow that says "of 6" is telling
     // the operator about a screen they will never be shown.
-    expect(container.textContent).toContain("step 3 of 4");
+    expect(container.textContent).toContain("step 4 of 5");
 
     await next();
     // Review, not "wherever the press left us": absence proves nothing about a
@@ -304,6 +325,7 @@ describe("the questions a modelless run does not ask", () => {
           : { complete: true, config_path: "/data/config.toml", restart_required: [] },
     } as unknown as OpenCompanyClient;
     await show(client);
+    await chooseSelfManaged();
     await fill("setup-field-key", "sk-works");
     await click("setup-test-connection");
     await next(); // -> business
@@ -369,6 +391,7 @@ describe("what a modelless run asks the host for", () => {
     const body = await rosterRequestFrom(async () => {
       // Answered first, then taken back: the drafts survive in state, and must
       // not steer the curated pick they are no longer an answer to.
+      await chooseSelfManaged();
       await fill("setup-field-key", "sk-works");
       await click("setup-test-connection");
       await next(); // -> business, with a model
@@ -393,6 +416,7 @@ describe("what a modelless run asks the host for", () => {
     // wizard designs only when it holds none, so the old one would otherwise
     // ride through Review under copy promising a standard team.
     const body = await rosterRequestFrom(async () => {
+      await chooseSelfManaged();
       await fill("setup-field-key", "sk-works");
       await click("setup-test-connection");
       await next(); // -> business
@@ -438,6 +462,7 @@ describe("a connection verdict that arrives after the question changed", () => {
     } as unknown as OpenCompanyClient;
 
     await show(client);
+    await chooseSelfManaged();
     await fill("setup-field-key", "sk-works");
     await click("setup-test-connection"); // in flight, unresolved
     await skipModel();

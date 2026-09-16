@@ -154,6 +154,21 @@ const settle = async () =>
   });
 
 /**
+ * Gets past step 0 onto the model step, and is a no-op where step 0 is absent.
+ *
+ * The flow opens on the setup-way choice, and the provider picker sits behind
+ * "Set it up yourself".
+ */
+async function chooseSelfManaged() {
+  const option = find("setup-way-self-managed") as HTMLElement | null;
+  if (!option) return;
+  await act(async () => {
+    option.click();
+  });
+  await next();
+}
+
+/**
  * Business -> sign-in -> account -> review, with no model step in front of it.
  *
  * Nothing here answers a model question, which is the assertion this helper
@@ -229,22 +244,28 @@ describe("a host that already reaches a model", () => {
 });
 
 describe("a host that reaches no model of its own", () => {
-  it("still asks the model question first, in a five-step flow", async () => {
+  it("still asks the model question, now behind the setup-way choice", async () => {
     await show(clientWith(status()));
 
+    expect(find("setup-provider-select"), "the model step is not step 0").toBeNull();
+
+    await chooseSelfManaged();
+
     expect(slots()).toEqual([
-      "step-power",
+      "step-setup-way",
+      "step-self-managed-connect",
       "step-business",
       "step-signin",
       "step-account",
       "step-review",
     ]);
-    expect(container.textContent).toContain("step 1 of 5");
+    expect(container.textContent).toContain("step 2 of 6");
     expect(find("setup-provider-select"), "the model step should render").toBeTruthy();
   });
 
   it("still gates that step on a verdict", async () => {
     await show(clientWith(status()));
+    await chooseSelfManaged();
 
     await next();
     expect(find("setup-problem"), "an untested connection must hold the step").toBeTruthy();
@@ -253,6 +274,7 @@ describe("a host that reaches no model of its own", () => {
 
   it("says nothing about a host-provided model", async () => {
     await show(clientWith(status()));
+    await chooseSelfManaged();
 
     // "No model" answers the step by being chosen, which is what lets this
     // walk reach Review without a credential.
