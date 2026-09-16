@@ -526,6 +526,80 @@ async fn a_desk_mention_runs_one_turn_on_the_far_desk_and_carries_the_answer_hom
 /// indistinguishable by the time the library hands back a `Referral` — each
 /// carries the target's home desk — so the two tests together are what keep
 /// the distinction from collapsing back into one.
+/// **A pair may keep talking, the way a desk keeps deliberating.**
+///
+/// A crossing to a DESK convenes it and it runs until it settles. A crossing to
+/// a PERSON ran exactly one turn, so two seats working something out got one
+/// question and one reply and no way to clarify — the same asymmetry
+/// `deliberates` removed for desks, left standing on the other target. Every
+/// pair exchange in eight live episodes was exactly two rows, which was the
+/// mechanism and not the agents' choice.
+///
+/// `pair_messages` bounds it. The default of 2 IS that single exchange, so this
+/// pins both: raised, the pair alternates; unset, nothing changes.
+#[tokio::test]
+async fn a_pair_may_keep_talking_up_to_its_bound() {
+    const CHATTY: &str = "hive = { turn_budget = 8, quorum = 2, blind_round = false, \
+                          referral = { enabled = true, pair_messages = 4 } }";
+    let far = FarDesk::answering("The replica lag budget is 400ms.");
+    let (log, _) = run(
+        CHATTY,
+        &[
+            (
+                "planner",
+                "!question #lag What is the replica lag budget? @sre",
+            ),
+            ("scout", "!propose #stage Stage the rollout behind a flag."),
+            ("critic", "!support #stage ^1 Staging fits the lag budget."),
+            ("planner", "!commit #stage ^3 Recorded."),
+        ],
+        Some(&far),
+    )
+    .await;
+
+    let said = log.replies(&super::referral::pair_conversation("planner", "sre"));
+    assert_eq!(
+        said.len(),
+        4,
+        "the pair runs to its bound rather than stopping at one reply: {said:?}"
+    );
+    // Alternating, because a pair is two people: whoever did not just speak
+    // goes next.
+    let voices: Vec<&str> = said.iter().map(|(who, _)| who.as_str()).collect();
+    assert_eq!(
+        voices,
+        vec!["planner", "sre", "planner", "sre"],
+        "they take it in turns: {said:?}"
+    );
+}
+
+/// The same desk with `pair_messages` unset: one question, one reply, as before.
+#[tokio::test]
+async fn a_pair_bound_left_unset_is_the_single_exchange_it_always_was() {
+    let far = FarDesk::answering("The replica lag budget is 400ms.");
+    let (log, _) = run(
+        REFERRING,
+        &[
+            (
+                "planner",
+                "!question #lag What is the replica lag budget? @sre",
+            ),
+            ("scout", "!propose #stage Stage the rollout behind a flag."),
+            ("critic", "!support #stage ^1 Staging fits the lag budget."),
+            ("planner", "!commit #stage ^3 Recorded."),
+        ],
+        Some(&far),
+    )
+    .await;
+
+    assert_eq!(
+        log.replies(&super::referral::pair_conversation("planner", "sre"))
+            .len(),
+        2,
+        "a company that says nothing behaves exactly as it did"
+    );
+}
+
 #[tokio::test]
 async fn naming_a_person_holds_the_exchange_in_their_pair_thread() {
     let far = FarDesk::answering("The replica lag budget is 400ms.");
@@ -669,6 +743,8 @@ fn the_close_tells_a_local_question_from_a_crossing_one() {
         asker: "route_planner".to_owned(),
         target: target.to_owned(),
         desk: desk.to_owned(),
+        // These fixtures describe crossings that ran on a desk, not in a pair.
+        conversation: None,
         returned: false,
         crossed,
     };
@@ -732,6 +808,7 @@ fn the_close_reads_as_english_for_every_combination_of_referral_facts() {
             asker: "route_planner".to_owned(),
             target: "account_manager".to_owned(),
             desk: "commercial".to_owned(),
+            conversation: None,
             returned: false,
             crossed: true,
         }]
@@ -1013,6 +1090,25 @@ async fn a_referring_desk_is_shown_its_peers_and_told_to_ask_early() {
     assert!(
         prompt.contains("it is not a vote"),
         "and told what an answer is worth:\n{prompt}"
+    );
+    // **And how to ask a PERSON, which only a room that can dispatch is told.**
+    //
+    // Naming a teammate with `@` is read as a question put to them: their turn
+    // runs at once and the exchange is held privately. Two live failures come
+    // from a seat not knowing that. Told only to "address them by the ids
+    // above", one wrote `@amendments should handle it` while proposing to the
+    // desk and opened a private exchange it never asked for. Told instead what
+    // the `@` COSTS, with dropping it offered as the alternative, a room wrote
+    // "we still need the order details from amendments" without the `@` and
+    // spent six turns waiting on a question nobody had been asked — twice in
+    // one episode, both rooms exhausting their budget.
+    assert!(
+        prompt.contains("To get an ANSWER") && prompt.contains("it is the only way to ask them"),
+        "a seat that CAN dispatch is told the @handle is how it gets an answer:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("asks nobody and reaches nobody"),
+        "and that dropping it reaches nobody, so it never waits on a question it did not send:\n{prompt}"
     );
 }
 

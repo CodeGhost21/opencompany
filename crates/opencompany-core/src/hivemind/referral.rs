@@ -130,6 +130,26 @@ pub struct ReferralConfig {
     /// room instead of a turn, which is the trade the knob is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliberates: Option<bool>,
+    /// How many rows a question put to a PERSON may run to, counting the
+    /// question itself.
+    ///
+    /// A crossing to a desk convenes that desk and it deliberates until it
+    /// settles ([`ReferralConfig::deliberates`]). A crossing to a person ran
+    /// exactly one turn — one question, one reply, no way to clarify — so two
+    /// seats working something out got a single shot each. This is the same
+    /// asymmetry `deliberates` removed for desks, on the other target.
+    ///
+    /// Defaults to 2, which IS that single exchange, so a company that says
+    /// nothing behaves exactly as it did. Raising it lets the pair alternate:
+    /// the answerer replies, the asker may come back, and so on until the bound
+    /// is reached. The pair's own thread already renders however many rows it
+    /// holds, so nothing downstream changes.
+    ///
+    /// Bounded rather than settled-by-fold on purpose: a pair is two members
+    /// and a desk's quorum is typically two, so a pair cannot reach one and has
+    /// no convergence to detect. A count is the honest bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_messages: Option<u32>,
 }
 
 /// The reach words a manifest may write, in widening order.
@@ -180,6 +200,14 @@ impl ReferralConfig {
     #[must_use]
     pub fn deliberates(&self) -> bool {
         self.deliberates.unwrap_or(true)
+    }
+
+    /// How many rows a crossing to a person may run to, question included.
+    ///
+    /// At least 2: a question with no reply is a turn spent for nothing.
+    #[must_use]
+    pub fn pair_messages(&self) -> u32 {
+        self.pair_messages.unwrap_or(2).max(2)
     }
 }
 
@@ -352,6 +380,15 @@ pub struct AskedQuestion {
     pub desk: String,
     /// Whether the answer was carried back to the asking desk.
     pub returned: bool,
+    /// The conversation the exchange actually ran in, when that is not the
+    /// asking desk.
+    ///
+    /// A question put to a person by name runs in the pair's own thread, which
+    /// neither participant can read afterwards: `elsewhere_for` gathers a
+    /// seat's other desks and its own direct line, and a `dm:<a>+<b>` pair is
+    /// neither. So the pair talked and the answer was orphaned — the asker
+    /// could not carry it home because it could not see it.
+    pub conversation: Option<String>,
     /// Whether the question actually left this desk.
     ///
     /// `reach` widens strictly (`local` → `channels` → `desks`), so a desk that
@@ -417,6 +454,44 @@ worse than no answer, because the room that asked cannot check it against anythi
 Their message:
 
 {question}"
+    )
+}
+
+/// How a pair's exchange reads to whichever of the two speaks next.
+///
+/// [`referral_prompt`] opens a crossing — it introduces a stranger's question.
+/// Once the pair has said something to each other, the next turn is not being
+/// introduced to anything: it is continuing a conversation it can see. So this
+/// hands over the exchange so far and asks for the next line in it.
+///
+/// Says how much room is left, because the bound is real and a speaker that
+/// does not know it is on its last line cannot close properly. Says nothing
+/// about markers: a pair thread is not a desk and nothing there is folded into
+/// anyone's floor.
+#[must_use]
+pub fn pair_turn_prompt(other_label: &str, exchange: &[(String, String)], left: u32) -> String {
+    let said = exchange
+        .iter()
+        .map(|(who, words)| format!("{who}: {words}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let closing = match left {
+        0 | 1 => "This is the last line of this exchange — close it: say what you have concluded, \
+                  or that you cannot answer."
+            .to_string(),
+        remaining => format!(
+            "You have {remaining} more lines in this exchange. Use them only if you still need \
+             something; if you have your answer, say so and stop."
+        ),
+    };
+    format!(
+        "You are in a private exchange with @{other_label}. Nobody else reads it.
+
+The exchange so far:
+
+{said}
+
+{closing}"
     )
 }
 
@@ -629,6 +704,9 @@ pub struct EpisodeReferrals<'a> {
     /// Whether a `@#desk` crossing convenes that desk rather than asking one
     /// of its seats ([`ReferralConfig::deliberates`]).
     deliberates: bool,
+    /// How many rows a crossing to a PERSON may run to
+    /// ([`ReferralConfig::pair_messages`]).
+    pair_messages: u32,
     state: Mutex<ReferralState>,
     /// The asking episode's own fold boundary.
     ///
@@ -713,6 +791,7 @@ impl<'a> EpisodeReferrals<'a> {
                 .collect(),
             peer_cap: config.peer_cap(),
             deliberates: config.deliberates(),
+            pair_messages: config.pair_messages(),
             state: Mutex::new(ReferralState::default()),
             scope,
         }
@@ -912,6 +991,7 @@ impl<'a> EpisodeReferrals<'a> {
 
     async fn forward(&self, referral: &Referral) -> EnqueueOutcome {
         let asker = self.label(&referral.source_id);
+        let target = self.label(&referral.target_id);
         let asker_desk = self.desk_name(&referral.from.desk_id);
         let prompt = referral_prompt(&asker, &asker_desk, &referral.content);
         // Where this runs: the pair's own thread when a person was asked for by
@@ -1051,11 +1131,78 @@ impl<'a> EpisodeReferrals<'a> {
                 "[hive] a referred answer could not be journaled in the pair's thread"
             );
         }
+        // **A pair may keep talking, the way a desk keeps deliberating.**
+        //
+        // A crossing to a DESK convenes it and it runs until it settles. A
+        // crossing to a PERSON ran exactly one turn, so two seats working
+        // something out got one question and one reply with no way to clarify —
+        // the same asymmetry `deliberates` removed for desks, left standing on
+        // the other target. `pair_messages` is the bound, and at its default of
+        // 2 this loop does not run at all, so nothing changes for a company
+        // that says nothing.
+        //
+        // Alternating, because a pair is two people: whoever did not just speak
+        // goes next, each handed the exchange so far. Bounded by a count rather
+        // than by a fold — a pair is two members and a desk's quorum is
+        // typically two, so there is no convergence here to detect.
+        //
+        // A failed turn mid-exchange ends it and keeps what was already said:
+        // the rows are durable and the asker has something to carry home, which
+        // is better than discarding a real answer because a follow-up broke.
+        let mut exchange = vec![
+            (asker.clone(), referral.content.clone()),
+            (target.clone(), answer.clone()),
+        ];
+        let mut answer = answer;
+        if by_name {
+            let budget = self.pair_messages;
+            while u32::try_from(exchange.len()).unwrap_or(u32::MAX) < budget {
+                let next_is_asker = exchange.len() % 2 == 0;
+                let (speaker, other) = match next_is_asker {
+                    true => (&referral.source_id, &target),
+                    false => (&referral.target_id, &asker),
+                };
+                let left = budget.saturating_sub(
+                    u32::try_from(exchange.len())
+                        .unwrap_or(u32::MAX)
+                        .saturating_add(1),
+                );
+                let turn = pair_turn_prompt(other, &exchange, left);
+                let Ok(said) = self.runner.refer(&pair.desk_id, speaker, &turn).await else {
+                    break;
+                };
+                if said.trim().is_empty() {
+                    break;
+                }
+                if let Err(error) = self.journal(&pair, speaker, said.clone()).await {
+                    tracing::warn!(
+                        company = %self.company,
+                        pair = %pair.desk_id,
+                        error = %error,
+                        "[hive] a pair's follow-up could not be journaled; the exchange stops here"
+                    );
+                    break;
+                }
+                let label = match next_is_asker {
+                    true => asker.clone(),
+                    false => target.clone(),
+                };
+                exchange.push((label, said.clone()));
+                // What comes home is the last thing the OTHER side said: the
+                // asker carrying its own words back would tell the room nothing
+                // it did not already have.
+                if !next_is_asker {
+                    answer = said;
+                }
+            }
+        }
         let mut state = self.state.lock().await;
         state.ledger.asked.push(AskedQuestion {
             asker: referral.source_id.clone(),
             target: referral.target_id.clone(),
             desk: referral.to.desk_id.clone(),
+            // Where it ran, when the host moved it off the desk.
+            conversation: (pair.desk_id != referral.to.desk_id).then(|| pair.desk_id.clone()),
             returned: false,
             crossed: referral.to.desk_id != self.home.desk_id,
         });
@@ -1133,7 +1280,23 @@ impl ReferralQueue for EpisodeReferrals<'_> {
                 // The width bound the library leaves to the host. Counted only
                 // for forwards: a return spends no turn, and refusing one would
                 // strand an answer this episode has already paid for.
-                if matches!(referral.kind, ReferralKind::Forward) {
+                //
+                // And only for forwards that actually CROSS. This bound is
+                // documented as "how many crossing questions one episode may
+                // ask", priced on a question costing "a full model turn on
+                // another desk" — but it was charged to every forward, so a
+                // question to a teammate on THIS desk, which never leaves it,
+                // spent the allowance for asking other desks.
+                //
+                // Live on `companies/retail_co`: two `@#returns` crossings used
+                // the default cap of 2, and every `@refunds` and `@amendments`
+                // after them was refused. Seats trying to ask each other got
+                // nothing, silently, because the budget for asking other desks
+                // was gone. The two costs are not even comparable now that a
+                // desk crossing convenes a whole room and a teammate question
+                // is one turn.
+                let crosses = referral.to.desk_id != self.home.desk_id;
+                if crosses && matches!(referral.kind, ReferralKind::Forward) {
                     if state.asked >= self.peer_cap {
                         state.ledger.over_cap = state.ledger.over_cap.saturating_add(1);
                         return Ok(EnqueueOutcome::Refused {
