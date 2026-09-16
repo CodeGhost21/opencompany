@@ -17,9 +17,9 @@ use super::*;
 use crate::Result;
 use crate::ports::events::EventLog;
 use crate::ports::types::{CompanyEvent, EventSeq};
-use super::tests_fixtures::*;
-use super::tests_memory::*;
-use super::tests_misc::*;
+use super::moves_fixtures_tests::*;
+use super::moves_memory_tests::*;
+use super::moves_misc_tests::*;
 
 // ---------------------------------------------------------------------------
 // The grammar itself
