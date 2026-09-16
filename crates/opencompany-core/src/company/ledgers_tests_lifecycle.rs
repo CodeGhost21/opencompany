@@ -563,7 +563,7 @@ async fn a_read_is_bounded_and_says_how_many_matched() {
     );
 }
 
-async fn read2(ctx: &Ledgers, spec: &crate::ledger::LedgerSpec, limit: usize) -> Read {
+pub(super) async fn read2(ctx: &Ledgers, spec: &crate::ledger::LedgerSpec, limit: usize) -> Read {
     read(
         ctx,
         spec,

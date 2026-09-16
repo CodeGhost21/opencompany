@@ -461,7 +461,7 @@ async fn a_blank_value_clears_the_field() {
 /// A ledger shaped like the global `learnings`: it declares the check *and*
 /// marks a prose field required, which is the pair `hazards` deliberately
 /// lacks.
-fn findings() -> serde_json::Value {
+pub(super) fn findings() -> serde_json::Value {
     json!({
         "slug": "findings",
         "title": "Findings",
