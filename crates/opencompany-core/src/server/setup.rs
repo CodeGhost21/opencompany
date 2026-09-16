@@ -92,6 +92,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/setup/roster", post(propose_roster))
         .route("/api/v1/setup/inference/test", post(test_inference))
         .route("/api/v1/setup/inference/probe", post(probe_inference_draft))
+        .route(
+            "/api/v1/setup/composio/api-key/test",
+            post(test_composio_key),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +352,37 @@ pub struct SetupRequest {
     /// Top level for the same reason too: it belongs to whichever company comes
     /// out of the seed, designed or templated.
     pub(crate) provider_draft: Option<crate::server::ops::inference::providers::AddProvider>,
+    /// The Composio credential the wizard's self-managed branch collected.
+    ///
+    /// Two shapes, one field, because the Connections dialog is one form with
+    /// two routes: a company's own Composio API key (which also selects the
+    /// BYOK mode), or a token for the TinyHumans-managed route.
+    ///
+    /// Travels on the apply for the same reason the others do — both writes are
+    /// per company, and the company is what this call creates.
+    pub composio_draft: Option<ComposioDraft>,
+}
+
+/// The Composio credential the wizard collected, and which of the two it is.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposioDraft {
+    /// Which write this performs — the same two values the console's
+    /// `ComposioForm.credential` carries.
+    pub credential: ComposioCredential,
+    /// The secret. Write-only: no route returns it.
+    pub value: String,
+}
+
+/// Which Composio credential a draft is.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub enum ComposioCredential {
+    /// This company's own Composio account key, which also selects BYOK.
+    #[serde(rename = "composio-api-key")]
+    ApiKey,
+    /// A token for the TinyHumans-managed route.
+    #[serde(rename = "composio-token")]
+    Token,
 }
 
 /// The company the wizard designed, as it arrives from the review step.
@@ -428,6 +463,10 @@ pub struct AppliedDto {
     /// the wizard's probe and the apply is a reason to say so, not a reason to
     /// fail a setup that otherwise succeeded.
     pub provider_note: Option<String>,
+    /// What the Composio credential the wizard collected did.
+    ///
+    /// `None` when none was sent or no company was seeded.
+    pub composio_note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,6 +1103,7 @@ async fn apply_inner(
 
     let credential_note = store_account_key(state, seeded.as_deref(), &req).await?;
     let provider_note = connect_drafted_provider(state, seeded.as_deref(), &req).await?;
+    let composio_note = store_composio_credential(state, seeded.as_deref(), &req).await?;
 
     // Companies that already existed still hold the old mode on their cached
     // runtime, so rebuild them in place. `seeded` is excluded — it was just
@@ -1106,7 +1146,72 @@ async fn apply_inner(
         seeded_company: seeded,
         credential_note,
         provider_note,
+        composio_note,
     })
+}
+
+/// Stores the Composio credential the self-managed branch collected against the
+/// seeded company.
+///
+/// [`store_api_key`](crate::company::composio::store_api_key) and
+/// [`store_token`](crate::company::composio::store_token) are the same two
+/// functions `PUT …/composio/api-key` and `PUT …/composio/token` call, and they
+/// take a company id and a secret store rather than a request, so they are
+/// reached directly rather than through a seam.
+///
+/// The routes' extra machinery is all about a **transition**: the account-key
+/// slot guard, the `load_mode` re-read and its `Conflict`, the `switching` /
+/// `used_by` / `confirm_in_use` warning about providers stranded in the account
+/// this company is leaving. A company created milliseconds ago has no previous
+/// mode, no connected providers and no concurrent admin — and `apply_inner`
+/// holds `APPLY_LOCK` — so there is no transition for any of it to describe.
+///
+/// [`evict_catalog_cache`](crate::server::ops::composio::evict_catalog_cache)
+/// runs anyway. There is nothing cached for a company this new, and a cache
+/// drop that costs nothing is not worth reasoning about being right.
+///
+/// Deliberately **not** journalled, the same call 4a made for the account key:
+/// the journal attributes a credential change to the admin who made it, and a
+/// first run has no signed-in admin to name. The apply is what records it.
+///
+/// A blank value is dropped rather than written.
+/// [`store_api_key`](crate::company::composio::store_api_key) reads an empty
+/// key as "clear this company back to managed", which on a company that was
+/// never on BYOK is a mode write nobody asked for.
+async fn store_composio_credential(
+    state: &AppState,
+    seeded: Option<&str>,
+    req: &SetupRequest,
+) -> Result<Option<String>, OpenCompanyError> {
+    let Some(draft) = req.composio_draft.as_ref() else {
+        return Ok(None);
+    };
+    let value = draft.value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    // Only ever onto a company this call created — same rule as the account key
+    // and the provider draft, for the same reason.
+    let Some(id) = seeded.map(crate::ports::types::CompanyId::new) else {
+        return Ok(None);
+    };
+    let Some(runtime) = state.registry().get(&id) else {
+        return Ok(None);
+    };
+    let secrets = runtime.secrets();
+
+    let note = match draft.credential {
+        ComposioCredential::ApiKey => {
+            crate::company::composio::store_api_key(&id, secrets.as_ref(), value).await?;
+            "This company reaches its tools through its own Composio account."
+        }
+        ComposioCredential::Token => {
+            crate::company::composio::store_token(&id, secrets.as_ref(), value).await?;
+            "A Composio token is stored for the TinyHumans-managed route."
+        }
+    };
+    crate::server::ops::composio::evict_catalog_cache(runtime.as_ref());
+    Ok(Some(note.to_string()))
 }
 
 /// Adds the provider the self-managed branch connected to the seeded company,
@@ -1472,6 +1577,63 @@ async fn probe_inference_draft(
 ) -> Result<axum::response::Response, crate::server::Rejection> {
     authorize(&state, &headers, peer).await?;
     Ok(crate::server::ops::inference::providers::probe_draft_inner("setup", body).await)
+}
+
+/// What `POST /api/v1/setup/composio/api-key/test` is asked.
+///
+/// The company-scoped route takes **no body** on purpose: it reads the key from
+/// the company's own store, and a body carrying one would turn it into "send
+/// this credential to that host". This one has to take the key, because there
+/// is no company to read it from — and it is the same primitive all the same,
+/// because the destination is not in the body either way:
+/// `composio_direct::probe_api_key` dials Composio's own compile-time URL.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposioKeyTestRequest {
+    api_key: String,
+}
+
+/// `POST /api/v1/setup/composio/api-key/test` — check a Composio API key the
+/// operator has just typed, before there is a company to store it against.
+///
+/// Its own SSRF footing is the reason this one is cheap to add: the endpoint is
+/// fixed at compile time, so no caller — authenticated or not — can point it
+/// anywhere. All this route can do is spend an outbound request on a key the
+/// caller supplied and report one of three fixed sentences.
+///
+/// Without it an operator types a wrong Composio key in onboarding and learns
+/// nothing until they open Connections and find an empty tool belt — which is
+/// the same objection that rules out skipping the inference probe.
+async fn test_composio_key(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(req): Json<ComposioKeyTestRequest>,
+) -> Result<Json<crate::server::ops::composio::ApiKeyTestDto>, crate::server::Rejection> {
+    authorize(&state, &headers, peer).await?;
+    let key = req.api_key.trim();
+    if key.is_empty() {
+        return Err(ApiError::from(OpenCompanyError::InvalidRequest(
+            "Paste a Composio API key to check it.".to_string(),
+        ))
+        .into());
+    }
+    Ok(Json(
+        match crate::server::ops::composio::classify_key("setup", key).await {
+            None => crate::server::ops::composio::ApiKeyTestDto {
+                ok: true,
+                probe_class: None,
+                message: None,
+            },
+            // `describe_verdict`, not `describe`: this route stored nothing,
+            // and the latter's copy opens by saying it did.
+            Some(class) => crate::server::ops::composio::ApiKeyTestDto {
+                ok: false,
+                probe_class: Some(class),
+                message: Some(crate::company::composio_probe::describe_verdict(class).to_string()),
+            },
+        },
+    ))
 }
 
 /// Runs the probe against the resolved config.
