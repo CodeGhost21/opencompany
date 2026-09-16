@@ -20,6 +20,17 @@ fn proposed(role: &str) -> ProposedAgent {
     }
 }
 
+// ---------------------------------------------------------------------
+// The job checklist coverage is judged against
+// ---------------------------------------------------------------------
+
+/// The splitting rule, from the fixture the console's test reads too.
+///
+/// The fixture is the whole mitigation for having two implementations of one
+/// rule: the console echoes the items live while someone types, and the host
+/// numbers them for the prompt. The first version of this feature shipped a
+/// hand-copied keyword list in the browser and it drifted within a week.
+#[test]
 fn job_items_matches_the_shared_fixture() {
     #[derive(serde::Deserialize)]
     struct Case {

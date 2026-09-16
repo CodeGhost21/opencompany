@@ -639,14 +639,3 @@ fn focus_round_trips_through_serde() {
     );
 }
 
-// ---------------------------------------------------------------------
-// The job checklist coverage is judged against
-// ---------------------------------------------------------------------
-
-/// The splitting rule, from the fixture the console's test reads too.
-///
-/// The fixture is the whole mitigation for having two implementations of one
-/// rule: the console echoes the items live while someone types, and the host
-/// numbers them for the prompt. The first version of this feature shipped a
-/// hand-copied keyword list in the browser and it drifted within a week.
-#[test]
