@@ -20,7 +20,7 @@ pub(super) struct RecordingWorkflowTurn {
 }
 
 impl RecordingWorkflowTurn {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             calls: std::sync::Mutex::new(Vec::new()),
         }
