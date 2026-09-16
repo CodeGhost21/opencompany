@@ -232,11 +232,8 @@ fn an_unrecognized_stop_reason_is_surfaced_not_swallowed() {
     ));
     assert_eq!(outcome.reply, "partial thought");
     assert!(
-        outcome
-            .steps
-            .iter()
-            .any(|s| s.kind == TurnStepKind::Note
-                && s.label == "[stopped: unrecognized stop reason]"),
+        outcome.steps.iter().any(|s| s.kind == TurnStepKind::Note
+            && s.label == "[stopped: unrecognized stop reason]"),
         "an unrecognized stop must still be surfaced as a step: {:?}",
         outcome.steps
     );

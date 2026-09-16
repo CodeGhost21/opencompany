@@ -5380,5 +5380,5 @@ impl crate::hivemind::HiveMemory for HiveDeskMemory {
 }
 
 #[cfg(test)]
-#[path = "brain_tests_full.rs"]
+#[path = "brain_tests.rs"]
 mod tests;

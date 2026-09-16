@@ -12,22 +12,22 @@ use super::*;
 /// prompt that resolves immediately exits the loop before the steer check
 /// ever runs, and the cancel path goes unexercised. `cancel_hangs` makes
 /// `cancel` never answer (the bounded-RPC path).
-pub(super) struct Scripted {
-    pub(super) turn: AcpTurn,
+struct Scripted {
+    turn: AcpTurn,
     /// Milliseconds to hold the turn open before answering — how a test
     /// owns the session's slot for a *bounded* window, so a second turn
     /// genuinely queues and then genuinely gets in.
-    pub(super) holds_ms: u64,
-    pub(super) hang: bool,
-    pub(super) hold_for_cancel: bool,
-    pub(super) cancel_hangs: bool,
-    pub(super) cancel_fails: bool,
-    pub(super) cancels: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    pub(super) cancel_started: tokio::sync::Notify,
+    holds_ms: u64,
+    hang: bool,
+    hold_for_cancel: bool,
+    cancel_hangs: bool,
+    cancel_fails: bool,
+    cancels: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    cancel_started: tokio::sync::Notify,
 }
 
 impl Scripted {
-    pub(super) fn answering(updates: Vec<AcpUpdate>) -> Self {
+    fn answering(updates: Vec<AcpUpdate>) -> Self {
         Self {
             turn: AcpTurn {
                 updates,
@@ -88,7 +88,7 @@ impl AcpAgent for Scripted {
 
 /// The updates a coding turn produces: a thought, a tool call that runs
 /// and then completes, and the answer.
-pub(super) fn a_working_turn() -> Vec<AcpUpdate> {
+fn a_working_turn() -> Vec<AcpUpdate> {
     vec![
         AcpUpdate::ThoughtChunk,
         AcpUpdate::ThoughtChunk,
@@ -106,3 +106,6 @@ pub(super) fn a_working_turn() -> Vec<AcpUpdate> {
             status: "completed".into(),
             result: Some("42 lines".into()),
         },
+        AcpUpdate::MessageChunk("done".into()),
+    ]
+}

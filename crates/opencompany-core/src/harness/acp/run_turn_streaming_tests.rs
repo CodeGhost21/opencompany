@@ -18,9 +18,6 @@ async fn drain_live(
     }
     frames
 }
-    ]
-}
-
 #[tokio::test]
 async fn a_chat_turn_streams_its_execution_state_onto_the_watching_thread() {
     // The gap this closes: an ACP turn used to be observable only once it
