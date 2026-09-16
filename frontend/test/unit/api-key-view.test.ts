@@ -377,7 +377,8 @@ describe("ApiKeyView's Connect to TinyHumans dialog", () => {
     expect(input).not.toBeNull();
     // Write-only: never echoed.
     expect(input.type).toBe("password");
-    expect(document.body.textContent ?? "").toContain("Add your API key");
+    // With a hub the grant leads and the field is the "or"; the label says so.
+    expect(document.body.textContent ?? "").toContain("Paste an API key");
     expect(document.body.textContent ?? "").toContain("Don't have an API key?");
 
     const link = document.querySelector('[data-testid="account-key-get-link"]') as HTMLAnchorElement;
