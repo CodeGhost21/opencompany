@@ -207,7 +207,7 @@ describe("the Managed row on Connections → Search", () => {
     await press(menuItem("Remove key"));
     expect(document.querySelector('[data-testid="search-confirm"]')).not.toBeNull();
     expect(document.querySelector('[data-testid="search-confirm"]')?.textContent).toContain(
-      "Remove Managed key?",
+      "Remove the Managed key?",
     );
   });
 

@@ -217,25 +217,6 @@ pub fn harness_inference_from_env_at(
     ))
 }
 
-/// Resolve the shared hosted-endpoint `(credential, base_url)` pair that managed
-/// TinyHumans chat inference addresses — the **one** credential path both
-/// [`harness_inference_from_env`] and [`PlatformCredentialStatus::resolve`] read,
-/// so a rotation or a per-tenant key reaches both without a second, drifting
-/// resolution.
-///
-/// Precedence mirrors the documented inference order, most specific first:
-///
-/// * credential — `OPENCOMPANY_INFERENCE_KEY` if set, else the platform token
-///   source ([`TinyhumansTokenSource::from_env`]: a projected `TINYHUMANS_TOKEN_FILE`
-///   ahead of a static `TINYHUMANS_API_KEY`). **Nothing configured ⇒ `None`.**
-/// * url — `OPENCOMPANY_INFERENCE_URL`, else [`DEFAULT_TINYHUMANS_INFERENCE_URL`].
-///
-/// The chat client POSTs to `{base_url}/chat/completions`, an OpenAI-compatible
-/// surface.
-pub(crate) fn hosted_endpoint_from_env(env: &dyn EnvSource) -> Option<(Credential, String)> {
-    hosted_endpoint_from_env_at(env, None)
-}
-
 /// Resolves the managed endpoint with an optional, already-normalized host API
 /// URL.  An environment endpoint remains the explicit highest-precedence
 /// override; the host URL is only the fallback proxy origin.
@@ -372,7 +353,7 @@ pub struct PlatformCredentialStatus {
     /// That identity is the **projected-file** tier rather than a static key.
     pub projected_tier: bool,
     /// Managed chat inference resolved
-    /// ([`hosted_endpoint_from_env`]).
+    /// ([`hosted_endpoint_from_env_at`]).
     pub inference: bool,
     /// Managed web search resolved ([`search_backend_from_env`]).
     pub search: bool,
