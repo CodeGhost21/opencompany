@@ -903,9 +903,15 @@ async fn finish_link(
     {
         crate::server::inference_models::evict_company_catalogs(runtime.id().as_ref());
     }
-    journal_fan_out(&company, false, &report).await?;
+    // Same ordering as `set_key`/`set_model`: rebuild before propagating a
+    // journal failure. The grant's link is already consumed by this point, so
+    // an identical retry cannot re-run this fan-out — but a rebuild skipped
+    // here still has no other trigger for this company, and journaling is
+    // never allowed to be the thing that costs it (CodeRabbit review).
+    let journal_result = journal_fan_out(&company, false, &report).await;
 
     let live = rebuild_if_pending(&state, &company, &report).await;
+    journal_result?;
     Ok(Json(MutationResponse {
         status: effective_status(&state, live.as_ref()).await?,
         note: company_key::fan_out_note(false, &report, None),
