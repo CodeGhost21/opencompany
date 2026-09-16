@@ -450,6 +450,7 @@ async fn a_write_to_an_env_owned_field_is_refused() {
             admin_email: None,
             tinyhumans_key: None,
             tinyhumans_model: None,
+            provider_draft: None,
         },
         &env,
     )
@@ -2421,4 +2422,319 @@ async fn an_account_key_with_no_company_to_own_it_is_not_written_anywhere() {
         None,
         "a company this wizard did not create must not be given a wallet"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The self-managed branch's provider (onboarding redesign, slice 4b-i)
+// ---------------------------------------------------------------------------
+
+/// A key shaped like a real one and worth nothing.
+const PROVIDER_KEY: &str = "sk-not-a-real-key";
+
+/// A local endpoint nothing is listening on, so the add's probe fails the
+/// non-destructive way rather than dialling anyone.
+const DRAFT_ENDPOINT: &str = "http://127.0.0.1:1/v1";
+
+/// The wizard's self-managed branch connects a provider, and the apply runs it
+/// through the same `add_provider` the LLM page's own add runs.
+///
+/// The row and the key are the visible half. The **default** is the half that
+/// says which function wrote them: decision X1 makes the first provider a
+/// company ever connects its default, and it lives inside `add_provider` — a
+/// hand-written flush of `put_provider` plus a secret set would land the row
+/// and the key exactly as below and leave the company with no default at all,
+/// which is a company whose agents have nothing to route to.
+#[tokio::test]
+async fn the_wizards_connected_provider_is_added_through_the_real_add() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "law_firm",
+            "name": "Acme",
+            "provider_draft": {
+                "kind": "custom",
+                "label": "Acme Models",
+                "baseUrl": DRAFT_ENDPOINT,
+                "key": PROVIDER_KEY,
+                "model": "acme/test-model",
+                "addAnyway": true,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["seeded_company"], "acme", "{body}");
+    assert!(
+        !body.to_string().contains(PROVIDER_KEY),
+        "the apply response must never echo the key: {body}"
+    );
+
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("the seeded company is registered");
+    let secrets = runtime.secrets();
+
+    let providers =
+        crate::company::inference::store::list_providers(runtime.id(), secrets.as_ref())
+            .await
+            .unwrap();
+    let row = providers
+        .iter()
+        .find(|p| p.slug == "acme-models")
+        .unwrap_or_else(|| panic!("no row was added: {providers:?}"));
+    assert!(
+        matches!(
+            row.model(),
+            crate::company::inference::store::ModelOnRow::One(ref model)
+                if model == "acme/test-model"
+        ),
+        "the row carries the model the operator chose: {:?}",
+        row.model()
+    );
+    assert_eq!(
+        secret(
+            &runtime,
+            &crate::company::inference::store::provider_key_key(&row.slug)
+        )
+        .await,
+        Some(PROVIDER_KEY.to_string()),
+        "the credential belongs to the row, in the slot the LLM page writes"
+    );
+
+    // The load-bearing one. Only `add_provider` decides this (decision X1), so
+    // a flush that wrote the row itself leaves it `Unset`.
+    let default = crate::company::inference::store::load_default(runtime.id(), secrets.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        default
+            .full()
+            .map(|choice| (choice.provider.as_str(), choice.model.as_str())),
+        Some(("acme-models", "acme/test-model")),
+        "the first provider a company ever connects becomes its default: {default:?}"
+    );
+
+    let note = body["provider_note"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the add's own words must come back: {body}"));
+    assert!(note.contains("Acme Models"), "{note}");
+}
+
+/// A provider with nothing to attach it to is dropped, not guessed at — the
+/// same rule the account key follows, for the same reason: on a host that
+/// already had companies there is none of them this wizard can claim the
+/// operator meant.
+#[tokio::test]
+async fn a_provider_draft_with_no_company_to_own_it_is_not_written_anywhere() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+    let existing = with_company(&state, home_dir.path()).await;
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "law_firm",
+            "provider_draft": {
+                "kind": "custom",
+                "label": "Acme Models",
+                "baseUrl": DRAFT_ENDPOINT,
+                "key": PROVIDER_KEY,
+                "model": "acme/test-model",
+                "addAnyway": true,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["seeded_company"].is_null(), "{body}");
+    assert!(
+        body["provider_note"].is_null(),
+        "nothing happened, so nothing is claimed: {body}"
+    );
+
+    let runtime = state.registry().get(&existing).expect("still registered");
+    let providers =
+        crate::company::inference::store::list_providers(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .unwrap();
+    assert!(
+        providers.is_empty(),
+        "a company this wizard did not create must not be given a provider: {providers:?}"
+    );
+}
+
+/// No draft, no write. An apply that carries none must leave the seeded
+/// company's provider list exactly as the seed left it, and claim nothing.
+#[tokio::test]
+async fn an_apply_with_no_provider_draft_adds_nothing_and_says_nothing() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({ "fields": {}, "template": "law_firm", "name": "Acme" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["provider_note"].is_null(), "{body}");
+
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("the seeded company is registered");
+    let providers =
+        crate::company::inference::store::list_providers(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .unwrap();
+    assert!(providers.is_empty(), "{providers:?}");
+}
+
+/// TinyHumans picked on the **self-managed** branch goes through the same add
+/// as anything else, including its slot guard.
+///
+/// `provider/tinyhumans/key` is shared with the account-key fan-out, so the add
+/// reads whatever is there before it writes and puts it back on any rollback.
+/// This pins that a wizard-side add lands in that slot rather than beside it.
+#[tokio::test]
+async fn tinyhumans_connected_on_the_self_managed_branch_lands_in_the_shared_slot() {
+    let home_dir = home();
+    // The TinyHumans row's endpoint is the configured proxy, so this points it
+    // at a closed local port: the add's probe then fails as transport, which is
+    // not a class that rolls a cloud provider back, and no test ever dials the
+    // real hub.
+    let state = AppState::new(AppConfig {
+        bind: "127.0.0.1:8080".to_string(),
+        api_url: "http://127.0.0.1:1".to_string(),
+        ..AppConfig::default()
+    })
+    .with_home(home_dir.path().to_path_buf());
+    // The account key's own fan-out runs first and writes the same slot, which
+    // is the state the add has to read and replace rather than write beside.
+    crate::server::ops::company_key::prober_override::set(
+        "acme",
+        Ok(vec!["acme/test-model".to_string()]),
+    );
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "law_firm",
+            "name": "Acme",
+            "tinyhumans_key": ACCOUNT_KEY,
+            "provider_draft": {
+                "kind": crate::company::inference::MANAGED_SLUG,
+                "key": PROVIDER_KEY,
+                "model": "acme/test-model",
+                "addAnyway": true,
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("the seeded company is registered");
+
+    assert_eq!(
+        secret(
+            &runtime,
+            &crate::company::inference::store::provider_key_key(
+                crate::company::inference::MANAGED_SLUG
+            )
+        )
+        .await,
+        Some(PROVIDER_KEY.to_string()),
+        "the row's key belongs in the slot the fan-out shares, not beside it"
+    );
+    // One slot, one occupant. The add read the fan-out's copy as its
+    // `previous_key` and replaced it; a wizard-side write that missed the slot
+    // would leave the account key here and the row's credential nowhere.
+    assert_ne!(
+        secret(
+            &runtime,
+            &crate::company::inference::store::provider_key_key(
+                crate::company::inference::MANAGED_SLUG
+            )
+        )
+        .await,
+        Some(ACCOUNT_KEY.to_string()),
+    );
+    // And it is a row, not the bare key the deprecated managed-key route
+    // leaves behind — the difference between a provider the LLM page can show
+    // and a credential nothing owns.
+    let providers =
+        crate::company::inference::store::list_providers(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .unwrap();
+    assert!(
+        providers
+            .iter()
+            .any(|p| p.slug == crate::company::inference::MANAGED_SLUG),
+        "{providers:?}"
+    );
+}
+
+/// The draft probe is behind the same gate every other setup route is.
+///
+/// It widens the first-run surface by one outward dial, so the gate is the
+/// whole of what keeps it honest: a routable host must refuse it anonymously,
+/// exactly as it refuses the read and the apply.
+#[tokio::test]
+async fn the_draft_probe_is_refused_on_a_routable_host() {
+    let home_dir = home();
+    let response = router(routable_state(home_dir.path()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup/inference/probe")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "baseUrl": DRAFT_ENDPOINT }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::OK,
+        "a routable host must not let an anonymous caller dial an address it names"
+    );
+}
+
+/// And it keeps its own refusal, which is not about authority at all: an
+/// endpoint carrying userinfo is refused before any request is made, because
+/// this host would otherwise put a basic-auth credential on the wire to an
+/// address the caller chose.
+#[tokio::test]
+async fn the_draft_probe_refuses_an_endpoint_carrying_a_credential() {
+    let home_dir = home();
+    let response = router(fresh_state(home_dir.path()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup/inference/probe")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "baseUrl": "http://alice:pw@127.0.0.1:1/v1" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
