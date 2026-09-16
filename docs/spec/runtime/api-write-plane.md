@@ -496,6 +496,6 @@ the provider, and to use Composio instead — ignoring the provider's `code` and
 `POST …/connections/{provider}/start` is likewise a `410 Gone` JSON response
 with stable code `native_oauth_retired`, a message, and `removalAfter:
 "2026-09-30"`. Both send `Deprecation: true` and a `Sunset: Wed, 30 Sep 2026
-00:00:00 GMT` header. #1023 removes the bridge after the cache
-window established by #979, keeping Disconnect and the read projection so
-tenants can release credentials written before #828.
+00:00:00 GMT` header. #1023 removes the bridge after the cache window
+established by #979, keeping Disconnect and the read projection so tenants can
+release credentials written before #828.
