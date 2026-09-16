@@ -1,36 +1,36 @@
 
 /// The agent every test here talks to.
-const AGENT: &str = "ceo";
+pub(super) const AGENT: &str = "ceo";
 
 /// The declared daily cap the in-turn brake arms at, in USD.
 ///
 /// Small enough that one scripted call crosses it, and quoted in the notice —
 /// so the assertions below can look for `$0.05` and know where it came from.
-const CAP_USD: f64 = 0.05;
+pub(super) const CAP_USD: f64 = 0.05;
 
 /// `prompt_tokens` a *cheap* call reports — well inside [`CAP_USD`], so a turn
 /// scripted with it finishes on its own.
-const CHEAP_TOKENS: u64 = 12;
+pub(super) const CHEAP_TOKENS: u64 = 12;
 
 /// `prompt_tokens` an *expensive* call reports. On the `chat-v1` tier this
 /// estimates to roughly $0.14, so the very first iteration crosses
 /// [`CAP_USD`] and the brake halts the turn.
-const EXPENSIVE_TOKENS: u64 = 1_000_000;
+pub(super) const EXPENSIVE_TOKENS: u64 = 1_000_000;
 
 /// The tool-iteration cap a turn actually runs under, bound to the constant
 /// rather than re-hardcoded so a vendor bump cannot quietly weaken the
 /// cross-fire test below into scripting the wrong turn shape.
-const CAP: usize = crate::harness::build::MAX_TOOL_ITERATIONS;
+pub(super) const CAP: usize = crate::harness::build::MAX_TOOL_ITERATIONS;
 
 /// The answer the scripted model gives when it is allowed to finish.
-const ANSWER: &str = "Spec published.";
+pub(super) const ANSWER: &str = "Spec published.";
 
 /// A slice of the spend notice unique to the platform's voice, for proving the
 /// notice is *absent* — from memory, and from a turn that finished.
 ///
 /// A substring rather than the whole notice: an absence assertion on the full
 /// string would pass the moment the wording changed by a comma.
-const SPEND_MARKER: &str = "reached its spend cap partway through";
+pub(super) const SPEND_MARKER: &str = "reached its spend cap partway through";
 
 // ---------------------------------------------------------------------------
 // The scripted model
@@ -77,7 +77,7 @@ fn tool_call_message(tool: &str, args: &Value) -> Value {
 }
 
 /// Serve the script on loopback and return its base URL plus the shared handle.
-async fn spawn_script(turns: Vec<Turn>, prompt_tokens: u64) -> (String, Arc<Script>) {
+pub(super) async fn spawn_script(turns: Vec<Turn>, prompt_tokens: u64) -> (String, Arc<Script>) {
     let script = Arc::new(Script {
         turns: Mutex::new(turns),
         seen: Mutex::new(Vec::new()),
@@ -134,7 +134,7 @@ async fn spawn_script(turns: Vec<Turn>, prompt_tokens: u64) -> (String, Arc<Scri
 /// a run stopped by *that* would prove nothing about the brake under test. The
 /// writes must also succeed every time, or the repeated-failure breaker halts
 /// the run for a third unrelated reason.
-fn write_then_answer(n: usize) -> Vec<Turn> {
+pub(super) fn write_then_answer(n: usize) -> Vec<Turn> {
     let mut turns: Vec<Turn> = (1..=n)
         .map(|i| Turn::Call {
             tool: "file_write".to_string(),
@@ -171,7 +171,7 @@ impl CycleHost for NoopHost {
     }
 }
 
-fn company() -> CompanyId {
+pub(super) fn company() -> CompanyId {
     CompanyId::new("acme")
 }
 
@@ -183,7 +183,7 @@ fn company() -> CompanyId {
 /// the negative control this file needs, and not something a zero could stand
 /// in for (a zero is a *malformed* cap, which `turn_spend_cap_usd` also ignores,
 /// for a different reason).
-fn manifest(budget: Option<f64>) -> CompanyManifest {
+pub(super) fn manifest(budget: Option<f64>) -> CompanyManifest {
     let budget_line = match budget {
         Some(usd) => format!("budget_usd_daily = {usd}\n"),
         None => String::new(),
@@ -208,7 +208,7 @@ tier = "orchestrator"
     .expect("manifest parses")
 }
 
-fn record(budget: Option<f64>) -> CompanyRecord {
+pub(super) fn record(budget: Option<f64>) -> CompanyRecord {
     CompanyRecord {
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
@@ -243,7 +243,7 @@ fn record(budget: Option<f64>) -> CompanyRecord {
 /// and the *in-turn* brake is the thing that stops it. A `None` meter would let
 /// the turn run too, but for the wrong reason (that gate fails open), and the
 /// test would no longer distinguish the two controls it exists to separate.
-fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
+pub(super) fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
         emergency_gate: None,
@@ -314,7 +314,7 @@ fn deps_for(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<FsOps>
 }
 
 /// An operator message, the shape a chat turn arrives as.
-fn chat(text: &str) -> CycleRequest {
+pub(super) fn chat(text: &str) -> CycleRequest {
     CycleRequest {
         cycle_id: "cycle-1".to_string(),
         company_id: company(),
@@ -333,7 +333,7 @@ fn chat(text: &str) -> CycleRequest {
 }
 
 /// The operator-channel bubbles a cycle produced.
-fn operator_bubbles(responses: &[OutboundMessage]) -> Vec<&OutboundMessage> {
+pub(super) fn operator_bubbles(responses: &[OutboundMessage]) -> Vec<&OutboundMessage> {
     responses
         .iter()
         .filter(|m| m.channel == "operator")
@@ -341,7 +341,7 @@ fn operator_bubbles(responses: &[OutboundMessage]) -> Vec<&OutboundMessage> {
 }
 
 /// Everything the turn wrote back to memory.
-async fn memory_bodies(context: &FsContextStore) -> Vec<String> {
+pub(super) async fn memory_bodies(context: &FsContextStore) -> Vec<String> {
     let metas = context
         .list(&company(), memory_loop::OUTCOME_LABEL_PREFIX)
         .await

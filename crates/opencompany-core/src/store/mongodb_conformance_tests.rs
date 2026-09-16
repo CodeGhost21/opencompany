@@ -1,5 +1,6 @@
 use super::tests::{drop_db, store};
 use super::*;
+use crate::store::conformance;
 
     #[tokio::test]
     async fn conformance_isolation_by_company() {
