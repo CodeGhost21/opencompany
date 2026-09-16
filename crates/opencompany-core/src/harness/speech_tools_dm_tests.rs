@@ -1,5 +1,6 @@
 use super::speech_tools_test_fixtures::*;
 use super::*;
+use std::sync::Mutex;
 
 /// `desk_dm` must resolve a display name to the roster's canonical id
 /// before journaling: `dm` names the recipient's session with it
