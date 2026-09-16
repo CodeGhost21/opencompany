@@ -184,6 +184,15 @@ async fn dm_replies(
         .collect()
 }
 
+/// Every resume acknowledgement lands in the thread the question was
+/// asked in, not at the channel root.
+///
+/// The anchor is the one the approval recorded when it parked. Driven
+/// directly because `park_blocker` records no
+/// parent of its own: only an `escalate_to_human` park carries one, and
+/// what is under test is that each resume passes on the anchor it is
+/// handed rather than dropping it.
+#[tokio::test]
 async fn a_resume_note_threads_off_the_question_it_answers() {
     use crate::ports::blockers::{BlockerResolution, BlockerVerdict};
 

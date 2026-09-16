@@ -538,12 +538,3 @@ async fn an_agent_question_whose_card_moved_on_answers_the_conversation() {
     );
 }
 
-/// Every resume acknowledgement lands in the thread the question was
-/// asked in, not at the channel root.
-///
-/// The anchor is the one the approval recorded when it parked. Driven
-/// directly because `park_blocker` records no
-/// parent of its own: only an `escalate_to_human` park carries one, and
-/// what is under test is that each resume passes on the anchor it is
-/// handed rather than dropping it.
-#[tokio::test]
