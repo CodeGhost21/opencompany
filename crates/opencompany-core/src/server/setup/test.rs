@@ -1996,6 +1996,7 @@ async fn catalog_auth_rejections_keep_their_credential_message() {
                 base_url: Some(format!("http://{address}/v1")),
             },
             &MapEnv::default(),
+            crate::app::config::DEFAULT_API_URL,
         )
         .await;
         server.abort();
