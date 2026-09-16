@@ -1369,14 +1369,29 @@ async fn resolve_legacy_scoped(
         )
         .await?;
         let had_key = !key.trim().is_empty();
-        // The **raw** kind, not the normalized one. `normalize_provider` folds
-        // `managed` onto `openrouter`, and resolving through the normalized
-        // value skipped both managed branches — so a company that declared
-        // `managed` and stored a key had its requests sent to `openrouter.ai`
-        // carrying a TinyHumans token. `resolve_endpoint` consults
-        // `is_managed_choice` first and needs the word the operator chose.
+        // Which spelling reaches `resolve_endpoint` depends on whether this
+        // runtime config also names an endpoint — the same split the manifest
+        // arm below makes, and for the same reason: `validate_runtime`
+        // accepts `provider: "managed"` with a valid non-blank `base_url`
+        // (normalizing to `openrouter` for the provider-allowlist check
+        // only), so a console `PUT` naming a gateway in front of the platform
+        // is exactly as valid a runtime config as a manifest one, and must be
+        // honoured the same way rather than having `resolve_endpoint`'s
+        // managed branch silently discard it for the platform's own endpoint
+        // (CodeRabbit review). Without a `base_url` the **raw** word must go
+        // in: `normalize_provider` folds `managed` onto `openrouter`, and
+        // resolving through the normalized value skipped both managed
+        // branches — so a company that declared `managed` and stored a key
+        // had its requests sent to `openrouter.ai` carrying a TinyHumans
+        // token. `resolve_endpoint` consults `is_managed_choice` first and
+        // needs the word the operator chose.
+        let endpoint_kind = if runtime_base_url.is_some() {
+            provider.as_str()
+        } else {
+            runtime.provider.as_str()
+        };
         let (base_url, credential, proxied) = resolve_endpoint(
-            &runtime.provider,
+            endpoint_kind,
             runtime.base_url.as_deref(),
             key,
             env_default,
