@@ -2637,8 +2637,17 @@ mod dead_card_test;
 
 /// Where a referred line says it came from, and who it says is speaking.
 #[cfg(test)]
-#[path = "chat_history_referral_origin_test.rs"]
-mod referral_origin_test;
+#[path = "chat_history_referral_origin_test_support.rs"]
+mod referral_origin_test_support;
+#[cfg(test)]
+#[path = "chat_history_referral_origin_episode_test.rs"]
+mod referral_origin_episode_test;
+#[cfg(test)]
+#[path = "chat_history_referral_origin_crossing_test.rs"]
+mod referral_origin_crossing_test;
+#[cfg(test)]
+#[path = "chat_history_referral_origin_relay_test.rs"]
+mod referral_origin_relay_test;
 
 /// How a chat selector becomes the `(desk id, desk name)` pair [`owns`] filters
 /// on — the one answer to "which desk is this", shared by the seed, the cycle's
