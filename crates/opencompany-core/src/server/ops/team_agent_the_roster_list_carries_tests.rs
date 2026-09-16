@@ -1,9 +1,7 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
+use axum::http::StatusCode;
+use serde_json::json;
 
 use super::team_agent_test_support::*;
-use crate::server::router;
 
 /// Issue #601: the roster **list** answers for tools and desks too, with
 /// the same values as the detail read.
