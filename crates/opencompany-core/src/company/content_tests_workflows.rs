@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::content_tests_support::*;
 use super::workflow_file::WorkflowNodeKind;
 use super::{
     CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
@@ -11,7 +12,6 @@ use super::{
     grants_workspace_write_explicit, load_catalog_skills, load_dir_ledgers, load_dir_skills,
     parse_workflow, walk_workspace,
 };
-use super::content_tests_support::*;
 
 #[test]
 fn the_skill_registry_parses() {
@@ -573,12 +573,3 @@ fn every_seeded_output_destination_resolves_against_its_own_manifest() {
          carries a destination"
     );
 }
-
-/// Every shipped bundle's ledger declarations must parse, and the set a company
-/// ends up with — the global baseline plus its own — must fit under the cap.
-///
-/// A declaration that does not parse is not a boot failure (the builder warns
-/// and carries on, because a hand-edited bundle should still reach its console),
-/// which is exactly why it has to fail *here*: a shipped template whose defining
-/// axis silently never appears is the failure this whole surface exists to
-/// prevent, and nothing at run time would say so.

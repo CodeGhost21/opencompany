@@ -13,6 +13,14 @@ use super::{
     parse_workflow, walk_workspace,
 };
 
+/// Every shipped bundle's ledger declarations must parse, and the set a company
+/// ends up with — the global baseline plus its own — must fit under the cap.
+///
+/// A declaration that does not parse is not a boot failure (the builder warns
+/// and carries on, because a hand-edited bundle should still reach its console),
+/// which is exactly why it has to fail *here*: a shipped template whose defining
+/// axis silently never appears is the failure this whole surface exists to
+/// prevent, and nothing at run time would say so.
 #[test]
 fn every_company_ledger_declaration_parses_and_fits_under_the_cap() {
     for company in subdirs(&repo_root().join("companies")) {
