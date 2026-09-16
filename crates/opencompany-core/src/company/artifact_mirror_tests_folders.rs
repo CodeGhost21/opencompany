@@ -2,8 +2,8 @@
 //! folder, failed-replacement rollback, and the operator-version /
 //! retired-node lookup rules (split out of `artifact_mirror_tests.rs`).
 
-use super::*;
 use super::artifact_mirror_tests_support::*;
+use super::*;
 
 /// Issue #759, the folder half of the publish walk: two publishers needing
 /// the same **task folder** that does not exist yet.

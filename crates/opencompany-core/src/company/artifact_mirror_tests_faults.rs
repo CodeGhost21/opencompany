@@ -2,8 +2,8 @@
 //! artifact stores, and the task-folder naming/adoption rules that keep
 //! one card in one folder (split out of `artifact_mirror_tests.rs`).
 
-use super::*;
 use super::artifact_mirror_tests_support::*;
+use super::*;
 
 /// A store that cannot be listed establishes **nothing**, and must not be
 /// reported as the ordinary-note answer.

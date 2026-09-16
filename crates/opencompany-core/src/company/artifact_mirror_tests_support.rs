@@ -32,11 +32,7 @@ impl WorkspaceStore for RefusingCreate {
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
         WorkspaceStore::tree(&*self.0, company).await
     }
-    async fn read(
-        &self,
-        company: &CompanyId,
-        id: &str,
-    ) -> Result<Option<(WorkspaceNode, String)>> {
+    async fn read(&self, company: &CompanyId, id: &str) -> Result<Option<(WorkspaceNode, String)>> {
         WorkspaceStore::read(&*self.0, company, id).await
     }
     async fn read_capped(
@@ -159,11 +155,7 @@ impl WorkspaceStore for AdoptParentThenRefuse {
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
         WorkspaceStore::tree(&*self.0, company).await
     }
-    async fn read(
-        &self,
-        company: &CompanyId,
-        id: &str,
-    ) -> Result<Option<(WorkspaceNode, String)>> {
+    async fn read(&self, company: &CompanyId, id: &str) -> Result<Option<(WorkspaceNode, String)>> {
         WorkspaceStore::read(&*self.0, company, id).await
     }
     async fn read_capped(
@@ -338,11 +330,7 @@ impl WorkspaceStore for PausedSwap {
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
         WorkspaceStore::tree(&*self.0, company).await
     }
-    async fn read(
-        &self,
-        company: &CompanyId,
-        id: &str,
-    ) -> Result<Option<(WorkspaceNode, String)>> {
+    async fn read(&self, company: &CompanyId, id: &str) -> Result<Option<(WorkspaceNode, String)>> {
         WorkspaceStore::read(&*self.0, company, id).await
     }
     async fn read_capped(
@@ -492,11 +480,7 @@ impl WorkspaceStore for PausedTreeRead {
         }
         WorkspaceStore::tree(&*self.inner, company).await
     }
-    async fn read(
-        &self,
-        company: &CompanyId,
-        id: &str,
-    ) -> Result<Option<(WorkspaceNode, String)>> {
+    async fn read(&self, company: &CompanyId, id: &str) -> Result<Option<(WorkspaceNode, String)>> {
         WorkspaceStore::read(&*self.inner, company, id).await
     }
     async fn read_capped(
@@ -540,8 +524,7 @@ impl WorkspaceStore for PausedTreeRead {
         name: &str,
         origin: WorkspaceOrigin,
     ) -> Result<crate::ports::workspace::FolderClaim> {
-        WorkspaceStore::adopt_or_create_folder(&*self.inner, company, parent, name, origin)
-            .await
+        WorkspaceStore::adopt_or_create_folder(&*self.inner, company, parent, name, origin).await
     }
     async fn create_binary(
         &self,
@@ -584,8 +567,7 @@ impl WorkspaceStore for PausedTreeRead {
         replacement_id: &str,
         name: &str,
     ) -> Result<Option<WorkspaceNode>> {
-        WorkspaceStore::swap_files(&*self.inner, company, expected_id, replacement_id, name)
-            .await
+        WorkspaceStore::swap_files(&*self.inner, company, expected_id, replacement_id, name).await
     }
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
         WorkspaceStore::delete(&*self.inner, company, id).await

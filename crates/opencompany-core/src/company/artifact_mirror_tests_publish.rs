@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use super::*;
 use super::artifact_mirror_tests_support::*;
+use super::*;
 
 /// The headline: a published deliverable lands in the shared tree, under
 /// `artifacts/<agent-id>/`, attributed to the agent that published it.
