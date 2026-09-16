@@ -319,18 +319,6 @@ const BUDGET_ROSTER: &str = "[company]\nname = \"Acme\"\n\
      [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\nbudget_usd_daily = 5.0\n\
      [[agent]]\nid = \"writer\"\nrole = \"Writer\"\n";
 
-fn budget_entry(agent_id: &str, cap: Option<f64>) -> BudgetOverride {
-    BudgetOverride {
-        agent_id: agent_id.to_string(),
-        budget_usd_daily: cap,
-        set_by: Actor {
-            kind: ActorKind::User,
-            id: "user-1".to_string(),
-        },
-        at_millis: 1_700_000_000_000,
-    }
-}
-
 // ---- `[policy]` override (issue #562) --------------------------------
 
 const POLICY_MANIFEST: &str = "[company]\nname = \"Acme\"\n\
