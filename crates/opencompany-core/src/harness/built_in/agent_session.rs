@@ -142,6 +142,15 @@ impl AgentSessionState {
             }
         }
     }
+
+    /// Record a row that an alternate prompt path already showed to the agent.
+    ///
+    /// Hive episode turns carry their own attributed transcript. They must mark
+    /// the triggering row seen without replacing the company-wide watermark;
+    /// replacing it would discard an unseen DM or channel row below the trigger.
+    pub(super) fn accept_seen(&mut self, seq: EventSeq) {
+        self.accept(seq);
+    }
 }
 
 /// One row on its way into the session.
