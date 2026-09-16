@@ -1,21 +1,17 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
-use tower::ServiceExt;
+use axum::http::StatusCode;
+use serde_json::json;
 
+use super::team_agent_test_support::*;
 use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::store::company_write_lock;
 use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
-use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
+
+#[allow(unused_imports)]
+use crate::ports::CompanyStore as _;
 
 /// A company whose grants actually bite: `ceo` asks for one tool the company
 /// does not allow, `writer` asks for nothing at all, and `hermit` sits on no
 /// desk. Each of those is a different arm of the resolution under test.
-const ROSTER: &str = r#"
+const _ROSTER_DOC: &str = r#"
 [company]
 name = "Acme"
 [policy]
