@@ -1,3 +1,7 @@
+use super::tests::tmp_root;
+use super::tests_company_store::sample_manifest;
+use super::*;
+
 
     /// **Issue #1828 review, tenth round**: `commit_staged` returned a plain
     /// `Err` for two very different states — the rename never happened, or

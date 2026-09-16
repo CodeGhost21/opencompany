@@ -1,3 +1,6 @@
+use super::tests::tmp_root;
+use super::*;
+
     pub(super) fn sample_manifest() -> crate::company::CompanyManifest {
         let toml_src = r#"
             [company]

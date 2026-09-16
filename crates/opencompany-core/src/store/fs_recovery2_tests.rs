@@ -1,3 +1,7 @@
+use super::tests::tmp_root;
+use super::tests_company_store::sample_manifest;
+use super::*;
+
 
     /// **Issue #1828 review, ninth round**: on the update path the two files
     /// are published by two independent renames, `company.toml` first. If the
