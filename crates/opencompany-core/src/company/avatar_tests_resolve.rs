@@ -82,10 +82,7 @@ impl ScriptedStore {
 
 #[async_trait::async_trait]
 impl crate::ports::WorkspaceStore for ScriptedStore {
-    async fn tree(
-        &self,
-        _company: &crate::ports::types::CompanyId,
-    ) -> Result<Vec<WorkspaceNode>> {
+    async fn tree(&self, _company: &crate::ports::types::CompanyId) -> Result<Vec<WorkspaceNode>> {
         unreachable!("resolve does not list the tree")
     }
     async fn read(
@@ -192,11 +189,7 @@ impl crate::ports::WorkspaceStore for ScriptedStore {
     ) -> Result<Option<WorkspaceNode>> {
         unreachable!("resolve does not swap files")
     }
-    async fn delete(
-        &self,
-        _company: &crate::ports::types::CompanyId,
-        _id: &str,
-    ) -> Result<bool> {
+    async fn delete(&self, _company: &crate::ports::types::CompanyId, _id: &str) -> Result<bool> {
         unreachable!("resolve does not delete")
     }
     async fn is_empty(&self, _company: &crate::ports::types::CompanyId) -> Result<bool> {

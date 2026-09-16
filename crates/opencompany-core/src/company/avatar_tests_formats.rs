@@ -4,7 +4,6 @@
 
 use super::*;
 
-
 // ——— decoded-size validation ——————————————————————————————
 
 /// A PNG whose header announces the given size — the signature and IHDR
@@ -511,4 +510,3 @@ fn size_check_refuses_an_undersized_sof() {
     assert!(image_dimensions(undersized).is_none());
     assert!(check_image_dimensions(undersized).is_err());
 }
-

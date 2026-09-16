@@ -3232,17 +3232,17 @@ impl crate::ports::journal::JournalStore for FsJournalStore {
 #[path = "fs_tests.rs"]
 mod tests;
 #[cfg(test)]
+#[path = "fs_company_store_tests.rs"]
+mod tests_company_store;
+#[cfg(test)]
 #[path = "fs_conformance_tests.rs"]
 mod tests_conformance;
 #[cfg(test)]
-#[path = "fs_company_store_tests.rs"]
-mod tests_company_store;
+#[path = "fs_ledger_tests.rs"]
+mod tests_ledger;
 #[cfg(test)]
 #[path = "fs_recovery_tests.rs"]
 mod tests_recovery;
 #[cfg(test)]
 #[path = "fs_recovery2_tests.rs"]
 mod tests_recovery2;
-#[cfg(test)]
-#[path = "fs_ledger_tests.rs"]
-mod tests_ledger;
