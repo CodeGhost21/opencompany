@@ -1,5 +1,6 @@
 //! Runtime tests: dispatch, quiescing refusal, and card/DM relay journaling.
 
+use super::tests_core::RecordingMeter;
 use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
 use crate::ports::tasks::TaskTitle;
 use std::sync::Arc;
