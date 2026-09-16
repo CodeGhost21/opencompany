@@ -168,11 +168,7 @@ async fn a_store_failure_never_reaches_the_turn() {
 
     #[async_trait]
     impl RunStore for BrokenRuns {
-        async fn create_run(
-            &self,
-            company: &CompanyId,
-            spec: NewRun,
-        ) -> crate::Result<RunRecord> {
+        async fn create_run(&self, company: &CompanyId, spec: NewRun) -> crate::Result<RunRecord> {
             Ok(RunRecord {
                 id: spec.id,
                 company: company.clone(),

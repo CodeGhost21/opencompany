@@ -69,8 +69,7 @@ fn library_doc(slug: &str) -> SkillDoc {
         description: "Profile competitors.".to_string(),
         category: Some("Research".to_string()),
         version: Some("1.0.0".to_string()),
-        body: "\n# Competitor Scan\n\n## Steps\n\n1. Pick.\n\n## Output\n\nA table.\n"
-            .to_string(),
+        body: "\n# Competitor Scan\n\n## Steps\n\n1. Pick.\n\n## Output\n\nA table.\n".to_string(),
     }
 }
 
@@ -202,7 +201,8 @@ fn an_unparseable_snapshot_the_library_lacks_stays_dropped() {
 #[test]
 fn a_stub_for_a_slug_the_library_lacks_is_left_alone() {
     let ws = tempfile::tempdir().unwrap();
-    let stub = "---\nname: Retired\ndescription: Gone from the library.\n---\nGone from the library.\n";
+    let stub =
+        "---\nname: Retired\ndescription: Gone from the library.\n---\nGone from the library.\n";
 
     let eff = EffectiveSkills::materialize(
         ws.path().to_path_buf(),
@@ -226,8 +226,8 @@ fn company_dir_skills_materialize_with_resources() {
     let ws = tempfile::tempdir().unwrap();
     seed_company_skill(src.path(), "web-research", "Web Research", Some("# spec"));
 
-    let eff = EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[])
-        .unwrap();
+    let eff =
+        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[]).unwrap();
 
     // The parsed doc surfaces in the catalogue.
     assert_eq!(eff.docs.len(), with_baseline(&["web-research"]));
@@ -348,8 +348,7 @@ fn custom_doc_supersedes_company_body() {
     assert_eq!(eff.docs.len(), with_baseline(&["report"]));
     assert_eq!(doc(&eff, "report").name, "New Report");
     let written =
-        std::fs::read_to_string(ws.path().join("skills").join("report").join("SKILL.md"))
-            .unwrap();
+        std::fs::read_to_string(ws.path().join("skills").join("report").join("SKILL.md")).unwrap();
     assert_eq!(written, body);
 }
 
@@ -378,8 +377,7 @@ fn a_manifest_opt_out_drops_a_global_skill() {
     let dropped = crate::globals::skills()[0].slug.clone();
     let deltas = skill_effective::globals_skill_disables(&[format!("skill:{dropped}")]);
 
-    let eff =
-        EffectiveSkills::materialize(ws.path().to_path_buf(), None, &[], &deltas).unwrap();
+    let eff = EffectiveSkills::materialize(ws.path().to_path_buf(), None, &[], &deltas).unwrap();
 
     assert!(eff.docs.iter().all(|doc| doc.slug != dropped));
     assert_eq!(eff.docs.len(), crate::globals::skills().len() - 1);
@@ -403,8 +401,8 @@ fn read_tools_expose_three_named_tools() {
     let src = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
     seed_company_skill(src.path(), "web-research", "Web Research", None);
-    let eff = EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[])
-        .unwrap();
+    let eff =
+        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[]).unwrap();
 
     let tools = eff.read_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
@@ -449,18 +447,12 @@ async fn console_custom_docs_surface_content_through_read_tools() {
         slug: "quick-note".to_string(),
         enabled: true,
         source: SkillSource::Custom,
-        custom_doc: Some(
-            "---\nname: Quick Note\ndescription: Jot a quick note\n---\n".to_string(),
-        ),
+        custom_doc: Some("---\nname: Quick Note\ndescription: Jot a quick note\n---\n".to_string()),
     };
 
-    let eff = EffectiveSkills::materialize(
-        ws.path().to_path_buf(),
-        None,
-        &[],
-        &[registry, empty_body],
-    )
-    .unwrap();
+    let eff =
+        EffectiveSkills::materialize(ws.path().to_path_buf(), None, &[], &[registry, empty_body])
+            .unwrap();
     assert_eq!(
         eff.docs.len(),
         with_baseline(&["web-research", "quick-note"]),
@@ -512,8 +504,8 @@ async fn list_skills_tool_sees_the_materialized_skill() {
     let src = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
     seed_company_skill(src.path(), "web-research", "Web Research", None);
-    let eff = EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[])
-        .unwrap();
+    let eff =
+        EffectiveSkills::materialize(ws.path().to_path_buf(), Some(src.path()), &[], &[]).unwrap();
 
     let tools = eff.read_tools();
     let list = tools

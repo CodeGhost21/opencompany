@@ -176,5 +176,5 @@ pub async fn resolve_effective_provider(
 }
 
 #[cfg(test)]
-#[path = "mod_search_tests.rs"]
+#[path = "search_tests.rs"]
 mod tests;

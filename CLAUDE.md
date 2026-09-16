@@ -43,8 +43,9 @@ The vendored runtime source is the `vendor/openhuman/` Git submodule. TinyAgents
 is inherited from OpenHuman at `vendor/openhuman/vendor/tinyagents/`.
 
 Prefer small modules with focused responsibilities. Keep core type definitions
-in a dedicated `types.rs` file and package-local tests in the module file or a
-dedicated `test.rs` file when they grow.
+in a dedicated `types.rs` file and package-local tests in a sibling
+`<stem>_tests.rs` file (see "Testing Guidelines"). Every source directory
+carries a `README.md` describing what lives there, file by file.
 
 ## Build, Test, and Development Commands
 
@@ -107,11 +108,39 @@ be `snake_case`; public types should be `PascalCase`; functions, methods,
 fields, and local variables should be `snake_case`. Return `Result<T>` using
 the crate error type from `src/error.rs`.
 
+No file under `crates/*/src` may exceed **750 lines**;
+`scripts/ci/assert-rs-source-layout.sh` fails the `Rust source layout` job
+otherwise. Fix it by splitting along a real seam, never by deleting: keep
+`foo.rs` as the module root, move a coherent part into `foo/<part>.rs`
+declared with `mod <part>;`, and re-export so every existing `crate::...`
+path still resolves. Integration targets under `tests/` and `examples/` are
+exempt because CI selects those per file (issue #475).
+
+Every `pub` item gets a `///` doc comment saying what it does and why it
+exists, and every file a `//!` header; the surrounding comments in this repo
+explain reasoning and cite the issue that motivated them — match that.
+
 ## Testing Guidelines
 
 Add focused tests with every behavior change. Keep tests near the module they
 exercise unless they verify cross-module behavior, in which case place them in
 the consuming module or in `tests/` as an integration target.
+
+Unit tests live in a sibling file named after the source stem — `foo.rs` →
+`foo_tests.rs`, `foo/mod.rs` → `foo/foo_tests.rs` — never in an inline
+`#[cfg(test)] mod tests { ... }` block (the same CI script as the line cap
+rejects those). Declare it from the source file as
+
+```rust
+#[cfg(test)]
+#[path = "foo_tests.rs"]
+mod tests;
+```
+
+so the module is still `foo::tests`, `use super::*;` still reaches private
+items, and existing test paths keep working. When a test file passes 750
+lines, split it by topic into `foo_<topic>_tests.rs`, each declared the same
+way with its own module name.
 
 A new file under `tests/` is not covered until a CI job both selects it and
 enables the features its crate-level `cfg` needs (issue #475). A target missing

@@ -96,8 +96,7 @@ fn selection_request_says_what_each_member_can_use() {
     ];
     let request = selection_request("fetch the latest open issues", &candidates);
     assert!(
-        request
-            .contains("- support_specialist — Support Specialist [can use: composio, web.*]"),
+        request.contains("- support_specialist — Support Specialist [can use: composio, web.*]"),
         "the member that can reach GitHub says so: {request}"
     );
     assert!(
