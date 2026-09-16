@@ -2,7 +2,7 @@
 //! with [`HostedMedullaBrain`] wired in through the builder. See
 //! `hosted_offline_tests.rs` for the offline half over [`MockTransport`].
 
-use super::tests_offline::{effect_frame, tool_call_frame};
+use super::tests_offline::{effect_frame, tool_call_frame, usage_frame};
 use super::*;
 use std::sync::Arc;
 use std::sync::Mutex;

@@ -141,7 +141,7 @@ pub(super) fn tool_call_frame(name: &str, index: usize, args: Value) -> InboundF
 
 /// A usage report for the cycle under test (issue #174), keyed on the same
 /// deterministic dedupe id the server would derive.
-fn usage_frame(index: usize, input: u64, output: u64, cost_usd: Option<f64>) -> InboundFrame {
+pub(super) fn usage_frame(index: usize, input: u64, output: u64, cost_usd: Option<f64>) -> InboundFrame {
     InboundFrame::Usage(UsageFrame {
         cycle_id: cid(),
         call_id: wire::call_id(&cid(), wire::USAGE_CALL_KIND, index),
