@@ -1,0 +1,675 @@
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+use super::*;
+
+use crate::company::CompanyManifest;
+use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+
+const TOKEN: &str = "sk-super-secret-inference-token-XYZ";
+
+fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("oc-inference-")
+        .tempdir()
+        .expect("tempdir")
+}
+
+fn manifest() -> CompanyManifest {
+    toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
+}
+
+/// A manifest whose **only** inference lives in the default harness's
+/// `[harness.inference]` — no company-level `[inference]` section at all.
+/// `openhuman`-gated like its only caller: under the default build the
+/// harness-wiring path the fix targets is compiled out, and an unused
+/// helper would trip `clippy -D warnings`.
+#[cfg(feature = "openhuman")]
+fn manifest_with_harness_inference() -> CompanyManifest {
+    toml::from_str(
+        r#"[company]
+name = "Acme"
+[policy]
+mode = "full"
+
+[[harness]]
+id = "embedded"
+kind = "built_in"
+default = true
+
+[harness.inference]
+provider = "openai_compatible"
+base_url = "https://byo.example/v1"
+"#,
+    )
+    .unwrap()
+}
+
+/// Commits `manifest` as `id`'s record — what `manifest_inference` reads.
+async fn save_record(home: &std::path::Path, id: &CompanyId, manifest: &CompanyManifest) {
+    use crate::ports::CompanyStore;
+    FsCompanyStore::new(home.to_path_buf())
+        .save(&CompanyRecord {
+            overlay_desk_hive: Vec::new(),
+            overlay_retired_agents: Vec::new(),
+            overlay_agent_edits: Vec::new(),
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_tool_grants: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+            name_confirmed: false,
+            activation_completed_at: None,
+            created_at_millis: None,
+        })
+        .await
+        .unwrap();
+}
+
+async fn state_with_company(home: &std::path::Path) -> AppState {
+    state_with_company_named(home, "acme").await
+}
+
+/// A company under a caller-chosen id.
+///
+/// Almost every test here can share `acme`, but the catalog cache is
+/// process-global and keyed on the company, and storing a key now evicts
+/// that company's authenticated entries (Codex review on #2045). A test that
+/// rotates a credential therefore wipes the seeded fixtures of every sibling
+/// running beside it under the same id — libtest runs these in parallel — so
+/// it needs an id of its own rather than an ordering assumption that cannot
+/// hold.
+async fn state_with_company_named(home: &std::path::Path, name: &str) -> AppState {
+    let id = CompanyId::new(name);
+    save_record(home, &id, &manifest()).await;
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, name).await;
+    state
+}
+
+/// [`state_with_company`] over a caller-supplied manifest.
+///
+/// The strict `validate()` only runs on a first boot with no persisted
+/// record (`src/runtime/builder.rs`), and `save_record` writes one first —
+/// so this can plant a manifest a fresh company would now be refused. That
+/// is the point: an endpoint stored before the refusal existed is exactly
+/// the case the redaction half of the rule is for.
+async fn state_with_manifest(
+    home: &std::path::Path,
+    name: &str,
+    manifest_toml: &str,
+) -> AppState {
+    let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+    let id = CompanyId::new(name);
+    save_record(home, &id, &manifest).await;
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, name).await;
+    state
+}
+
+/// [`state_with_company`] over a harness-only-inference manifest. The
+/// routes read `manifest_inference` from the saved record, so the company
+/// boots on the echo brain here (no pool attached) while the record it
+/// reads still carries the harness's `[harness.inference]` — exactly the
+/// shape of company the fix targets.
+#[cfg(feature = "openhuman")]
+async fn state_with_harness_inference(home: &std::path::Path) -> AppState {
+    let id = CompanyId::new("acme");
+    save_record(home, &id, &manifest_with_harness_inference()).await;
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest_with_harness_inference())
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+    state
+}
+
+/// A rebuilder that rebuilds over the handover, as the binary's does.
+struct Working {
+    home: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::RuntimeRebuilder for Working {
+    async fn rebuild(
+        &self,
+        _state: &AppState,
+        request: crate::runtime::RebuildRequest,
+    ) -> crate::Result<crate::company::runtime::CompanyRuntime> {
+        RuntimeBuilder::new(self.home.clone(), request.manifest)
+            .with_id(request.id)
+            .with_handover(request.handover)
+            .build()
+            .await
+    }
+}
+
+/// `POST …/inference/restart` rebuilds the runtime in place, so the console's
+/// "Restart required" notice has an action behind it rather than being a
+/// dead end pointing at a container the operator may not be able to touch.
+#[tokio::test]
+async fn restart_rebuilds_the_registered_runtime() {
+    let home_dir = home();
+    let home = home_dir.path();
+    let id = CompanyId::new("acme");
+    let state = state_with_company(home)
+        .await
+        .with_rebuilder(std::sync::Arc::new(Working {
+            home: home.to_path_buf(),
+        }));
+    state.set_boot_inputs(id.clone(), crate::runtime::BootInputs::default());
+    let before = state.registry().get(&id).expect("registered");
+
+    let (status, resp, raw) =
+        send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    // A genuinely different runtime is registered — the point of the route.
+    let after = state.registry().get(&id).expect("registered");
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "the restart must actually swap the runtime, not report success and leave it"
+    );
+    // And it is taking work, rather than stuck in the quiesce window. A
+    // company parked there refuses every cycle forever, which is worse than
+    // the stale brain the rebuild was replacing.
+    assert!(!after.is_quiesced());
+    assert!(resp["status"].is_object(), "{raw}");
+}
+
+/// Calling it twice is not an error. The console offers the button off a
+/// status read, so it can always be a moment stale — refusing when nothing
+/// is pending would turn a harmless retry into a failure an operator has to
+/// interpret.
+#[tokio::test]
+async fn restarting_a_healthy_company_is_a_no_op_not_a_refusal() {
+    let home_dir = home();
+    let home = home_dir.path();
+    let id = CompanyId::new("acme");
+    let state = state_with_company(home)
+        .await
+        .with_rebuilder(std::sync::Arc::new(Working {
+            home: home.to_path_buf(),
+        }));
+    state.set_boot_inputs(id, crate::runtime::BootInputs::default());
+
+    for attempt in 1..=2 {
+        let (status, _, raw) =
+            send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+        assert_eq!(status, StatusCode::OK, "attempt {attempt}: {raw}");
+    }
+}
+
+/// A host that wired no rebuilder cannot do this, and must say so rather
+/// than report a success that changed nothing. This is the pre-#290
+/// deployment, and the console keeps showing the restart notice.
+#[tokio::test]
+async fn a_host_that_cannot_rebuild_says_so() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, _, raw) =
+        send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+    assert_ne!(status, StatusCode::OK, "{raw}");
+    assert!(
+        raw.contains("restart the process"),
+        "the failure must tell the operator what will work instead: {raw}"
+    );
+
+    // Critically, the company is still serving. A failed rebuild that left
+    // it quiesced would turn a cosmetic dead end into an outage.
+    let (status, _, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// `restart_runtime` takes `AdminScopedCompany` in its signature, but
+/// nothing here had actually driven a plain member against it over HTTP —
+/// every other test in this module authenticates as the seeded admin.
+/// Rebuilding a company's runtime on demand is at least as sharp a
+/// boundary as any other admin-only write in this module.
+#[tokio::test]
+async fn a_member_may_not_restart_the_runtime() {
+    let home_dir = home();
+    let home = home_dir.path();
+    let id = CompanyId::new("acme");
+    let state = state_with_company(home)
+        .await
+        .with_rebuilder(std::sync::Arc::new(Working {
+            home: home.to_path_buf(),
+        }));
+    state.set_boot_inputs(id.clone(), crate::runtime::BootInputs::default());
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+    let before = state.registry().get(&id).expect("registered");
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/inference/restart")
+        .header("cookie", crate::server::test_support::member_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // A refused request must not have rebuilt the runtime either.
+    let after = state.registry().get(&id).expect("still registered");
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &after),
+        "a forbidden restart must not swap the runtime"
+    );
+}
+
+/// Issue #1736: the console cannot offer a restart it has no way to know is
+/// available, so the status carries the capability rather than leaving the
+/// card to guess from the deployment shape.
+///
+/// The pairing is the whole point — a flag that is always `false` would
+/// satisfy the "no button on a host that cannot" half while silently
+/// removing the action from every host that can.
+#[tokio::test]
+async fn the_status_says_whether_this_host_can_rebuild_in_place() {
+    let bare_home = home();
+    let bare = state_with_company(bare_home.path()).await;
+    let (status, body, raw) = send(&bare, "GET", "/api/v1/company/inference", None).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(
+        body["canRebuildInPlace"],
+        json!(false),
+        "a host with no rebuilder must say so, or the console renders a \
+         Restart now button whose route can only answer with a config error: {raw}"
+    );
+
+    let wired_home = home();
+    let wired =
+        state_with_company(wired_home.path())
+            .await
+            .with_rebuilder(std::sync::Arc::new(Working {
+                home: wired_home.path().to_path_buf(),
+            }));
+    let (status, body, raw) = send(&wired, "GET", "/api/v1/company/inference", None).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(
+        body["canRebuildInPlace"],
+        json!(true),
+        "a host that wired one must keep offering the action: {raw}"
+    );
+}
+
+/// Issue #1737: a probe the process already knows cannot authenticate is
+/// refused here rather than sent.
+///
+/// The endpoint is the discard port, so a regression does not merely fail
+/// this assertion — it makes an outbound connection, which is the behaviour
+/// under test. A keyless `openrouter` carrying its own `base_url` resolves
+/// direct and credential-less by construction, so this does not depend on
+/// whatever the process environment happens to hold.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn a_probe_with_no_credential_is_refused_before_it_is_sent() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, _, raw) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/inference",
+        Some(json!({ "provider": "openrouter", "baseUrl": "http://127.0.0.1:9/v1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, body, raw) =
+        send(&state, "POST", "/api/v1/company/inference/test", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["code"], json!("no_key"), "{raw}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no Authorization header"),
+        "the refusal names the cause the vendor's 401 would have hidden: {raw}"
+    );
+}
+
+/// The other half of that judgement: an endpoint the operator supplied may
+/// legitimately want no bearer, so it is still probed. Refusing there would
+/// turn a working local server into a false alarm — worse than the outbound
+/// request it saves.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn a_keyless_custom_endpoint_is_still_probed() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, _, raw) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/inference",
+        Some(json!({ "provider": "openai_compatible", "baseUrl": "http://127.0.0.1:9/v1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, body, raw) =
+        send(&state, "POST", "/api/v1/company/inference/test", None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{raw}");
+    assert_eq!(body["code"], json!("probe_failed"), "{raw}");
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn saved_company_probe_sends_its_resolved_model() {
+    let sent_model = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let model_for_route = sent_model.clone();
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let sent_model = model_for_route.clone();
+            async move {
+                *sent_model.lock().unwrap() = body["model"].as_str().map(str::to_string);
+                axum::Json(json!({
+                    "choices": [{ "message": { "content": "pong" } }]
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, _, raw) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/inference",
+        Some(json!({
+            "provider": "openai_compatible",
+            "baseUrl": format!("http://{address}/v1"),
+            "models": { "chat-v1": "provider/model" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, body, raw) =
+        send(&state, "POST", "/api/v1/company/inference/test", None).await;
+    server.abort();
+
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(body["ok"], true, "{raw}");
+    assert_eq!(
+        sent_model.lock().unwrap().as_deref(),
+        Some("provider/model")
+    );
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn saved_company_probe_keeps_typed_credential_failures() {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": {
+                        "message": "Missing Authentication header",
+                        "code": 401
+                    }
+                })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, _, raw) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/inference",
+        Some(json!({
+            "provider": "openai_compatible",
+            "baseUrl": format!("http://{address}/v1"),
+            "key": "not-a-real-key",
+            "models": { "chat-v1": "provider/model" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, body, raw) =
+        send(&state, "POST", "/api/v1/company/inference/test", None).await;
+    server.abort();
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{raw}");
+    assert_eq!(body["code"], json!("credential_rejected"), "{raw}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("did carry an Authorization header"),
+        "{raw}"
+    );
+}
+
+/// Issue #1737, the sentence that would have saved an hour: OpenRouter
+/// answers a credential it cannot parse with `Missing Authentication
+/// header`, which reads as "nothing was sent" and is how the issue came to
+/// be filed against the wrong layer. The header *was* sent.
+#[cfg(feature = "openhuman")]
+#[test]
+fn a_401_is_reported_as_a_rejected_credential_rather_than_a_missing_header() {
+    let decl = inference::decl_for_probe(
+        "openrouter",
+        None,
+        Some("a-key-for-some-other-vendor"),
+        None,
+    );
+    let error = anyhow::Error::new(tinyinference::Error::Provider(Box::new(
+        tinyinference::model::ProviderError {
+            provider: "inference".to_string(),
+            status: Some(401),
+            message: "Missing Authentication header".to_string(),
+            ..Default::default()
+        },
+    )));
+    let (message, code) = probe_failure(&decl, &error);
+
+    assert_eq!(code, "credential_rejected");
+    assert!(
+        message.contains("did carry an Authorization header"),
+        "the console must not repeat the vendor's reading back at the operator: {message}"
+    );
+    assert!(
+        message.contains("stored against the provider selected when it was saved"),
+        "and it must name the reason a stored key can still be the wrong one: {message}"
+    );
+    assert!(
+        message.contains("Missing Authentication header"),
+        "the vendor's own words stay attached as evidence: {message}"
+    );
+}
+
+async fn send(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value, String) {
+    send_as(state, "acme", method, uri, body).await
+}
+
+/// `send` against a company other than `acme`, for the tests that need an id
+/// of their own — see `state_with_company_named`.
+async fn send_as(
+    state: &AppState,
+    company: &str,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value, String) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("cookie", crate::server::test_support::fixed_cookie(company));
+    let request = match body {
+        Some(body) => request
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+        None => request.body(Body::empty()).unwrap(),
+    };
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let raw = String::from_utf8_lossy(&bytes).to_string();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, value, raw)
+}
+
+/// Seed one endpoint's catalog cache so the route answers offline, and
+/// deterministically: each test uses a base URL of its own, because the
+/// registry is process-wide and a shared key would let one test's positive
+/// entry decide another's outcome.
+///
+/// Seeded in **`acme`'s** scope, because an authenticated read is
+/// partitioned per company — every route test here drives the `acme`
+/// company from [`state_with_company`], and a seed in the shared/keyless
+/// slot would no longer be the entry the route reads.
+/// Seed the authenticated catalog cache for a named company — the scope the
+/// route reads under.
+///
+/// Every caller names its own company rather than sharing one: eviction is
+/// company-wide, so a fixture seeded under an id another test saves a key
+/// for is thrown away at random.
+fn seed_catalog_for(company: &str, base_url: &str, ids: &[&str]) {
+    crate::server::inference_models::catalog_cache_scoped(base_url, Some(company)).store(
+        ids.iter()
+            .map(|id| crate::server::inference_models::InferenceModel {
+                id: (*id).to_string(),
+                name: Some(format!("{id} (display)")),
+                context_length: Some(128_000),
+            })
+            .collect(),
+        std::time::Instant::now(),
+    );
+}
+
+/// The catalog is read from the endpoint **this company** is configured
+/// against, not from OpenRouter's public registry.
+///
+/// This is the defect in one assertion. The route used to call
+/// `openrouter_models()` with no reference to the company at all, so a
+/// company pointed at a TinyHumans base URL was shown OpenRouter's 421
+/// models — `anthropic/claude-sonnet-5` among them — and the endpoint then
+/// answered `Model 'anthropic/claude-sonnet-5' is not available`.
+#[tokio::test]
+async fn model_catalog_route_lists_the_configured_endpoints_own_catalog() {
+    const ENDPOINT: &str = "http://127.0.0.1:9/tier-native/v1";
+    // Its own company id. Saving a key evicts that company's authenticated
+    // catalogs, and a dozen tests in this module save one under `acme`; with
+    // a shared id, whichever of them libtest happens to run alongside this
+    // one throws the seeded fixture away. Locally the interleaving hid it;
+    // CI's found it (Codex review on #2045).
+    const COMPANY: &str = "catalog-tiers";
+    let home_dir = home();
+    let state = state_with_company_named(home_dir.path(), COMPANY).await;
+    let (status, _, raw) = send_as(
+        &state,
+        COMPANY,
+        "PUT",
+        "/api/v1/company/inference",
+        Some(json!({
+            "provider": "openai_compatible",
+            "baseUrl": ENDPOINT,
+            "key": "test-token",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    // Seeded *after* the save, not before: storing a key evicts this
+    // company's authenticated catalogs, because a rotation changes what the
+    // endpoint will answer without changing the cache key (Codex review on
+    // #2045). Seeding first meant the save threw the fixture away and the
+    // route fell through to a real request. This order is also what happens
+    // in life — the cache is warmed by a read, which comes after the config
+    // exists to be read against.
+    seed_catalog_for(
+        COMPANY,
+        ENDPOINT,
+        &["agentic-v1", "chat-v1", "reasoning-v1", "vision-v1"],
+    );
+
+    let (status, body, raw) = send_as(
+        &state,
+        COMPANY,
+        "GET",
+        "/api/v1/company/inference/models",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(
+        body["baseUrl"], ENDPOINT,
+        "the catalog names the endpoint it came from: {raw}"
+    );
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .map(|m| m["id"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["agentic-v1", "chat-v1", "reasoning-v1", "vision-v1"],
+        "the configured endpoint's own ids, not OpenRouter's: {raw}"
+    );
+    // Keys rework (#2306), slice 2d: no vocabulary classification is
+    // shipped on this DTO any more — the console never read it either.
+    assert!(
+        body.get("tierVocabulary").is_none() && body.get("tierDefaults").is_none(),
+        "{raw}"
+    );
+}
+
