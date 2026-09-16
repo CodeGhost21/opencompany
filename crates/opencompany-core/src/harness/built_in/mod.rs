@@ -3891,13 +3891,13 @@ impl HarnessPool {
         };
         let backend = match (&deps.search, company_key) {
             (Some(backend), _) => backend.clone(),
-            (None, Some(_)) => match {
-                self.managed_search_backends
-                    .read()
-                    .await
-                    .get(&company.id)
-                    .cloned()
-            } {
+            (None, Some(_)) => match self
+                .managed_search_backends
+                .read()
+                .await
+                .get(&company.id)
+                .cloned()
+            {
                 Some(backend) => backend,
                 None => {
                     use crate::app::config::ProcessEnv;
