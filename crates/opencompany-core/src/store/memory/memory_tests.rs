@@ -31,13 +31,13 @@ pub(super) struct FakeEngine {
 }
 
 impl FakeEngine {
-    fn provider() -> Arc<dyn tinymemory_api::provider::MemoryProvider> {
+    pub(super) fn provider() -> Arc<dyn tinymemory_api::provider::MemoryProvider> {
         Self::with_handle().1
     }
 
     /// The engine *and* its provider, for tests that need to inspect what was
     /// actually persisted rather than what a read path chose to return.
-    fn with_handle() -> (Arc<Self>, Arc<dyn tinymemory_api::provider::MemoryProvider>) {
+    pub(super) fn with_handle() -> (Arc<Self>, Arc<dyn tinymemory_api::provider::MemoryProvider>) {
         let engine = Arc::new(Self::default());
         let provider = Arc::new(MemoryTraitProvider::new(engine.clone(), "fake-engine"));
         (engine, provider)
