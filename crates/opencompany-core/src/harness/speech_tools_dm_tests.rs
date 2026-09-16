@@ -2,6 +2,42 @@ use super::speech_tools_test_fixtures::*;
 use super::*;
 use std::sync::Mutex;
 
+#[tokio::test]
+async fn a_committed_dm_stages_one_bounded_recipient_turn_without_a_card() {
+    let (context, _events, _dir) = context_with_overlay_teammates().await;
+    let queue = crate::harness::orchestrator::DelegationQueue::default();
+    let _claim = queue.claim();
+    let spoken = crate::runtime::delegation::new_turn_speech();
+    let result = crate::runtime::delegation::with_turn_speech(spoken, async {
+        crate::runtime::delegation::with_turn_conversation(
+            Some("brand".to_string()),
+            DmTool(context.with_dispatch(queue.clone())).execute(serde_json::json!({
+                "to": ["copy", "nova"],
+                "message": "Which headline survived review?"
+            })),
+        )
+        .await
+    })
+    .await
+    .expect("the tool runs");
+    assert!(!result.is_error, "{result:?}");
+
+    let staged = queue.drain(crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN);
+    assert_eq!(staged.len(), 1, "one DM call may wake at most one recipient");
+    assert!(matches!(
+        &staged[0],
+        crate::harness::orchestrator::Delegation::ConversationDispatch {
+            source,
+            target,
+            message,
+            child_hop: 1,
+            ..
+        } if source == "designer"
+            && target == "copy"
+            && message == "Which headline survived review?"
+    ));
+}
+
 /// `desk_dm` must resolve a display name to the roster's canonical id
 /// before journaling: `dm` names the recipient's session with it
 /// (`openhuman_session_key`), and `agent_channels` registers that session
