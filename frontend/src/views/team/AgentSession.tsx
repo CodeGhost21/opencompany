@@ -308,7 +308,7 @@ function SessionRow({ line, agentId }: { line: SessionLine; agentId: string }) {
             was said. */}
         {!!message.steps?.length && <StepTimeline steps={message.steps} />}
         {message.referralConversation && (
-          <ReferralConversation crossing={message.referralConversation} />
+          <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
         )}
         {message.asideConversation && (
           <AsideConversation aside={message.asideConversation} />

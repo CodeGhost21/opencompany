@@ -77,7 +77,12 @@ describe("the Session tab", () => {
    */
   it("reuses the room's referral and aside collapses", () => {
     expect(session).toContain('from "@/views/room/StepTimeline"');
-    expect(session).toContain("<ReferralConversation crossing={message.referralConversation} />");
+    // `rowId` rides along so the chip can tell a crossing still being had from
+    // one that is over — the same distinction the channel draws, which is the
+    // point of sharing the component (#2341 live report).
+    expect(session).toContain(
+      "<ReferralConversation crossing={message.referralConversation} rowId={message.id} />",
+    );
     expect(session).toContain("<AsideConversation aside={message.asideConversation} />");
     expect(session).toContain("<StepTimeline steps={message.steps} />");
   });

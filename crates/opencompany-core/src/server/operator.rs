@@ -1826,6 +1826,9 @@ fn project_event_for_viewer(
             from_desk,
             trigger_sequence,
             to_desk,
+            target,
+            asker,
+            conversation,
             returning,
             ..
         } => {
@@ -1849,6 +1852,40 @@ fn project_event_for_viewer(
             // to find what changed.
             o["sequence"] = json!(trigger_sequence);
             o["toDesk"] = json!(to_desk);
+            // **Who was asked, so a console can say a turn is running and
+            // whose.**
+            //
+            // A referred turn runs through `HiveReferralRunner::refer`, outside
+            // the `TurnStarted`/`turn_settled` bracket every other turn is
+            // announced by — so nothing told the console a model was working,
+            // and a crossing of up to `pair_messages` turns showed as a desk
+            // sitting silent for a minute or more. This frame already fires at
+            // exactly the right moment (`mark` runs before `forward`); it was
+            // only missing the name.
+            //
+            // Structural, like the rest of this envelope: an id the same
+            // operator already reads off the roster, never the content of what
+            // was asked.
+            o["target"] = json!(target);
+            o["asker"] = json!(asker);
+            // **Whether a PERSON was asked, which changes what is happening.**
+            //
+            // A crossing to a desk convenes that desk: one side answers, and
+            // since #2332 that is the whole room deliberating. A crossing to a
+            // person is a two-way exchange — `pair_messages` lets the pair
+            // alternate — so both seats spend turns and neither is merely
+            // "answering".
+            //
+            // It also decides whether `target` may be shown at all. The library
+            // resolves `@#returns` to that desk's FIRST eligible member, so on
+            // a desk crossing `target` names an arbitrary seat while the whole
+            // room works: printing it would be confidently wrong. Only a direct
+            // crossing has a target worth naming.
+            //
+            // Read the same way `chat_history` reads it — the conversation
+            // field is set only when the host moved the exchange into the pair's
+            // own thread.
+            o["direct"] = json!(conversation.is_some());
             // Which leg this is, read the same way `ReferredFrom::returning`
             // is: a return is the one that completes the exchange, so a console
             // that only wants to re-read once can wait for it.
@@ -14675,6 +14712,18 @@ mode = "full"
         );
         assert_eq!(v["sequence"], 41, "and the row it folds onto");
         assert_eq!(v["toDesk"], "design");
+        // Who is about to spend a model turn, so a console can say a turn is
+        // running and whose. A referred turn runs outside the
+        // `TurnStarted`/`turn_settled` bracket, so this frame is the only
+        // notice the console gets (#2341 live report).
+        assert_eq!(v["asker"], "software_engineer");
+        // A DESK was asked, so the whole room answers and `target` names only
+        // the library's first-eligible seat. A console must not print it as
+        // the one doing the work.
+        assert_eq!(
+            v["direct"], false,
+            "a desk crossing is not a person-to-person exchange"
+        );
         assert_eq!(
             v["returning"], false,
             "which leg, read as `ReferredFrom` is"
@@ -14694,6 +14743,36 @@ mode = "full"
     /// on the leg that carries the answer — and because the forward frame goes
     /// out before any answer exists, the asking desk was never refreshed at all
     /// (Codex, #2341).
+    /// A crossing put to a PERSON is a two-way exchange, and says so.
+    ///
+    /// `pair_messages` lets the pair alternate, so both seats spend turns —
+    /// "answering" describes the desk case, not this one. The frame carries
+    /// both names and the flag that separates them (#2341 live report).
+    #[test]
+    fn a_direct_crossing_names_both_sides_of_the_exchange() {
+        let v = super::project_event(&stored(CompanyEvent::ReferralEnqueued {
+            conversation: Some("dm:cancellations+amendments".into()),
+            answers: None,
+            from_desk: "order_ops".into(),
+            from_desk_name: "Order Operations".into(),
+            asker: "cancellations".into(),
+            asker_label: "cancellations".into(),
+            trigger_sequence: 12,
+            to_desk: "order_ops".into(),
+            target: "amendments".into(),
+            returning: false,
+        }))
+        .expect("a direct crossing is projected");
+
+        assert_eq!(v["direct"], true, "a person was asked, not a desk");
+        assert_eq!(v["target"], "amendments");
+        assert_eq!(v["asker"], "cancellations");
+        assert!(
+            v.get("lines").is_none(),
+            "and still no crossing content: {v}"
+        );
+    }
+
     #[test]
     fn a_returning_crossing_names_the_desk_that_asked() {
         let v = super::project_event(&stored(CompanyEvent::ReferralEnqueued {

@@ -623,6 +623,17 @@ export function dispatchMarkerPlacement(
  * object for every row on every round trip, so comparing identity would report
  * each one as changed and make the skip dead code.
  */
+/**
+ * Whether two copies of one row carry the same content.
+ *
+ * By value, never by identity: `fromHistory` parses a fresh object for every
+ * row on every round trip, so `!==` is true for rows that are word-for-word
+ * identical and any caller using it to detect change would see change always.
+ */
+function sameMessage(one: ChatMessage, two: ChatMessage): boolean {
+  return JSON.stringify(one) === JSON.stringify(two);
+}
+
 export function reconcileTranscript(
   existing: ChatMessage[],
   hydrated: ChatMessage[],
@@ -638,7 +649,7 @@ export function reconcileTranscript(
       // this console's own, and a re-read must not delete it.
       return held;
     }
-    if (JSON.stringify(durable) === JSON.stringify(held)) {
+    if (sameMessage(durable, held)) {
       return held;
     }
     changed = true;
@@ -892,7 +903,24 @@ export function mergeHistoryInOrder(
     durableEchoes.set(messageFingerprint(message), matches);
   }
 
-  const persisted = hydrated.map((m) => existingById.get(m.id) ?? m);
+  // **The durable copy wins when it differs, and only then.**
+  //
+  // Keeping the row already on screen preserves its object identity so React
+  // can bail out of re-rendering an unchanged transcript — but keeping it
+  // *unconditionally* discards every update the host made to a row this
+  // console already holds. A referral is exactly that: its exchange folds onto
+  // the asking row, so the poll fetched the finished four-message crossing and
+  // then threw it away in favour of the one-message version it had caught mid
+  // exchange. Only a full reload, which builds the transcript from nothing,
+  // ever showed the whole thing.
+  //
+  // Comparing by value keeps the bail-out for rows that really are unchanged,
+  // which is almost all of them on almost every tick.
+  const persisted = hydrated.map((m) => {
+    const held = existingById.get(m.id);
+    if (!held) return m;
+    return sameMessage(held, m) ? held : m;
+  });
   const consumedEchoes = new Set<ChatMessage>();
   const liveRows = existing.filter((m) => !historyIds.has(m.id));
   const liveDurable = liveRows.filter((m) => isHostMessageId(m.id));
