@@ -1,14 +1,233 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn a_blocker_verdict_with_an_amended_payload_is_refused() {
+    assert_refused(
+        serde_json::json!({
+            "verdict": "approve",
+            "blocker_verdict": "skip",
+            "amended_payload": { "text": "edited" },
+        }),
+        "cannot accompany amended_payload",
+    )
+    .await;
+}
+
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn a_blocker_verdict_with_a_tool_scope_is_refused() {
+    assert_refused(
+        serde_json::json!({
+            "verdict": "approve",
+            "blocker_verdict": "skip",
+            "scope": "tool",
+            "expires_in_millis": 3_600_000,
+        }),
+        "cannot accompany scope",
+    )
+    .await;
+}
+
+/// A `blocker_verdict` on an approval that is not a parked blocker is a 400,
+/// not a quiet fall-through to the two-value path — which would lose the
+/// operator's verdict without telling anyone.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn a_blocker_verdict_on_an_ordinary_approval_is_refused() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    let app = router(state);
+    let ordinary = park_for_extend(&runtime, "ordinary-1", crate::ports::now_millis()).await;
+
+    let (status, answer) = post_resolve(
+        &app,
+        &ordinary,
+        serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("is not a parked blocker"),
+        "{answer}"
+    );
+    assert!(
+        runtime.pending_approvals().iter().any(|p| p.id == ordinary),
+        "a refused request must leave the approval parked"
+    );
+    assert!(banked_resolutions(&home, &company).await.is_empty());
+}
+
+/// A stepless blocker uses its task link to settle the card it paused.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
+async fn skipping_an_agent_question_settles_the_card_its_approval_is_linked_to() {
+    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
+    use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    let app = router(state);
+
+    runtime
+        .tasks()
+        .upsert(
+            runtime.id(),
+            &crate::ports::tasks::TaskRecord {
+                id: "t-9".to_string(),
+                title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
+                note: None,
+                column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
+                priority: "medium".to_string(),
+                assignee: "eng".to_string(),
+                updated_at_millis: 1,
+                origin: None,
+                origin_message_seq: None,
+                parent_task_id: None,
+                output: Some(crate::ports::tasks::TaskOutput {
+                    source: crate::ports::tasks::TaskOutputSource::Run {
+                        run_id: "old-run".to_string(),
+                        attempt: Some(1),
+                    },
+                    at_millis: 1,
+                    artifacts: Vec::new(),
+                    workflows: Vec::new(),
+                }),
+                plan: None,
+                planning_attempts: Vec::new(),
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
+                bounced: Some("stale failure".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+    let payload = BlockerPayload {
+        kind: BlockerKind::Information,
+        source: BlockerSource::AgentQuestion,
+        step: None,
+        reason: "which of the two briefs is current?".to_string(),
+        needed: "an answer from you".to_string(),
+        group_key: None,
+    };
+    let approval = ApprovalId::new("question-1");
+    let effect = crate::ports::types::Effect {
+        kind: payload.effect_kind(),
+        group: crate::ports::types::EffectGroup::Other,
+        amount_usd: None,
+        established_thread: false,
+        first_time_counterparty: false,
+        payload: serde_json::to_value(&payload).unwrap(),
+        agent: None,
+        run_id: None,
+    };
+    let at = crate::ports::now_millis();
+    runtime
+        .approval_gate
+        .rehydrate(approval.clone(), effect.clone(), at);
+    runtime
+        .journal
+        .record_parked(
+            &approval,
+            &effect,
+            at,
+            TaskLink::from_task_id(Some("t-9")),
+            ApprovalConversation {
+                thread: Some("dm:eng".to_string()),
+                parent: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, answer) = post_resolve(
+        &app,
+        &approval,
+        serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        answer["settledIds"],
+        serde_json::json!(["question-1"]),
+        "the non-detached body names what it settled too: {answer}"
+    );
+
+    let banked = banked_resolutions(&home, &company).await;
+    assert_eq!(banked.len(), 1);
+    assert_eq!(
+        banked[0]["resolution"]["verdict"], "skip",
+        "the operator's verdict is banked whatever the resume can do with it"
+    );
+    assert!(
+        banked[0]["resolution"].get("step").is_none(),
+        "the durable record keeps the stepless park the blocker carried: {}",
+        banked[0]
+    );
+    let card = runtime
+        .tasks()
+        .list(runtime.id())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == "t-9")
+        .expect("the card still exists");
+    assert_eq!(
+        card.column,
+        crate::ports::tasks::COLUMN_IN_REVIEW,
+        "the skipped card is ready for human review"
+    );
+    assert!(card.output.is_none(), "a skip produces no output");
+    assert!(card.bounced.is_none(), "a skip clears the old bounce chip");
+    assert_eq!(card.origin_chat_id(), Some("dm:eng"));
+    assert!(
+        card.note
+            .as_deref()
+            .is_some_and(|note| { note.contains("blocker question waived by the operator") })
+    );
+    assert!(
+        runtime
+            .runs()
+            .list_runs(
+                runtime.id(),
+                &crate::ports::runs::RunFilter::for_task("t-9"),
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "a skip must not open another attempt"
+    );
+}
 
 /// The link is followed only to a card the board still holds.
 ///
@@ -404,241 +623,4 @@ async fn a_member_cannot_read_or_act_on_a_money_bearing_approval() {
         StatusCode::FORBIDDEN,
         "a member must not be able to extend a parked effect's deadline"
     );
-}
-
-/// POL-011: `extend_approval` is one handler mounted under both scope
-/// forms (`scoped("/approvals/{aid}/extend", ...)`), so the platform
-/// `/companies/{id}/...` form must carry the exact same admin gate the
-/// `/company/...` alias does — and must not become a side channel that
-/// resolves against the wrong company merely because its id rode in the
-/// path instead of the alias.
-#[tokio::test]
-async fn extend_on_the_scoped_route_form_enforces_admin_and_the_right_company() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-    let approval = park_for_extend(&runtime, "appr-scoped", crate::ports::now_millis()).await;
-    crate::server::test_support::seed_fixed_member(&state, "acme").await;
-    let member_cookie = crate::server::test_support::member_cookie("acme");
-    let admin_cookie = crate::server::test_support::fixed_cookie("acme");
-    let app = router(state);
-
-    // AUTH: a member is refused on the scoped form exactly as on the alias.
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/v1/companies/acme/approvals/{approval}/extend"
-                ))
-                .header("cookie", &member_cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-
-    // FAIL: addressing a *different* company id on the scoped form must
-    // 404 rather than reach into `acme`'s gate — the path segment is the
-    // only thing naming the company here, unlike the alias.
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/v1/companies/globex/approvals/{approval}/extend"
-                ))
-                .header("cookie", &admin_cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_ne!(
-        response.status(),
-        StatusCode::OK,
-        "a company id that does not exist must not extend acme's approval"
-    );
-    assert!(
-        runtime.pending_approvals().iter().any(|a| a.id == approval),
-        "the approval must still be sitting under its real company, untouched"
-    );
-
-    // And the scoped form works for the right admin and the right company.
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/v1/companies/acme/approvals/{approval}/extend"
-                ))
-                .header("cookie", &admin_cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-/// **Issue #383 / #380 defect 3 — the keystone.** A client that walks away
-/// mid-turn must not take the agent's continuation with it.
-///
-/// The host is plain `axum::serve(listener, router(state))` and nothing on
-/// the resolve path was spawned, so the follow-up agent turn lived *inside*
-/// the request future. Hyper drops that future the moment the peer closes,
-/// and nginx closes its upstream connection when it gives up on a slow
-/// response. So on a hosted tenant the sequence was: verdict recorded,
-/// journaled, single-use grant minted — and then the re-dispatch the grant
-/// existed for cancelled mid-flight. The operator's approval was spent and
-/// the conversation never resumed, which is precisely what #380 reported.
-///
-/// `Router::oneshot` reproduces that cancellation faithfully rather than by
-/// analogy: the mechanism is the same one hyper uses — the handler future is
-/// owned by the future the caller is polling, and dropping the latter drops
-/// the former.
-#[tokio::test]
-async fn a_dropped_connection_does_not_cancel_the_follow_up_cycle() {
-    let home_dir = home();
-    let c = stalled_company(home_dir.path()).await;
-
-    // Approve it, then let the connection die once the turn is under way.
-    let mut resolving = Box::pin(c.app.clone().oneshot(resolve_request(
-        &c.approval_id,
-        serde_json::json!({"verdict":"approve"}),
-    )));
-    tokio::select! {
-        _ = &mut resolving => panic!("the resolve answered before the follow-up turn began"),
-        _ = c.entered.notified() => {}
-    }
-    drop(resolving);
-
-    // The verdict is already durable and the grant already spent — this is
-    // the state the operator is left in when the proxy gives up.
-    assert!(
-        !c.runtime
-            .pending_approvals()
-            .iter()
-            .any(|a| a.id == c.approval_id),
-        "the verdict was journaled before the connection dropped"
-    );
-    assert!(
-        c.runtime.grants.peek(&c.approval_id).is_some(),
-        "the single-use grant was minted before the connection dropped"
-    );
-
-    // So the continuation the grant exists for must still complete.
-    c.release.notify_one();
-    assert!(
-        await_continuation(&c.runtime).await,
-        "the follow-up cycle died with the dropped connection: the grant is spent \
-         and the agent never continued"
-    );
-    assert_eq!(
-        c.runtime.grants.live_count(),
-        1,
-        "the continuation minted no second grant"
-    );
-}
-
-/// **Issue #882.** A chat turn whose caller walks away mid-flight must still
-/// finish and still journal its answer.
-///
-/// This is the chat-lane twin of
-/// `a_dropped_connection_does_not_cancel_the_follow_up_cycle`. Both the
-/// cycle and the `AgentReply` append used to live inside the request future,
-/// so a turn slower than nginx's read timeout was cancelled mid-flight and
-/// the answer was never written. The operator's DM history then held their
-/// question and nothing else — the turn could not be read back on reload and
-/// could not be resumed, which is what #882 reported. Workflow runs survived
-/// the identical 504 precisely because they are spawned.
-///
-/// `Router::oneshot` reproduces the cancellation by the same mechanism hyper
-/// uses: the handler future is owned by the future the caller polls, so
-/// dropping the latter drops the former.
-#[tokio::test]
-async fn a_dropped_connection_does_not_lose_the_chat_turns_work() {
-    let home_dir = home();
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let state = build_state_with_brain(
-        home_dir.path(),
-        "running",
-        AppConfig::default(),
-        Some(Arc::new(StalledChatBrain {
-            entered: entered.clone(),
-            release: release.clone(),
-        })),
-    )
-    .await;
-    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-    let app = router(state);
-
-    // Send the turn, then let the connection die once it is under way —
-    // exactly what the proxy does when it decides the upstream is too slow.
-    let mut chatting = Box::pin(app.clone().oneshot(chat_request("run the seo audit")));
-    tokio::select! {
-        _ = &mut chatting => panic!("the chat answered before the turn began"),
-        _ = entered.notified() => {}
-    }
-    drop(chatting);
-
-    // Nothing is journaled yet: the turn is still stalled inside the brain.
-    assert!(
-        !reply_journaled(&runtime).await,
-        "the reply was journaled before the turn was released"
-    );
-
-    // Issue #983: the turn was recorded the instant it was accepted, and
-    // the record is what a re-read resolves — so at this point the operator
-    // has walked away and the turn is still `Running` rather than absent.
-    let row = turn_rows(&runtime)
-        .await
-        .pop()
-        .expect("accepting the turn minted a row");
-    assert_eq!(
-        row.1, "running",
-        "a turn whose caller is gone must still read as under way"
-    );
-
-    // The work must survive the caller giving up.
-    release.notify_one();
-    assert!(
-        await_reply_journaled(&runtime).await,
-        "the chat turn died with the dropped connection: the operator's \
-         message is journaled, the answer is not, and the turn can neither \
-         be read back nor resumed (issue #882)"
-    );
-
-    // Issue #983: and so must the settle. The row is written by the spawned
-    // task, not by the handler, so a dropped connection leaving it
-    // `Running` forever would be the #882 bug one layer down — the turn
-    // finishes, the answer lands, and the status surface still claims work
-    // is in flight until the next boot reaps it.
-    until("the settle died with the dropped connection", async || {
-        turn_rows(&runtime)
-            .await
-            .iter()
-            .all(|(_, status)| status == "succeeded")
-    })
-    .await;
-}
-
-// ── Issue #983: an accepted turn exists and can be read back ────────────
-
-/// A brain that blocks every operator turn on a semaphore the test holds.
-///
-/// Deliberately a `Semaphore` rather than a `Notify`: these tests run two
-/// turns at once and release both, and `notify_one` wakes exactly one
-/// waiter while `notify_waiters` wakes only those already parked. Permits
-/// are held whether or not anybody is waiting yet, so the release cannot
-/// race the turns into a hang.
-struct BlockingChatBrain {
-    /// One permit added per turn that has entered the brain.
-    entered: Arc<tokio::sync::Semaphore>,
-    /// The test's permission for a turn to finish — one permit each.
-    release: Arc<tokio::sync::Semaphore>,
 }

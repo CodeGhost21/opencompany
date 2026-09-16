@@ -1,14 +1,331 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
+
+/// Issue #371 also starts projecting the run id on the settle-frame — the
+/// key that lets the console clear the right canvas when two runs overlap.
+/// Still omitted for a pre-#371 row, so no permanently-null key appears.
+#[test]
+fn projects_the_run_id_on_a_finished_run_only_when_there_is_one() {
+    let with_id = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+        workflow_id: "digest".into(),
+        scheduled: false,
+        run_id: Some("run-9".into()),
+        deliveries: Vec::new(),
+        pending_approvals: Vec::new(),
+        error: None,
+        cancelled: false,
+        notices: Vec::new(),
+        board: Vec::new(),
+        blocked_nodes: Vec::new(),
+        approvals: Vec::new(),
+    }))
+    .expect("projected");
+    assert_eq!(with_id["runId"], "run-9");
+
+    let legacy = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+        workflow_id: "digest".into(),
+        scheduled: false,
+        run_id: None,
+        deliveries: Vec::new(),
+        pending_approvals: Vec::new(),
+        error: None,
+        cancelled: false,
+        notices: Vec::new(),
+        board: Vec::new(),
+        blocked_nodes: Vec::new(),
+        approvals: Vec::new(),
+    }))
+    .expect("projected");
+    assert!(legacy.get("runId").is_none(), "{legacy}");
+}
+
+#[test]
+fn drops_non_attention_and_raw_payload_events() {
+    // The operator's own message, and every variant that carries a raw
+    // third-party payload or is audit-only, is dropped so nothing unexpected
+    // (or secret-bearing) ever reaches the console.
+    //
+    // This list is unchanged by #228: adding `workflow_run_finished` to the
+    // projection widened the wire by exactly one listed variant, and this
+    // test passing untouched is what proves the deny-by-default default
+    // still drops everything it dropped before.
+    let dropped = [
+        CompanyEvent::OperatorMessage {
+            mentions: Vec::new(),
+            parent: None,
+            text: "hi".into(),
+            by: None,
+            chat: None,
+            deliverable: None,
+            attachments: Vec::new(),
+        },
+        CompanyEvent::WebhookReceived {
+            channel: "email".into(),
+            body: serde_json::json!({"authorization": "Bearer sk-secret"}),
+        },
+        CompanyEvent::A2aTaskReceived {
+            from: "@peer".into(),
+            task: serde_json::json!({"token": "sk-secret"}),
+        },
+        CompanyEvent::ScheduleFired {
+            cron: "0 9 * * *".into(),
+            prompt: "daily standup".into(),
+        },
+        CompanyEvent::FeedbackFiled {
+            note: "too slow".into(),
+        },
+        CompanyEvent::MemoryFactDeleted {
+            fact_id: "f-1".into(),
+        },
+    ];
+    for event in dropped {
+        assert!(
+            super::project_event(&stored(event.clone())).is_none(),
+            "event should be dropped from the SSE feed: {event:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn events_route_streams_text_event_stream() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/company/events")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The SSE head is returned immediately; the body streams indefinitely, so
+    // we assert the status + content-type without draining it.
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/event-stream")
+    );
+}
+
+#[tokio::test]
+async fn events_route_requires_a_session() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/company/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The composer's own typing pings must not echo back to it — the bus has
+/// no per-listener addressing, so this filter is the only thing standing
+/// between "you typed" and a fresh "Alice is typing…" line under your own
+/// cursor.
+#[test]
+fn a_typing_frame_from_the_viewer_is_dropped_and_from_anybody_else_is_kept() {
+    let mine = crate::turn_stream::LiveFrame::Typing(crate::turn_stream::TypingFrame {
+        kind: "typing",
+        user_id: "u1".into(),
+        chat_id: "engineering".into(),
+        parent_id: None,
+        at_millis: 0,
+    });
+    assert!(super::is_own_typing_frame(&mine, Some("u1")));
+    assert!(!super::is_own_typing_frame(&mine, Some("u2")));
+    assert!(
+        !super::is_own_typing_frame(&mine, None),
+        "a machine credential with nobody behind it authors nothing to echo"
+    );
+
+    let presence = crate::turn_stream::LiveFrame::Presence(crate::turn_stream::PresenceFrame {
+        kind: "presence",
+        user_id: "u1".into(),
+        status: "online",
+        at_millis: 0,
+    });
+    assert!(
+        !super::is_own_typing_frame(&presence, Some("u1")),
+        "presence is left alone — only typing echoes"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Standing permissions (issue #374)
+// -----------------------------------------------------------------------
+
+/// Every contradictory or unbounded scope request is a 400, and none of them
+/// reaches the runtime.
+///
+/// The approval id is deliberately one that does not exist: each of these
+/// must be refused at the edge, so the fact that resolving a missing
+/// approval would otherwise be a harmless no-op never gets a chance to mask
+/// a body that should not have been accepted.
+///
+/// A deny may now ride the tool scope (issue #1458 — a standing refusal),
+/// so that pairing is asserted as *accepted* at the bottom rather than
+/// listed among the refusals.
+#[tokio::test]
+async fn a_contradictory_or_unbounded_scope_is_refused() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path(), "running").await;
+
+    let day: u64 = 24 * 60 * 60 * 1000;
+    for (label, body) in [
+        (
+            "an argument edit and a standing grant contradict",
+            format!(
+                r#"{{"verdict":"approve","scope":"tool","expires_in_millis":{day},"amended_payload":{{"to":"x"}}}}"#
+            ),
+        ),
+        (
+            "the deadline is mandatory",
+            r#"{"verdict":"approve","scope":"tool"}"#.to_string(),
+        ),
+        (
+            "zero is not a duration",
+            r#"{"verdict":"approve","scope":"tool","expires_in_millis":0}"#.to_string(),
+        ),
+        (
+            "past the seven-day cap is refused, never clamped",
+            format!(
+                r#"{{"verdict":"approve","scope":"tool","expires_in_millis":{}}}"#,
+                MAX_STANDING_GRANT_MILLIS + 1
+            ),
+        ),
+        (
+            "a duration is meaningless on the once scope",
+            format!(r#"{{"verdict":"approve","scope":"once","expires_in_millis":{day}}}"#),
+        ),
+    ] {
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/approvals/appr-missing")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{label}: must be refused at the edge"
+        );
+    }
+
+    // An unrecognised scope is refused too, one layer earlier: `ResolveScope`
+    // is a closed enum, so axum's JSON extractor rejects it as 422 before
+    // any handler runs. The status differs from the checks above; what
+    // matters is that it is never silently downgraded to `once`, which would
+    // hand an operator a single call when they asked for a standing one.
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/approvals/appr-missing")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"approve","scope":"forever"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Exactly at the cap is fine — the boundary is inclusive.
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/approvals/appr-missing")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"verdict":"approve","scope":"tool","expires_in_millis":{MAX_STANDING_GRANT_MILLIS}}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A deny riding the tool scope is no longer a contradiction: it mints a
+    // standing refusal (issue #1458). Same edge validation as an approve —
+    // duration mandatory, bounded, and the missing approval resolves as a
+    // no-op — so it is accepted exactly where a matching approve would be.
+    let response = router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/approvals/appr-missing")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"verdict":"deny","scope":"tool","expires_in_millis":{day}}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// The default body — no `scope` key at all — is accepted exactly as before.
+#[tokio::test]
+async fn an_omitted_scope_is_the_pre_374_request() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path(), "running").await;
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/approvals/appr-missing")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"approve"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
 
 /// The grants list is empty on a fresh company, and revoking something that
 /// is not there is a 404 rather than a cheerful no-op.
@@ -275,381 +592,64 @@ async fn revoking_a_grant_is_404_only_once_it_is_actually_swept() {
     );
 }
 
-/// GRANT-012 (FAIL). `revoke_standing_grant` takes the grant out of the
-/// live set **before** its durable journal append — the opposite order
-/// from minting, and on purpose (see the function's own doc): a crash
-/// here must fail toward no-permission, never toward a permission nobody
-/// can see is still live. When the append then fails, the caller is told
-/// the revoke failed, but the grant must already be gone from the live
-/// set that actually governs future calls.
-#[tokio::test]
-async fn a_failed_revoke_append_still_removes_the_grant_from_the_live_set() {
+/// GRANT-012 (CONC). Two browsers — or one double-click — racing a
+/// `DELETE` on the same grant id must not both report success:
+/// `revoke_standing` is a plain `HashMap::remove`, so exactly one caller
+/// takes the grant and every other must see the ordinary "already gone"
+/// 404 a second revoke gets, not a duplicate 204 or a panic on a double
+/// free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_simultaneous_revokes_of_the_same_grant_settle_once() {
     let home_dir = home();
-    let store = std::sync::Arc::new(RefusingGrantRevokeStore {
-        inner: crate::ports::journal::MemoryJournalStore::default(),
-    });
-    let m = manifest();
-    let id = CompanyId::new("acme");
-    let fs_store = FsCompanyStore::new(home_dir.path().to_path_buf());
-    {
-        use crate::ports::store::CompanyStore;
-        fs_store
-            .save(&CompanyRecord {
-                overlay_desk_hive: Vec::new(),
-                overlay_retired_agents: Vec::new(),
-                overlay_agent_edits: Vec::new(),
-                id: id.clone(),
-                manifest: m.clone(),
-                ledger: Vec::new(),
-                lifecycle: "running".to_string(),
-                overlay_agents: Vec::new(),
-                overlay_desk_members: Vec::new(),
-                overlay_desk_order: Vec::new(),
-                overlay_desks: Vec::new(),
-                overlay_workflows: Vec::new(),
-                overlay_budgets: Vec::new(),
-                overlay_policy: None,
-                overlay_tool_grants: None,
-                overlay_desk_tools: Default::default(),
-                disabled_workflows: Vec::new(),
-                template_provenance: None,
-                setup: None,
-                name_confirmed: false,
-                activation_completed_at: None,
-                created_at_millis: None,
-            })
-            .await
-            .unwrap();
-    }
-    let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), m)
-        .with_id(id.clone())
-        .with_journal_store(store)
-        .build()
-        .await
-        .unwrap();
-    let runtime = Arc::new(runtime);
+    let state = state_with_company(home_dir.path(), "running").await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     runtime
         .grants
-        .grant_standing(racing_standing_grant("g-append-fail"));
-
-    let state = AppState::new(AppConfig::default());
-    state.registry().insert(id.clone(), runtime.clone());
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        .grant_standing(racing_standing_grant("g-race"));
 
     let app = router(state);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/v1/company/grants/g-append-fail")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "the forced append failure must surface"
-    );
-    assert_eq!(
-        runtime.grants.standing().len(),
-        0,
-        "the live-set removal must land even though the durable record of it failed — \
-         fail toward no permission, never toward one nobody can see is still granted"
-    );
-}
-
-// ---------------------------------------------------------------------
-// Issue #469 — a turn that parks several approvals.
-//
-// Every test above parks exactly one, which is the case that always
-// worked. The failure the operator hit needs more than one: four
-// `composio_execute` calls from a single turn, all approved, and then
-// silence. These drive that shape end to end over the real router.
-// ---------------------------------------------------------------------
-
-/// A brain that parks `parks` gated tool calls on one operator message and
-/// answers each `ApprovalResolved` it is told about.
-///
-/// Deliberately shaped like `HarnessBrain`'s approval arm rather than like a
-/// convenient stub: it consults the live grant set and produces **no reply
-/// at all** when there is no grant left to redeem, because that silent
-/// no-op is exactly what the later of several follow-up cycles used to hit.
-struct MultiParkBrain {
-    parks: usize,
-    /// One entry per `ApprovalResolved` the brain was handed, across all
-    /// cycles.
-    decisions: Arc<std::sync::Mutex<Vec<String>>>,
-    /// How many cycles ran in total (the first is the chat turn).
-    cycles: Arc<std::sync::atomic::AtomicUsize>,
-    /// The runtime, so the brain can reach the grant set the way the
-    /// harness's re-dispatch does. Filled by the test after the build.
-    rt: Arc<std::sync::OnceLock<Arc<CompanyRuntime>>>,
-    /// Fail the continuation cycle, to exercise defect 4.
-    fail_continuation: bool,
-    /// Stamp a workflow run id onto every parked effect (issue #1092), so
-    /// the park records the shape a workflow node's gated tool call has:
-    /// explicitly unlinked from any card, and carrying a run.
-    run_id: Option<String>,
-    /// An `@mention` to append to every continuation reply. Exercises the
-    /// durable half of a reply's mention: the re-issue's reply journaling
-    /// must badge the person it names, same as the `/chat` path.
-    continuation_mention: Option<String>,
-}
-
-/// **The keystone (issue #469).** A turn that parks four sign-offs, all
-/// approved, produces exactly ONE continuation — and an answer the operator
-/// can actually see.
-///
-/// Before this, each resolve spawned its own follow-up cycle: four full
-/// re-runs of one turn, each told about one decision. They did not race —
-/// the per-company serial lock made them queue — but the later ones found
-/// the grants the earlier ones had redeemed and produced nothing at all.
-/// And none of it reached the operator either way, because the resolve
-/// route never journaled a continuation's replies, so no `agent_reply`
-/// frame was ever projected. Four approvals, four wasted turns, silence.
-#[tokio::test]
-async fn four_sign_offs_from_one_turn_produce_one_continuation() {
-    let home_dir = home();
-    let c = multi_park_company(home_dir.path(), 4, None, false).await;
-    let before = c.cycles.load(std::sync::atomic::Ordering::SeqCst);
-
-    let mut handles = Vec::new();
-    for id in &c.approvals {
-        let app = c.app.clone();
-        let request = approve_detached(id);
-        handles.push(tokio::spawn(
-            async move { app.oneshot(request).await.unwrap() },
-        ));
-    }
-    for handle in handles {
-        assert_eq!(handle.await.unwrap().status(), StatusCode::OK);
-    }
-    settle(&c.runtime, 4).await;
-
-    assert_eq!(
-        c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
-        1,
-        "one turn owes one continuation, not one per approval"
-    );
-    assert_eq!(
-        c.decisions.lock().unwrap().len(),
-        4,
-        "the single continuation carries every decision, so the brain learns all four"
-    );
-    assert!(
-        c.runtime.pending_approvals().is_empty(),
-        "every sign-off was decided"
-    );
-    assert_eq!(
-        agent_replies(&c.runtime).await.len(),
-        4,
-        "the continuation's answers must reach the event stream, or the operator \
-         watches an approved action in silence"
-    );
-}
-
-/// The two orders an operator can decide in must end in the same place.
-///
-/// Approving four at once and approving them one at a time are the same
-/// request spread over a different span, and the gate is the last decision
-/// rather than a time window — so neither can produce more continuations
-/// than the other. A design that coalesced only what arrived together would
-/// pass the test above and still re-run the turn four times here.
-#[tokio::test]
-async fn deciding_one_at_a_time_ends_where_deciding_all_at_once_does() {
-    let home_dir = home();
-    let c = multi_park_company(home_dir.path(), 4, None, false).await;
-    let before = c.cycles.load(std::sync::atomic::Ordering::SeqCst);
-
-    for (i, id) in c.approvals.iter().enumerate() {
-        let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let ran = c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before;
-        if i < 3 {
-            assert_eq!(
-                ran,
-                0,
-                "the turn is still blocked on {} more sign-off(s); continuing now \
-                 would re-park them",
-                3 - i
-            );
-        }
-    }
-    settle(&c.runtime, 4).await;
-
-    assert_eq!(
-        c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
-        1,
-        "the last decision unblocks the turn, and it runs once"
-    );
-    assert_eq!(c.decisions.lock().unwrap().len(), 4);
-    assert_eq!(agent_replies(&c.runtime).await.len(), 4);
-}
-
-/// The continuation answers in the conversation the sign-off was raised in.
-///
-/// Not on the answering agent's own line: a desk channel's request and a
-/// direct message to that channel's lead are answered by the same teammate,
-/// so keying the reply on the agent delivers a channel's continuation into a
-/// private thread nobody is watching (issue #379's lesson, which the reply
-/// path had never learned — only the re-park had).
-#[tokio::test]
-async fn a_continuation_answers_in_the_thread_the_sign_off_was_raised_in() {
-    let home_dir = home();
-    let c = multi_park_company(home_dir.path(), 2, Some("sales"), false).await;
-
-    for id in &c.approvals {
-        let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-    settle(&c.runtime, 2).await;
-
-    let replies = agent_replies(&c.runtime).await;
-    assert_eq!(replies.len(), 2, "both re-issues answered");
-    assert!(
-        replies.iter().all(|r| r.starts_with("sales|")),
-        "the continuation must land in the channel the approval was raised in, got {replies:?}"
-    );
-}
-
-/// **Issue #1092.** A workflow node's parked call, once approved, answers
-/// on its run — never as a direct message from the teammate that ran it.
-///
-/// This is the wiring test for `continuation_fallback_chat_id`: the unit
-/// tests pin what the fallback *returns*, and this pins that
-/// `publish_continuation` actually uses it, through a real park, a real
-/// resolve and the journal the console reads back.
-///
-/// The assertion is written against the agent id rather than only for the
-/// run id, because that is the regression: the leak put the re-issued
-/// turn's narration into `chat/history?desk=<teammate>`, where it rendered
-/// as an unprompted DM.
-#[tokio::test]
-async fn a_workflow_parks_continuation_answers_on_the_run_not_in_a_dm() {
-    let home_dir = home();
-    let c =
-        multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None).await;
-
-    let response = c
-        .app
-        .clone()
-        .oneshot(approve_detached(&c.approvals[0]))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    settle(&c.runtime, 1).await;
-
-    let replies = agent_replies(&c.runtime).await;
-    assert_eq!(replies.len(), 1, "the re-issue answered once");
-    let (chat_id, _) = replies[0].split_once('|').expect("chat_id|text");
-    assert_eq!(
-        chat_id, "run-1092",
-        "a workflow park's continuation belongs to its run, got {replies:?}"
-    );
-    // The regression, stated as itself: before this fix the fallback was
-    // the answering teammate's own id, so this is what the leaked row held.
-    assert_ne!(
-        chat_id, "ceo",
-        "the re-issue must not be journaled as a DM from the teammate that ran it"
-    );
-}
-
-/// **Codex P1 (pass 2).** A continuation's reply is journaled through
-/// `publish_continuation`, not the `/chat` turn — so a mention an agent
-/// types back in an approval follow-up used to render as a chip and
-/// nothing else: no badge, no durable row, exactly the person it is meant
-/// to reach (offline when the reply lands) getting neither.
-///
-/// Both paths file through the same writer now; this pins that an `@user`
-/// in a continuation reply lands as a mention notification whose audience
-/// carries the person named, under the chat the continuation answered in.
-#[tokio::test]
-async fn a_continuation_reply_that_mentions_a_user_files_a_notification() {
-    let home_dir = home();
-    let c = multi_park_company_run(
-        home_dir.path(),
-        1,
-        Some("sales"),
-        false,
-        None,
-        Some("@harness-admin"),
-    )
-    .await;
-
-    let users = c
-        .runtime
-        .users()
-        .list_users(&CompanyId::new("acme"))
-        .await
-        .unwrap();
-    let admin = users
-        .iter()
-        .find(|u| u.email == "harness-admin@example.test")
-        .expect("the fixed admin is seeded");
-    assert_eq!(
-        admin.status,
-        crate::ports::users::UserStatus::Active,
-        "the admin must be an active, mentionable target"
-    );
-
-    let response = c
-        .app
-        .clone()
-        .oneshot(approve_detached(&c.approvals[0]))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    settle(&c.runtime, 1).await;
-    // The notification is filed inside `publish_continuation`, after the
-    // reply is journaled — `settle` only waits for the reply. A loaded CI
-    // runner can reach this point before the notification append finishes,
-    // so poll for it (issue #1665, Codex P1 regression).
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let notes = c
-                .runtime
-                .notifications()
-                .list(&CompanyId::new("acme"), &admin.id)
+    let racers: Vec<_> = (0..8)
+        .map(|_| {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/api/v1/company/grants/g-race")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
-                .unwrap();
-            if notes.iter().any(|n| n.notification.kind == "mention") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the mention notification never appeared");
-
-    let notes = c
-        .runtime
-        .notifications()
-        .list(&CompanyId::new("acme"), &admin.id)
-        .await
-        .unwrap();
-    let mentions: Vec<_> = notes
-        .into_iter()
-        .filter(|n| n.notification.kind == "mention")
+                .unwrap()
+            })
+        })
         .collect();
+
+    let mut statuses = Vec::new();
+    for racer in racers {
+        statuses.push(
+            racer
+                .await
+                .expect("the request task did not panic")
+                .status(),
+        );
+    }
     assert_eq!(
-        mentions.len(),
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::NO_CONTENT)
+            .count(),
         1,
-        "the continuation's mention must badge the person it names"
+        "exactly one simultaneous revoke may take the grant, got {statuses:?}"
     );
-    let note = &mentions[0].notification;
-    assert_eq!(note.context.as_deref(), Some("sales"));
     assert_eq!(
-        note.title, "Someone mentioned you in sales",
-        "a continuation has no author, so the generic label is the honest one"
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::NOT_FOUND)
+            .count(),
+        7,
+        "every loser must see the ordinary already-gone 404, got {statuses:?}"
     );
-    assert!(
-        note.audience
-            .as_ref()
-            .is_some_and(|a| a.contains(&admin.id)),
-        "the named user must be in the notification's audience"
-    );
+    assert_eq!(runtime.grants.standing().len(), 0);
 }

@@ -1,9 +1,16 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;

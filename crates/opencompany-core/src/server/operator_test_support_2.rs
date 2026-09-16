@@ -1,13 +1,81 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
+
+pub(super) async fn delete_desk_member(
+    app: &axum::Router,
+    cookie: &str,
+    desk: &str,
+    agent: &str,
+) -> Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/company/desks/{desk}/members/{agent}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Reads the `error` string out of an api.md error envelope.
+pub(super) async fn error_message(response: Response) -> String {
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    value["error"].as_str().unwrap().to_string()
+}
+
+/// Returns the effective member list of `desk` from `list_desks`.
+pub(super) async fn desk_members(app: &axum::Router, cookie: &str, desk: &str) -> Vec<String> {
+    let desks = get_desks(app, cookie).await;
+    desks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == desk)
+        .unwrap_or_else(|| panic!("desk {desk} present in list"))["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Seeds `eng` as an overlay member of `studio` so a desk has two members to
+/// reorder.
+pub(super) async fn seed_overlay_eng(app: &axum::Router, cookie: &str) {
+    let add = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/desks/studio/members")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"agent_id":"eng"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(add.status(), StatusCode::NO_CONTENT);
+}
 
 pub(super) async fn put_desk_order(
     app: &axum::Router,
@@ -95,8 +163,10 @@ pub(super) async fn session_rows(uri: &str) -> Vec<serde_json::Value> {
     rows
 }
 
+/* ---- issue #364: durable ids, threads, reactions, channel isolation ---- */
+
 /// Posts a chat message and returns the decoded `ChatResponse` body.
-pub(super) async fn post_chat(app: &Router, cookie: &str, body: &str) -> serde_json::Value {
+async fn post_chat(app: &Router, cookie: &str, body: &str) -> serde_json::Value {
     let response = app
         .clone()
         .oneshot(
@@ -164,235 +234,6 @@ pub(super) async fn post_reaction(
         .status()
 }
 
-/// **Issue #2028 (finding 2, deadlock regression).** Answering a
-/// task-backed blocker in a DM runs the whole path end to end: the route
-/// reads and classifies the reply, settles the verdict, and waits on the
-/// follow-up that re-dispatches the card — and that follow-up runs on a
-/// spawned task which takes `task_writes` for its board edit.
-///
-/// So the route must not still hold `task_writes` when it waits. It did,
-/// having mirrored the guard from the review branch above it, and the two
-/// together are a deadlock: the handler waits for a task that is waiting for
-/// the handler's lock. Explicitly bounded rather than left to hang, so a
-/// regression fails in seconds instead of taking a runner down for an hour.
-#[cfg(feature = "openhuman")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-pub(super) async fn a_dm_answer_to_a_task_backed_blocker_completes() {
-    use crate::company::blocker_sender::BlockerSenderSignals;
-    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
-
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = build_state_with_brain_and_manifest(
-        &home,
-        "running",
-        AppConfig::default(),
-        None,
-        roster_manifest(),
-    )
-    .await;
-    let company = CompanyId::new("acme");
-    let runtime = state.registry().get(&company).unwrap();
-    let app = router(state);
-
-    let mut card = crate::ports::tasks::TaskRecord {
-        id: "t-9".to_string(),
-        title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
-        note: None,
-        column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
-        priority: "medium".to_string(),
-        assignee: "backend_engineer".to_string(),
-        updated_at_millis: 1,
-        origin: None,
-        origin_message_seq: None,
-        parent_task_id: None,
-        output: None,
-        plan: None,
-        planning_attempts: Vec::new(),
-        deliverable: crate::ports::tasks::TaskDeliverable::Once,
-        workflow_proposal: None,
-        origin_run_id: None,
-        origin_workflow_id: None,
-        bounced: None,
-    };
-    card.origin =
-        crate::ports::tasks::TaskOrigin::new(Some("dm:backend_engineer".to_string()), None);
-    runtime.tasks().upsert(runtime.id(), &card).await.unwrap();
-
-    runtime
-        .park_blocker(
-            &BlockerPayload {
-                kind: BlockerKind::Infrastructure,
-                source: BlockerSource::Provider,
-                step: Some(BlockerStep::Task {
-                    task_id: "t-9".to_string(),
-                }),
-                reason: "the model id was rejected".to_string(),
-                needed: "a model id this provider serves".to_string(),
-                group_key: None,
-            },
-            "t-9",
-            BlockerSenderSignals {
-                started_by: None,
-                owner_desk: None,
-                assignee: Some("backend_engineer".to_string()),
-            },
-        )
-        .await
-        .expect("parks the blocker into the teammate's DM");
-
-    let response = tokio::time::timeout(
-        Duration::from_secs(30),
-        app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/companies/acme/chat")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"chat":"dm:backend_engineer","text":"yes, go ahead and retry it"}"#,
-                ))
-                .unwrap(),
-        ),
-    )
-    .await
-    .expect(
-        "answering a task-backed blocker in a DM deadlocked: the route held the board \
-         lock while waiting on the follow-up that needs it",
-    )
-    .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    assert!(
-        runtime.pending_approvals().is_empty(),
-        "the answered blocker is retired"
-    );
-    let moved = runtime
-        .tasks()
-        .list(runtime.id())
-        .await
-        .expect("list")
-        .into_iter()
-        .find(|t| t.id == "t-9")
-        .expect("the card is still on the board");
-    assert_eq!(
-        moved.column,
-        crate::ports::tasks::COLUMN_IN_PROGRESS,
-        "the DM answer re-dispatched the paused card"
-    );
-}
-
-/// The ask-which question lands in the thread that asked it.
-///
-/// When two blocked things share a DM and the reply names neither, the
-/// runtime asks which one was meant. That question is an answer to the
-/// operator's message, so it threads off it the way every other reply in
-/// this handler does — otherwise the operator reads their own line in a
-/// thread and the teammate's follow-up at the channel root, which is the
-/// split this tier exists to close.
-#[cfg(feature = "openhuman")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-pub(super) async fn the_ask_which_question_threads_off_the_reply_that_was_ambiguous() {
-    use crate::company::blocker_sender::BlockerSenderSignals;
-    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
-
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = build_state_with_brain_and_manifest(
-        &home,
-        "running",
-        AppConfig::default(),
-        None,
-        roster_manifest(),
-    )
-    .await;
-    let company = CompanyId::new("acme");
-    let runtime = state.registry().get(&company).unwrap();
-    let app = router(state);
-
-    for (task, connection) in [("t-1", "connection:slack"), ("t-2", "connection:notion")] {
-        runtime
-            .park_blocker(
-                &BlockerPayload {
-                    kind: BlockerKind::Infrastructure,
-                    source: BlockerSource::Provider,
-                    step: Some(BlockerStep::Task {
-                        task_id: task.to_string(),
-                    }),
-                    reason: format!("{connection} refused the call"),
-                    needed: "a working connection".to_string(),
-                    group_key: Some(connection.to_string()),
-                },
-                task,
-                BlockerSenderSignals {
-                    started_by: None,
-                    owner_desk: None,
-                    assignee: Some("backend_engineer".to_string()),
-                },
-            )
-            .await
-            .expect("parks the blocker into the teammate's DM");
-    }
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/companies/acme/chat")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"chat":"dm:backend_engineer","text":"retry it"}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let stored = runtime
-        .events
-        .read_from(
-            runtime.id(),
-            crate::ports::types::EventSeq::new(0),
-            usize::MAX,
-        )
-        .await
-        .expect("read events");
-    let asked = stored
-        .iter()
-        .find_map(|s| match &s.event {
-            crate::ports::types::CompanyEvent::OperatorMessage { chat, text, .. }
-                if chat.as_deref() == Some("dm:backend_engineer") && text == "retry it" =>
-            {
-                Some(s.seq)
-            }
-            _ => None,
-        })
-        .expect("the operator's ambiguous reply is journalled");
-    let prompt = stored
-        .iter()
-        .find_map(|s| match &s.event {
-            crate::ports::types::CompanyEvent::AgentReply {
-                chat_id,
-                text,
-                parent,
-                ..
-            } if chat_id == "dm:backend_engineer" && text.contains("Which") => {
-                Some((text.clone(), *parent))
-            }
-            _ => None,
-        })
-        .expect("the runtime asks which of the two was meant");
-    assert_eq!(
-        prompt.1,
-        Some(asked),
-        "the ask-which question must hang off the reply that was ambiguous, not the \
-         channel root; prompt was {:?}",
-        prompt.0
-    );
-}
-
 /// The tool call the operator is asked to sign off. `agent: Some(_)` is what
 /// makes approving it mint a single-use grant rather than execute it
 /// (issue #243) — which is the whole reason a lost continuation hurts: the
@@ -441,6 +282,22 @@ pub(super) fn grantable_tool_call() -> crate::ports::types::Effect {
 /// presence in `pending_approvals()` is proof the continuation reached the
 /// end of the turn *and* wrote to disk — not merely that a task was alive.
 pub(super) const CONTINUATION_MARKER: &str = "continuation.marker";
+
+/// A brain that parks one gated tool call per operator message and, on the
+/// follow-up `ApprovalResolved` cycle, blocks mid-turn until the test
+/// releases it — the shape of a slow agent turn behind a proxy.
+pub(super) struct StalledContinuationBrain {
+    /// Fires once the follow-up turn has begun. By this point the verdict
+    /// is journaled and the grant minted, so this is exactly the moment the
+    /// field report's connection died.
+    entered: Arc<tokio::sync::Notify>,
+    /// The test's permission for the turn to finish.
+    release: Arc<tokio::sync::Notify>,
+    /// The effect parked for the operator's sign-off. Whether it may be
+    /// granted a standing permission is a property of this effect, so the
+    /// scope tests supply their own rather than sharing one fixture.
+    parked: crate::ports::types::Effect,
+}
 
 #[async_trait::async_trait]
 impl crate::ports::brain::Brain for StalledContinuationBrain {
@@ -514,11 +371,13 @@ pub(super) fn resolve_request(approval_id: &ApprovalId, body: serde_json::Value)
     resolve_request_scoped("/api/v1/company", approval_id, body)
 }
 
+// -- A blocker answered from the Approvals page (issue #2028) -------------
+
 /// Parks a workflow-node blocker: `TaskLink::Unlinked` with no
 /// conversation, which is the shape a node blocker takes and the reason the
 /// chat blocker path — which filters on the thread — can never reach one.
 #[cfg(feature = "openhuman")]
-pub(super) async fn park_node_blocker(
+async fn park_node_blocker(
     runtime: &Arc<CompanyRuntime>,
     id: &str,
     group_key: Option<&str>,
@@ -586,7 +445,7 @@ pub(super) async fn banked_resolutions(
 /// A company with one parked workflow-node blocker, and the pieces a resolve
 /// test needs to read back what its click banked.
 #[cfg(feature = "openhuman")]
-struct BlockedCompany {
+pub(super) struct BlockedCompany {
     app: axum::Router,
     runtime: Arc<CompanyRuntime>,
     home: std::path::PathBuf,
@@ -657,11 +516,13 @@ pub(super) async fn assert_refused(body: serde_json::Value, expect_in_error: &st
     );
 }
 
+// -- Extend the deadline (issue #1805) -----------------------------------
+
 /// Parks one effect in BOTH the gate and the journal under a fixed id, at a
 /// controllable instant — the gate is what `extend_approval` asks whether an
 /// id is live, and the journal is what projects the deadline, so an extend
 /// test needs both seeded exactly as a real park leaves them.
-pub(super) async fn park_for_extend(
+async fn park_for_extend(
     runtime: &Arc<CompanyRuntime>,
     id: &str,
     at_millis: u64,
@@ -710,4 +571,95 @@ pub(super) fn extend_request(approval_id: &ApprovalId) -> Request<Body> {
         approval_id,
         crate::server::test_support::fixed_cookie("acme"),
     )
+}
+
+pub(super) async fn body_json(response: Response) -> serde_json::Value {
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Whether the stalled brain's follow-up turn has journaled its marker yet.
+pub(super) fn continued(runtime: &Arc<CompanyRuntime>) -> bool {
+    runtime
+        .pending_approvals()
+        .iter()
+        .any(|a| a.kind == CONTINUATION_MARKER)
+}
+
+/// Waits for the stalled brain's follow-up turn to journal its marker.
+pub(super) async fn await_continuation(runtime: &Arc<CompanyRuntime>) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !continued(runtime) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// A running company with one tool call parked and a brain that will stall
+/// on the follow-up turn until `release` is fired.
+pub(super) struct StalledCompany {
+    app: axum::Router,
+    runtime: Arc<CompanyRuntime>,
+    approval_id: ApprovalId,
+    /// Fires once the follow-up turn has begun — by which point the verdict
+    /// is journaled and the grant minted.
+    entered: Arc<tokio::sync::Notify>,
+    /// The test's permission for that turn to finish.
+    release: Arc<tokio::sync::Notify>,
+}
+
+pub(super) async fn stalled_company(home: &std::path::Path) -> StalledCompany {
+    stalled_company_parking(home, gated_tool_call()).await
+}
+
+/// `stalled_company`, with the parked effect chosen by the caller — because
+/// whether a scope may be granted is decided by the effect, not the route.
+pub(super) async fn stalled_company_parking(
+    home: &std::path::Path,
+    parked: crate::ports::types::Effect,
+) -> StalledCompany {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let state = build_state_with_brain(
+        home,
+        "running",
+        AppConfig::default(),
+        Some(Arc::new(StalledContinuationBrain {
+            entered: entered.clone(),
+            release: release.clone(),
+            parked,
+        })),
+    )
+    .await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    let app = router(state);
+
+    let response = app.clone().oneshot(chat_request("do it")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let parked = runtime.pending_approvals();
+    assert_eq!(parked.len(), 1, "the brain parked one tool call");
+    let approval_id = parked[0].id.clone();
+
+    StalledCompany {
+        app,
+        runtime,
+        approval_id,
+        entered,
+        release,
+    }
+}
+
+/// The reply a stalled chat turn produces once released.
+pub(super) const SLOW_TURN_REPLY: &str = "the slow turn's answer";
+
+/// A brain that stalls on the operator's **first** turn — the chat lane,
+/// rather than the approval follow-up `StalledContinuationBrain` stalls on.
+pub(super) struct StalledChatBrain {
+    /// Fires once the turn is under way, which is the moment the field
+    /// report's proxy gave up and closed the connection.
+    entered: Arc<tokio::sync::Notify>,
+    /// The test's permission for that turn to finish.
+    release: Arc<tokio::sync::Notify>,
 }

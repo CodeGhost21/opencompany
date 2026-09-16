@@ -1,14 +1,362 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
+
+/// GRANT-012 (FAIL). `revoke_standing_grant` takes the grant out of the
+/// live set **before** its durable journal append — the opposite order
+/// from minting, and on purpose (see the function's own doc): a crash
+/// here must fail toward no-permission, never toward a permission nobody
+/// can see is still live. When the append then fails, the caller is told
+/// the revoke failed, but the grant must already be gone from the live
+/// set that actually governs future calls.
+#[tokio::test]
+async fn a_failed_revoke_append_still_removes_the_grant_from_the_live_set() {
+    let home_dir = home();
+    let store = std::sync::Arc::new(RefusingGrantRevokeStore {
+        inner: crate::ports::journal::MemoryJournalStore::default(),
+    });
+    let m = manifest();
+    let id = CompanyId::new("acme");
+    let fs_store = FsCompanyStore::new(home_dir.path().to_path_buf());
+    {
+        use crate::ports::store::CompanyStore;
+        fs_store
+            .save(&CompanyRecord {
+                overlay_desk_hive: Vec::new(),
+                overlay_retired_agents: Vec::new(),
+                overlay_agent_edits: Vec::new(),
+                id: id.clone(),
+                manifest: m.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_tool_grants: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+                name_confirmed: false,
+                activation_completed_at: None,
+                created_at_millis: None,
+            })
+            .await
+            .unwrap();
+    }
+    let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), m)
+        .with_id(id.clone())
+        .with_journal_store(store)
+        .build()
+        .await
+        .unwrap();
+    let runtime = Arc::new(runtime);
+    runtime
+        .grants
+        .grant_standing(racing_standing_grant("g-append-fail"));
+
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id.clone(), runtime.clone());
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let app = router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/company/grants/g-append-fail")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the forced append failure must surface"
+    );
+    assert_eq!(
+        runtime.grants.standing().len(),
+        0,
+        "the live-set removal must land even though the durable record of it failed — \
+         fail toward no permission, never toward one nobody can see is still granted"
+    );
+}
+
+/// **The keystone (issue #469).** A turn that parks four sign-offs, all
+/// approved, produces exactly ONE continuation — and an answer the operator
+/// can actually see.
+///
+/// Before this, each resolve spawned its own follow-up cycle: four full
+/// re-runs of one turn, each told about one decision. They did not race —
+/// the per-company serial lock made them queue — but the later ones found
+/// the grants the earlier ones had redeemed and produced nothing at all.
+/// And none of it reached the operator either way, because the resolve
+/// route never journaled a continuation's replies, so no `agent_reply`
+/// frame was ever projected. Four approvals, four wasted turns, silence.
+#[tokio::test]
+async fn four_sign_offs_from_one_turn_produce_one_continuation() {
+    let home_dir = home();
+    let c = multi_park_company(home_dir.path(), 4, None, false).await;
+    let before = c.cycles.load(std::sync::atomic::Ordering::SeqCst);
+
+    let mut handles = Vec::new();
+    for id in &c.approvals {
+        let app = c.app.clone();
+        let request = approve_detached(id);
+        handles.push(tokio::spawn(
+            async move { app.oneshot(request).await.unwrap() },
+        ));
+    }
+    for handle in handles {
+        assert_eq!(handle.await.unwrap().status(), StatusCode::OK);
+    }
+    settle(&c.runtime, 4).await;
+
+    assert_eq!(
+        c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
+        1,
+        "one turn owes one continuation, not one per approval"
+    );
+    assert_eq!(
+        c.decisions.lock().unwrap().len(),
+        4,
+        "the single continuation carries every decision, so the brain learns all four"
+    );
+    assert!(
+        c.runtime.pending_approvals().is_empty(),
+        "every sign-off was decided"
+    );
+    assert_eq!(
+        agent_replies(&c.runtime).await.len(),
+        4,
+        "the continuation's answers must reach the event stream, or the operator \
+         watches an approved action in silence"
+    );
+}
+
+/// The two orders an operator can decide in must end in the same place.
+///
+/// Approving four at once and approving them one at a time are the same
+/// request spread over a different span, and the gate is the last decision
+/// rather than a time window — so neither can produce more continuations
+/// than the other. A design that coalesced only what arrived together would
+/// pass the test above and still re-run the turn four times here.
+#[tokio::test]
+async fn deciding_one_at_a_time_ends_where_deciding_all_at_once_does() {
+    let home_dir = home();
+    let c = multi_park_company(home_dir.path(), 4, None, false).await;
+    let before = c.cycles.load(std::sync::atomic::Ordering::SeqCst);
+
+    for (i, id) in c.approvals.iter().enumerate() {
+        let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let ran = c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before;
+        if i < 3 {
+            assert_eq!(
+                ran,
+                0,
+                "the turn is still blocked on {} more sign-off(s); continuing now \
+                 would re-park them",
+                3 - i
+            );
+        }
+    }
+    settle(&c.runtime, 4).await;
+
+    assert_eq!(
+        c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
+        1,
+        "the last decision unblocks the turn, and it runs once"
+    );
+    assert_eq!(c.decisions.lock().unwrap().len(), 4);
+    assert_eq!(agent_replies(&c.runtime).await.len(), 4);
+}
+
+/// The continuation answers in the conversation the sign-off was raised in.
+///
+/// Not on the answering agent's own line: a desk channel's request and a
+/// direct message to that channel's lead are answered by the same teammate,
+/// so keying the reply on the agent delivers a channel's continuation into a
+/// private thread nobody is watching (issue #379's lesson, which the reply
+/// path had never learned — only the re-park had).
+#[tokio::test]
+async fn a_continuation_answers_in_the_thread_the_sign_off_was_raised_in() {
+    let home_dir = home();
+    let c = multi_park_company(home_dir.path(), 2, Some("sales"), false).await;
+
+    for id in &c.approvals {
+        let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    settle(&c.runtime, 2).await;
+
+    let replies = agent_replies(&c.runtime).await;
+    assert_eq!(replies.len(), 2, "both re-issues answered");
+    assert!(
+        replies.iter().all(|r| r.starts_with("sales|")),
+        "the continuation must land in the channel the approval was raised in, got {replies:?}"
+    );
+}
+
+/// **Issue #1092.** A workflow node's parked call, once approved, answers
+/// on its run — never as a direct message from the teammate that ran it.
+///
+/// This is the wiring test for `continuation_fallback_chat_id`: the unit
+/// tests pin what the fallback *returns*, and this pins that
+/// `publish_continuation` actually uses it, through a real park, a real
+/// resolve and the journal the console reads back.
+///
+/// The assertion is written against the agent id rather than only for the
+/// run id, because that is the regression: the leak put the re-issued
+/// turn's narration into `chat/history?desk=<teammate>`, where it rendered
+/// as an unprompted DM.
+#[tokio::test]
+async fn a_workflow_parks_continuation_answers_on_the_run_not_in_a_dm() {
+    let home_dir = home();
+    let c =
+        multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None).await;
+
+    let response = c
+        .app
+        .clone()
+        .oneshot(approve_detached(&c.approvals[0]))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    settle(&c.runtime, 1).await;
+
+    let replies = agent_replies(&c.runtime).await;
+    assert_eq!(replies.len(), 1, "the re-issue answered once");
+    let (chat_id, _) = replies[0].split_once('|').expect("chat_id|text");
+    assert_eq!(
+        chat_id, "run-1092",
+        "a workflow park's continuation belongs to its run, got {replies:?}"
+    );
+    // The regression, stated as itself: before this fix the fallback was
+    // the answering teammate's own id, so this is what the leaked row held.
+    assert_ne!(
+        chat_id, "ceo",
+        "the re-issue must not be journaled as a DM from the teammate that ran it"
+    );
+}
+
+/// **Codex P1 (pass 2).** A continuation's reply is journaled through
+/// `publish_continuation`, not the `/chat` turn — so a mention an agent
+/// types back in an approval follow-up used to render as a chip and
+/// nothing else: no badge, no durable row, exactly the person it is meant
+/// to reach (offline when the reply lands) getting neither.
+///
+/// Both paths file through the same writer now; this pins that an `@user`
+/// in a continuation reply lands as a mention notification whose audience
+/// carries the person named, under the chat the continuation answered in.
+#[tokio::test]
+async fn a_continuation_reply_that_mentions_a_user_files_a_notification() {
+    let home_dir = home();
+    let c = multi_park_company_run(
+        home_dir.path(),
+        1,
+        Some("sales"),
+        false,
+        None,
+        Some("@harness-admin"),
+    )
+    .await;
+
+    let users = c
+        .runtime
+        .users()
+        .list_users(&CompanyId::new("acme"))
+        .await
+        .unwrap();
+    let admin = users
+        .iter()
+        .find(|u| u.email == "harness-admin@example.test")
+        .expect("the fixed admin is seeded");
+    assert_eq!(
+        admin.status,
+        crate::ports::users::UserStatus::Active,
+        "the admin must be an active, mentionable target"
+    );
+
+    let response = c
+        .app
+        .clone()
+        .oneshot(approve_detached(&c.approvals[0]))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    settle(&c.runtime, 1).await;
+    // The notification is filed inside `publish_continuation`, after the
+    // reply is journaled — `settle` only waits for the reply. A loaded CI
+    // runner can reach this point before the notification append finishes,
+    // so poll for it (issue #1665, Codex P1 regression).
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let notes = c
+                .runtime
+                .notifications()
+                .list(&CompanyId::new("acme"), &admin.id)
+                .await
+                .unwrap();
+            if notes.iter().any(|n| n.notification.kind == "mention") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the mention notification never appeared");
+
+    let notes = c
+        .runtime
+        .notifications()
+        .list(&CompanyId::new("acme"), &admin.id)
+        .await
+        .unwrap();
+    let mentions: Vec<_> = notes
+        .into_iter()
+        .filter(|n| n.notification.kind == "mention")
+        .collect();
+    assert_eq!(
+        mentions.len(),
+        1,
+        "the continuation's mention must badge the person it names"
+    );
+    let note = &mentions[0].notification;
+    assert_eq!(note.context.as_deref(), Some("sales"));
+    assert_eq!(
+        note.title, "Someone mentioned you in sales",
+        "a continuation has no author, so the generic label is the honest one"
+    );
+    assert!(
+        note.audience
+            .as_ref()
+            .is_some_and(|a| a.contains(&admin.id)),
+        "the named user must be in the notification's audience"
+    );
+}
 
 /// **Issue #379's routing, re-homed (issue #469).** The continuation
 /// resumes in the thread the sign-off was raised in — and in no other.
@@ -321,335 +669,5 @@ async fn a_mention_in_a_dm_stores_the_console_dm_channel_id() {
         contexts.iter().all(|c| *c == Some("dm:designer")),
         "every mention in a DM has to store the console's DM channel id, \
          not the bare roster thread id — got {contexts:?}"
-    );
-}
-
-/// [`mention_context`] canonicalizes a **`dm:`-prefixed** noncanonical key
-/// too. An API client can address a DM with the console's channel shape but
-/// a noncanonical payload — `dm:BACKEND_ENGINEER` for the teammate whose id
-/// is `backend_engineer`. The routing resolves that case-insensitively, so
-/// the stored context has to carry the canonical agent id: filing the raw
-/// key under `dm:BACKEND_ENGINEER` badges a rail channel that does not
-/// exist, and opening the actual DM can never clear it. Pre-fix, the
-/// `dm:`-prefixed branch returned the key verbatim and bypassed
-/// `assignee::resolve` entirely.
-#[tokio::test]
-async fn mention_context_canonicalizes_prefixed_dm_keys() {
-    let home_dir = home();
-    let state = state_with_roster(home_dir.path()).await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).expect("company registered");
-
-    // A case-variant of the teammate's id, carrying the `dm:` prefix the
-    // console mints.
-    assert_eq!(
-        runtime
-            .mention_context(&id, &[], "dm:BACKEND_ENGINEER")
-            .await,
-        "dm:backend_engineer",
-        "a `dm:`-prefixed noncanonical teammate key has to store dm:<agent-id>"
-    );
-    // The already-canonical shape stays unchanged — the resolution must
-    // not move a key that was already right.
-    assert_eq!(
-        runtime
-            .mention_context(&id, &[], "dm:backend_engineer")
-            .await,
-        "dm:backend_engineer",
-        "a canonical dm:<teammate-id> key is kept as-is"
-    );
-    // A `dm:` key whose bare half names a desk (the desk-first ordering the
-    // routing uses) files under the desk id, not a nonexistent `dm:<desk>`.
-    assert_eq!(
-        runtime.mention_context(&id, &[], "dm:Engineering").await,
-        "engineering",
-        "a `dm:` key that resolves to a desk has to store the desk id"
-    );
-}
-
-/// A desk id that collides with a **human user id** still files under the
-/// desk. `assignee::resolve`'s desk-first ordering — the same one
-/// `responder_for` uses — outranks the user directory, and the directory
-/// must not get a say ahead of it. Pre-fix, a `users` pre-check ran before
-/// the resolution and returned `dm:<id>` for any bare key matching a human,
-/// so a mention aimed at a desk whose id happened to match a human id would
-/// badge a nonexistent DM channel and could never be cleared from the desk
-/// it was meant for.
-#[tokio::test]
-async fn mention_context_a_human_id_matching_a_desk_id_stays_a_desk() {
-    let home_dir = home();
-    let state = state_with_roster(home_dir.path()).await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).expect("company registered");
-
-    // A human whose id collides with the `engineering` desk's id. The human
-    // directory must not win: the message is aimed at the desk.
-    let human = crate::ports::users::UserRecord {
-        id: "engineering".to_string(),
-        email: "human@example.test".to_string(),
-        display_name: None,
-        avatar: None,
-        role: crate::ports::users::UserRole::Member,
-        status: crate::ports::users::UserStatus::Active,
-        password_hash: None,
-        must_change_password: false,
-        created_at_millis: crate::ports::now_millis(),
-        last_seen_at_millis: None,
-        updated_at_millis: crate::ports::now_millis(),
-    };
-
-    assert_eq!(
-        runtime
-            .mention_context(&id, std::slice::from_ref(&human), "engineering")
-            .await,
-        "engineering",
-        "a desk id that matches a human id files under the desk, not dm:<id>"
-    );
-    assert_eq!(
-        runtime
-            .mention_context(&id, std::slice::from_ref(&human), "dm:engineering")
-            .await,
-        "engineering",
-        "the same collision through a dm:-prefixed key still files under the desk"
-    );
-    // A DM the human is actually a teammate of still badges as a DM.
-    assert_eq!(
-        runtime
-            .mention_context(&id, &[human], "dm:backend_engineer")
-            .await,
-        "dm:backend_engineer",
-        "a real DM channel is unaffected by the collision guard"
-    );
-}
-
-/// [`mention_context`] resolves a `dm:`-prefixed key **as sent** before
-/// stripping the prefix, so a desk literally named `dm:engineering` keeps
-/// that id. Pre-fix, the unconditional strip resolved `engineering` instead
-/// and filed the badge under the wrong transcript — the exact claim
-/// [`assignee::dm_key`]'s contract warns about.
-#[tokio::test]
-async fn mention_context_a_desk_literally_named_dm_prefix_keeps_its_id() {
-    let home_dir = home();
-    let state = state_with_dm_prefixed_desk(home_dir.path()).await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).expect("company registered");
-
-    // The literal `dm:engineering` desk resolves as sent; stripping would
-    // misroute to the plain `engineering` desk.
-    assert_eq!(
-        runtime.mention_context(&id, &[], "dm:engineering").await,
-        "dm:engineering",
-        "a desk literally named dm:<…> keeps its id — the raw key resolves first"
-    );
-    // The un-prefixed desk is untouched by the collision.
-    assert_eq!(
-        runtime.mention_context(&id, &[], "engineering").await,
-        "engineering",
-        "the un-prefixed desk still resolves to its own id"
-    );
-    // A genuine DM still re-keys onto the rail's DM channel.
-    assert_eq!(
-        runtime
-            .mention_context(&id, &[], "dm:backend_engineer")
-            .await,
-        "dm:backend_engineer",
-        "a real DM channel is unaffected by the literal dm: desk"
-    );
-}
-
-/// [`mention_context`] stores the **canonical** id for a key typed in a
-/// noncanonical shape — a desk by its display name, a teammate by a
-/// case-variant of their id. `assignee::resolve` already returns canonical
-/// ids (issue #214); storing the raw key instead would file the badge under
-/// a channel id the rail never has, so it could neither render nor clear.
-#[tokio::test]
-async fn mention_context_stores_canonical_ids_for_noncanonical_keys() {
-    let home_dir = home();
-    let state = state_with_roster(home_dir.path()).await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).expect("company registered");
-
-    // A desk addressed by its display name files under the desk's id —
-    // `"Engineering"` names the desk whose id is `engineering`.
-    assert_eq!(
-        runtime.mention_context(&id, &[], "Engineering").await,
-        "engineering",
-        "a desk named by its display name has to store the desk id, not the raw key"
-    );
-    // A teammate addressed by a case-variant of their id files under the
-    // canonical agent id, re-keyed into the console's DM channel space.
-    assert_eq!(
-        runtime.mention_context(&id, &[], "BACKEND_ENGINEER").await,
-        "dm:backend_engineer",
-        "a teammate named by a noncanonical key has to store dm:<agent-id>"
-    );
-}
-
-/// [`mention_context`] files a mention in the General desk — the default an
-/// unaddressed message lands in — under the console's canonical main-thread
-/// id even when this company has no desk named/id `General`. This fixture's
-/// only desk is `engineering`, so every general-chat spelling would
-/// otherwise fall through to the raw string and badge a rail row that does
-/// not exist (issue #1665 follow-up).
-#[tokio::test]
-async fn mention_context_maps_unresolvable_general_spellings_to_main() {
-    let home_dir = home();
-    let state = state_with_roster(home_dir.path()).await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).expect("company registered");
-
-    for general in ["General", "general", "main", ""] {
-        assert_eq!(
-            runtime.mention_context(&id, &[], general).await,
-            crate::server::chat_history::MAIN_THREAD_ID,
-            "a mention in the General desk ({general:?}) has to store the console's \
-             main-thread id, which the rail aliases onto its first rendered desk \
-             channel"
-        );
-    }
-    // A desk that does resolve keeps its canonical id — the general-chat
-    // mapping must not swallow a real desk.
-    assert_eq!(
-        runtime.mention_context(&id, &[], "Engineering").await,
-        "engineering",
-        "a real desk keeps its canonical id even when its name looks general"
-    );
-}
-
-/// [`mention_context`] canonicalizes a **memberless** desk too. A desk that
-/// exists but has nobody seated on it is still a real desk with a real rail
-/// channel, so a key typed as its display name must file under its canonical
-/// id: `"Sales"` has to badge `#sales`, and opening `#sales` has to clear it.
-/// Pre-fix, `EmptyDesk` fell through the same wildcard as `Unknown` and
-/// stored the raw key — a channel id no desk renders, so the badge was
-/// invisible and could never clear.
-#[tokio::test]
-async fn mention_context_canonicalizes_a_memberless_desk() {
-    let home_dir = home();
-    let state = state_with_memberless_desk(home_dir.path()).await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).expect("company registered");
-
-    assert_eq!(
-        runtime.mention_context(&id, &[], "Sales").await,
-        "sales",
-        "a memberless desk named by its display name has to store the desk id, \
-         not the raw key — the rail's channel id is `sales`"
-    );
-    // The desk that does have a lead keeps behaving as before.
-    assert_eq!(
-        runtime.mention_context(&id, &[], "Engineering").await,
-        "engineering",
-        "a desk with a lead still stores its canonical id"
-    );
-}
-
-/// Issue #1781 review (Codex P1): [`company_events`]'s periodic refresh
-/// must re-derive admin access from the live user record, not keep
-/// answering with whatever it was when the SSE stream opened. Proven
-/// directly against [`refreshed_is_admin`] — the seam that refresh loop
-/// calls on every tick — rather than the SSE handler itself, since the
-/// handler's own timing (a real `EventSource`, a 60s interval) is not
-/// what this bug is about.
-#[tokio::test]
-async fn refreshed_is_admin_reflects_a_mid_stream_demotion() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).unwrap();
-
-    let mut user = crate::ports::users::UserRecord {
-        id: "u1".to_string(),
-        email: "admin@acme.test".to_string(),
-        display_name: None,
-        avatar: None,
-        role: crate::ports::users::UserRole::Admin,
-        status: crate::ports::users::UserStatus::Active,
-        password_hash: None,
-        must_change_password: false,
-        created_at_millis: crate::ports::now_millis(),
-        last_seen_at_millis: None,
-        updated_at_millis: crate::ports::now_millis(),
-    };
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await
-        .unwrap();
-    let actor = Actor {
-        kind: ActorKind::User,
-        id: user.id.clone(),
-    };
-
-    assert!(
-        refreshed_is_admin(&runtime, Some(&actor), false).await,
-        "an active admin's record must resolve to admin, even starting from a stale `false`"
-    );
-
-    // The demotion itself: same shape `PATCH …/users/{id}` writes, and —
-    // critically — it does not touch sessions, so a connection opened
-    // before this write stays open exactly as it would in production.
-    user.role = crate::ports::users::UserRole::Member;
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await
-        .unwrap();
-
-    assert!(
-        !refreshed_is_admin(&runtime, Some(&actor), true).await,
-        "a demoted user's live record must flip a stale `true` to `false` — this is \
-         exactly the check `company_events` failed to make before this fix, leaking the \
-         owner-fallback admin-only report to a demoted viewer for the rest of their stream"
-    );
-
-    // Suspension revokes admin the same way, even if role were untouched.
-    user.role = crate::ports::users::UserRole::Admin;
-    user.status = crate::ports::users::UserStatus::Suspended;
-    runtime
-        .users()
-        .upsert_user(runtime.id(), &user)
-        .await
-        .unwrap();
-
-    assert!(
-        !refreshed_is_admin(&runtime, Some(&actor), true).await,
-        "a suspended admin must not keep admin-only visibility either"
-    );
-}
-
-/// Issue #1781 review, Codex P1 second follow-up: a human actor whose
-/// current role cannot be confirmed — `Ok(None)` because the user record
-/// has gone missing, folded in here with a genuine store error since both
-/// hit the same match arm — must resolve to `false`, not `previous`.
-///
-/// `previous: true` here stands in for exactly the dangerous case: a
-/// cached "was admin" value from before whatever made this actor
-/// unconfirmable, revalidated at the one call site
-/// (`is_admin_for_item`) that gates the admin-only owner-fallback report
-/// on this result directly. Before this fix, an actor deleted out from
-/// under an open SSE stream — or a transient read failure landing at the
-/// exact moment a report needed gating — fell back to `previous` and kept
-/// leaking the report, silently, for as long as the failure (or the
-/// missing record) persisted.
-#[tokio::test]
-async fn refreshed_is_admin_fails_closed_when_the_user_record_cannot_be_found() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).unwrap();
-
-    // Never upserted — `get_user` answers `Ok(None)`, the "record has
-    // gone missing" half of the case this proves.
-    let actor = Actor {
-        kind: ActorKind::User,
-        id: "ghost".to_string(),
-    };
-
-    assert!(
-        !refreshed_is_admin(&runtime, Some(&actor), true).await,
-        "a human actor with no resolvable user record must read as not-admin \
-         even when the cached value being revalidated was `true` — trusting \
-         `previous` here is exactly the fail-open gap this fix closes"
     );
 }

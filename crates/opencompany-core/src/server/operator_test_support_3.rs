@@ -1,94 +1,20 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
 use super::operator_test_support_4::*;
-
-pub(super) async fn body_json(response: Response) -> serde_json::Value {
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-/// Whether the stalled brain's follow-up turn has journaled its marker yet.
-pub(super) fn continued(runtime: &Arc<CompanyRuntime>) -> bool {
-    runtime
-        .pending_approvals()
-        .iter()
-        .any(|a| a.kind == CONTINUATION_MARKER)
-}
-
-/// Waits for the stalled brain's follow-up turn to journal its marker.
-pub(super) async fn await_continuation(runtime: &Arc<CompanyRuntime>) -> bool {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while !continued(runtime) {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .is_ok()
-}
-
-/// A running company with one tool call parked and a brain that will stall
-/// on the follow-up turn until `release` is fired.
-struct StalledCompany {
-    app: axum::Router,
-    runtime: Arc<CompanyRuntime>,
-    approval_id: ApprovalId,
-    /// Fires once the follow-up turn has begun — by which point the verdict
-    /// is journaled and the grant minted.
-    entered: Arc<tokio::sync::Notify>,
-    /// The test's permission for that turn to finish.
-    release: Arc<tokio::sync::Notify>,
-}
-
-pub(super) async fn stalled_company(home: &std::path::Path) -> StalledCompany {
-    stalled_company_parking(home, gated_tool_call()).await
-}
-
-/// `stalled_company`, with the parked effect chosen by the caller — because
-/// whether a scope may be granted is decided by the effect, not the route.
-pub(super) async fn stalled_company_parking(
-    home: &std::path::Path,
-    parked: crate::ports::types::Effect,
-) -> StalledCompany {
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let state = build_state_with_brain(
-        home,
-        "running",
-        AppConfig::default(),
-        Some(Arc::new(StalledContinuationBrain {
-            entered: entered.clone(),
-            release: release.clone(),
-            parked,
-        })),
-    )
-    .await;
-    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-    let app = router(state);
-
-    let response = app.clone().oneshot(chat_request("do it")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let parked = runtime.pending_approvals();
-    assert_eq!(parked.len(), 1, "the brain parked one tool call");
-    let approval_id = parked[0].id.clone();
-
-    StalledCompany {
-        app,
-        runtime,
-        approval_id,
-        entered,
-        release,
-    }
-}
-
-/// The reply a stalled chat turn produces once released.
-pub(super) const SLOW_TURN_REPLY: &str = "the slow turn's answer";
 
 #[async_trait::async_trait]
 impl crate::ports::brain::Brain for StalledChatBrain {
@@ -152,6 +78,22 @@ pub(super) async fn await_reply_journaled(runtime: &Arc<CompanyRuntime>) -> bool
     })
     .await
     .is_ok()
+}
+
+// ── Issue #983: an accepted turn exists and can be read back ────────────
+
+/// A brain that blocks every operator turn on a semaphore the test holds.
+///
+/// Deliberately a `Semaphore` rather than a `Notify`: these tests run two
+/// turns at once and release both, and `notify_one` wakes exactly one
+/// waiter while `notify_waiters` wakes only those already parked. Permits
+/// are held whether or not anybody is waiting yet, so the release cannot
+/// race the turns into a hang.
+struct BlockingChatBrain {
+    /// One permit added per turn that has entered the brain.
+    entered: Arc<tokio::sync::Semaphore>,
+    /// The test's permission for a turn to finish — one permit each.
+    release: Arc<tokio::sync::Semaphore>,
 }
 
 impl BlockingChatBrain {
@@ -262,7 +204,8 @@ pub(super) async fn turn_rows(runtime: &Arc<CompanyRuntime>) -> Vec<(String, Str
         .collect()
 }
 
-pub(super) fn stored(event: CompanyEvent) -> StoredEvent {
+// ---- issue #66: the operator attention SSE feed ----
+fn stored(event: CompanyEvent) -> StoredEvent {
     StoredEvent {
         seq: EventSeq::new(7),
         company: CompanyId::new("acme"),
@@ -271,7 +214,8 @@ pub(super) fn stored(event: CompanyEvent) -> StoredEvent {
     }
 }
 
-pub(super) fn delivery_row(
+// ---- issue #228: the workflow-run outcome projection ----
+fn delivery_row(
     node: &str,
     status: crate::ports::DeliveryStatus,
 ) -> crate::ports::DeliveryReport {
@@ -306,75 +250,13 @@ pub(super) fn racing_standing_grant(id: &str) -> crate::runtime::grants::Standin
     }
 }
 
-/// GRANT-012 (CONC). Two browsers — or one double-click — racing a
-/// `DELETE` on the same grant id must not both report success:
-/// `revoke_standing` is a plain `HashMap::remove`, so exactly one caller
-/// takes the grant and every other must see the ordinary "already gone"
-/// 404 a second revoke gets, not a duplicate 204 or a panic on a double
-/// free.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-pub(super) async fn two_simultaneous_revokes_of_the_same_grant_settle_once() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
-    runtime
-        .grants
-        .grant_standing(racing_standing_grant("g-race"));
-
-    let app = router(state);
-    let racers: Vec<_> = (0..8)
-        .map(|_| {
-            let app = app.clone();
-            tokio::spawn(async move {
-                app.oneshot(
-                    Request::builder()
-                        .method("DELETE")
-                        .uri("/api/v1/company/grants/g-race")
-                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-            })
-        })
-        .collect();
-
-    let mut statuses = Vec::new();
-    for racer in racers {
-        statuses.push(
-            racer
-                .await
-                .expect("the request task did not panic")
-                .status(),
-        );
-    }
-    assert_eq!(
-        statuses
-            .iter()
-            .filter(|s| **s == StatusCode::NO_CONTENT)
-            .count(),
-        1,
-        "exactly one simultaneous revoke may take the grant, got {statuses:?}"
-    );
-    assert_eq!(
-        statuses
-            .iter()
-            .filter(|s| **s == StatusCode::NOT_FOUND)
-            .count(),
-        7,
-        "every loser must see the ordinary already-gone 404, got {statuses:?}"
-    );
-    assert_eq!(runtime.grants.standing().len(), 0);
-}
-
 /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
 /// every `StandingGrantRevoked` line and passes everything else through.
 /// Targets the **direct** `DELETE {scope}/grants/{gid}` append —
 /// distinct from `runtime::cycle::test::FailStandingRevokeStore`, which
 /// pins the mint/revoke *reconcile* path's own (oppositely ordered)
 /// append.
-struct RefusingGrantRevokeStore {
+pub(super) struct RefusingGrantRevokeStore {
     inner: crate::ports::journal::MemoryJournalStore,
 }
 
@@ -405,6 +287,44 @@ impl crate::ports::journal::JournalStore for RefusingGrantRevokeStore {
     async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> crate::Result<()> {
         self.inner.complete_import(id, lines).await
     }
+}
+
+// ---------------------------------------------------------------------
+// Issue #469 — a turn that parks several approvals.
+//
+// Every test above parks exactly one, which is the case that always
+// worked. The failure the operator hit needs more than one: four
+// `composio_execute` calls from a single turn, all approved, and then
+// silence. These drive that shape end to end over the real router.
+// ---------------------------------------------------------------------
+
+/// A brain that parks `parks` gated tool calls on one operator message and
+/// answers each `ApprovalResolved` it is told about.
+///
+/// Deliberately shaped like `HarnessBrain`'s approval arm rather than like a
+/// convenient stub: it consults the live grant set and produces **no reply
+/// at all** when there is no grant left to redeem, because that silent
+/// no-op is exactly what the later of several follow-up cycles used to hit.
+struct MultiParkBrain {
+    parks: usize,
+    /// One entry per `ApprovalResolved` the brain was handed, across all
+    /// cycles.
+    decisions: Arc<std::sync::Mutex<Vec<String>>>,
+    /// How many cycles ran in total (the first is the chat turn).
+    cycles: Arc<std::sync::atomic::AtomicUsize>,
+    /// The runtime, so the brain can reach the grant set the way the
+    /// harness's re-dispatch does. Filled by the test after the build.
+    rt: Arc<std::sync::OnceLock<Arc<CompanyRuntime>>>,
+    /// Fail the continuation cycle, to exercise defect 4.
+    fail_continuation: bool,
+    /// Stamp a workflow run id onto every parked effect (issue #1092), so
+    /// the park records the shape a workflow node's gated tool call has:
+    /// explicitly unlinked from any card, and carrying a run.
+    run_id: Option<String>,
+    /// An `@mention` to append to every continuation reply. Exercises the
+    /// durable half of a reply's mention: the re-issue's reply journaling
+    /// must badge the person it names, same as the `/chat` path.
+    continuation_mention: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -479,7 +399,7 @@ impl crate::ports::brain::Brain for MultiParkBrain {
 }
 
 /// A company whose next turn parks four sign-offs.
-struct MultiParkCompany {
+pub(super) struct MultiParkCompany {
     app: axum::Router,
     runtime: Arc<CompanyRuntime>,
     approvals: Vec<ApprovalId>,
@@ -709,7 +629,54 @@ pub(super) fn card_in_review(id: &str, chat_id: &str) -> crate::ports::tasks::Ta
     }
 }
 
+// -- Approval authority: deciding for the company, not addressing it -----
+
 /// Both address forms. Every ops route is registered under two, and this
 /// pair had already drifted apart: only the alias carried the
 /// temporary-password refusal, so every assertion below runs against both.
-pub(super) const APPROVAL_SCOPES: [&str; 2] = ["/api/v1/companies/acme", "/api/v1/company"];
+const APPROVAL_SCOPES: [&str; 2] = ["/api/v1/companies/acme", "/api/v1/company"];
+
+pub(super) fn resolve_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
+    let builder = Request::builder()
+        .method("POST")
+        .uri(format!("{scope}/approvals/{approval_id}"))
+        .header("content-type", "application/json");
+    let builder = match cookie {
+        Some(cookie) => builder.header("cookie", cookie),
+        None => builder,
+    };
+    builder
+        .body(Body::from(
+            serde_json::json!({ "verdict": "deny" }).to_string(),
+        ))
+        .unwrap()
+}
+
+pub(super) fn extend_as(scope: &str, approval_id: &str, cookie: Option<&str>) -> Request<Body> {
+    let builder = Request::builder()
+        .method("POST")
+        .uri(format!("{scope}/approvals/{approval_id}/extend"));
+    let builder = match cookie {
+        Some(cookie) => builder.header("cookie", cookie),
+        None => builder,
+    };
+    builder.body(Body::empty()).unwrap()
+}
+
+// -- resolve_attachments: IDOR-safe re-resolution, the attachment cap, --
+// -- bad-id/folder refusal, and dedup (issue #1682) ----------------------
+fn attachment_binary_node(id: &str, name: &str, mime: &str) -> WorkspaceNode {
+    WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: 1_700_000_000_000,
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: Some(mime.to_string()),
+        size: None,
+        sha256: None,
+        adopted: false,
+    }
+}

@@ -1,14 +1,351 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
+
+/// [`mention_context`] canonicalizes a **`dm:`-prefixed** noncanonical key
+/// too. An API client can address a DM with the console's channel shape but
+/// a noncanonical payload — `dm:BACKEND_ENGINEER` for the teammate whose id
+/// is `backend_engineer`. The routing resolves that case-insensitively, so
+/// the stored context has to carry the canonical agent id: filing the raw
+/// key under `dm:BACKEND_ENGINEER` badges a rail channel that does not
+/// exist, and opening the actual DM can never clear it. Pre-fix, the
+/// `dm:`-prefixed branch returned the key verbatim and bypassed
+/// `assignee::resolve` entirely.
+#[tokio::test]
+async fn mention_context_canonicalizes_prefixed_dm_keys() {
+    let home_dir = home();
+    let state = state_with_roster(home_dir.path()).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company registered");
+
+    // A case-variant of the teammate's id, carrying the `dm:` prefix the
+    // console mints.
+    assert_eq!(
+        runtime
+            .mention_context(&id, &[], "dm:BACKEND_ENGINEER")
+            .await,
+        "dm:backend_engineer",
+        "a `dm:`-prefixed noncanonical teammate key has to store dm:<agent-id>"
+    );
+    // The already-canonical shape stays unchanged — the resolution must
+    // not move a key that was already right.
+    assert_eq!(
+        runtime
+            .mention_context(&id, &[], "dm:backend_engineer")
+            .await,
+        "dm:backend_engineer",
+        "a canonical dm:<teammate-id> key is kept as-is"
+    );
+    // A `dm:` key whose bare half names a desk (the desk-first ordering the
+    // routing uses) files under the desk id, not a nonexistent `dm:<desk>`.
+    assert_eq!(
+        runtime.mention_context(&id, &[], "dm:Engineering").await,
+        "engineering",
+        "a `dm:` key that resolves to a desk has to store the desk id"
+    );
+}
+
+/// A desk id that collides with a **human user id** still files under the
+/// desk. `assignee::resolve`'s desk-first ordering — the same one
+/// `responder_for` uses — outranks the user directory, and the directory
+/// must not get a say ahead of it. Pre-fix, a `users` pre-check ran before
+/// the resolution and returned `dm:<id>` for any bare key matching a human,
+/// so a mention aimed at a desk whose id happened to match a human id would
+/// badge a nonexistent DM channel and could never be cleared from the desk
+/// it was meant for.
+#[tokio::test]
+async fn mention_context_a_human_id_matching_a_desk_id_stays_a_desk() {
+    let home_dir = home();
+    let state = state_with_roster(home_dir.path()).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company registered");
+
+    // A human whose id collides with the `engineering` desk's id. The human
+    // directory must not win: the message is aimed at the desk.
+    let human = crate::ports::users::UserRecord {
+        id: "engineering".to_string(),
+        email: "human@example.test".to_string(),
+        display_name: None,
+        avatar: None,
+        role: crate::ports::users::UserRole::Member,
+        status: crate::ports::users::UserStatus::Active,
+        password_hash: None,
+        must_change_password: false,
+        created_at_millis: crate::ports::now_millis(),
+        last_seen_at_millis: None,
+        updated_at_millis: crate::ports::now_millis(),
+    };
+
+    assert_eq!(
+        runtime
+            .mention_context(&id, std::slice::from_ref(&human), "engineering")
+            .await,
+        "engineering",
+        "a desk id that matches a human id files under the desk, not dm:<id>"
+    );
+    assert_eq!(
+        runtime
+            .mention_context(&id, std::slice::from_ref(&human), "dm:engineering")
+            .await,
+        "engineering",
+        "the same collision through a dm:-prefixed key still files under the desk"
+    );
+    // A DM the human is actually a teammate of still badges as a DM.
+    assert_eq!(
+        runtime
+            .mention_context(&id, &[human], "dm:backend_engineer")
+            .await,
+        "dm:backend_engineer",
+        "a real DM channel is unaffected by the collision guard"
+    );
+}
+
+/// [`mention_context`] resolves a `dm:`-prefixed key **as sent** before
+/// stripping the prefix, so a desk literally named `dm:engineering` keeps
+/// that id. Pre-fix, the unconditional strip resolved `engineering` instead
+/// and filed the badge under the wrong transcript — the exact claim
+/// [`assignee::dm_key`]'s contract warns about.
+#[tokio::test]
+async fn mention_context_a_desk_literally_named_dm_prefix_keeps_its_id() {
+    let home_dir = home();
+    let state = state_with_dm_prefixed_desk(home_dir.path()).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company registered");
+
+    // The literal `dm:engineering` desk resolves as sent; stripping would
+    // misroute to the plain `engineering` desk.
+    assert_eq!(
+        runtime.mention_context(&id, &[], "dm:engineering").await,
+        "dm:engineering",
+        "a desk literally named dm:<…> keeps its id — the raw key resolves first"
+    );
+    // The un-prefixed desk is untouched by the collision.
+    assert_eq!(
+        runtime.mention_context(&id, &[], "engineering").await,
+        "engineering",
+        "the un-prefixed desk still resolves to its own id"
+    );
+    // A genuine DM still re-keys onto the rail's DM channel.
+    assert_eq!(
+        runtime
+            .mention_context(&id, &[], "dm:backend_engineer")
+            .await,
+        "dm:backend_engineer",
+        "a real DM channel is unaffected by the literal dm: desk"
+    );
+}
+
+/// [`mention_context`] stores the **canonical** id for a key typed in a
+/// noncanonical shape — a desk by its display name, a teammate by a
+/// case-variant of their id. `assignee::resolve` already returns canonical
+/// ids (issue #214); storing the raw key instead would file the badge under
+/// a channel id the rail never has, so it could neither render nor clear.
+#[tokio::test]
+async fn mention_context_stores_canonical_ids_for_noncanonical_keys() {
+    let home_dir = home();
+    let state = state_with_roster(home_dir.path()).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company registered");
+
+    // A desk addressed by its display name files under the desk's id —
+    // `"Engineering"` names the desk whose id is `engineering`.
+    assert_eq!(
+        runtime.mention_context(&id, &[], "Engineering").await,
+        "engineering",
+        "a desk named by its display name has to store the desk id, not the raw key"
+    );
+    // A teammate addressed by a case-variant of their id files under the
+    // canonical agent id, re-keyed into the console's DM channel space.
+    assert_eq!(
+        runtime.mention_context(&id, &[], "BACKEND_ENGINEER").await,
+        "dm:backend_engineer",
+        "a teammate named by a noncanonical key has to store dm:<agent-id>"
+    );
+}
+
+/// [`mention_context`] files a mention in the General desk — the default an
+/// unaddressed message lands in — under the console's canonical main-thread
+/// id even when this company has no desk named/id `General`. This fixture's
+/// only desk is `engineering`, so every general-chat spelling would
+/// otherwise fall through to the raw string and badge a rail row that does
+/// not exist (issue #1665 follow-up).
+#[tokio::test]
+async fn mention_context_maps_unresolvable_general_spellings_to_main() {
+    let home_dir = home();
+    let state = state_with_roster(home_dir.path()).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company registered");
+
+    for general in ["General", "general", "main", ""] {
+        assert_eq!(
+            runtime.mention_context(&id, &[], general).await,
+            crate::server::chat_history::MAIN_THREAD_ID,
+            "a mention in the General desk ({general:?}) has to store the console's \
+             main-thread id, which the rail aliases onto its first rendered desk \
+             channel"
+        );
+    }
+    // A desk that does resolve keeps its canonical id — the general-chat
+    // mapping must not swallow a real desk.
+    assert_eq!(
+        runtime.mention_context(&id, &[], "Engineering").await,
+        "engineering",
+        "a real desk keeps its canonical id even when its name looks general"
+    );
+}
+
+/// [`mention_context`] canonicalizes a **memberless** desk too. A desk that
+/// exists but has nobody seated on it is still a real desk with a real rail
+/// channel, so a key typed as its display name must file under its canonical
+/// id: `"Sales"` has to badge `#sales`, and opening `#sales` has to clear it.
+/// Pre-fix, `EmptyDesk` fell through the same wildcard as `Unknown` and
+/// stored the raw key — a channel id no desk renders, so the badge was
+/// invisible and could never clear.
+#[tokio::test]
+async fn mention_context_canonicalizes_a_memberless_desk() {
+    let home_dir = home();
+    let state = state_with_memberless_desk(home_dir.path()).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company registered");
+
+    assert_eq!(
+        runtime.mention_context(&id, &[], "Sales").await,
+        "sales",
+        "a memberless desk named by its display name has to store the desk id, \
+         not the raw key — the rail's channel id is `sales`"
+    );
+    // The desk that does have a lead keeps behaving as before.
+    assert_eq!(
+        runtime.mention_context(&id, &[], "Engineering").await,
+        "engineering",
+        "a desk with a lead still stores its canonical id"
+    );
+}
+
+/// Issue #1781 review (Codex P1): [`company_events`]'s periodic refresh
+/// must re-derive admin access from the live user record, not keep
+/// answering with whatever it was when the SSE stream opened. Proven
+/// directly against [`refreshed_is_admin`] — the seam that refresh loop
+/// calls on every tick — rather than the SSE handler itself, since the
+/// handler's own timing (a real `EventSource`, a 60s interval) is not
+/// what this bug is about.
+#[tokio::test]
+async fn refreshed_is_admin_reflects_a_mid_stream_demotion() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path(), "running").await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).unwrap();
+
+    let mut user = crate::ports::users::UserRecord {
+        id: "u1".to_string(),
+        email: "admin@acme.test".to_string(),
+        display_name: None,
+        avatar: None,
+        role: crate::ports::users::UserRole::Admin,
+        status: crate::ports::users::UserStatus::Active,
+        password_hash: None,
+        must_change_password: false,
+        created_at_millis: crate::ports::now_millis(),
+        last_seen_at_millis: None,
+        updated_at_millis: crate::ports::now_millis(),
+    };
+    runtime
+        .users()
+        .upsert_user(runtime.id(), &user)
+        .await
+        .unwrap();
+    let actor = Actor {
+        kind: ActorKind::User,
+        id: user.id.clone(),
+    };
+
+    assert!(
+        refreshed_is_admin(&runtime, Some(&actor), false).await,
+        "an active admin's record must resolve to admin, even starting from a stale `false`"
+    );
+
+    // The demotion itself: same shape `PATCH …/users/{id}` writes, and —
+    // critically — it does not touch sessions, so a connection opened
+    // before this write stays open exactly as it would in production.
+    user.role = crate::ports::users::UserRole::Member;
+    runtime
+        .users()
+        .upsert_user(runtime.id(), &user)
+        .await
+        .unwrap();
+
+    assert!(
+        !refreshed_is_admin(&runtime, Some(&actor), true).await,
+        "a demoted user's live record must flip a stale `true` to `false` — this is \
+         exactly the check `company_events` failed to make before this fix, leaking the \
+         owner-fallback admin-only report to a demoted viewer for the rest of their stream"
+    );
+
+    // Suspension revokes admin the same way, even if role were untouched.
+    user.role = crate::ports::users::UserRole::Admin;
+    user.status = crate::ports::users::UserStatus::Suspended;
+    runtime
+        .users()
+        .upsert_user(runtime.id(), &user)
+        .await
+        .unwrap();
+
+    assert!(
+        !refreshed_is_admin(&runtime, Some(&actor), true).await,
+        "a suspended admin must not keep admin-only visibility either"
+    );
+}
+
+/// Issue #1781 review, Codex P1 second follow-up: a human actor whose
+/// current role cannot be confirmed — `Ok(None)` because the user record
+/// has gone missing, folded in here with a genuine store error since both
+/// hit the same match arm — must resolve to `false`, not `previous`.
+///
+/// `previous: true` here stands in for exactly the dangerous case: a
+/// cached "was admin" value from before whatever made this actor
+/// unconfirmable, revalidated at the one call site
+/// (`is_admin_for_item`) that gates the admin-only owner-fallback report
+/// on this result directly. Before this fix, an actor deleted out from
+/// under an open SSE stream — or a transient read failure landing at the
+/// exact moment a report needed gating — fell back to `previous` and kept
+/// leaking the report, silently, for as long as the failure (or the
+/// missing record) persisted.
+#[tokio::test]
+async fn refreshed_is_admin_fails_closed_when_the_user_record_cannot_be_found() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path(), "running").await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).unwrap();
+
+    // Never upserted — `get_user` answers `Ok(None)`, the "record has
+    // gone missing" half of the case this proves.
+    let actor = Actor {
+        kind: ActorKind::User,
+        id: "ghost".to_string(),
+    };
+
+    assert!(
+        !refreshed_is_admin(&runtime, Some(&actor), true).await,
+        "a human actor with no resolvable user record must read as not-admin \
+         even when the cached value being revalidated was `true` — trusting \
+         `previous` here is exactly the fail-open gap this fix closes"
+    );
+}
 
 /// Issue #1781 review, Codex P1 follow-up: even with the periodic refresh
 /// the test above covers, `company_events` still only re-checked on its
@@ -330,343 +667,4 @@ async fn review_card_revise_re_enters_in_progress_with_the_note() {
         .unwrap();
     let note = after.note.expect("note");
     assert!(note.contains("tighten the intro"), "{note}");
-}
-
-/// A thread reply intercepted as review feedback re-dispatches its card
-/// instead of answering with `responses` here. Codex #3903907771:
-/// `ChatView.send` reads an empty `responses` as "the turn produced
-/// nothing" and renders a synthetic "(no reply)" bubble underneath the
-/// operator's own feedback, even though the card was re-dispatched and
-/// will answer through its later relay. `reviewFeedbackApplied` is what
-/// tells the console this empty `responses` is expected.
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn thread_reply_review_feedback_marks_the_response_not_empty_handed() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).unwrap();
-
-    runtime
-        .tasks()
-        .upsert(
-            runtime.id(),
-            &crate::ports::tasks::TaskRecord {
-                id: "t-1".to_string(),
-                title: TaskTitle::authored("Ship it"),
-                note: None,
-                column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
-                priority: "medium".to_string(),
-                assignee: "ceo".to_string(),
-                updated_at_millis: 1,
-                origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
-                parent_task_id: None,
-                output: None,
-                plan: None,
-                planning_attempts: Vec::new(),
-                deliverable: crate::ports::tasks::TaskDeliverable::Once,
-                workflow_proposal: None,
-                origin_run_id: None,
-                origin_workflow_id: None,
-                origin_message_seq: None,
-                bounced: None,
-            },
-        )
-        .await
-        .unwrap();
-
-    runtime
-        .events()
-        .append(
-            runtime.id(),
-            crate::ports::types::CompanyEvent::DeskTaskCompleted {
-                task_id: "t-1".to_string(),
-                desk: "ceo".to_string(),
-                output: "done".to_string(),
-                column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
-                artifact_ids: Vec::new(),
-                origin_chat_id: Some("strategy".to_string()),
-                origin_parent: None,
-            },
-        )
-        .await
-        .unwrap();
-    let relay_seq = runtime
-        .events()
-        .append(
-            runtime.id(),
-            crate::ports::types::CompanyEvent::AgentReply {
-                audience: Vec::new(),
-                chat_id: "strategy".to_string(),
-                agent_id: "ceo".to_string(),
-                text: "Here is the draft.".to_string(),
-                steps: Vec::new(),
-                task_id: None,
-                outputs: Vec::new(),
-                parent: None,
-                mentions: Vec::new(),
-                mention_depth: 0,
-            },
-        )
-        .await
-        .unwrap();
-
-    let message = ChatMessage {
-        text: "needs another pass".to_string(),
-        chat: Some("strategy".to_string()),
-        parent: Some(relay_seq.value().to_string()),
-        deliverable: None,
-        detach: false,
-        mentions: None,
-        attachments: Vec::new(),
-    };
-
-    let outcome = chat_and_emit(&state, &id, runtime.clone(), message, None)
-        .await
-        .expect("review feedback applies");
-    let ChatOk::Settled(body) = outcome else {
-        panic!("a synchronous review-feedback intercept must not detach");
-    };
-    assert!(body.responses.is_empty());
-    assert_eq!(
-        body.review_feedback_applied,
-        Some(true),
-        "an empty `responses` here must be marked expected, not read as \
-         a silent turn"
-    );
-
-    let after = runtime
-        .tasks()
-        .list(runtime.id())
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|t| t.id == "t-1")
-        .unwrap();
-    assert_eq!(
-        after.column,
-        crate::ports::tasks::COLUMN_IN_PROGRESS,
-        "the reply still re-dispatches the card"
-    );
-}
-
-/// An unrecognized `decision` string rejects with `InvalidRequest` (400)
-/// rather than falling through to either verdict.
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn review_card_rejects_an_unknown_decision() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).unwrap();
-
-    runtime
-        .tasks()
-        .upsert(
-            runtime.id(),
-            &crate::ports::tasks::TaskRecord {
-                id: "t-1".to_string(),
-                title: TaskTitle::authored("Ship it"),
-                note: None,
-                column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
-                priority: "medium".to_string(),
-                assignee: "ceo".to_string(),
-                updated_at_millis: 1,
-                origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
-                parent_task_id: None,
-                output: None,
-                plan: None,
-                planning_attempts: Vec::new(),
-                deliverable: crate::ports::tasks::TaskDeliverable::Once,
-                workflow_proposal: None,
-                origin_run_id: None,
-                origin_workflow_id: None,
-                origin_message_seq: None,
-                bounced: None,
-            },
-        )
-        .await
-        .unwrap();
-
-    let scope = ScopedCompany {
-        runtime: runtime.clone(),
-        actor: None,
-        may_read_contents: true,
-        is_admin: true,
-    };
-    let err = review_card(
-        scope,
-        Json(ChatReviewRequest {
-            chat_id: "strategy".to_string(),
-            task_id: "t-1".to_string(),
-            decision: "yeet".to_string(),
-            note: None,
-        }),
-    )
-    .await
-    .expect_err("an unknown decision string must not settle the card");
-    assert_eq!(
-        axum::response::IntoResponse::into_response(err).status(),
-        StatusCode::BAD_REQUEST
-    );
-}
-
-/// `POST {scope}/chat/review` end to end through the real router: proves
-/// the route is actually mounted by [`with_review_routes`] (not just that
-/// the handler function works when called directly) and that the wire
-/// body deserializes and settles the card via HTTP.
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn chat_review_route_is_mounted_and_settles_via_http() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home, "running").await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).unwrap();
-
-    runtime
-        .tasks()
-        .upsert(
-            runtime.id(),
-            &crate::ports::tasks::TaskRecord {
-                id: "t-1".to_string(),
-                title: TaskTitle::authored("Ship it"),
-                note: None,
-                column: crate::ports::tasks::COLUMN_IN_REVIEW.to_string(),
-                priority: "medium".to_string(),
-                assignee: "ceo".to_string(),
-                updated_at_millis: 1,
-                origin: crate::ports::TaskOrigin::new(Some("strategy".to_string()), None),
-                parent_task_id: None,
-                output: None,
-                plan: None,
-                planning_attempts: Vec::new(),
-                deliverable: crate::ports::tasks::TaskDeliverable::Once,
-                workflow_proposal: None,
-                origin_run_id: None,
-                origin_workflow_id: None,
-                origin_message_seq: None,
-                bounced: None,
-            },
-        )
-        .await
-        .unwrap();
-
-    let app = router(state);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/company/chat/review")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "chatId": "strategy",
-                        "taskId": "t-1",
-                        "decision": "approve",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(value["taskId"], "t-1");
-    assert_eq!(value["column"], "done");
-}
-
-/// No card is `in_review` on the desk at all — as opposed to a `taskId`
-/// naming the wrong card, covered above — must also 404, through the same
-/// HTTP path the console calls.
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn chat_review_route_404s_when_no_card_is_in_review() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home, "running").await;
-
-    let app = router(state);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/company/chat/review")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "chatId": "strategy",
-                        "taskId": "t-1",
-                        "decision": "approve",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-/// Two review verdicts racing the same `in_review` card (PR #1981 review
-/// finding, Codex P1) must not both resolve it before either applies —
-/// same `task_writes`-serialized load-modify-save shape
-/// `add_desk_member_serializes_against_the_company_write_lock` proves
-/// above, applied to `review_card`.
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn review_card_serializes_against_the_task_writes_lock() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-    let id = CompanyId::new("acme");
-    let runtime = state.registry().get(&id).unwrap();
-
-    runtime
-        .tasks()
-        .upsert(runtime.id(), &card_in_review("t-1", "strategy"))
-        .await
-        .unwrap();
-
-    let guard = runtime.task_writes.lock().await;
-
-    let runtime_for_task = runtime.clone();
-    let mut task = tokio::spawn(async move {
-        let scope = ScopedCompany {
-            runtime: runtime_for_task,
-            actor: None,
-            may_read_contents: true,
-            is_admin: true,
-        };
-        review_card(
-            scope,
-            Json(ChatReviewRequest {
-                chat_id: "strategy".to_string(),
-                task_id: "t-1".to_string(),
-                decision: "approve".to_string(),
-                note: None,
-            }),
-        )
-        .await
-    });
-
-    let raced_ahead = tokio::time::timeout(Duration::from_millis(200), &mut task)
-        .await
-        .is_ok();
-    assert!(
-        !raced_ahead,
-        "review_card resolved and applied a verdict while task_writes was \
-         held elsewhere — it is not serializing against concurrent board \
-         writers"
-    );
-
-    drop(guard);
-    let result = tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .expect("review_card never resumed after task_writes was released")
-        .expect("review_card task panicked");
-    assert!(result.is_ok());
 }

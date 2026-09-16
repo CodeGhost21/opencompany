@@ -1,14 +1,292 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
+
+/// #185: the correlation key rides the SSE stream when — and only when — the
+/// event carries one. Both directions matter: its presence is what lets a
+/// live console route a frame to the right task, and its absence is what
+/// keeps the legacy shape intact for every ordinary chat reply.
+#[test]
+fn projects_task_id_only_when_the_event_is_correlated() {
+    let reply = super::project_event(&stored(CompanyEvent::AgentReply {
+        audience: Vec::new(),
+        mentions: Vec::new(),
+        mention_depth: 0,
+        parent: None,
+        task_id: Some("t-1".into()),
+        outputs: Vec::new(),
+        chat_id: "t-1".into(),
+        agent_id: "ceo".into(),
+        text: "on it".into(),
+        steps: Vec::new(),
+    }))
+    .expect("agent_reply is an attention signal");
+    assert_eq!(reply["taskId"], serde_json::json!("t-1"));
+
+    let failure = super::project_event(&stored(CompanyEvent::McpCallFailed {
+        task_id: Some("t-1".into()),
+        server: "gh".into(),
+        tool: "issues".into(),
+        status: "credential_required".into(),
+        message: "needs auth".into(),
+    }))
+    .expect("mcp_call_failed is an attention signal");
+    assert_eq!(failure["taskId"], serde_json::json!("t-1"));
+
+    let uncorrelated = super::project_event(&stored(CompanyEvent::McpCallFailed {
+        task_id: None,
+        server: "gh".into(),
+        tool: "issues".into(),
+        status: "credential_required".into(),
+        message: "needs auth".into(),
+    }))
+    .expect("mcp_call_failed is an attention signal");
+    assert!(uncorrelated.get("taskId").is_none());
+}
+
+/// #185/#377: the dispatch terminal projects the structural fields, plus
+/// the conversation the card was raised from. `column` is the one that
+/// matters most — it is how a console tells a clean finish from a cancelled
+/// or failed run — and `chatId` is what says which channel it belongs in.
+#[test]
+fn projects_desk_task_completed_with_every_field() {
+    let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+        task_id: "t-1".into(),
+        desk: "engineer".into(),
+        output: "shipped".into(),
+        column: "in_review".into(),
+        artifact_ids: Vec::new(),
+        origin_chat_id: Some("engineering".into()),
+        origin_parent: None,
+    }))
+    .expect("desk_task_completed is an attention signal");
+    assert_eq!(v["type"], serde_json::json!("desk_task_completed"));
+    assert_eq!(v["taskId"], serde_json::json!("t-1"));
+    assert_eq!(v["desk"], serde_json::json!("engineer"));
+    assert_eq!(v["column"], serde_json::json!("in_review"));
+    assert_eq!(v["chatId"], serde_json::json!("engineering"));
+    // The envelope's own keys still ride along — the console mints the
+    // marker's identity from `seq` (issue #483's mechanism), so losing it
+    // here would silently disable the reload dedupe.
+    assert!(v.get("seq").is_some(), "{v}");
+    assert!(v.get("atMillis").is_some(), "{v}");
+}
+
+/// Issue #377: the run's prose is **not** on this frame.
+///
+/// The relay bubble (#151) already carries the agent's words into the same
+/// channel this marker lands in. Projecting `output` here as well would put
+/// one run's text into one conversation twice, and dropping it at the
+/// projection is what stops any later reader from reintroducing that.
+#[test]
+fn desk_task_completed_does_not_project_the_runs_prose() {
+    let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+        task_id: "t-1".into(),
+        desk: "engineer".into(),
+        output: "the whole reply, verbatim".into(),
+        column: "in_review".into(),
+        artifact_ids: Vec::new(),
+        origin_chat_id: Some("engineering".into()),
+        origin_parent: None,
+    }))
+    .expect("desk_task_completed is an attention signal");
+    assert!(v.get("output").is_none(), "{v}");
+    assert!(
+        !v.to_string().contains("the whole reply"),
+        "the prose must not reach the wire under any key: {v}"
+    );
+}
+
+/// Issue #377: a card nobody raised from a conversation omits `chatId`
+/// rather than sending null — so "board-created" is a presence check on the
+/// console, the same shape `approval_parked` uses for a page-only approval.
+#[test]
+fn desk_task_completed_omits_the_chat_id_for_a_board_created_card() {
+    let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+        task_id: "t-1".into(),
+        desk: "engineer".into(),
+        output: "shipped".into(),
+        column: "in_review".into(),
+        artifact_ids: Vec::new(),
+        origin_chat_id: None,
+        origin_parent: None,
+    }))
+    .expect("desk_task_completed is an attention signal");
+    assert!(v.get("chatId").is_none(), "{v}");
+    assert_eq!(v["column"], serde_json::json!("in_review"));
+}
+
+/// Issue #1890 B: the thread inside the channel, on exactly the terms
+/// `chatId` rides on.
+///
+/// Stringified, because the console keys threads by message id and a
+/// message id is a string there — `chat/history` renders the same root the
+/// same way, and the two must agree or the marker would render inline live
+/// and jump into a thread on reload.
+#[test]
+fn desk_task_completed_projects_the_thread_its_card_was_raised_in() {
+    let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+        task_id: "t-1".into(),
+        desk: "engineer".into(),
+        output: "shipped".into(),
+        column: "in_review".into(),
+        artifact_ids: Vec::new(),
+        origin_chat_id: Some("engineering".into()),
+        origin_parent: Some(crate::ports::types::EventSeq::new(41)),
+    }))
+    .expect("desk_task_completed is an attention signal");
+    assert_eq!(v["chatId"], serde_json::json!("engineering"));
+    assert_eq!(v["parentId"], serde_json::json!("41"));
+}
+
+/// A card raised straight into a channel omits `parentId` rather than
+/// sending null — the same presence-check shape `chatId` takes, so the
+/// console reads "channel level" without a null check.
+#[test]
+fn desk_task_completed_omits_the_parent_for_a_channel_level_card() {
+    let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+        task_id: "t-1".into(),
+        desk: "engineer".into(),
+        output: "shipped".into(),
+        column: "in_review".into(),
+        artifact_ids: Vec::new(),
+        origin_chat_id: Some("engineering".into()),
+        origin_parent: None,
+    }))
+    .expect("desk_task_completed is an attention signal");
+    assert_eq!(v["chatId"], serde_json::json!("engineering"));
+    assert!(v.get("parentId").is_none(), "{v}");
+}
+
+#[test]
+fn projects_task_dispatched() {
+    let v = super::project_event(&stored(CompanyEvent::TaskDispatched {
+        task_id: "t-42".into(),
+        run_id: None,
+    }))
+    .expect("task_dispatched is an attention signal");
+    assert_eq!(v["type"], "task_dispatched");
+    assert_eq!(v["taskId"], "t-42");
+}
+
+/// Issue #464: an opened card reaches the console as its own frame. This is
+/// the half a unit test can prove — that the projection exists and carries
+/// the card; that the *board* redraws off it is a browser fact.
+#[test]
+fn projects_task_card_changed() {
+    let v = super::project_event(&stored(CompanyEvent::TaskCardChanged {
+        task_id: "t-77".into(),
+        change: crate::runtime::CHANGE_OPENED.into(),
+        column: Some("todo".into()),
+    }))
+    .expect("a board write is an attention signal");
+    assert_eq!(v["type"], "task_card_changed");
+    assert_eq!(v["taskId"], "t-77");
+    assert_eq!(v["change"], "opened");
+    assert_eq!(v["column"], "todo");
+}
+
+/// A removed card is projected without a column — the console's "is it
+/// gone?" check is a presence check, never a null one.
+#[test]
+fn projects_a_removed_card_without_a_column() {
+    let v = super::project_event(&stored(CompanyEvent::TaskCardChanged {
+        task_id: "t-77".into(),
+        change: crate::runtime::CHANGE_REMOVED.into(),
+        column: None,
+    }))
+    .expect("a board write is an attention signal");
+    assert_eq!(v["change"], "removed");
+    assert!(
+        v.get("column").is_none(),
+        "a removed card is in no column: {v}"
+    );
+}
+
+/// Issue #327: the workspace's own frame. The stream is deny-by-default, so
+/// an event with no arm is silently unprojected — this is what proves the
+/// arm exists at all.
+///
+/// Also pins what is **not** on the wire: no node name, no body. A note's
+/// text is operator- or agent-authored free text, and this frame's job is
+/// to say something moved, not to carry the tree.
+#[test]
+fn projects_workspace_changed_without_a_name_or_a_body() {
+    let v = super::project_event(&stored(CompanyEvent::WorkspaceChanged {
+        node_id: "n-9".into(),
+        change: crate::runtime::CHANGE_UPDATED.into(),
+    }))
+    .expect("a workspace write must reach the console");
+    assert_eq!(v["type"], "workspace_changed");
+    assert_eq!(v["nodeId"], "n-9");
+    assert_eq!(v["change"], "updated");
+    assert!(v.get("name").is_none(), "no node name on the wire: {v}");
+    assert!(v.get("content").is_none(), "no body on the wire: {v}");
+}
+
+#[test]
+fn projects_mcp_call_failed_with_scrubbed_message() {
+    let v = super::project_event(&stored(CompanyEvent::McpCallFailed {
+        task_id: None,
+        server: "browserbase".into(),
+        tool: "browse".into(),
+        status: "tool_call_rejected".into(),
+        message: "server rejected the call".into(),
+    }))
+    .expect("mcp_call_failed is an attention signal");
+    assert_eq!(v["type"], "mcp_call_failed");
+    assert_eq!(v["server"], "browserbase");
+    assert_eq!(v["tool"], "browse");
+    assert_eq!(v["status"], "tool_call_rejected");
+    // The message is already scrubbed at the source; we forward exactly it.
+    assert_eq!(v["message"], "server rejected the call");
+}
+
+#[test]
+fn projects_approval_resolved_without_the_actor() {
+    let v = super::project_event(&stored(CompanyEvent::ApprovalResolved {
+        approval_id: ApprovalId::new("ap-1"),
+        verdict: Verdict::Approve,
+        by: Actor {
+            kind: ActorKind::User,
+            // A user id must never reach the wire via the attention feed.
+            id: "secret-user-id".into(),
+        },
+    }))
+    .expect("approval_resolved is an attention signal");
+    assert_eq!(v["type"], "approval_resolved");
+    assert_eq!(v["approvalId"], "ap-1");
+    assert_eq!(v["verdict"], "approve");
+    // The actor is intentionally dropped — the projection carries no `by`,
+    // and the serialized bytes never mention the user id.
+    assert!(v.get("by").is_none(), "actor must not be projected");
+    assert!(
+        !v.to_string().contains("secret-user-id"),
+        "user id leaked onto the wire"
+    );
+    // Issue #971: and a person's decision carries no `automatic` flag, so
+    // the console's "an operator decided this" reading of its absence is
+    // the correct one.
+    assert!(
+        v.get("automatic").is_none(),
+        "a user's own decision is not automatic"
+    );
+}
 
 /// **T6 (issue #971).** A host-side expiry says so, without saying who.
 ///
@@ -399,310 +677,4 @@ fn projects_the_per_node_started_bracket() {
         ["atMillis", "nodeId", "runId", "seq", "type", "workflowId"],
         "the started frame carries only structural ids: {node}"
     );
-}
-
-/// Issue #371 also starts projecting the run id on the settle-frame — the
-/// key that lets the console clear the right canvas when two runs overlap.
-/// Still omitted for a pre-#371 row, so no permanently-null key appears.
-#[test]
-fn projects_the_run_id_on_a_finished_run_only_when_there_is_one() {
-    let with_id = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
-        workflow_id: "digest".into(),
-        scheduled: false,
-        run_id: Some("run-9".into()),
-        deliveries: Vec::new(),
-        pending_approvals: Vec::new(),
-        error: None,
-        cancelled: false,
-        notices: Vec::new(),
-        board: Vec::new(),
-        blocked_nodes: Vec::new(),
-        approvals: Vec::new(),
-    }))
-    .expect("projected");
-    assert_eq!(with_id["runId"], "run-9");
-
-    let legacy = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
-        workflow_id: "digest".into(),
-        scheduled: false,
-        run_id: None,
-        deliveries: Vec::new(),
-        pending_approvals: Vec::new(),
-        error: None,
-        cancelled: false,
-        notices: Vec::new(),
-        board: Vec::new(),
-        blocked_nodes: Vec::new(),
-        approvals: Vec::new(),
-    }))
-    .expect("projected");
-    assert!(legacy.get("runId").is_none(), "{legacy}");
-}
-
-#[test]
-fn drops_non_attention_and_raw_payload_events() {
-    // The operator's own message, and every variant that carries a raw
-    // third-party payload or is audit-only, is dropped so nothing unexpected
-    // (or secret-bearing) ever reaches the console.
-    //
-    // This list is unchanged by #228: adding `workflow_run_finished` to the
-    // projection widened the wire by exactly one listed variant, and this
-    // test passing untouched is what proves the deny-by-default default
-    // still drops everything it dropped before.
-    let dropped = [
-        CompanyEvent::OperatorMessage {
-            mentions: Vec::new(),
-            parent: None,
-            text: "hi".into(),
-            by: None,
-            chat: None,
-            deliverable: None,
-            attachments: Vec::new(),
-        },
-        CompanyEvent::WebhookReceived {
-            channel: "email".into(),
-            body: serde_json::json!({"authorization": "Bearer sk-secret"}),
-        },
-        CompanyEvent::A2aTaskReceived {
-            from: "@peer".into(),
-            task: serde_json::json!({"token": "sk-secret"}),
-        },
-        CompanyEvent::ScheduleFired {
-            cron: "0 9 * * *".into(),
-            prompt: "daily standup".into(),
-        },
-        CompanyEvent::FeedbackFiled {
-            note: "too slow".into(),
-        },
-        CompanyEvent::MemoryFactDeleted {
-            fact_id: "f-1".into(),
-        },
-    ];
-    for event in dropped {
-        assert!(
-            super::project_event(&stored(event.clone())).is_none(),
-            "event should be dropped from the SSE feed: {event:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn events_route_streams_text_event_stream() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home, "running").await;
-    let app = router(state);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/company/events")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    // The SSE head is returned immediately; the body streams indefinitely, so
-    // we assert the status + content-type without draining it.
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
-        Some("text/event-stream")
-    );
-}
-
-#[tokio::test]
-async fn events_route_requires_a_session() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home, "running").await;
-    let app = router(state);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/company/events")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-/// The composer's own typing pings must not echo back to it — the bus has
-/// no per-listener addressing, so this filter is the only thing standing
-/// between "you typed" and a fresh "Alice is typing…" line under your own
-/// cursor.
-#[test]
-fn a_typing_frame_from_the_viewer_is_dropped_and_from_anybody_else_is_kept() {
-    let mine = crate::turn_stream::LiveFrame::Typing(crate::turn_stream::TypingFrame {
-        kind: "typing",
-        user_id: "u1".into(),
-        chat_id: "engineering".into(),
-        parent_id: None,
-        at_millis: 0,
-    });
-    assert!(super::is_own_typing_frame(&mine, Some("u1")));
-    assert!(!super::is_own_typing_frame(&mine, Some("u2")));
-    assert!(
-        !super::is_own_typing_frame(&mine, None),
-        "a machine credential with nobody behind it authors nothing to echo"
-    );
-
-    let presence = crate::turn_stream::LiveFrame::Presence(crate::turn_stream::PresenceFrame {
-        kind: "presence",
-        user_id: "u1".into(),
-        status: "online",
-        at_millis: 0,
-    });
-    assert!(
-        !super::is_own_typing_frame(&presence, Some("u1")),
-        "presence is left alone — only typing echoes"
-    );
-}
-
-/// Every contradictory or unbounded scope request is a 400, and none of them
-/// reaches the runtime.
-///
-/// The approval id is deliberately one that does not exist: each of these
-/// must be refused at the edge, so the fact that resolving a missing
-/// approval would otherwise be a harmless no-op never gets a chance to mask
-/// a body that should not have been accepted.
-///
-/// A deny may now ride the tool scope (issue #1458 — a standing refusal),
-/// so that pairing is asserted as *accepted* at the bottom rather than
-/// listed among the refusals.
-#[tokio::test]
-async fn a_contradictory_or_unbounded_scope_is_refused() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-
-    let day: u64 = 24 * 60 * 60 * 1000;
-    for (label, body) in [
-        (
-            "an argument edit and a standing grant contradict",
-            format!(
-                r#"{{"verdict":"approve","scope":"tool","expires_in_millis":{day},"amended_payload":{{"to":"x"}}}}"#
-            ),
-        ),
-        (
-            "the deadline is mandatory",
-            r#"{"verdict":"approve","scope":"tool"}"#.to_string(),
-        ),
-        (
-            "zero is not a duration",
-            r#"{"verdict":"approve","scope":"tool","expires_in_millis":0}"#.to_string(),
-        ),
-        (
-            "past the seven-day cap is refused, never clamped",
-            format!(
-                r#"{{"verdict":"approve","scope":"tool","expires_in_millis":{}}}"#,
-                MAX_STANDING_GRANT_MILLIS + 1
-            ),
-        ),
-        (
-            "a duration is meaningless on the once scope",
-            format!(r#"{{"verdict":"approve","scope":"once","expires_in_millis":{day}}}"#),
-        ),
-    ] {
-        let response = router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/company/approvals/appr-missing")
-                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::BAD_REQUEST,
-            "{label}: must be refused at the edge"
-        );
-    }
-
-    // An unrecognised scope is refused too, one layer earlier: `ResolveScope`
-    // is a closed enum, so axum's JSON extractor rejects it as 422 before
-    // any handler runs. The status differs from the checks above; what
-    // matters is that it is never silently downgraded to `once`, which would
-    // hand an operator a single call when they asked for a standing one.
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/company/approvals/appr-missing")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"verdict":"approve","scope":"forever"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    // Exactly at the cap is fine — the boundary is inclusive.
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/company/approvals/appr-missing")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .header("content-type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"verdict":"approve","scope":"tool","expires_in_millis":{MAX_STANDING_GRANT_MILLIS}}}"#
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
-
-    // A deny riding the tool scope is no longer a contradiction: it mints a
-    // standing refusal (issue #1458). Same edge validation as an approve —
-    // duration mandatory, bounded, and the missing approval resolves as a
-    // no-op — so it is accepted exactly where a matching approve would be.
-    let response = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/company/approvals/appr-missing")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .header("content-type", "application/json")
-                .body(Body::from(format!(
-                    r#"{{"verdict":"deny","scope":"tool","expires_in_millis":{day}}}"#
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
-}
-
-/// The default body — no `scope` key at all — is accepted exactly as before.
-#[tokio::test]
-async fn an_omitted_scope_is_the_pre_374_request() {
-    let home_dir = home();
-    let state = state_with_company(home_dir.path(), "running").await;
-
-    let response = router(state)
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/company/approvals/appr-missing")
-                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"verdict":"approve"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
 }

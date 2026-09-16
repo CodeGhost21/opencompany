@@ -1,13 +1,60 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
+
+pub(super) fn the_folded_aside_reaches_the_wire_as_camel_case() {
+    use crate::server::chat_history::{AsideConversation, AsideLine};
+
+    let aside = AsideConversation {
+        members: vec!["exchanges".to_owned(), "refunds".to_owned()],
+        lines: vec![AsideLine {
+            author_id: "exchanges".to_owned(),
+            text: "the difference is -$16.63".to_owned(),
+        }],
+    };
+    let dto = super::AsideConversationDto {
+        members: aside.members,
+        lines: aside
+            .lines
+            .into_iter()
+            .map(|line| super::AsideLineDto {
+                author_id: line.author_id,
+                text: line.text,
+            })
+            .collect(),
+    };
+    let wire = serde_json::to_value(&dto).expect("the DTO serializes");
+
+    assert!(
+        wire.get("members").is_some(),
+        "author first, then who they addressed: {wire}"
+    );
+    let line = &wire.get("lines").and_then(|l| l.as_array()).expect("lines")[0];
+    assert_eq!(
+        line.get("authorId").and_then(|a| a.as_str()),
+        Some("exchanges"),
+        "camelCase, as the console reads it: {wire}"
+    );
+    assert_eq!(
+        line.get("text").and_then(|t| t.as_str()),
+        Some("the difference is -$16.63"),
+        "and the marker head never reaches the browser"
+    );
+}
 
 pub(super) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -195,13 +242,15 @@ pub(super) async fn state_with_failing_runs(home: &std::path::Path) -> AppState 
     state
 }
 
+// ── Issue #982: the card goes to whoever was addressed ──────────────────
+
 /// A roster with three teammates and one desk, so a chat can be addressed
 /// to something that exists.
 ///
 /// The ids are the ones the smoke that found #982 used, and the roles are
 /// deliberately distinct words, so a test can address one teammate in a
 /// message whose text points at another.
-pub(super) fn roster_manifest() -> CompanyManifest {
+fn roster_manifest() -> CompanyManifest {
     toml::from_str(
         r#"
 [company]
@@ -638,65 +687,4 @@ pub(super) async fn post_desk_member(
         )
         .await
         .unwrap()
-}
-
-pub(super) async fn delete_desk_member(
-    app: &axum::Router,
-    cookie: &str,
-    desk: &str,
-    agent: &str,
-) -> Response {
-    app.clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/api/v1/company/desks/{desk}/members/{agent}"))
-                .header("cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-}
-
-/// Reads the `error` string out of an api.md error envelope.
-pub(super) async fn error_message(response: Response) -> String {
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    value["error"].as_str().unwrap().to_string()
-}
-
-/// Returns the effective member list of `desk` from `list_desks`.
-pub(super) async fn desk_members(app: &axum::Router, cookie: &str, desk: &str) -> Vec<String> {
-    let desks = get_desks(app, cookie).await;
-    desks
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["id"] == desk)
-        .unwrap_or_else(|| panic!("desk {desk} present in list"))["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m.as_str().unwrap().to_string())
-        .collect()
-}
-
-/// Seeds `eng` as an overlay member of `studio` so a desk has two members to
-/// reorder.
-pub(super) async fn seed_overlay_eng(app: &axum::Router, cookie: &str) {
-    let add = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/company/desks/studio/members")
-                .header("cookie", cookie)
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"agent_id":"eng"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(add.status(), StatusCode::NO_CONTENT);
 }

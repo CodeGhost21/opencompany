@@ -1,14 +1,295 @@
-/// The wire shape the console binds to.
-///
-/// `fold_asides` is worthless if the field reaches the browser under a
-/// different name, and `tsc` cannot catch that: the DTO is Rust, the
-/// interface is hand-written TypeScript, and nothing checks one against the
-/// other. This is that check.
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+use super::*;
+use crate::company::CompanyManifest;
+use crate::ports::tasks::TaskTitle;
+use crate::ports::types::CompanyRecord;
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::store::FsCompanyStore;
+use crate::{AppConfig, AppState};
+use crate::ports::types::{EventSeq, StoredEvent};
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
 use super::operator_test_support_4::*;
+
+/// The ask-which question lands in the thread that asked it.
+///
+/// When two blocked things share a DM and the reply names neither, the
+/// runtime asks which one was meant. That question is an answer to the
+/// operator's message, so it threads off it the way every other reply in
+/// this handler does — otherwise the operator reads their own line in a
+/// thread and the teammate's follow-up at the channel root, which is the
+/// split this tier exists to close.
+#[cfg(feature = "openhuman")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_ask_which_question_threads_off_the_reply_that_was_ambiguous() {
+    use crate::company::blocker_sender::BlockerSenderSignals;
+    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource, BlockerStep};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = build_state_with_brain_and_manifest(
+        &home,
+        "running",
+        AppConfig::default(),
+        None,
+        roster_manifest(),
+    )
+    .await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    let app = router(state);
+
+    for (task, connection) in [("t-1", "connection:slack"), ("t-2", "connection:notion")] {
+        runtime
+            .park_blocker(
+                &BlockerPayload {
+                    kind: BlockerKind::Infrastructure,
+                    source: BlockerSource::Provider,
+                    step: Some(BlockerStep::Task {
+                        task_id: task.to_string(),
+                    }),
+                    reason: format!("{connection} refused the call"),
+                    needed: "a working connection".to_string(),
+                    group_key: Some(connection.to_string()),
+                },
+                task,
+                BlockerSenderSignals {
+                    started_by: None,
+                    owner_desk: None,
+                    assignee: Some("backend_engineer".to_string()),
+                },
+            )
+            .await
+            .expect("parks the blocker into the teammate's DM");
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/companies/acme/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"chat":"dm:backend_engineer","text":"retry it"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let stored = runtime
+        .events
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .expect("read events");
+    let asked = stored
+        .iter()
+        .find_map(|s| match &s.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { chat, text, .. }
+                if chat.as_deref() == Some("dm:backend_engineer") && text == "retry it" =>
+            {
+                Some(s.seq)
+            }
+            _ => None,
+        })
+        .expect("the operator's ambiguous reply is journalled");
+    let prompt = stored
+        .iter()
+        .find_map(|s| match &s.event {
+            crate::ports::types::CompanyEvent::AgentReply {
+                chat_id,
+                text,
+                parent,
+                ..
+            } if chat_id == "dm:backend_engineer" && text.contains("Which") => {
+                Some((text.clone(), *parent))
+            }
+            _ => None,
+        })
+        .expect("the runtime asks which of the two was meant");
+    assert_eq!(
+        prompt.1,
+        Some(asked),
+        "the ask-which question must hang off the reply that was ambiguous, not the \
+         channel root; prompt was {:?}",
+        prompt.0
+    );
+}
+
+#[tokio::test]
+async fn chat_by_id_matches_registered_company() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/companies/acme/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"yo"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn unknown_company_is_404() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/companies/ghost/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // 401, not 404: the caller holds no credential for `ghost`, and
+    // authentication precedes existence. Answering "no such company" to an
+    // unauthenticated caller would let anyone enumerate which companies a
+    // host runs. A user of `ghost` gets a real 404.
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn paused_company_chat_is_409() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "paused").await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn list_and_status_routes_report_the_company() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let app = router(state);
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/companies")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let bytes = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value.as_array().unwrap().len(), 1);
+    assert_eq!(value[0]["id"], "acme");
+
+    let status = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/companies/acme")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let bytes = to_bytes(status.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["id"], "acme");
+}
+
+#[tokio::test]
+async fn approvals_list_is_empty_before_any_park() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/company/approvals")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn amended_approve_resolves_and_returns_responses() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home, "running").await;
+    let app = router(state);
+
+    // An `approve` verdict carrying an amended payload routes to the
+    // approve-with-edit path. Even against an unknown id it resolves
+    // cleanly (nothing to execute) and the follow-up cycle replies.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/approvals/missing")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"verdict":"approve","amended_payload":{"text":"edited"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(value["responses"].is_array());
+}
 
 /// Issue #618: membership gets you the approval, role gets you its
 /// contents.
@@ -414,216 +695,4 @@ async fn an_unknown_blocker_verdict_is_refused_by_name() {
         "unknown blocker_verdict",
     )
     .await;
-}
-
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn a_blocker_verdict_with_an_amended_payload_is_refused() {
-    assert_refused(
-        serde_json::json!({
-            "verdict": "approve",
-            "blocker_verdict": "skip",
-            "amended_payload": { "text": "edited" },
-        }),
-        "cannot accompany amended_payload",
-    )
-    .await;
-}
-
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn a_blocker_verdict_with_a_tool_scope_is_refused() {
-    assert_refused(
-        serde_json::json!({
-            "verdict": "approve",
-            "blocker_verdict": "skip",
-            "scope": "tool",
-            "expires_in_millis": 3_600_000,
-        }),
-        "cannot accompany scope",
-    )
-    .await;
-}
-
-/// A `blocker_verdict` on an approval that is not a parked blocker is a 400,
-/// not a quiet fall-through to the two-value path — which would lose the
-/// operator's verdict without telling anyone.
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn a_blocker_verdict_on_an_ordinary_approval_is_refused() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home, "running").await;
-    let company = CompanyId::new("acme");
-    let runtime = state.registry().get(&company).unwrap();
-    let app = router(state);
-    let ordinary = park_for_extend(&runtime, "ordinary-1", crate::ports::now_millis()).await;
-
-    let (status, answer) = post_resolve(
-        &app,
-        &ordinary,
-        serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
-    assert!(
-        answer["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("is not a parked blocker"),
-        "{answer}"
-    );
-    assert!(
-        runtime.pending_approvals().iter().any(|p| p.id == ordinary),
-        "a refused request must leave the approval parked"
-    );
-    assert!(banked_resolutions(&home, &company).await.is_empty());
-}
-
-/// A stepless blocker uses its task link to settle the card it paused.
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn skipping_an_agent_question_settles_the_card_its_approval_is_linked_to() {
-    use crate::ports::blockers::{BlockerKind, BlockerPayload, BlockerSource};
-    use crate::runtime::journal::{ApprovalConversation, TaskLink};
-
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home, "running").await;
-    let company = CompanyId::new("acme");
-    let runtime = state.registry().get(&company).unwrap();
-    let app = router(state);
-
-    runtime
-        .tasks()
-        .upsert(
-            runtime.id(),
-            &crate::ports::tasks::TaskRecord {
-                id: "t-9".to_string(),
-                title: crate::ports::tasks::TaskTitle::authored("Draft the launch note"),
-                note: None,
-                column: crate::ports::tasks::COLUMN_PAUSED.to_string(),
-                priority: "medium".to_string(),
-                assignee: "eng".to_string(),
-                updated_at_millis: 1,
-                origin: None,
-                origin_message_seq: None,
-                parent_task_id: None,
-                output: Some(crate::ports::tasks::TaskOutput {
-                    source: crate::ports::tasks::TaskOutputSource::Run {
-                        run_id: "old-run".to_string(),
-                        attempt: Some(1),
-                    },
-                    at_millis: 1,
-                    artifacts: Vec::new(),
-                    workflows: Vec::new(),
-                }),
-                plan: None,
-                planning_attempts: Vec::new(),
-                deliverable: crate::ports::tasks::TaskDeliverable::Once,
-                workflow_proposal: None,
-                origin_run_id: None,
-                origin_workflow_id: None,
-                bounced: Some("stale failure".to_string()),
-            },
-        )
-        .await
-        .unwrap();
-
-    let payload = BlockerPayload {
-        kind: BlockerKind::Information,
-        source: BlockerSource::AgentQuestion,
-        step: None,
-        reason: "which of the two briefs is current?".to_string(),
-        needed: "an answer from you".to_string(),
-        group_key: None,
-    };
-    let approval = ApprovalId::new("question-1");
-    let effect = crate::ports::types::Effect {
-        kind: payload.effect_kind(),
-        group: crate::ports::types::EffectGroup::Other,
-        amount_usd: None,
-        established_thread: false,
-        first_time_counterparty: false,
-        payload: serde_json::to_value(&payload).unwrap(),
-        agent: None,
-        run_id: None,
-    };
-    let at = crate::ports::now_millis();
-    runtime
-        .approval_gate
-        .rehydrate(approval.clone(), effect.clone(), at);
-    runtime
-        .journal
-        .record_parked(
-            &approval,
-            &effect,
-            at,
-            TaskLink::from_task_id(Some("t-9")),
-            ApprovalConversation {
-                thread: Some("dm:eng".to_string()),
-                parent: None,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-
-    let (status, answer) = post_resolve(
-        &app,
-        &approval,
-        serde_json::json!({ "verdict": "approve", "blocker_verdict": "skip" }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{answer}");
-    assert_eq!(
-        answer["settledIds"],
-        serde_json::json!(["question-1"]),
-        "the non-detached body names what it settled too: {answer}"
-    );
-
-    let banked = banked_resolutions(&home, &company).await;
-    assert_eq!(banked.len(), 1);
-    assert_eq!(
-        banked[0]["resolution"]["verdict"], "skip",
-        "the operator's verdict is banked whatever the resume can do with it"
-    );
-    assert!(
-        banked[0]["resolution"].get("step").is_none(),
-        "the durable record keeps the stepless park the blocker carried: {}",
-        banked[0]
-    );
-    let card = runtime
-        .tasks()
-        .list(runtime.id())
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|t| t.id == "t-9")
-        .expect("the card still exists");
-    assert_eq!(
-        card.column,
-        crate::ports::tasks::COLUMN_IN_REVIEW,
-        "the skipped card is ready for human review"
-    );
-    assert!(card.output.is_none(), "a skip produces no output");
-    assert!(card.bounced.is_none(), "a skip clears the old bounce chip");
-    assert_eq!(card.origin_chat_id(), Some("dm:eng"));
-    assert!(
-        card.note
-            .as_deref()
-            .is_some_and(|note| { note.contains("blocker question waived by the operator") })
-    );
-    assert!(
-        runtime
-            .runs()
-            .list_runs(
-                runtime.id(),
-                &crate::ports::runs::RunFilter::for_task("t-9"),
-            )
-            .await
-            .unwrap()
-            .is_empty(),
-        "a skip must not open another attempt"
-    );
 }

@@ -2829,11 +2829,11 @@ mod live {
 /// request carries token A (never B), and A's result carries only A's account.
 
 #[cfg(test)]
-#[path = "composio_tests_full.rs"]
+#[path = "composio_tests.rs"]
 mod tests;
 #[cfg(all(test, feature = "composio"))]
-#[path = "composio_ops_helper_tests_full.rs"]
+#[path = "composio_ops_helper_tests.rs"]
 mod ops_helper_tests;
 #[cfg(all(test, feature = "composio"))]
-#[path = "composio_isolation_tests_full.rs"]
+#[path = "composio_isolation_tests.rs"]
 mod isolation_tests;
