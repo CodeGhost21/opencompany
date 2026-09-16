@@ -27,13 +27,13 @@ use std::sync::atomic::AtomicUsize;
 /// all. It also counts queries, so "a policy with no cap never asks the
 /// meter" is an assertion rather than an assumption.
 #[derive(Default)]
-struct FixedMeter {
+pub(super) struct FixedMeter {
     samples: Vec<UsageSample>,
     queries: AtomicUsize,
 }
 
 impl FixedMeter {
-    fn with(samples: Vec<UsageSample>) -> Arc<Self> {
+    pub(super) fn with(samples: Vec<UsageSample>) -> Arc<Self> {
         Arc::new(Self {
             samples,
             queries: AtomicUsize::new(0),
