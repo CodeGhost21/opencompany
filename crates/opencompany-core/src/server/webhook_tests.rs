@@ -395,13 +395,9 @@ async fn http_webhook_sink_times_out_rather_than_hanging_forever() {
     // connection outright (which `reqwest` would fail on immediately
     // regardless of any timeout).
     let server = tokio::spawn(async move {
-        loop {
-            if let Ok((socket, _)) = listener.accept().await {
-                // Hold the connection open and do nothing with it.
-                std::mem::forget(socket);
-            } else {
-                break;
-            }
+        while let Ok((socket, _)) = listener.accept().await {
+            // Hold the connection open and do nothing with it.
+            std::mem::forget(socket);
         }
     });
 
