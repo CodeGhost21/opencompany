@@ -111,29 +111,6 @@ async fn stored(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
         .expect("card exists")
 }
 
-/// What an agent's own `escalate_to_human` parks: a question with no
-/// step, because the tool holds neither a card nor a node.
-async fn dm_notes(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
-    runtime
-        .events
-        .read_from(
-            runtime.id(),
-            crate::ports::types::EventSeq::new(0),
-            usize::MAX,
-        )
-        .await
-        .expect("read events")
-        .into_iter()
-        .filter_map(|stored| match stored.event {
-            crate::ports::types::CompanyEvent::AgentReply { chat_id, text, .. }
-                if chat_id == "dm:eng" =>
-            {
-                Some(text)
-            }
-            _ => None,
-        })
-        .collect()
-}
 
 /// Journals an operator line in the teammate's DM and hands back its
 /// sequence, the root a reply in that DM threads off.
