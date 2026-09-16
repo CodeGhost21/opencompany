@@ -561,5 +561,8 @@ async fn save(
 }
 
 #[cfg(test)]
-#[path = "policy_tests.rs"]
-mod tests;
+#[path = "policy_core_tests.rs"]
+mod tests_core;
+#[cfg(test)]
+#[path = "policy_bounds_tests.rs"]
+mod tests_bounds;

@@ -3201,7 +3201,7 @@ impl HarnessAgentRunner {
                 // one layer out: `run_turn` would return the certified `42`,
                 // but the ENGINE would still null it before any `=item.json`
                 // binding ever saw it — proven end-to-end by
-                // `workflows::runner::tests::
+                // `workflows::runner::tests_node_output::
                 // a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`.
                 // The gate itself now refuses to certify this shape in the
                 // first place (`postcondition::evaluate_postcondition`'s
