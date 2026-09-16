@@ -2383,6 +2383,7 @@ jobs:
       - changes
       - actions-pinned
       - markdown-cap
+      - rust-source-layout
       - rust
       - rust-mail
       - rust-mongodb
