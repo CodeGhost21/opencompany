@@ -220,13 +220,13 @@ pub(super) struct FlakyOnceFires {
 }
 
 impl FlakyOnceFires {
-    fn new(fail_latest: usize) -> Self {
+    pub(super) fn new(fail_latest: usize) -> Self {
         Self {
             claims: Mutex::new(HashMap::new()),
             fail_latest: AtomicUsize::new(fail_latest),
         }
     }
-    fn seed(&self, c: &CompanyId, s: &str, m: u64) {
+    pub(super) fn seed(&self, c: &CompanyId, s: &str, m: u64) {
         self.claims
             .lock()
             .unwrap()
