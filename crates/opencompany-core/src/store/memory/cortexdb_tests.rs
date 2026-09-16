@@ -47,7 +47,7 @@ struct MockState {
 }
 
 const TOKEN: &str = "test-token";
-const ACTOR: &str = "opencompany-test";
+pub(super) const ACTOR: &str = "opencompany-test";
 
 /// Whether the request carries the one accepted credential pair.
 fn authorized(headers: &HeaderMap, state: &MockState) -> bool {
@@ -285,7 +285,7 @@ async fn forget(
 }
 
 /// Serves the mock on loopback and returns its base URL plus the shared state.
-async fn spawn_mock(valid_actor: &str) -> (String, Arc<MockState>) {
+pub(super) async fn spawn_mock(valid_actor: &str) -> (String, Arc<MockState>) {
     let state = Arc::new(MockState {
         events: Mutex::new(Vec::new()),
         valid_token: TOKEN.to_string(),
@@ -309,7 +309,7 @@ async fn spawn_mock(valid_actor: &str) -> (String, Arc<MockState>) {
     (format!("http://{addr}"), state)
 }
 
-fn client(base_url: &str, actor: &str) -> CortexdbMemory {
+pub(super) fn client(base_url: &str, actor: &str) -> CortexdbMemory {
     CortexdbMemory::new(base_url, TOKEN, actor).expect("valid config")
 }
 
