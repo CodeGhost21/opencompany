@@ -446,11 +446,11 @@ pub(super) async fn banked_resolutions(
 /// test needs to read back what its click banked.
 #[cfg(feature = "openhuman")]
 pub(super) struct BlockedCompany {
-    app: axum::Router,
-    runtime: Arc<CompanyRuntime>,
-    home: std::path::PathBuf,
-    company: CompanyId,
-    approval_id: ApprovalId,
+    pub(super) app: axum::Router,
+    pub(super) runtime: Arc<CompanyRuntime>,
+    pub(super) home: std::path::PathBuf,
+    pub(super) company: CompanyId,
+    pub(super) approval_id: ApprovalId,
 }
 
 #[cfg(feature = "openhuman")]
