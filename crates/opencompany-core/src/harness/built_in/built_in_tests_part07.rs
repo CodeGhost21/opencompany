@@ -8,6 +8,9 @@
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
 use super::*;
+use crate::harness::provider::MockProvider;
+use crate::ports::UsageSample;
+use crate::ports::types::LedgerEntry;
 
 /// An overlay teammate added through the live company store (the same path
 /// the console `POST .../team` route and the orchestrator's `add_agent` tool
