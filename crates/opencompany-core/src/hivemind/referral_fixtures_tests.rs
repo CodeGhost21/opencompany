@@ -50,7 +50,7 @@ pub(super) fn two_desks(hive: &str) -> String {
 }
 
 /// The operator's message on `eng`, and the watermark the episode opens on.
-async fn open(log: &MemoryLog) -> EventSeq {
+pub(super) async fn open(log: &MemoryLog) -> EventSeq {
     log.append(
         &MemoryLog::company(),
         CompanyEvent::OperatorMessage {
@@ -204,7 +204,7 @@ pub(super) const REFERRING: &str = "hive = { turn_budget = 6, quorum = 2, blind_
 pub(super) const PLAIN: &str = "hive = { turn_budget = 6, quorum = 2, blind_round = false }";
 
 /// Open a driver over `eng`, with or without the federation wired.
-async fn run(
+pub(super) async fn run(
     hive: &str,
     lines: &[(&str, &str)],
     far: Option<&FarDesk>,
@@ -230,7 +230,7 @@ async fn run(
 }
 
 /// The same, over any referral runner — `run` is fixed to [`FarDesk`].
-async fn run_with(
+pub(super) async fn run_with(
     hive: &str,
     lines: &[(&str, &str)],
     far: &dyn HiveReferralRunner,
