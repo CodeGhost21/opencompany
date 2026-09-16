@@ -6038,5 +6038,5 @@ pub(crate) fn create_workflow_parameters_schema() -> Value {
 }
 
 #[cfg(test)]
-#[path = "orchestrator_tests_full.rs"]
+#[path = "orchestrator_tests.rs"]
 mod tests;
