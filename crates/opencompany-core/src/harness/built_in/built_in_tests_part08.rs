@@ -9,6 +9,10 @@ use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
 use super::*;
 use async_trait::async_trait;
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
+
+use crate::ports::UsageSample;
+use crate::ports::types::LedgerEntry;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_inference_turns_cannot_both_spend_the_last_monthly_budget() {
