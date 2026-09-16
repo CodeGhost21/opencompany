@@ -295,8 +295,7 @@ fn project_carries_the_thread_parent() {
 
     // A message with no parent is in the channel, not in a thread — which
     // is every message journaled before threads were persisted.
-    let plain =
-        MessageView::project(at(14, agent_reply("studio")), &Viewer::Operator, &labels());
+    let plain = MessageView::project(at(14, agent_reply("studio")), &Viewer::Operator, &labels());
     assert!(plain.parent_id.is_none());
 }
 

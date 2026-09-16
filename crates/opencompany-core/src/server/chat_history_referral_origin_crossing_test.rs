@@ -251,19 +251,18 @@ async fn an_unrelated_pairs_marker_does_not_end_this_crossings_window() {
     let runtime = runtime(home.path()).await;
     let id = CompanyId::new("acme");
 
-    let marker =
-        |from: &str, to: &str, asker: &str, target: &str| CompanyEvent::ReferralEnqueued {
-            conversation: None,
-            answers: None,
-            from_desk: from.to_string(),
-            from_desk_name: from.to_string(),
-            asker: asker.to_string(),
-            asker_label: asker.to_string(),
-            trigger_sequence: 1,
-            to_desk: to.to_string(),
-            target: target.to_string(),
-            returning: false,
-        };
+    let marker = |from: &str, to: &str, asker: &str, target: &str| CompanyEvent::ReferralEnqueued {
+        conversation: None,
+        answers: None,
+        from_desk: from.to_string(),
+        from_desk_name: from.to_string(),
+        asker: asker.to_string(),
+        asker_label: asker.to_string(),
+        trigger_sequence: 1,
+        to_desk: to.to_string(),
+        target: target.to_string(),
+        returning: false,
+    };
     // This crossing: engineering asks design.
     runtime
         .events()

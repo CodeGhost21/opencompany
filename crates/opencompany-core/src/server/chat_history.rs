@@ -2616,38 +2616,38 @@ fn is_admin_only_event(event: &CompanyEvent) -> bool {
 }
 
 #[cfg(test)]
+#[path = "chat_history_attribution_audit_tests.rs"]
+mod attribution_audit;
+#[cfg(test)]
+#[path = "chat_history_mentions_tests.rs"]
+mod tests_mentions;
+#[cfg(test)]
 #[path = "chat_history_moves_tests.rs"]
 mod tests_moves;
 #[cfg(test)]
 #[path = "chat_history_reactions_tests.rs"]
 mod tests_reactions;
 #[cfg(test)]
-#[path = "chat_history_mentions_tests.rs"]
-mod tests_mentions;
-#[cfg(test)]
 #[path = "chat_history_terminal_tests.rs"]
 mod tests_terminal;
-#[cfg(test)]
-#[path = "chat_history_attribution_audit_tests.rs"]
-mod attribution_audit;
 
 #[cfg(test)]
 #[path = "chat_history_dead_card_test.rs"]
 mod dead_card_test;
 
-/// Where a referred line says it came from, and who it says is speaking.
-#[cfg(test)]
-#[path = "chat_history_referral_origin_test_support.rs"]
-mod referral_origin_test_support;
-#[cfg(test)]
-#[path = "chat_history_referral_origin_episode_test.rs"]
-mod referral_origin_episode_test;
 #[cfg(test)]
 #[path = "chat_history_referral_origin_crossing_test.rs"]
 mod referral_origin_crossing_test;
 #[cfg(test)]
+#[path = "chat_history_referral_origin_episode_test.rs"]
+mod referral_origin_episode_test;
+#[cfg(test)]
 #[path = "chat_history_referral_origin_relay_test.rs"]
 mod referral_origin_relay_test;
+/// Where a referred line says it came from, and who it says is speaking.
+#[cfg(test)]
+#[path = "chat_history_referral_origin_test_support.rs"]
+mod referral_origin_test_support;
 
 /// How a chat selector becomes the `(desk id, desk name)` pair [`owns`] filters
 /// on — the one answer to "which desk is this", shared by the seed, the cycle's
