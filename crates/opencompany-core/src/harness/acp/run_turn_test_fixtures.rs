@@ -88,7 +88,7 @@ impl AcpAgent for Scripted {
 
 /// The updates a coding turn produces: a thought, a tool call that runs
 /// and then completes, and the answer.
-fn a_working_turn() -> Vec<AcpUpdate> {
+pub(super) fn a_working_turn() -> Vec<AcpUpdate> {
     vec![
         AcpUpdate::ThoughtChunk,
         AcpUpdate::ThoughtChunk,
