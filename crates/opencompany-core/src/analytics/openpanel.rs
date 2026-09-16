@@ -864,6 +864,9 @@ mod http {
     }
 }
 
-#[cfg(test)]
-#[path = "openpanel_tests.rs"]
-mod tests;
+#[cfg(all(test, feature = "analytics"))]
+#[path = "openpanel_transport_tests.rs"]
+mod tests_transport;
+#[cfg(all(test, feature = "analytics"))]
+#[path = "openpanel_collector_tests.rs"]
+mod tests_collector;
