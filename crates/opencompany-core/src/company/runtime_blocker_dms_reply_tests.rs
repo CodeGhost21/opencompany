@@ -50,11 +50,11 @@ fn assignee(id: &str) -> BlockerSenderSignals {
     }
 }
 
+
 /// A blocker parks into its teammate's DM: the approval's thread is that
 /// DM, and a `blocker_parked` notification is filed pointing at it — with
 /// no payload beyond the one-line title.
 #[tokio::test]
-
 async fn a_blocker_surfaces_in_the_responsible_teammates_dm() {
     let (runtime, _home) = runtime().await;
     runtime
@@ -122,7 +122,10 @@ async fn pending_approvals_names_the_stopped_steps_kind() {
         .collect();
     assert_eq!(
         kinds,
-        std::collections::HashSet::from([Some("task".to_string()), Some("node".to_string())]),
+        std::collections::HashSet::from([
+            Some("task".to_string()),
+            Some("node".to_string())
+        ]),
         "a task-step and a node-step blocker must project distinct step kinds, not the \
          same value: {pending:?}"
     );
@@ -306,7 +309,7 @@ async fn park_thread_less_blocker(runtime: &Arc<CompanyRuntime>, task_id: &str) 
         .record_parked(
             &id,
             &effect,
-            super::now_millis(),
+            super::super::now_millis(),
             TaskLink::from_task_id(Some(task_id)),
             ApprovalConversation::default(),
             None,

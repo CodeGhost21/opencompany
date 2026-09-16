@@ -50,10 +50,7 @@ fn assignee(id: &str) -> BlockerSenderSignals {
     }
 }
 
-/// A blocker parks into its teammate's DM: the approval's thread is that
-/// DM, and a `blocker_parked` notification is filed pointing at it — with
-/// no payload beyond the one-line title.
-#[tokio::test]
+
 
 /// Manually parks a blocker with an arbitrary `at_millis` (and
 /// therefore an arbitrary deadline), bypassing `park_blocker`'s
