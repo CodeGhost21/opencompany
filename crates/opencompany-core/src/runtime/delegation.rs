@@ -1435,14 +1435,17 @@ impl<'a> DelegationRunner<'a> {
             && !crate::company::copilot::is_copilot_thread(chat_id);
         // Issue #463: did the REST chat handler already card this message?
         //
-        // One way it does, now: the operator asking for a workflow from the
-        // composer. The triage naming a title used to be the other, and the
-        // handler minted a card on it — that road is closed (tracking is a
-        // tool call, see `open_work_card`), so the triage's title is no longer
-        // evidence of a card. A message that arrives here carded any other way
-        // was carded by an agent's own `spawn_task`, which the drain below
-        // reports as this turn's card on its own.
-        let carded_by_handler = workflow_requested;
+        // Answered by looking, not by re-deriving the handler's decision: the
+        // handler stamps every card it opens with the message's own journal
+        // position (`origin_message_seq`), so `chat_handler_card` finds it by
+        // identity. The triage naming a title used to be evidence of a card
+        // too — the handler minted one on it — but that road is closed
+        // (tracking is a tool call, see `open_work_card`), and the one signal
+        // the handler still cards on, the composer's workflow control, is
+        // read alongside the lookup because a copilot thread suppresses the
+        // card while leaving the signal set.
+        let handler_card = self.chat_handler_card().await?;
+        let carded_by_handler = workflow_requested || handler_card.is_some();
         // Issue #1152: the mirror image of `workflow_requested` — the operator
         // said this message is not a request for work at all.
         //
@@ -1490,10 +1493,6 @@ impl<'a> DelegationRunner<'a> {
         // conversation rather than a run row, naming the workflows the turn
         // authored. Run records stay reserved for actual work attempts (#183
         // §4), so this turn mints none — see `TaskOutputSource`.
-        let handler_card = match carded_by_handler {
-            true => self.chat_handler_card().await?,
-            false => None,
-        };
         // A desk lead or teammate asked DIRECTLY opens no card by construction.
         // Issue #442 used to card anything "substantial" said to one here,
         // before their turn, because a non-orchestrator carried no tool that
