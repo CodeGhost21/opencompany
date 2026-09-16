@@ -2,6 +2,26 @@
 
 use std::sync::Arc;
 
+/// **Major review finding (CodeRabbit) on PR #2038.** The claim-release
+/// fix above only covers `record_blocker_resolution`'s own failure.
+/// `settle_approval` banks its own journal record right after
+/// (`record_resolved`), and a volume that dies between the two fails
+/// there instead — after the blocker's resolution is already durable,
+/// but before the approval itself settles. That path returned via `?`
+/// with the claim still taken.
+///
+/// This asserts the claim itself (`peek_blocker_resolution`) rather than
+/// a full successful retry, because `record_resolved` (like
+/// `resolve_outcome` on the gate) removes the approval from
+/// `journal.pending()` *before* its own append can fail — so a same-
+/// process retry hits `claim_and_settle_blocker`'s independent
+/// `still_parked` guard and reports `AlreadyResolved` regardless of
+/// whether the claim was released. Releasing it here is still owed: an
+/// orphaned entry in `grants.blocker_resolutions` for an id no live
+/// resume will ever consume is exactly the state
+/// `take_blocker_resolution` exists to prevent.
+#[cfg(feature = "openhuman")]
+#[tokio::test]
 async fn a_journal_failure_inside_settle_also_releases_the_blocker_claim() {
     let home = tempfile::tempdir().expect("home");
     let manifest: crate::company::CompanyManifest = toml::from_str(

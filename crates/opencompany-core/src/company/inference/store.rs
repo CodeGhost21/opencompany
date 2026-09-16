@@ -1334,6 +1334,9 @@ async fn write_health(
 #[path = "store_tests_support.rs"]
 mod store_tests_support;
 #[cfg(test)]
+#[path = "store_tests_defaults.rs"]
+mod tests_defaults;
+#[cfg(test)]
 #[path = "store_tests_locking.rs"]
 mod tests_locking;
 #[cfg(test)]
@@ -1342,6 +1345,3 @@ mod tests_providers;
 #[cfg(test)]
 #[path = "store_tests_routes_health.rs"]
 mod tests_routes_health;
-#[cfg(test)]
-#[path = "store_tests_defaults.rs"]
-mod tests_defaults;
