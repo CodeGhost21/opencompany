@@ -143,7 +143,7 @@ impl RunStatus {
     /// The inverse of [`Self::as_str`], and deliberately in the same `impl`
     /// rather than left to each reader: a REST `?status=` filter that grew its
     /// own literal table would be free to drift from the column the backend
-    /// indexes. [`from_wire_round_trips`](self::test::from_wire_round_trips)
+    /// indexes. [`from_wire_round_trips`](self::tests::from_wire_round_trips)
     /// pins the two together.
     pub fn from_wire(word: &str) -> Option<Self> {
         Some(match word {
@@ -175,7 +175,7 @@ impl RunStatus {
     ///
     /// A projection of [`Self::is_active`] / [`Self::is_parked`] /
     /// [`Self::is_terminal`], which partition the enum
-    /// ([`phases_partition_every_status`](self::test::phases_partition_every_status)
+    /// ([`phases_partition_every_status`](self::tests::phases_partition_every_status)
     /// pins that).
     ///
     /// It exists for readers — chiefly the console — that need to know whether

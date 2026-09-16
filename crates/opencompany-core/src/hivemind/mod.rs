@@ -93,7 +93,6 @@ mod referral_tests;
 #[cfg(test)]
 mod round_tests;
 #[cfg(test)]
-#[path = "hivemind_tests.rs"]
 pub(crate) mod test;
 
 pub use aside::{ASIDE_MARKER, AsideConfig, SURFACE_MARKER};
