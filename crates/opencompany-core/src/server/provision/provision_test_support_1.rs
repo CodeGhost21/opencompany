@@ -5,9 +5,9 @@ use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::Brain;
 use crate::ports::{CompanyStore, CycleHost, EventLog};
-use crate::ports::types::{
+pub(super) use crate::ports::types::{
     CompanyEvent, CompanyId, CompanyRecord, CompanySummary, CompressedTrace, CycleRequest,
-    CycleResult, Effect, LedgerEntry, OutboundMessage, TokenUsage,
+    CycleResult, Effect, EffectGroup, EventSeq, LedgerEntry, OutboundMessage, TokenUsage,
 };
 use crate::runtime::RuntimeBuilder;
 use crate::server::graphql::auth::GqlAuth;
