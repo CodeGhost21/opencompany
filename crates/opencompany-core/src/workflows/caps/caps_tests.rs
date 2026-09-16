@@ -2122,7 +2122,7 @@ async fn a_bare_array_reply_replaces_the_emitted_value_wholesale() {
 /// tinyflows nulls a bare scalar one layer further out (see the doc
 /// comment on the removed `Value::Bool(_) | Value::Number(_) |
 /// Value::String(_)` emission arm, and
-/// `workflows::runner::tests::a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
+/// `workflows::runner::tests_node_output::a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
 /// for the full-graph proof of the delivery gap that test missed).
 /// `field_present` on the bare `field = "json"` root can now never
 /// pass for a scalar reply — the gate refuses to certify a shape it

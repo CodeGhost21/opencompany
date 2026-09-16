@@ -80,7 +80,7 @@ fn field_present_dotted_path_fails_partway_through() {
 /// normalizes anything but `Object`/`Array` to `Value::Null`), so
 /// certifying it here would pass a gate whose value the workflow can
 /// never actually read — refused instead. See
-/// `workflows::runner::tests::a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
+/// `workflows::runner::tests_node_output::a_scalar_reply_cannot_satisfy_field_present_on_the_bare_json_root`
 /// for the full-engine proof of the delivery gap this closes.
 #[test]
 fn field_present_on_the_bare_json_root_rejects_a_scalar() {
