@@ -6,6 +6,20 @@ use std::sync::atomic::Ordering;
 use super::*;
 use super::fan_out_tests_support::*;
 
+// ---------------------------------------------------------------------------
+// Rollback and failure isolation
+// ---------------------------------------------------------------------------
+
+/// Adapted from the plan's "M8 with a prober that answers `auth`": M8 itself
+/// gates health on `legacy_managed` (entry zero declared managed), which
+/// makes the probe unreachable there no matter what it would answer — see
+/// `matrix_m8`'s own `calls == 0` assertion. This is the scenario that
+/// actually reaches the probe while still matching M8's *other* defining
+/// trait (`legacy_slot_is_managed` reading true through the "no entry zero at
+/// all" branch, with a real value sitting in the legacy `inference/key`
+/// slot): no entry zero, so nothing is `legacy_managed`, but the flat
+/// `inference/key` slot is still what backs the LLM copy — and an `auth`
+/// rejection has to restore both of the slots this request touched.
 #[tokio::test]
 async fn an_auth_probe_restores_the_llm_slots_exactly() {
     let cid = company("auth-restore");
@@ -398,8 +412,3 @@ async fn failing_health_record_does_not_change_outcomes() {
 
     assert_eq!(outcome(&report, Slot::Health), SlotOutcome::HealthOk);
 }
-
-/// Red-proof in the PR: without `slot_guard` held for the whole call, this
-/// fails — one save's read-then-write can interleave with the other's and
-/// leave the Composio and LLM copies pointing at different values than
-/// `tinyhumans/key` itself.

@@ -2,9 +2,13 @@
 //! report or note ever carries a key, and the account-key copy rules
 //! (split out of `fan_out_tests.rs`).
 
-use super::fan_out_tests_support::*;
 use super::*;
+use super::fan_out_tests_support::*;
 
+/// Red-proof in the PR: without `slot_guard` held for the whole call, this
+/// fails — one save's read-then-write can interleave with the other's and
+/// leave the Composio and LLM copies pointing at different values than
+/// `tinyhumans/key` itself.
 #[tokio::test]
 async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
     const OTHER: &str = "th-not-a-real-key-3";

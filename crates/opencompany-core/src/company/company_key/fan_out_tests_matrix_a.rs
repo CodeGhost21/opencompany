@@ -541,5 +541,3 @@ async fn matrix_m7() {
         SlotOutcome::Kept(SkipReason::DefaultAlreadySet)
     );
 }
-
-#[tokio::test]

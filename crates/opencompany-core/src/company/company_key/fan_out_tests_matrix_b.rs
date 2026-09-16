@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use super::*;
 use super::fan_out_tests_support::*;
 
+#[tokio::test]
 async fn matrix_m8() {
     let cid = company("m8");
     let secrets = MemSecrets::default();
@@ -519,18 +520,3 @@ async fn matrix_c3() {
         SlotOutcome::Skipped(SkipReason::AlreadyEmpty)
     );
 }
-
-// ---------------------------------------------------------------------------
-// Rollback and failure isolation
-// ---------------------------------------------------------------------------
-
-/// Adapted from the plan's "M8 with a prober that answers `auth`": M8 itself
-/// gates health on `legacy_managed` (entry zero declared managed), which
-/// makes the probe unreachable there no matter what it would answer — see
-/// `matrix_m8`'s own `calls == 0` assertion. This is the scenario that
-/// actually reaches the probe while still matching M8's *other* defining
-/// trait (`legacy_slot_is_managed` reading true through the "no entry zero at
-/// all" branch, with a real value sitting in the legacy `inference/key`
-/// slot): no entry zero, so nothing is `legacy_managed`, but the flat
-/// `inference/key` slot is still what backs the LLM copy — and an `auth`
-/// rejection has to restore both of the slots this request touched.
