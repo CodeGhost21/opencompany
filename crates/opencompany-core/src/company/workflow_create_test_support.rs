@@ -59,7 +59,7 @@ impl CompanyStore for MemStore {
 /// can be asserted.
 #[derive(Default)]
 pub(super) struct MemLog {
-    events: StdMutex<Vec<CompanyEvent>>,
+    pub(super) events: StdMutex<Vec<CompanyEvent>>,
 }
 
 #[async_trait]
