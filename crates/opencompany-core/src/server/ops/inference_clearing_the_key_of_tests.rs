@@ -3,8 +3,11 @@ use serde_json::json;
 
 use super::inference_test_support::*;
 
+#[cfg(feature = "openhuman")]
 use crate::ports::types::CompanyId;
+#[cfg(feature = "openhuman")]
 use crate::runtime::RuntimeBuilder;
+#[cfg(feature = "openhuman")]
 use crate::{AppConfig, AppState};
 
 #[tokio::test]
