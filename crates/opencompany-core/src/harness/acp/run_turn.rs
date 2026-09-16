@@ -1002,5 +1002,26 @@ impl AcpRunTurn {
 }
 
 #[cfg(test)]
-#[path = "run_turn_tests.rs"]
-mod tests;
+#[path = "run_turn_test_fixtures.rs"]
+mod run_turn_test_fixtures;
+/// `fold`'s reduction of raw ACP updates into steps — pure, synchronous,
+/// no `Scripted` agent needed. Split from the rest of this module's tests
+/// because the combined inline module exceeded the 750-line file limit.
+#[cfg(test)]
+#[path = "run_turn_fold_tests.rs"]
+mod tests_fold;
+/// End-to-end coverage of [`AcpRunTurn`] through `&dyn RunTurn`: cancel,
+/// steer, and the grace/hang/hold timing paths. See `tests_fold` above for
+/// why this is split out.
+#[cfg(test)]
+#[path = "run_turn_seam_tests.rs"]
+mod tests_seam;
+/// `AcpRunTurn::session_key` coverage.
+#[cfg(test)]
+#[path = "run_turn_session_key_tests.rs"]
+mod tests_session_key;
+/// The live-frame/turn-stream projection: `drain_live`, `live_frame_from`,
+/// and the folded-vs-live row-count invariant.
+#[cfg(test)]
+#[path = "run_turn_streaming_tests.rs"]
+mod tests_streaming;
