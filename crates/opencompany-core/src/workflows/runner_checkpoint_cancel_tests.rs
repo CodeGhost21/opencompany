@@ -551,9 +551,9 @@ async fn a_run_cancelled_before_it_starts_does_not_walk_the_graph() {
 /// agent node completes, the engine hits the next boundary, sees the flipped
 /// token, and winds the run down rather than being dropped mid-await.
 pub(super) struct GatedProvider {
-    inner: MockProvider,
-    entered: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Notify>,
+    pub(super) inner: MockProvider,
+    pub(super) entered: Arc<tokio::sync::Notify>,
+    pub(super) release: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]

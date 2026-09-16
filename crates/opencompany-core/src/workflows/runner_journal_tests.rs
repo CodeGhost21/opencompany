@@ -450,7 +450,7 @@ async fn a_trigger_rerun_records_its_resume_semantic() {
 /// which is also the realistic wedge: the run an operator actually wants to
 /// stop is one sitting on a slow inference call.
 pub(super) struct StallingProvider {
-    entered: Arc<tokio::sync::Notify>,
+    pub(super) entered: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]

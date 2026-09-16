@@ -152,8 +152,8 @@ fn focus_terms_is_capped_and_deduplicated() {
 /// to prove whether a whole-sentence query alone can ever reach a fact
 /// keyed on one of its content words.
 pub(super) struct ExactMatchFactStore {
-    matches: &'static str,
-    fact: crate::ports::FactRecord,
+    pub(super) matches: &'static str,
+    pub(super) fact: crate::ports::FactRecord,
 }
 
 #[async_trait::async_trait]
