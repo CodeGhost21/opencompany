@@ -116,7 +116,7 @@ impl ScriptedMemory {
         }
     }
 
-    fn notes(&self) -> Vec<HiveMemoryNote> {
+    pub(super) fn notes(&self) -> Vec<HiveMemoryNote> {
         self.notes.lock().expect("poisoned").clone()
     }
 }
