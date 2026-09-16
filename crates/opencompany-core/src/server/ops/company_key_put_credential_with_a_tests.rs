@@ -12,6 +12,9 @@ use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
+use super::tests_p1_1_legacy_managed::{GRANTED_KEY, state_param, state_with_hub};
+use super::tests_the_key_round_trips::slot_outcome;
+
 /// A value long and opaque enough that a leak would be unmistakable in a body.
 const KEY: &str = "th_company_credential_SECRET_do_not_echo_me";
 
