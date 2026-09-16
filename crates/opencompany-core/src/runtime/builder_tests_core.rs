@@ -5,7 +5,7 @@ pub(super) use crate::runtime::journal::ExecutedEffect;
 
 #[derive(Clone)]
 pub(super) struct TestMemoryScopes {
-    context: Arc<dyn ContextStore>,
+    pub(super) context: Arc<dyn ContextStore>,
 }
 
 #[async_trait::async_trait]
