@@ -1370,17 +1370,30 @@ async fn resolve_legacy_scoped(
             .as_deref()
             .map(str::trim)
             .filter(|url| !url.is_empty());
-        let key = load_inference_key_for(
-            company,
-            secrets,
-            credential_slug(&runtime.provider),
-            None,
-            scope,
-            // It named its own endpoint, so the company's key is for somewhere
-            // else. See `load_inference_key_for`.
-            runtime_base_url.is_none(),
-        )
-        .await?;
+        // `managed` is an alias for the platform endpoint, not a credential
+        // type an arbitrary gateway can receive.  Once this runtime row names
+        // its own endpoint it resolves as a direct OpenRouter-compatible
+        // provider, so it must not read the managed slot: account-key fan-out
+        // deliberately places the write-only TinyHumans account key there.
+        // There is no runtime field for a gateway credential; operators that
+        // need one select the actual gateway provider, whose distinct slot the
+        // provider route writes.  Failing closed here prevents a `managed` +
+        // `base_url` row from disclosing a TinyHumans key to that endpoint.
+        let key = if runtime_base_url.is_some() && is_managed_choice(&runtime.provider) {
+            String::new()
+        } else {
+            load_inference_key_for(
+                company,
+                secrets,
+                credential_slug(&runtime.provider),
+                None,
+                scope,
+                // It named its own endpoint, so the company's key is for
+                // somewhere else. See `load_inference_key_for`.
+                runtime_base_url.is_none(),
+            )
+            .await?
+        };
         let had_key = !key.trim().is_empty();
         // Which spelling reaches `resolve_endpoint` depends on whether this
         // runtime config also names an endpoint — the same split the manifest
@@ -3358,6 +3371,43 @@ mod tests {
             presented, None,
             "no credential at all is the correct answer here"
         );
+    }
+
+    #[tokio::test]
+    async fn managed_runtime_override_never_sends_the_managed_key_to_its_endpoint() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        write(
+            &secrets,
+            &store::provider_key_key(MANAGED_SLUG),
+            "th-write-only-account-key",
+        )
+        .await;
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "managed".into(),
+                base_url: Some("https://gateway.example/v1".into()),
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let decl = resolve_effective(
+            &company,
+            &Inference::default(),
+            Some(&managed_env()),
+            &secrets,
+        )
+        .await
+        .unwrap()
+        .expect("an explicit endpoint resolves");
+
+        assert_eq!(decl.base_url, "https://gateway.example/v1");
+        assert!(!decl.is_proxied());
+        assert_eq!(bearer(&decl).await, None);
     }
 
     #[tokio::test]
