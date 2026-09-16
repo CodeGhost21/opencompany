@@ -7,10 +7,6 @@ use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
 
-use super::*;
-use crate::ports::types::Verdict;
-use serde_json::json;
-
 pub(super) fn c(tool: &str) -> Consequence {
     consequence_of(tool, &json!({}))
 }
