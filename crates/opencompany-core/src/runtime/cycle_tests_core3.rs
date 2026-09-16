@@ -1,6 +1,13 @@
+pub(super) use super::*;
+
 /* ---- issue #1890 E: the thread index ---- */
 
-fn op(seq: u64, chat: &str, parent: Option<u64>, text: &str) -> crate::ports::types::StoredEvent {
+pub(super) fn op(
+    seq: u64,
+    chat: &str,
+    parent: Option<u64>,
+    text: &str,
+) -> crate::ports::types::StoredEvent {
     crate::ports::types::StoredEvent {
         seq: EventSeq::new(seq),
         company: CompanyId::new("acme"),
