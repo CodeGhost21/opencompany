@@ -1,3 +1,4 @@
+use super::*;
     use crate::ports::SecretStore;
     use crate::ports::types::{Actor, ActorKind, CompanyEvent};
     use crate::runtime::RuntimeBuilder;
