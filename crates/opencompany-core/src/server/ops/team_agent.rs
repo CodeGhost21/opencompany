@@ -2333,8 +2333,9 @@ async fn build_draft(
 }
 
 #[cfg(test)]
-#[path = "team_agent_test_support.rs"]
-mod team_agent_test_support;
+mod team_agent_test_support {
+    include!("team_agent_test_support.rs");
+}
 #[cfg(test)]
 #[path = "team_agent_a_company_past_its_tests.rs"]
 mod tests_a_company_past_its;
