@@ -2868,11 +2868,16 @@ base_url = "https://byo.example/v1"
             dto.key_configured,
             "a console-set key must read as configured"
         );
-        // Same company, same injected platform default, opposite answer — and the
-        // key is not merely recorded: it moves the company off the subscription
-        // proxy and onto its own OpenRouter account, which is the only way a
-        // stored `sk-or-…` could actually be used.
-        assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL);
+        // Unlike plain `openrouter` (`keyless_openrouter_rides_the_subscription_
+        // and_a_key_goes_direct`), a `managed` config never goes direct: its
+        // whole reason to be a separate provider from `openrouter` is that its
+        // credential is a TinyHumans account key, valid only against the
+        // TinyHumans proxy, not a raw OpenRouter secret. `resolve_endpoint`'s
+        // managed branch documents this ("the endpoint is always the
+        // platform's") — the key changes which credential rides the request,
+        // never the endpoint it rides to. The base URL must therefore stay the
+        // platform's even once the tenant's own key is stored.
+        assert_eq!(dto.base_url, STAGING_URL);
     }
 
     #[tokio::test]
