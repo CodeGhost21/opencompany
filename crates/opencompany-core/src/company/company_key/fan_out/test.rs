@@ -242,7 +242,7 @@ async fn matrix_m1() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -295,7 +295,7 @@ async fn matrix_m2() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -348,7 +348,7 @@ async fn proxy_base_url_override_lands_on_the_stored_row() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: Some(api_url),
@@ -410,7 +410,7 @@ async fn matrix_m3() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -454,7 +454,7 @@ async fn matrix_m4() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -519,7 +519,7 @@ async fn matrix_m5() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -590,7 +590,7 @@ async fn matrix_m5_plus_auth() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -657,7 +657,7 @@ async fn matrix_m5_plus_auth() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -691,7 +691,7 @@ async fn matrix_m6() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -765,7 +765,7 @@ async fn matrix_m7() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -810,7 +810,7 @@ async fn matrix_m8() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -892,7 +892,7 @@ async fn matrix_m9() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -936,7 +936,7 @@ async fn matrix_m10() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -998,7 +998,7 @@ async fn matrix_m11() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1012,7 +1012,7 @@ async fn matrix_m11() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1065,7 +1065,7 @@ async fn matrix_m12() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1101,7 +1101,7 @@ async fn matrix_m13() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1150,7 +1150,7 @@ async fn matrix_m14() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1196,7 +1196,7 @@ async fn matrix_c1() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1257,7 +1257,7 @@ async fn matrix_c2() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1292,7 +1292,7 @@ async fn matrix_c3() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1339,7 +1339,7 @@ async fn an_auth_probe_restores_the_llm_slots_exactly() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1377,7 +1377,7 @@ async fn a_non_auth_probe_failure_keeps_everything() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1416,7 +1416,7 @@ async fn an_invalid_model_writes_nothing() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some("chat-v1"),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1443,7 +1443,7 @@ async fn a_model_with_a_clear_is_refused() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: "",
+            key: FanOutKey::Explicit(""),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1483,7 +1483,7 @@ async fn a_read_failure_after_the_account_key_is_stored_still_keeps_the_key() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1548,7 +1548,7 @@ async fn failing_account_key_write_writes_nothing_else() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1576,7 +1576,7 @@ async fn failing_composio_write_still_sets_up_llm() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1614,7 +1614,7 @@ async fn failing_inference_write_skips_row_default_and_probe() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1653,7 +1653,7 @@ async fn failing_row_write_keeps_the_key_copy() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1684,7 +1684,7 @@ async fn failing_default_write_keeps_the_row() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1718,7 +1718,7 @@ async fn failing_health_record_does_not_change_outcomes() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1755,7 +1755,7 @@ async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
             &c1,
             s1.as_ref(),
             FanOutRequest {
-                key: NEW,
+                key: FanOutKey::Explicit(NEW),
                 model: None,
                 confirm_in_use: true,
                 proxy_base_url: None,
@@ -1766,7 +1766,7 @@ async fn concurrent_saves_leave_every_copy_equal_to_the_account_key() {
             &c2,
             s2.as_ref(),
             FanOutRequest {
-                key: OTHER,
+                key: FanOutKey::Explicit(OTHER),
                 model: None,
                 confirm_in_use: true,
                 proxy_base_url: None,
@@ -1815,7 +1815,7 @@ async fn no_report_or_note_contains_a_key() {
         &cid,
         &secrets,
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: None,
             confirm_in_use: true,
             proxy_base_url: None,
@@ -1998,7 +1998,7 @@ async fn a_fan_out_racing_a_provider_add_loses_neither_row() {
         &c1,
         s1.as_ref(),
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
@@ -2081,7 +2081,7 @@ async fn a_fan_out_racing_a_default_change_backs_off_or_wins_but_never_corrupts(
         &c1,
         s1.as_ref(),
         FanOutRequest {
-            key: NEW,
+            key: FanOutKey::Explicit(NEW),
             model: Some(MODEL),
             confirm_in_use: true,
             proxy_base_url: None,
