@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use super::tests_core::{RacingJournalStore, RefusingJournalStore};
+
 /// **Major review finding (CodeRabbit) on PR #2038.** The claim-release
 /// fix above only covers `record_blocker_resolution`'s own failure.
 /// `settle_approval` banks its own journal record right after
