@@ -4,7 +4,7 @@ pub(super) use crate::ports::tasks::TaskTitle;
 /// Wraps a real [`crate::ports::RunStore`] but fails every `list_runs`
 /// call, to prove a run-history read failure surfaces distinctly from "no
 /// attempts" instead of being silently swallowed into an empty result.
-pub(super) struct FailingRunHistory(Arc<dyn crate::ports::RunStore>);
+pub(super) struct FailingRunHistory(pub(super) Arc<dyn crate::ports::RunStore>);
 
 #[async_trait]
 impl crate::ports::RunStore for FailingRunHistory {
