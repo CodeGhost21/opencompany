@@ -290,13 +290,13 @@ pub(super) struct StalledContinuationBrain {
     /// Fires once the follow-up turn has begun. By this point the verdict
     /// is journaled and the grant minted, so this is exactly the moment the
     /// field report's connection died.
-    entered: Arc<tokio::sync::Notify>,
+    pub(super) entered: Arc<tokio::sync::Notify>,
     /// The test's permission for the turn to finish.
-    release: Arc<tokio::sync::Notify>,
+    pub(super) release: Arc<tokio::sync::Notify>,
     /// The effect parked for the operator's sign-off. Whether it may be
     /// granted a standing permission is a property of this effect, so the
     /// scope tests supply their own rather than sharing one fixture.
-    parked: crate::ports::types::Effect,
+    pub(super) parked: crate::ports::types::Effect,
 }
 
 #[async_trait::async_trait]
@@ -659,7 +659,7 @@ pub(super) const SLOW_TURN_REPLY: &str = "the slow turn's answer";
 pub(super) struct StalledChatBrain {
     /// Fires once the turn is under way, which is the moment the field
     /// report's proxy gave up and closed the connection.
-    entered: Arc<tokio::sync::Notify>,
+    pub(super) entered: Arc<tokio::sync::Notify>,
     /// The test's permission for that turn to finish.
-    release: Arc<tokio::sync::Notify>,
+    pub(super) release: Arc<tokio::sync::Notify>,
 }

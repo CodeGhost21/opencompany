@@ -26,7 +26,7 @@ use crate::ports::{
 
 /// An in-memory `Memory` backend, keyed exactly as the contract specifies.
 #[derive(Default)]
-struct FakeEngine {
+pub(super) struct FakeEngine {
     rows: Mutex<BTreeMap<(String, String), MemoryEntry>>,
 }
 
@@ -204,7 +204,7 @@ impl Memory for FakeEngine {
 /// archives a few traces, hits the injected failure, and the archive must
 /// still be bounded on that partial-failure path.
 #[derive(Clone)]
-struct FlakyStore {
+pub(super) struct FlakyStore {
     inner: Arc<FakeEngine>,
     fail_archive_store_on: u32,
     archive_stores: Arc<Mutex<u32>>,
@@ -309,19 +309,19 @@ impl Memory for FlakyStore {
 /// leak is only observable when both tenants are in the same store. There is
 /// deliberately no per-company binding to build — the engine is process-scoped
 /// and the company arrives with each call.
-fn engine() -> BoundMemory {
+pub(super) fn engine() -> BoundMemory {
     BoundMemory::bind(FakeEngine::provider(), DriverClass::Embedded).unwrap()
 }
 
-fn acme_id() -> CompanyId {
+pub(super) fn acme_id() -> CompanyId {
     CompanyId::new("acme")
 }
 
-fn globex_id() -> CompanyId {
+pub(super) fn globex_id() -> CompanyId {
     CompanyId::new("globex")
 }
 
-fn a_fact(id: &str, title: &str) -> FactRecord {
+pub(super) fn a_fact(id: &str, title: &str) -> FactRecord {
     FactRecord {
         id: id.to_string(),
         kind: FactKind::Fact,
