@@ -118,8 +118,11 @@ pub(crate) use scope::{AdminScopedCompany, ScopedCompany, scoped};
 #[cfg(test)]
 mod setup_tests;
 #[cfg(test)]
-#[path = "ops_tests.rs"]
-mod tests;
+#[path = "ops_put_domain_returns_records_tests.rs"]
+mod tests_put_domain_returns_records;
+#[cfg(test)]
+#[path = "ops_put_smtp_without_a_tests.rs"]
+mod tests_put_smtp_without_a;
 #[cfg(test)]
 #[path = "write_a_resolved_approval_reports_tests.rs"]
 mod tests_a_resolved_approval_reports;

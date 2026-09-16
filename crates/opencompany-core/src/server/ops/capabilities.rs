@@ -595,5 +595,8 @@ async fn get_status(company: ScopedCompany) -> Result<Json<CapabilityStatusDto>,
 }
 
 #[cfg(test)]
-#[path = "capabilities_tests.rs"]
-mod tests;
+#[path = "capabilities_a_company_on_the_tests.rs"]
+mod tests_a_company_on_the;
+#[cfg(test)]
+#[path = "capabilities_the_composio_verdict_walks_tests.rs"]
+mod tests_the_composio_verdict_walks;

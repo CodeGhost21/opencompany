@@ -524,5 +524,8 @@ fn titleize(slug: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "skills_tests.rs"]
-mod tests;
+#[path = "skills_part2_tests.rs"]
+mod tests_part2;
+#[cfg(test)]
+#[path = "skills_skill_md_frontmatter_resists_tests.rs"]
+mod tests_skill_md_frontmatter_resists;

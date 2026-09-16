@@ -438,5 +438,8 @@ impl Drop for RestoreGuard {
 }
 
 #[cfg(test)]
-#[path = "budget_pause_tests.rs"]
-mod tests;
+#[path = "budget_pause_a_failed_redispatch_restores_tests.rs"]
+mod tests_a_failed_redispatch_restores;
+#[cfg(test)]
+#[path = "budget_pause_redeem_replays_the_markers_tests.rs"]
+mod tests_redeem_replays_the_markers;

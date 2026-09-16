@@ -1285,5 +1285,8 @@ async fn delete_search(
 }
 
 #[cfg(test)]
-#[path = "search_tests.rs"]
-mod tests;
+#[path = "search_a_legacy_patch_that_tests.rs"]
+mod tests_a_legacy_patch_that;
+#[cfg(test)]
+#[path = "search_an_unconfigured_company_reports_tests.rs"]
+mod tests_an_unconfigured_company_reports;
