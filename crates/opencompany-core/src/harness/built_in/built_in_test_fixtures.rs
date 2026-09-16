@@ -444,7 +444,7 @@ impl ScriptedProvider {
     }
 
     /// Fail every call past the end of the script, permanently.
-    fn failing_when_exhausted(mut self) -> Self {
+    pub(super) fn failing_when_exhausted(mut self) -> Self {
         self.fail_when_exhausted = true;
         self
     }
