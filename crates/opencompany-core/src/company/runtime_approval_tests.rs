@@ -588,10 +588,12 @@ async fn extend_approval_moves_deadline_and_survives_replay() {
 /// A [`JournalStore`](crate::ports::journal::JournalStore) that refuses
 /// every `ApprovalExtended` line and passes everything else through to an
 /// in-memory backend.
+#[cfg(feature = "openhuman")]
 pub(super) struct RefusingExtendStore {
     pub(super) inner: crate::ports::journal::MemoryJournalStore,
 }
 
+#[cfg(feature = "openhuman")]
 #[async_trait::async_trait]
 impl crate::ports::journal::JournalStore for RefusingExtendStore {
     async fn append_journal(
