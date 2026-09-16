@@ -97,7 +97,7 @@ pub(super) struct BlockingChatBrain {
 }
 
 impl BlockingChatBrain {
-    fn new() -> (
+    pub(super) fn new() -> (
         Arc<Self>,
         Arc<tokio::sync::Semaphore>,
         Arc<tokio::sync::Semaphore>,
