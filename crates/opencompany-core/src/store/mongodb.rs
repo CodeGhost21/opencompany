@@ -4657,5 +4657,8 @@ fn mongo_workspace_descendants(
 #[path = "mongodb_tests.rs"]
 mod tests;
 #[cfg(test)]
+#[path = "mongodb_blob_sweep_tests.rs"]
+mod tests_blob_sweep;
+#[cfg(test)]
 #[path = "mongodb_conformance_tests.rs"]
 mod tests_conformance;

@@ -1,3 +1,34 @@
+//! Shared fixtures for the spend-halt turn tests: the scripted model,
+//! company/manifest/record builders, and the harness deps wiring. Split
+//! out of `spend_halt_turn_tests.rs` because the combined inline module
+//! exceeded the 750-line file limit.
+//!
+//! See [`super::spend_halt_turn_tests`] for what each test proves.
+
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use axum::Json;
+use axum::routing::post;
+use serde_json::{Value, json};
+
+use crate::company::CompanyManifest;
+use crate::company::credentials::Credential;
+use crate::harness::brain::{iteration_cap_pause_notice, spend_halt_notice};
+use crate::harness::mcp_probe::McpFailureQueue;
+use crate::harness::memory_loop;
+use crate::harness::orchestrator::{DelegationQueue, WorkflowRunnerHandle};
+use crate::harness::policy::ApprovalRequestQueue;
+use crate::harness::provider::{HostedProvider, HostedProviderConfig};
+use crate::harness::{HarnessBrain, HarnessDeps, HarnessPool};
+use crate::ports::ContextStore;
+use crate::ports::brain::{Brain, CycleHost};
+use crate::ports::types::{
+    ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult, CycleRequest,
+    Effect, EffectDisposition, OutboundMessage, ToolCall, ToolResult,
+};
+
 
 /// The agent every test here talks to.
 pub(super) const AGENT: &str = "ceo";
