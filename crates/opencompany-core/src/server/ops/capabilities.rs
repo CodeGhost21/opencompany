@@ -1098,8 +1098,6 @@ mod tests {
     #[cfg(feature = "openhuman")]
     #[tokio::test]
     async fn reports_company_managed_search_key_as_configured() {
-        use crate::ports::SecretStore;
-
         let home_dir = home();
         let state = state_with_manifest(
             home_dir.path(),
@@ -1115,7 +1113,7 @@ mod tests {
             .set(
                 &company,
                 crate::company::search::MANAGED_KEY_SECRET,
-                "company-search-key",
+                crate::ports::types::SecretValue("company-search-key".to_string()),
             )
             .await
             .unwrap();
