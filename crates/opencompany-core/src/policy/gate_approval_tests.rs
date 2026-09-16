@@ -2,9 +2,6 @@ use super::gate_resolution_tests::*;
 use super::*;
 use crate::ports::types::ActorKind;
 
-use super::*;
-use crate::ports::types::ActorKind;
-
 /// The fence these tests run under, written out rather than taken from
 /// [`DEFAULT_ALWAYS_APPROVE`](crate::company::DEFAULT_ALWAYS_APPROVE).
 ///

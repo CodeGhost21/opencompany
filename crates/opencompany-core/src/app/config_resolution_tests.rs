@@ -2,9 +2,6 @@ use super::config_serialization_tests::*;
 use super::*;
 use crate::company::CompanyManifest;
 
-use super::*;
-use crate::company::CompanyManifest;
-
 pub(super) fn manifest_with_brain(mode: &str) -> CompanyManifest {
     let toml_src = format!("[company]\nname = \"X\"\n[brain]\nmode = \"{mode}\"\n");
     toml::from_str(&toml_src).expect("valid manifest")
