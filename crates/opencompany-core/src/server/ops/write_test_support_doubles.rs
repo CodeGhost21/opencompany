@@ -1,3 +1,4 @@
+use super::*;
 //! Test doubles shared by the `ops` write-plane split test files:
 //! `FaultyArtifacts` (an `ArtifactStore` with one chosen fault) and
 //! `RecordingReads` (a `WorkspaceStore` wrapper that counts bytes read).
