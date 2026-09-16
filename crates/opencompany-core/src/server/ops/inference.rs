@@ -1588,6 +1588,9 @@ async fn test_config(company: ScopedCompany) -> Response {
 }
 
 #[cfg(test)]
+#[path = "inference_test_support.rs"]
+mod inference_test_support;
+#[cfg(test)]
 #[path = "inference_a_managed_manifest_also_tests.rs"]
 mod tests_a_managed_manifest_also;
 #[cfg(test)]
