@@ -153,7 +153,7 @@ impl MailSender for RefusingMailSender {
 
 /// The offline delivery bundle: a recording mail sender (or none), tempdir
 /// inbox + user stores, and the built-in operator channel.
-struct Harness {
+pub(super) struct Harness {
     deps: WorkflowDeliveryDeps,
     mail: RecordingMailSender,
     channel: OperatorChannel,
