@@ -23,6 +23,31 @@ pub(super) use crate::ports::types::{
 };
 pub(super) use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
+/// A minimal card, used across the brain tests wherever the assertion is
+/// about dispatch/lifecycle plumbing rather than the card's own content.
+pub(super) fn card(id: &str, assignee: &str) -> TaskRecord {
+    TaskRecord {
+        id: id.to_string(),
+        title: TaskTitle::authored("Ship the thing"),
+        note: None,
+        column: "in_progress".to_string(),
+        priority: "high".to_string(),
+        assignee: assignee.to_string(),
+        updated_at_millis: 0,
+        origin: None,
+        parent_task_id: None,
+        output: None,
+        plan: None,
+        planning_attempts: Vec::new(),
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
+        origin_message_seq: None,
+        bounced: None,
+    }
+}
+
 /// A `CycleHost` that auto-executes anything the brain asks for and swallows
 /// anything it parks; used by every test that isn't about approvals.
 #[derive(Default)]
