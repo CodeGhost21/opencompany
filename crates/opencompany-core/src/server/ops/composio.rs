@@ -1735,5 +1735,23 @@ async fn connections_impl(_runtime: &CompanyRuntime) -> Result<Json<Vec<Connecti
 }
 
 #[cfg(test)]
-#[path = "composio_tests.rs"]
-mod tests;
+#[path = "composio_an_empty_toolkit_list_tests.rs"]
+mod tests_an_empty_toolkit_list;
+#[cfg(test)]
+#[path = "composio_clearing_the_managed_token_tests.rs"]
+mod tests_clearing_the_managed_token;
+#[cfg(test)]
+#[path = "composio_credential_source_matrix_follows_tests.rs"]
+mod tests_credential_source_matrix_follows;
+#[cfg(test)]
+#[path = "composio_set_default_route_conflicts_tests.rs"]
+mod tests_set_default_route_conflicts;
+#[cfg(test)]
+#[path = "composio_the_api_key_test_tests.rs"]
+mod tests_the_api_key_test;
+#[cfg(test)]
+#[path = "composio_the_managed_tier_reads_tests.rs"]
+mod tests_the_managed_tier_reads;
+#[cfg(test)]
+#[path = "composio_toolkits_tests.rs"]
+mod tests_toolkits;

@@ -1388,5 +1388,5 @@ fn web_deflection_message(toolkit: &str, host: &str) -> String {
 #[path = "composio_catalog_tests.rs"]
 mod tests;
 #[cfg(test)]
-#[path = "composio_catalog_projection_prototype_tests_full.rs"]
+#[path = "composio_catalog_projection_prototype_tests.rs"]
 mod projection_prototype_tests;
