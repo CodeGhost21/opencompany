@@ -223,7 +223,7 @@ async fn list_models(company: ScopedCompany) -> Result<Json<ModelCatalogDto>, Ap
 /// carries a credential — only a non-secret `keyConfigured` flag.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InferenceStatusDto {
+pub(crate) struct InferenceStatusDto {
     /// Provider kind (`managed` / `openrouter` / `openai_compatible` / `ollama`)
     /// **as the operator selected it**, not as it resolves.
     ///
