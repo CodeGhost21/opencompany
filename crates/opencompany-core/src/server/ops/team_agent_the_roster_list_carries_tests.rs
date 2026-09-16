@@ -1,90 +1,10 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
-use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
-use crate::ports::store::company_write_lock;
-use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::runtime::RuntimeBuilder;
+use super::team_agent_test_support::*;
 use crate::server::router;
-use crate::store::FsCompanyStore;
-use crate::{AppConfig, AppState};
-use super::tests_requested_grants_reads_overlay::*;
 
-/// A company whose grants actually bite: `ceo` asks for one tool the company
-/// does not allow, `writer` asks for nothing at all, and `hermit` sits on no
-/// desk. Each of those is a different arm of the resolution under test.
-const ROSTER: &str = r#"
-[company]
-name = "Acme"
-[policy]
-mode = "full"
-[tools]
-allow = ["workspace", "workspace.*", "composio"]
-
-[[agent]]
-id = "ceo"
-role = "Chief Executive"
-description = "Sets direction and delegates."
-tier = "orchestrator"
-tools = ["workspace.read", "email.send"]
-
-[[agent]]
-id = "writer"
-role = "Writer"
-
-[[agent]]
-id = "hermit"
-role = "Hermit"
-
-[[group_chat]]
-id = "content"
-name = "Content desk"
-members = ["writer", "ceo"]
-"#;
-
-/// [`ROSTER`], plus a declared `[[harness]]` set (issue #1245's
-/// harness-picker follow-up): `laptop` is a `local` ACP harness and the
-/// **default**, so a fresh overlay teammate — which names no harness of
-/// its own — lands there and a model override on it is meaningful. Tests
-/// that need to exercise the harness picker itself declare a second,
-/// non-default `built_in` entry (`main`) to switch *away* from.
-const ACP_ROSTER: &str = r#"
-[company]
-name = "Acme"
-[policy]
-mode = "full"
-[tools]
-allow = ["workspace", "workspace.*", "composio"]
-
-[[agent]]
-id = "ceo"
-role = "Chief Executive"
-description = "Sets direction and delegates."
-tier = "orchestrator"
-tools = ["workspace.read", "email.send"]
-
-[[harness]]
-id = "main"
-kind = "built_in"
-
-[[harness]]
-id = "laptop"
-kind = "acp"
-default = true
-
-[harness.acp]
-transport = "local"
-agent = "claude"
-"#;
-
-fn home() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("oc-agent-detail-")
-        .tempdir()
-        .expect("tempdir")
 }
 
 /// Issue #601: the roster **list** answers for tools and desks too, with
