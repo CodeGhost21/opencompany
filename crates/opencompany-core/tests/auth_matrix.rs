@@ -433,6 +433,7 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Get, "/capabilities", Scoped, Ordinary, ""),
     r!(Get, "/credential", Scoped, Ordinary, ""),
     r!(Put, "/credential", Admin, Credential, ""),
+    r!(Put, "/credential/model", Admin, Credential, ""),
     r!(Post, "/credential/link/start", Admin, Credential, ""),
     r!(Post, "/credential/link/finish", Admin, Credential, ""),
     r!(
