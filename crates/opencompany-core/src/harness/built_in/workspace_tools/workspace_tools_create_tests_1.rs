@@ -361,21 +361,21 @@ async fn create_below_the_home_still_refuses_and_mints_nothing() {
 /// `adopt_or_create_folder`. `refuse_note` fails every *file* create — the
 /// shape a store error or quota refusal takes — while folders still mint,
 /// so the home is created on the way in and only the note fails.
-struct ProxyStore {
+pub(super) struct ProxyStore {
     inner: Arc<dyn WorkspaceStore>,
     hidden: Option<String>,
     refuse_note: bool,
 }
 
 impl ProxyStore {
-    fn hiding(inner: Arc<dyn WorkspaceStore>, hidden: &str) -> Self {
+    pub(super) fn hiding(inner: Arc<dyn WorkspaceStore>, hidden: &str) -> Self {
         Self {
             inner,
             hidden: Some(hidden.to_string()),
             refuse_note: false,
         }
     }
-    fn refusing_notes(inner: Arc<dyn WorkspaceStore>) -> Self {
+    pub(super) fn refusing_notes(inner: Arc<dyn WorkspaceStore>) -> Self {
         Self {
             inner,
             hidden: None,
