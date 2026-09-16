@@ -2584,19 +2584,19 @@ fn undeclared_group(name: &str) -> EffectGroup {
 
 #[cfg(test)]
 #[path = "consequence_composio_tests.rs"]
-mod tests_composio;
+mod consequence_composio_tests;
 #[cfg(test)]
 #[path = "consequence_fetch_grant_tests.rs"]
-mod tests_fetch_grant;
+mod consequence_fetch_grant_tests;
 #[cfg(test)]
 #[path = "consequence_hosting_tests.rs"]
-mod tests_hosting;
+mod consequence_hosting_tests;
 #[cfg(test)]
 #[path = "consequence_mcp_roster_tests.rs"]
-mod tests_mcp_roster;
+mod consequence_mcp_roster_tests;
 #[cfg(test)]
 #[path = "consequence_scope_labels_tests.rs"]
-mod tests_scope_labels;
+mod consequence_scope_labels_tests;
 #[cfg(test)]
 #[path = "consequence_shell_git_mcp_tests.rs"]
-mod tests_shell_git_mcp;
+mod consequence_shell_git_mcp_tests;
