@@ -298,51 +298,6 @@ async fn dm_notes(runtime: &Arc<CompanyRuntime>) -> Vec<String> {
         .collect()
 }
 
-/// Journals an operator line in the teammate's DM and hands back its
-/// sequence, the root a reply in that DM threads off.
-async fn asked_in_dm(runtime: &Arc<CompanyRuntime>) -> crate::ports::types::EventSeq {
-    runtime
-        .events
-        .append(
-            &runtime.id,
-            crate::ports::types::CompanyEvent::OperatorMessage {
-                text: "which brief is current?".to_string(),
-                chat: Some("dm:eng".to_string()),
-                parent: None,
-                by: None,
-                deliverable: None,
-                mentions: Vec::new(),
-                attachments: Vec::new(),
-            },
-        )
-        .await
-        .expect("journal the question")
-}
-
-async fn dm_replies(
-    runtime: &Arc<CompanyRuntime>,
-) -> Vec<(String, Option<crate::ports::types::EventSeq>)> {
-    runtime
-        .events
-        .read_from(
-            runtime.id(),
-            crate::ports::types::EventSeq::new(0),
-            usize::MAX,
-        )
-        .await
-        .expect("read events")
-        .into_iter()
-        .filter_map(|stored| match stored.event {
-            crate::ports::types::CompanyEvent::AgentReply {
-                chat_id,
-                text,
-                parent,
-                ..
-            } if chat_id == "dm:eng" => Some((text, parent)),
-            _ => None,
-        })
-        .collect()
-}
 
 fn agent_question() -> BlockerPayload {
     BlockerPayload {
