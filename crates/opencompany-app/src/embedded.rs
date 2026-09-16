@@ -174,8 +174,29 @@ pub async fn start_with(
     // spelled out below is only what this host owns: the loopback bind and the
     // sign-in default.
     let config_file = opencompany::app::config::ConfigFile::load(instance.home())?;
+
+    // Bound HERE, before the config exists, so the config can name the port the
+    // OS actually chose. It used to be bound after, with `bind` left reading
+    // the literal `127.0.0.1:0` it was asked for — and everything that derives
+    // an address from `config().bind` then said port `0`: a TinyHumans key
+    // grant sent the browser back to `http://127.0.0.1:0/…`, which Chrome
+    // refuses outright (`ERR_UNSAFE_PORT`), and an MCP OAuth redirect URI was
+    // registered the same way. `bind` is what `host_base_url()` reads, so it
+    // has to be the truth, not the request.
+    //
+    // `127.0.0.1:0`, never `0.0.0.0`: an embedded instance is this machine's,
+    // and a routable address would publish someone's company to their café.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| {
+            opencompany::error::OpenCompanyError::Config(format!(
+                "could not bind `127.0.0.1:0`: {error}"
+            ))
+        })?;
+    let address = listener.local_addr()?;
+
     let config = AppConfig {
-        bind: "127.0.0.1:0".to_string(),
+        bind: address.to_string(),
         // No sign-in, for every company this host serves.
         //
         // A desktop install is one machine and one person: there is nobody to
@@ -291,19 +312,10 @@ pub async fn start_with(
     // below is already stopped, rather than plumbing a second shutdown path
     // through a struct that otherwise has none.
     let sweeper = state.spawn_acp_session_sweeper(std::sync::Arc::new(tokio::sync::Notify::new()));
-    let (address, serving) = match opencompany::server::bind("127.0.0.1:0", state).await {
-        Ok(bound) => bound,
-        Err(error) => {
-            // The sweeper was already running (an infinite loop with no other
-            // shutdown path here), so a failed bind must abort it explicitly
-            // or it outlives this whole attempt — one more sweeper leaked per
-            // retry a caller makes after a busy-port failure.
-            sweeper.abort();
-            return Err(error);
-        }
-    };
+    // The listener was bound at the top of this function (see there for why),
+    // so nothing here can fail between starting the sweeper and serving.
     let server = tokio::spawn(async move {
-        if let Err(error) = serving.run().await {
+        if let Err(error) = opencompany::server::serve_on(listener, state).await {
             tracing::error!(%error, "the embedded host stopped");
         }
     });
