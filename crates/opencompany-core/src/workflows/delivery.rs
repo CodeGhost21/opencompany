@@ -1622,17 +1622,17 @@ fn subject_for(record: &CompanyRecord, workflow: &WorkflowFile, node_name: &str)
 }
 
 #[cfg(test)]
-#[path = "delivery_owner_setup_tests.rs"]
-mod tests_owner_setup;
+#[path = "delivery_channel_grants_tests.rs"]
+mod tests_channel_grants;
+#[cfg(test)]
+#[path = "delivery_dry_and_park_tests.rs"]
+mod tests_dry_and_park;
 #[cfg(test)]
 #[path = "delivery_owner_routing_tests.rs"]
 mod tests_owner_routing;
 #[cfg(test)]
-#[path = "delivery_channel_grants_tests.rs"]
-mod tests_channel_grants;
+#[path = "delivery_owner_setup_tests.rs"]
+mod tests_owner_setup;
 #[cfg(test)]
 #[path = "delivery_unwired_dedup_tests.rs"]
 mod tests_unwired_dedup;
-#[cfg(test)]
-#[path = "delivery_dry_and_park_tests.rs"]
-mod tests_dry_and_park;

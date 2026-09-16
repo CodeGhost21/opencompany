@@ -6168,23 +6168,23 @@ pub struct PaymentReceipt {
 }
 
 #[cfg(test)]
-#[path = "types_chat_and_secrets_tests.rs"]
-mod tests_chat_and_secrets;
-#[cfg(test)]
-#[path = "types_task_lifecycle_tests.rs"]
-mod tests_task_lifecycle;
-#[cfg(test)]
-#[path = "types_task_discussion_effects_tests.rs"]
-mod tests_task_discussion_effects;
-#[cfg(test)]
 #[path = "types_agent_ids_tests.rs"]
 mod tests_agent_ids;
 #[cfg(test)]
 #[path = "types_budgets_overrides_tests.rs"]
 mod tests_budgets_overrides;
 #[cfg(test)]
+#[path = "types_chat_and_secrets_tests.rs"]
+mod tests_chat_and_secrets;
+#[cfg(test)]
 #[path = "types_overlay_and_run_tests.rs"]
 mod tests_overlay_and_run;
 #[cfg(test)]
 #[path = "types_run_events_tests.rs"]
 mod tests_run_events;
+#[cfg(test)]
+#[path = "types_task_discussion_effects_tests.rs"]
+mod tests_task_discussion_effects;
+#[cfg(test)]
+#[path = "types_task_lifecycle_tests.rs"]
+mod tests_task_lifecycle;

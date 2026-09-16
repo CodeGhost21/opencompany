@@ -2661,35 +2661,35 @@ impl WorkflowRunner for HarnessWorkflowRunner {
 }
 
 #[cfg(test)]
-#[path = "runner_reclassify_tests.rs"]
-mod tests_reclassify;
+#[path = "runner_cancel_delivery_tests.rs"]
+mod tests_cancel_delivery;
 #[cfg(test)]
 #[path = "runner_capped_halt_tests.rs"]
 mod tests_capped_halt;
 #[cfg(test)]
-#[path = "runner_node_output_tests.rs"]
-mod tests_node_output;
+#[path = "runner_checkpoint_cancel_tests.rs"]
+mod tests_checkpoint_cancel;
 #[cfg(test)]
 #[path = "runner_delivery_gate_tests.rs"]
 mod tests_delivery_gate;
 #[cfg(test)]
-#[path = "runner_node_kinds_tests.rs"]
-mod tests_node_kinds;
-#[cfg(test)]
-#[path = "runner_sub_workflow_tests.rs"]
-mod tests_sub_workflow;
-#[cfg(test)]
-#[path = "runner_cancel_delivery_tests.rs"]
-mod tests_cancel_delivery;
+#[path = "runner_dry_run_tests.rs"]
+mod tests_dry_run;
 #[cfg(test)]
 #[path = "runner_journal_tests.rs"]
 mod tests_journal;
 #[cfg(test)]
-#[path = "runner_checkpoint_cancel_tests.rs"]
-mod tests_checkpoint_cancel;
+#[path = "runner_node_kinds_tests.rs"]
+mod tests_node_kinds;
 #[cfg(test)]
-#[path = "runner_dry_run_tests.rs"]
-mod tests_dry_run;
+#[path = "runner_node_output_tests.rs"]
+mod tests_node_output;
+#[cfg(test)]
+#[path = "runner_reclassify_tests.rs"]
+mod tests_reclassify;
 #[cfg(test)]
 #[path = "runner_settle_tests.rs"]
 mod tests_settle;
+#[cfg(test)]
+#[path = "runner_sub_workflow_tests.rs"]
+mod tests_sub_workflow;
