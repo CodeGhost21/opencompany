@@ -8,6 +8,8 @@
 use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
 use super::*;
+use crate::ports::types::ContextChunk;
+use tinyinference::model::ModelRequest;
 
 /// Issue #416 — a confined turn reaches the company's memory neither on the
 /// way in nor on the way out.
