@@ -629,7 +629,7 @@ use crate::store::{FsCompanyStore, FsEventLog};
 /// The four trait objects the suite drives: fs company and event stores, paired
 /// with provider-backed memory and context. The two fs slots are the ports a
 /// memory engine does not implement — same arrangement the cortex backends use.
-type ConformanceStores = (
+pub(super) type ConformanceStores = (
     Arc<dyn CompanyStore>,
     Arc<dyn EventLog>,
     Arc<dyn crate::ports::MemoryStore>,
