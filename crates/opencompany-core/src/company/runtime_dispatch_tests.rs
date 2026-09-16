@@ -1,8 +1,8 @@
 //! Runtime tests: dispatch, quiescing refusal, and card/DM relay journaling.
 
-use std::sync::Arc;
-use crate::ports::tasks::TaskTitle;
 use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
+use crate::ports::tasks::TaskTitle;
+use std::sync::Arc;
 
 async fn runtime_and_record() -> (
     super::CompanyRuntime,
@@ -107,9 +107,7 @@ async fn workflow_wiring_keeps_the_static_capability_filter_without_a_plan() {
     runtime.set_workflow_harness_deps(wiring_deps(
         &runtime,
         None,
-        crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(
-            ["web"].into_iter().collect(),
-        ),
+        crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(["web"].into_iter().collect()),
         None,
     ));
     let namespaces = runtime
@@ -159,9 +157,7 @@ async fn workflow_wiring_names_why_each_namespace_is_unwired() {
     runtime.set_workflow_harness_deps(wiring_deps(
         &runtime,
         None,
-        crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(
-            ["web"].into_iter().collect(),
-        ),
+        crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(["web"].into_iter().collect()),
         None,
     ));
     let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
@@ -631,4 +627,3 @@ async fn a_dispatch_refused_by_a_quiescing_runtime_settles_its_attempt() {
     );
     assert!(abandoned.finished_at_millis.is_some());
 }
-
