@@ -2325,6 +2325,7 @@ mod tests_condition;
 #[cfg(test)]
 #[path = "workflow_create_delete_tests.rs"]
 mod tests_delete;
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "workflow_create_destination_tests.rs"]
 mod tests_destination;

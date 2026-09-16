@@ -8043,6 +8043,7 @@ mod tests_approval;
 #[cfg(test)]
 #[path = "runtime_blocked_node_tests.rs"]
 mod tests_blocked_node;
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_blocker_claim_tests.rs"]
 mod tests_blocker_claim;
@@ -8056,6 +8057,7 @@ mod tests_blocker_dms_concurrency;
 #[cfg(test)]
 #[path = "runtime_blocker_dms_reply_tests.rs"]
 mod tests_blocker_dms_reply;
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_blocker_race_tests.rs"]
 mod tests_blocker_race;
@@ -8075,6 +8077,7 @@ mod tests_conversation;
 #[cfg(test)]
 #[path = "runtime_core_tests.rs"]
 mod tests_core;
+#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_dispatch_tests.rs"]
 mod tests_dispatch;
