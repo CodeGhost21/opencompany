@@ -279,11 +279,11 @@ async fn answer(
         .expect("applies");
 }
 
+
 /// The acceptance headline: a workflow parked at a failed node and
 /// answered `retry` re-runs, and the answer is on the trigger input the
 /// re-run carries — not banked in the DM and dropped.
 #[tokio::test]
-
 async fn retry_re_runs_the_node_with_the_answer_in_the_trigger_input() {
     let home = seed_home();
     let (rt, runner) = runtime(home.path(), true).await;

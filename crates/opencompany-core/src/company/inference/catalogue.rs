@@ -1125,8 +1125,8 @@ pub mod copy {
 #[path = "catalogue_tests_basics.rs"]
 mod tests_basics;
 #[cfg(test)]
-#[path = "catalogue_tests_mirror.rs"]
-mod tests_mirror;
-#[cfg(test)]
 #[path = "catalogue_tests_endpoints.rs"]
 mod tests_endpoints;
+#[cfg(test)]
+#[path = "catalogue_tests_mirror.rs"]
+mod tests_mirror;
