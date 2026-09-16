@@ -169,6 +169,12 @@ reach = "desks"
 max_hops = 2
 returns = true
 peer_cap = 2
+# How long a question put to a PERSON may run. The default of 2 is one question
+# and one reply, which is what a crossing to a teammate did before it could run
+# as a conversation — and it showed: a live pair opened four separate two-row
+# exchanges rather than one that settled, the fourth ending "hey — i'm not
+# following what you're asking me here", with no way to ask back.
+pair_messages = 4
 
 # ---------------------------------------------------------------------------
 # Pending orders. Two seats, competing remedies.
@@ -221,6 +227,12 @@ reach = "desks"
 max_hops = 2
 returns = true
 peer_cap = 2
+# How long a question put to a PERSON may run. The default of 2 is one question
+# and one reply, which is what a crossing to a teammate did before it could run
+# as a conversation — and it showed: a live pair opened four separate two-row
+# exchanges rather than one that settled, the fourth ending "hey — i'm not
+# following what you're asking me here", with no way to ask back.
+pair_messages = 4
 
 # ---------------------------------------------------------------------------
 # Delivered orders. Same shape.
@@ -261,3 +273,9 @@ reach = "desks"
 max_hops = 2
 returns = true
 peer_cap = 2
+# How long a question put to a PERSON may run. The default of 2 is one question
+# and one reply, which is what a crossing to a teammate did before it could run
+# as a conversation — and it showed: a live pair opened four separate two-row
+# exchanges rather than one that settled, the fourth ending "hey — i'm not
+# following what you're asking me here", with no way to ask back.
+pair_messages = 4

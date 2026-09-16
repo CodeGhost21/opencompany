@@ -600,6 +600,57 @@ export function dispatchMarkerPlacement(
 }
 
 /**
+ * Folds a freshly-read transcript into the rows a thread already holds.
+ *
+ * ## Why this is not "append the ids we have not seen"
+ *
+ * That is what it was, and it assumed a re-read can only ADD rows. A referral
+ * breaks the assumption: its exchange folds onto the row that *asked*, which is
+ * a durable row the transcript already has. The refreshed copy carried the
+ * fold, the id filter dropped it as already-known, and the crossing stayed
+ * invisible until the thread was rebuilt from scratch — which is why a live
+ * crossing appeared only after a reload (CodeRabbit, #2341).
+ *
+ * The durable copy wins on conflict. It is what the host projected, and this
+ * whole round trip exists precisely because the live frames are the
+ * approximation.
+ *
+ * Returns `existing` **by reference** when nothing changed, so a caller holding
+ * React state can skip the update rather than re-rendering the thread on every
+ * re-read that found no news.
+ *
+ * That comparison is by VALUE, and it has to be: `fromHistory` parses a fresh
+ * object for every row on every round trip, so comparing identity would report
+ * each one as changed and make the skip dead code.
+ */
+export function reconcileTranscript(
+  existing: ChatMessage[],
+  hydrated: ChatMessage[],
+): ChatMessage[] {
+  const refreshed = new Map(hydrated.map((m) => [m.id, m]));
+  const known = new Set(existing.map((m) => m.id));
+  const fresh = hydrated.filter((m) => !known.has(m.id));
+  let changed = false;
+  const reconciled = existing.map((held) => {
+    const durable = refreshed.get(held.id);
+    if (!durable) {
+      // A live row for a turn still running is not in `chat/history` yet. It is
+      // this console's own, and a re-read must not delete it.
+      return held;
+    }
+    if (JSON.stringify(durable) === JSON.stringify(held)) {
+      return held;
+    }
+    changed = true;
+    return durable;
+  });
+  if (fresh.length === 0 && !changed) {
+    return existing;
+  }
+  return [...reconciled, ...fresh];
+}
+
+/**
  * Maps a desk's persisted transcript (`GET .../chat/history`, issue #65) to
  * the console's chat lines, preserving `mine`/author/text and ordering — the
  * backend already returns messages oldest-first. `id`s are namespaced with an

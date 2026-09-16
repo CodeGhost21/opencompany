@@ -282,6 +282,18 @@ pub struct EpisodePrompt<'a> {
     /// the fold `step` runs, so nothing here can move an option towards a
     /// decision on this desk.
     elsewhere: &'a [(String, Vec<SessionMessage>)],
+    /// Whether this episode can actually put a question to somebody.
+    ///
+    /// A referred room is stood up without a federation — that omission is the
+    /// recursion bound in `HiveDeskRunner::deliberate` — so `consider` never
+    /// runs for its lines and an `@handle` there dispatches nothing at all.
+    /// Telling those seats the handle is how they get an answer is telling them
+    /// to use a move that does not exist, which is the failure `peers()` is
+    /// careful to avoid for desks.
+    can_ask: bool,
+    /// Whether a crossing to a peer desk convenes that desk as a room, or asks
+    /// one seat on it ([`ReferralConfig::deliberates`]).
+    desks_deliberate: bool,
     /// Whether this is the SECOND pass of one member's turn, taken because the
     /// question it asked another desk has come back answered.
     ///
@@ -323,6 +335,8 @@ impl<'a> EpisodePrompt<'a> {
             unspoken: &[],
             peers: Vec::new(),
             elsewhere: &[],
+            can_ask: false,
+            desks_deliberate: true,
             continuing: false,
             trigger: None,
         }
@@ -350,6 +364,21 @@ impl<'a> EpisodePrompt<'a> {
     #[must_use]
     pub fn with_unspoken(mut self, unspoken: &'a [String]) -> Self {
         self.unspoken = unspoken;
+        self
+    }
+
+    /// Say that this episode can put a question to a named teammate.
+    ///
+    /// Off by default: an episode without a referral queue cannot, and a prompt
+    /// that promises the move anyway sends a seat to a dead end.
+    #[must_use]
+    pub fn desks_deliberate(mut self, deliberates: bool) -> Self {
+        self.desks_deliberate = deliberates;
+        self
+    }
+
+    pub fn able_to_ask(mut self, can_ask: bool) -> Self {
+        self.can_ask = can_ask;
         self
     }
 
@@ -587,9 +616,11 @@ impl<'a> EpisodePrompt<'a> {
 
     /// The other desks this seat may ask, or nothing when it may ask none.
     ///
-    /// One question per line, and only one seat's worth: the far desk answers
-    /// with a single turn by a single member, so this is a colleague to consult
-    /// and not a channel to broadcast into.
+    /// One question per line: a colleague to consult and not a channel to
+    /// broadcast into. Whether the far desk answers as a room or through a
+    /// single seat is [`ReferralConfig::deliberates`], and the text follows it
+    /// — the doc here said "a single turn by a single member" for both, which
+    /// stopped being true when #2332 made deliberation the default.
     fn peers(&self) -> String {
         if self.peers.is_empty() {
             return String::new();
@@ -603,8 +634,15 @@ impl<'a> EpisodePrompt<'a> {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // A desk that set `deliberates = false` answers with a single seat's
+        // turn, so promising a room would describe a mechanism this company
+        // turned off.
+        let answered = match self.desks_deliberate {
+            true => "That desk answers as a room and sends back what it settled on",
+            false => "One member of that desk answers and sends back what they said",
+        };
         format!(
-            "Other desks you may put ONE question to, by writing their handle in your line:\n             {listed}\n             Ask only for a fact this desk does not hold and cannot check for itself, and ask it              EARLY — a room that has already backed an answer has voted past whatever comes back.              Exactly one member of that desk answers, and their answer arrives as a message you              can read and cite; it is not a vote, and it supports nothing here until one of us              spends a line on it.\n\n",
+            "Other desks you may put ONE question to, by writing their handle in your line:\n             {listed}\n             Ask only for a fact this desk does not hold and cannot check for itself, and ask it              EARLY — a room that has already backed an answer has voted past whatever comes back.              {answered}, which arrives as a              message you can read and cite; it is not a vote, and it supports nothing here until              one of us spends a line on it.\n\n",
         )
     }
 
@@ -661,9 +699,43 @@ impl<'a> EpisodePrompt<'a> {
             room.push_str(&format!("This desk is for: {description}\n"));
         }
         if !teammates.is_empty() {
+            // **What an `@handle` does, and what dropping it costs.**
+            //
+            // Naming a teammate with `@` is not addressing the room about
+            // them: the fold reads it as a question put to that person, runs
+            // their turn at once, and holds the exchange in a line only the two
+            // of them read. A seat told merely to "address them by the ids
+            // above" writes `@amendments should handle it` while proposing to
+            // the desk — third-person prose — and silently opens a private
+            // exchange and spends one of the desk's questions.
+            //
+            // The first attempt at this said what the `@` COSTS and offered
+            // dropping it as the alternative, and that was worse than saying
+            // nothing: seats stopped using it for the case it exists for. A
+            // room asked "we still need the order details from amendments",
+            // without the `@`, then spent six turns waiting for an answer to a
+            // question nobody had been asked, and exhausted its budget. Two
+            // rooms did it in one episode.
+            //
+            // So the asymmetry has to be explicit in both directions: the `@`
+            // is how you get an answer, and leaving it off means NOBODY is
+            // asked. The cost is worth naming, but second.
             room.push_str(&format!(
-                "In the room with you: {}. Address them by the ids above.\n",
-                teammates.join(", "),
+                "In the room with you: {}.\n",
+                teammates.join(", ")
+            ));
+        }
+        if !teammates.is_empty() && self.can_ask {
+            room.push_str(&format!(
+                "{}To get an ANSWER from one of them, write their @handle: that puts your question \
+                 to them, they answer at once, and their answer comes back to you. Use it whenever \
+                 you need something only that person can tell you — it is the only way to ask \
+                 them. It is a private line: the rest of the room does not read it, and it spends \
+                 one of this desk's questions, so ask for what you actually need.\n\
+                 Writing a teammate's name WITHOUT the `@` asks nobody and reaches nobody — it is \
+                 just words to the room, for saying whose work something is. Never write a \
+                 question that way and wait for a reply; none is coming.\n",
+                "",
             ));
         }
         room.push_str(&format!("The operator asked the desk:\n{}\n", self.task));
