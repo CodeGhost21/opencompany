@@ -3906,17 +3906,20 @@ impl HarnessPool {
                 });
             }
         };
+        // Drop the read guard before the vacant branch below takes the write
+        // lock; retaining it across that branch deadlocks the first
+        // company-only resolution.
+        let cached_company_backend = if deps.search.is_none() && company_key.is_some() {
+            let backends = self.managed_search_backends.read().await;
+            backends.get(&company.id).cloned()
+        } else {
+            None
+        };
         let backend = match (&deps.search, company_key) {
             (Some(backend), Some(_)) => backend.clone(),
             (Some(backend), None) if backend.credential.configured() => backend.clone(),
             (Some(_), None) => return None,
-            (None, Some(_)) => match {
-                // Drop the read guard before the vacant branch takes the write
-                // lock; keeping the temporary guard alive across the match
-                // would deadlock the first company-only resolution.
-                let backends = self.managed_search_backends.read().await;
-                backends.get(&company.id).cloned()
-            } {
+            (None, Some(_)) => match cached_company_backend {
                 Some(backend) => backend,
                 None => {
                     use crate::app::config::ProcessEnv;
