@@ -321,6 +321,7 @@ impl SpeechContext {
         // the model, or by whoever reads the result) can address only the
         // ones that still need it.
         let mut failed_for: Vec<(String, String)> = Vec::new();
+        let mut first_committed: Option<(String, String, EventSeq)> = None;
         for peer in &peers {
             // Codex P1: a desk whose id happens to equal this recipient's
             // agent id also "owns" a row journaled under the bare id
@@ -332,11 +333,14 @@ impl SpeechContext {
             // row is journaled somewhere only that desk's own id would match,
             // which is far less likely to collide.
             let key = dm_journal_key(record, peer);
-            let result = self.say(key, text.clone(), Vec::new()).await;
-            if result.is_error {
-                failed_for.push((peer.clone(), tool_result_text(&result)));
-                continue;
-            }
+            let seq = match self.append(key.clone(), text.clone(), Vec::new()).await {
+                Ok(seq) => seq,
+                Err(error) => {
+                    failed_for.push((peer.clone(), error));
+                    continue;
+                }
+            };
+            first_committed.get_or_insert((peer.clone(), key, seq));
             // A DM is a hop from one openhuman session to another, and
             // this is the only place both ends are known at once. Both
             // teammates hold a live openhuman session named
@@ -362,6 +366,9 @@ impl SpeechContext {
                 "[speech] dm left in the recipient's session"
             );
             left_for.push(format!("@{peer}"));
+        }
+        if let Some((peer, chat_id, trigger)) = first_committed {
+            self.stage_recipient_turn(record, &peer, chat_id, trigger, &text);
         }
         if !failed_for.is_empty() {
             let failures = failed_for
@@ -398,6 +405,21 @@ impl SpeechContext {
                     .to_string(),
             );
         }
+        match self.append(chat_id, text, audience).await {
+            Ok(seq) => {
+                crate::runtime::delegation::mark_turn_spoke();
+                ToolResult::success(format!("Said. Journaled at [{seq}]."))
+            }
+            Err(error) => ToolResult::error(error),
+        }
+    }
+
+    async fn append(
+        &self,
+        chat_id: String,
+        text: String,
+        audience: Vec<String>,
+    ) -> Result<EventSeq, String> {
         let event = CompanyEvent::AgentReply {
             chat_id,
             agent_id: self.agent_id.clone(),
@@ -416,16 +438,78 @@ impl SpeechContext {
             mention_depth: 0,
             audience,
         };
-        match self.events.append(&self.company, event).await {
-            Ok(seq) => {
-                // The turn has now been heard. What it returns from here is
-                // private thinking, and the return-text fallback must not
-                // journal it a second time — see `delegation::TURN_SPOKE`.
-                crate::runtime::delegation::mark_turn_spoke();
-                ToolResult::success(format!("Said. Journaled at [{seq}]."))
-            }
-            Err(error) => ToolResult::error(format!("The message could not be journaled: {error}")),
-        }
+        self.events
+            .append(&self.company, event)
+            .await
+            .map_err(|error| format!("The message could not be journaled: {error}"))
+    }
+
+    fn stage_recipient_turn(
+        &self,
+        record: &crate::ports::types::CompanyRecord,
+        peer: &str,
+        chat_id: String,
+        trigger: EventSeq,
+        text: &str,
+    ) {
+        let Some(queue) = self.dispatch.as_ref() else {
+            return;
+        };
+        let members = crate::runtime::hivemind::roster_members(record);
+        let people = Vec::new();
+        let retired = Vec::new();
+        let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
+        let input = tinyhivemind_core::dispatch::MentionDispatchInput {
+            key: tinyhivemind_core::dispatch::DispatchKey {
+                trigger_sequence: trigger.value(),
+            },
+            conversation: tinyhivemind_core::dispatch::DispatchConversation {
+                desk_id: chat_id,
+                thread_root: None,
+            },
+            author_id: self.agent_id.clone(),
+            content: text.to_string(),
+            mentions: vec![tinyhivemind_core::mention::Mention {
+                target: tinyhivemind_core::mention::MentionTarget::Agent {
+                    id: peer.to_string(),
+                },
+                text: format!("@{peer}"),
+                offset: 0,
+                quiet: false,
+            }],
+            hop: u32::try_from(queue.scope_depth()).unwrap_or(u32::MAX),
+        };
+        let max_hops = u32::from(
+            record
+                .manifest
+                .tools
+                .max_delegation_depth
+                .unwrap_or(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
+        );
+        let Ok(tinyhivemind_core::dispatch::MentionDispatchDecision::One { request }) =
+            tinyhivemind_core::dispatch::mention_dispatch(
+                tinyhivemind_core::dispatch::MentionDispatchPolicy {
+                    enabled: true,
+                    max_hops,
+                },
+                &input,
+                &roster,
+            )
+        else {
+            return;
+        };
+        let _ = queue.push_within_cap(
+            crate::harness::orchestrator::Delegation::ConversationDispatch {
+                source: request.source_id,
+                target: request.target_id,
+                message: request.content,
+                chat_id: request.conversation.desk_id,
+                trigger_sequence: request.key.trigger_sequence,
+                child_hop: request.child_hop,
+            },
+            crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN,
+            usize::try_from(max_hops).unwrap_or(usize::MAX),
+        );
     }
 }
 
