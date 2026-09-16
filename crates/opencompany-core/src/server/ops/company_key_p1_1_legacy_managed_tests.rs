@@ -443,7 +443,7 @@ pub(super) async fn state_with_hub(home: &std::path::Path, company: &str) -> App
 }
 
 /// Pulls `state=` out of the authorize URL the console is told to navigate to.
-fn state_param(authorize_url: &str) -> String {
+pub(super) fn state_param(authorize_url: &str) -> String {
     let (_, after) = authorize_url
         .split_once("state%3D")
         .expect("state in callback");

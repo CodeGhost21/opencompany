@@ -82,15 +82,6 @@ async fn a_provider_not_in_use_needs_no_confirmation() {
     assert!(resp.get("usedBy").is_none(), "{resp}");
 }
 
-/// The slug the status reports as the default, if any.
-fn default_slug(dto: &Value) -> Option<String> {
-    dto["providers"]
-        .as_array()?
-        .iter()
-        .find(|p| p["isDefault"] == true)
-        .and_then(|p| p["slug"].as_str())
-        .map(str::to_string)
-}
 
 #[tokio::test]
 async fn a_route_naming_a_provider_nobody_holds_is_refused() {
