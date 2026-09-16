@@ -5,6 +5,13 @@ a concrete sequencing pointer to it, not to re-litigate #2342's plan — its
 own issue body is the source of truth for exact acceptance criteria. What's
 here is the subset that gates slice 4a.
 
+Note on [implementation-plan.md](implementation-plan.md)'s "no new keys"
+rule: `search/managed/key` is the one deliberate, already-reasoned exception
+— it closes a real gap (Search has no company-level tier at all today, unlike
+Composio/Provider) rather than duplicating something that exists. It is not
+a case of skipping the reuse-first check; it's #2342's approved conclusion
+after that check.
+
 ## Architecture Impact
 
 `company_key/types.rs`'s `Slot` enum (`Composio, Inference, Provider,

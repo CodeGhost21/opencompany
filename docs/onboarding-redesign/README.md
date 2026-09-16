@@ -124,6 +124,14 @@ beyond `search/managed/key`.
 
 ## Rules for the implementer
 
+- **Find the existing function before writing anything new.** Search for a
+  handler, component, hook, or endpoint that already does it before adding
+  code — on every step, not just once at the start. See
+  [implementation-plan.md](implementation-plan.md)'s "Standing rules."
+- **No new secret or config keys.** Reuse `tinyhumans/key`,
+  `provider/tinyhumans/key`, `composio/managed/key`, and #2342's search
+  equivalent as-is. A task that seems to need a new key needs a different
+  approach, not a new key.
 - Rust: `cargo fmt --all -- --check` locally; clippy/tests on CI, verified by
   head SHA, zero failures **and** zero pending.
 - Frontend: three typecheck gates (`typecheck`, `typecheck:unit`,

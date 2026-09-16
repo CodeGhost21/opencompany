@@ -12,6 +12,30 @@ post-#2338, same as the rest of this folder. Re-verified against the live
 tree during this planning pass — the corrections below are what had actually
 drifted or was missing from the earlier docs.
 
+## Standing rules — every task, no exceptions
+
+These two apply to every task file below, on every step of every task. They
+are not a preference — treat a violation of either as a sign the task isn't
+understood yet, not a shortcut to take.
+
+1. **Find the existing function before writing anything new.** Before
+   implementing any piece of this plan — a handler, a component, a hook, an
+   endpoint, a validation, anything — search the codebase for something that
+   already does it. Only write new code once you've confirmed nothing does.
+   This is the whole premise of [reuse-mapping.md](reuse-mapping.md) and the
+   "Corrections" table below: this plan already found real prior art
+   (`ReuseAccountKeyBanner.tsx`, the two same-named dialog pairs, etc.) that a
+   surface-level look would have missed or duplicated. Assume more exists that
+   this plan hasn't found yet, and look before each step, not just once at the
+   start.
+2. **No new secret or config keys.** Every credential this plan touches has an
+   existing name and an existing storage location: `tinyhumans/key`,
+   `provider/tinyhumans/key`, `composio/managed/key`, and (once #2342 lands)
+   its search equivalent. Reuse those exact keys. If a task seems to need a
+   new one, that is a stop-and-reconsider signal, not something to add —
+   revisit the task's approach, or raise it as an open question, before
+   introducing a new key.
+
 ## Corrections found during this planning pass
 
 | What the docs said | What's actually true | Where |
@@ -41,8 +65,9 @@ ship in parallel branches if more than one implementer picks this up. 4a
 cannot fully close until 2a/2b land (issue #2342), but can start and land its
 non-search parts first — see that file's own staging note.
 
-## Standing rules
+## Process rules
 
 Verification standard, credential handling, and the merge gate are not
 repeated per-file — see [README.md](README.md)'s "Rules for the implementer."
-Every task file below assumes them.
+Every task file below assumes them, on top of the two rules at the top of
+this file (reuse-first, no new keys).
