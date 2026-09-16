@@ -8077,7 +8077,6 @@ mod tests_conversation;
 #[cfg(test)]
 #[path = "runtime_core_tests.rs"]
 mod tests_core;
-#[cfg(feature = "openhuman")]
 #[cfg(test)]
 #[path = "runtime_dispatch_tests.rs"]
 mod tests_dispatch;
