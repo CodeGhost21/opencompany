@@ -17,20 +17,20 @@ pub(super) struct RefusingJournalStore {
 
 #[cfg(feature = "openhuman")]
 impl RefusingJournalStore {
-    fn arm(&self) {
+    pub(super) fn arm(&self) {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Lets appends land again — the volume coming back after a transient
     /// failure.
-    fn disarm(&self) {
+    pub(super) fn disarm(&self) {
         self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Once armed, lets the next `n` appends land before refusing —
     /// so the failure can be aimed at a later write in the same request
     /// rather than the very first one.
-    fn allow_next(&self, n: usize) {
+    pub(super) fn allow_next(&self, n: usize) {
         self.allow_before_failing
             .store(n, std::sync::atomic::Ordering::SeqCst);
     }
@@ -93,7 +93,7 @@ pub(super) struct RacingJournalStore {
 #[cfg(feature = "openhuman")]
 impl RacingJournalStore {
     /// Runs `run` once, inside the next append.
-    fn interleave_next(&self, run: impl FnOnce() + Send + 'static) {
+    pub(super) fn interleave_next(&self, run: impl FnOnce() + Send + 'static) {
         *self.interleave.lock().expect("interleave poisoned") = Some(Box::new(run));
     }
 }
@@ -326,7 +326,7 @@ use async_trait::async_trait;
 #[cfg(feature = "openhuman")]
 #[derive(Default)]
 pub(super) struct RecordingMeter {
-    queried_companies: Mutex<Vec<crate::ports::types::CompanyId>>,
+    pub(super) queried_companies: Mutex<Vec<crate::ports::types::CompanyId>>,
 }
 
 #[cfg(feature = "openhuman")]
