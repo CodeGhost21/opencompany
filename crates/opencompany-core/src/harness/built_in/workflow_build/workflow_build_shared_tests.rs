@@ -27,7 +27,7 @@ use super::workflow_build_fixtures_tests::*;
 /// exactly `["engineering"]` (issue #1191). The default fixture declares no
 /// desk, which makes the set empty — enough to prove the "nowhere to deliver"
 /// fallback, useless for telling an accepted channel target from a refused one.
-const DESK_MANIFEST: &str = r#"
+pub(crate) const DESK_MANIFEST: &str = r#"
 [company]
 name = "Acme"
 
@@ -49,7 +49,7 @@ allow = ["docs", "web"]
 "#;
 
 /// [`runtime_with`], on a company that has a desk to deliver to.
-async fn runtime_with_desk(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+pub(crate) async fn runtime_with_desk(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
     let home = tempfile::Builder::new()
         .prefix("opencompany-builder-desk-")
         .tempdir()
@@ -71,7 +71,7 @@ async fn runtime_with_desk(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc
     (home, Arc::new(runtime))
 }
 
-async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+pub(crate) async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
     let home = tempfile::Builder::new()
         .prefix("opencompany-builder-")
         .tempdir()
@@ -90,7 +90,7 @@ async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<Comp
 /// [`HarnessDeps`](crate::harness::HarnessDeps) the agent is built from, over the
 /// same native `model`. An optional recording meter becomes `runtime.usage()`, so
 /// a test can read back what the turn metered.
-async fn runtime_with_agent(
+pub(crate) async fn runtime_with_agent(
     model: Arc<NativeCopilotModel>,
     meter: Option<Arc<RecordingUsageMeter>>,
 ) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
@@ -114,7 +114,7 @@ async fn runtime_with_agent(
 }
 
 /// A `workflow`-deliverable card sitting In Progress, with an optional plan.
-fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
+pub(crate) fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
         title: TaskTitle::authored("Automate the weekly digest"),
@@ -137,7 +137,7 @@ fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
     }
 }
 
-async fn read(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
+pub(crate) async fn read(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
     runtime
         .tasks()
         .list(runtime.id())
@@ -150,7 +150,7 @@ async fn read(runtime: &Arc<CompanyRuntime>, id: &str) -> TaskRecord {
 
 /// Mints the attempt row the dispatch edge would, so the test can read its
 /// settle status back.
-async fn open_run(runtime: &Arc<CompanyRuntime>, task_id: &str) -> String {
+pub(crate) async fn open_run(runtime: &Arc<CompanyRuntime>, task_id: &str) -> String {
     runtime
         .runs()
         .create_run(
@@ -162,7 +162,7 @@ async fn open_run(runtime: &Arc<CompanyRuntime>, task_id: &str) -> String {
         .id
 }
 
-async fn run_status(runtime: &Arc<CompanyRuntime>, run_id: &str) -> RunStatus {
+pub(crate) async fn run_status(runtime: &Arc<CompanyRuntime>, run_id: &str) -> RunStatus {
     runtime
         .runs()
         .get_run(runtime.id(), run_id)
@@ -173,7 +173,7 @@ async fn run_status(runtime: &Arc<CompanyRuntime>, run_id: &str) -> RunStatus {
 }
 
 /// authority has something to dedup an id and name against.
-async fn seed_workflow(runtime: &Arc<CompanyRuntime>, id: &str, name: &str) {
+pub(crate) async fn seed_workflow(runtime: &Arc<CompanyRuntime>, id: &str, name: &str) {
     let spec: WorkflowGraphSpec = serde_json::from_value(serde_json::json!({
         "id": id,
         "name": name,
