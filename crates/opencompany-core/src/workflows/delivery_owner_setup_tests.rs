@@ -154,32 +154,32 @@ impl MailSender for RefusingMailSender {
 /// The offline delivery bundle: a recording mail sender (or none), tempdir
 /// inbox + user stores, and the built-in operator channel.
 pub(super) struct Harness {
-    deps: WorkflowDeliveryDeps,
-    mail: RecordingMailSender,
-    channel: OperatorChannel,
+    pub(super) deps: WorkflowDeliveryDeps,
+    pub(super) mail: RecordingMailSender,
+    pub(super) channel: OperatorChannel,
     /// A durable-looking channel, present only when
     /// [`with_recording_channel`](Harness::with_recording_channel) wired
     /// one. Needed by any case whose subject is what happens AFTER a send
     /// succeeds: `operator` is refused before the send, so it can no longer
     /// stand in for a channel that works.
-    recording: Option<crate::runtime::channel::RecordingChannel>,
-    inbox: Arc<FsInboxStore>,
-    users: Arc<FsOps>,
-    company: CompanyId,
+    pub(super) recording: Option<crate::runtime::channel::RecordingChannel>,
+    pub(super) inbox: Arc<FsInboxStore>,
+    pub(super) users: Arc<FsOps>,
+    pub(super) company: CompanyId,
     /// The approvals queue, when [`with_parking`](Harness::with_parking)
     /// wired one. The real gate and a real on-disk journal, not fakes: the
     /// point of these tests is that a workflow's park lands in the same
     /// queue an agent's does.
-    gate: Option<Arc<ManifestApprovalGate>>,
-    journal: Option<Arc<RuntimeJournal>>,
+    pub(super) gate: Option<Arc<ManifestApprovalGate>>,
+    pub(super) journal: Option<Arc<RuntimeJournal>>,
     /// The real on-disk event journal the write-behind delivery record
     /// (issue #529) lands in — held so a test can read back the
     /// [`CompanyEvent::WorkflowReportDelivered`] lines a dispatch appended.
-    events: Arc<dyn EventLog>,
+    pub(super) events: Arc<dyn EventLog>,
 }
 
 impl Harness {
-    fn new(dir: &std::path::Path, with_mail: bool, with_channel: bool) -> Self {
+    pub(super) fn new(dir: &std::path::Path, with_mail: bool, with_channel: bool) -> Self {
         let mail = RecordingMailSender::new();
         let inbox = Arc::new(FsInboxStore::new(dir));
         let users = Arc::new(FsOps::new(dir));
@@ -231,7 +231,7 @@ impl Harness {
 
     /// Sets the deployment's standing bootstrap-admin address (M8), the same
     /// value the production builder threads from `AppConfig::bootstrap_admin`.
-    fn with_bootstrap_admin(mut self, email: &str) -> Self {
+    pub(super) fn with_bootstrap_admin(mut self, email: &str) -> Self {
         self.deps.bootstrap_admin = Some(email.to_string());
         self
     }
@@ -239,7 +239,7 @@ impl Harness {
     /// Sets the company record's manifest so a test can name `[users] admins`
     /// standing invites. Rebuilt from TOML rather than mutated field-by-field
     /// so the parse mirrors a real manifest load.
-    fn manifest_with_admins(admins: &[&str]) -> crate::company::CompanyManifest {
+    pub(super) fn manifest_with_admins(admins: &[&str]) -> crate::company::CompanyManifest {
         let list = admins
             .iter()
             .map(|a| format!("\"{a}\""))
@@ -268,7 +268,7 @@ admins = [{list}]
     /// it is the mode under which `evaluate` would return `Allow` for a
     /// `Send` effect, so a test that parks under `full` is the one that
     /// proves delivery does not route through `evaluate`.
-    fn with_parking(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
+    pub(super) fn with_parking(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
         let policy =
             toml::from_str(&format!("mode = \"{policy_mode}\"\n")).expect("valid [policy] block");
         let gate = Arc::new(ManifestApprovalGate::new(policy));
@@ -297,7 +297,7 @@ admins = [{list}]
     /// `OpenOptions::open` returns `EISDIR`. Deterministic, cross-platform,
     /// and it fails at the real I/O boundary rather than at a mock, so the
     /// test exercises the same error path a full disk would.
-    fn with_failing_journal(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
+    pub(super) fn with_failing_journal(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
         let policy =
             toml::from_str(&format!("mode = \"{policy_mode}\"\n")).expect("valid [policy] block");
         let gate = Arc::new(ManifestApprovalGate::new(policy));
@@ -321,7 +321,7 @@ admins = [{list}]
     }
 
     /// Adds an active admin with `email` to the company directory.
-    async fn add_admin(&self, id: &str, email: &str) {
+    pub(super) async fn add_admin(&self, id: &str, email: &str) {
         self.users
             .upsert_user(
                 &self.company,
@@ -345,7 +345,7 @@ admins = [{list}]
 
     /// Files an INBOUND email from `from`, which is what makes that address
     /// an established thread.
-    async fn receive_from(&self, from: &str) {
+    pub(super) async fn receive_from(&self, from: &str) {
         self.inbox
             .append(
                 &self.company,
@@ -366,7 +366,7 @@ admins = [{list}]
     }
 
     /// Every message in the company's own inbox.
-    async fn inbox_messages(&self) -> Vec<EmailRecord> {
+    pub(super) async fn inbox_messages(&self) -> Vec<EmailRecord> {
         self.inbox
             .messages(&self.company, &local_part(COMPANY_ADDRESS), 100, 0)
             .await
@@ -375,7 +375,7 @@ admins = [{list}]
 
     /// Every `WorkflowReportDelivered` the write-behind path journaled
     /// (issue #529) — what a re-run's fold would later read back.
-    async fn journaled_deliveries(&self) -> Vec<CompanyEvent> {
+    pub(super) async fn journaled_deliveries(&self) -> Vec<CompanyEvent> {
         self.events
             .read_from(
                 &self.company,
@@ -395,7 +395,7 @@ admins = [{list}]
     /// dedicated `operator` line the standing Operator channel renders. This
     /// is what proves the owner/no-mailbox fallback is a real, readable
     /// delivery rather than a discard on the in-memory buffer.
-    async fn operator_reports(&self) -> Vec<String> {
+    pub(super) async fn operator_reports(&self) -> Vec<String> {
         self.events
             .read_from(
                 &self.company,
