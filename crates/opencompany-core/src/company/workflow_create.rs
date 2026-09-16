@@ -2314,5 +2314,32 @@ fn is_safe_workflow_id(wid: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "workflow_create_raw_tests.rs"]
-mod tests;
+#[path = "workflow_create_test_support.rs"]
+mod test_support;
+#[cfg(test)]
+#[path = "workflow_create_happy_guardrail_tests.rs"]
+mod tests_happy_guardrail;
+#[cfg(test)]
+#[path = "workflow_create_schedule_update_tests.rs"]
+mod tests_schedule_update;
+#[cfg(test)]
+#[path = "workflow_create_delete_tests.rs"]
+mod tests_delete;
+#[cfg(test)]
+#[path = "workflow_create_tool_call_tests.rs"]
+mod tests_tool_call;
+#[cfg(test)]
+#[path = "workflow_create_destination_tests.rs"]
+mod tests_destination;
+#[cfg(test)]
+#[path = "workflow_create_condition_tests.rs"]
+mod tests_condition;
+#[cfg(test)]
+#[path = "workflow_create_arming_tests.rs"]
+mod tests_arming;
+#[cfg(test)]
+#[path = "workflow_create_revision_tests.rs"]
+mod tests_revision;
+#[cfg(test)]
+#[path = "workflow_create_problems_tests.rs"]
+mod tests_problems;
