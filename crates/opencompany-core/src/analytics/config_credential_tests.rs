@@ -405,3 +405,4 @@ fn a_blank_switch_is_treated_as_absent() {
         .reports(),
         "a blank switch must not read as unreadable"
     );
+}
