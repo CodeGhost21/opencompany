@@ -458,6 +458,52 @@ async fn an_existing_row_migrates_to_a_changed_proxy_base_url() {
     );
 }
 
+/// A failed row migration must not read as a clean `Kept(RowExists)` — the
+/// account/inference keys are already rotated and the health probe already
+/// checked the *new* endpoint by this point, so reporting success here would
+/// tell the operator the migration landed while the stored row keeps routing
+/// every turn to the old one, with nothing on the response or in the journal
+/// saying otherwise (Codex P1 / CodeRabbit review).
+#[tokio::test]
+async fn a_failed_row_migration_reports_failed_not_kept() {
+    let cid = company("migrate-row-fails");
+    let inner = MemSecrets::default();
+    raw_set(&inner, &cid, ACCOUNT_KEY_KEY, OLD).await;
+    seed_row(&inner, &cid, MODEL).await;
+    let secrets = FailsWriting {
+        inner,
+        failing_key: inference_store::PROVIDER_INDEX_KEY.to_string(),
+    };
+
+    let prober = FakeProber::ok(&[MODEL]);
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: FanOutKey::Explicit(NEW),
+            model: None,
+            confirm_in_use: true,
+            proxy_base_url: Some("https://staging-api.tinyhumans.ai"),
+        },
+        &prober,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Failed);
+    // The row itself really is unchanged — the write failed, not merely the
+    // report of it.
+    let providers = inference_store::list_providers(&cid, &secrets.inner)
+        .await
+        .unwrap();
+    assert_eq!(
+        providers[0].base_url,
+        catalogue::cloud_provider(inference::MANAGED_SLUG)
+            .unwrap()
+            .endpoint
+    );
+}
+
 #[tokio::test]
 async fn matrix_m3() {
     let cid = company("m3");
