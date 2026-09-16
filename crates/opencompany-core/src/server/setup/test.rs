@@ -1670,6 +1670,7 @@ async fn local_model_probe_normalizes_the_address_and_detects_its_model() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -1741,6 +1742,7 @@ async fn managed_probe_reads_the_paged_catalog_and_sends_its_model() {
             ..Default::default()
         },
         &env,
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -1796,6 +1798,7 @@ async fn cloud_provider_probe_discovers_a_model_before_chat() {
             base_url: Some(format!("http://{address}/v1")),
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -1860,6 +1863,7 @@ async fn probe_prioritises_a_chat_model_after_five_non_chat_entries() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -1910,6 +1914,7 @@ async fn probe_bounds_model_specific_catalog_rejections() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -1949,6 +1954,7 @@ async fn an_empty_catalog_has_its_own_failure_and_never_sends_chat() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
@@ -2095,6 +2101,7 @@ async fn setup_probe_refuses_a_credentialed_endpoint_before_sending_anything() {
             ..Default::default()
         },
         &MapEnv::default(),
+        crate::app::config::DEFAULT_API_URL,
     )
     .await;
     server.abort();
