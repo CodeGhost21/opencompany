@@ -814,7 +814,7 @@ pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]
 }
 
 /// Every desk `member` sits on, in [`desk_ids`] order.
-fn desks_of_member(record: &CompanyRecord, member: &str) -> Vec<String> {
+pub(crate) fn desks_of_member(record: &CompanyRecord, member: &str) -> Vec<String> {
     desk_ids(record)
         .into_iter()
         .filter(|id| {
