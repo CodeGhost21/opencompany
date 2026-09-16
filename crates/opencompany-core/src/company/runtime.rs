@@ -247,7 +247,7 @@ pub struct CompanyRuntime {
     /// (issue #1059). Latched so a board with many cards says it once.
     pub(crate) inert_board_reported: std::sync::atomic::AtomicBool,
     /// The platform managed default — see [`Self::platform_default`].
-    pub(crate) platform_default: Option<inference::EnvDefault>,
+    pub(crate) platform_default: Option<crate::company::inference::EnvDefault>,
     pub(crate) id: CompanyId,
     pub(crate) brain: Arc<dyn Brain>,
     pub(crate) store: Arc<dyn CompanyStore>,
@@ -1018,12 +1018,12 @@ impl CompanyRuntime {
     /// harness brain — so a console read and a turn cannot disagree about
     /// which platform "Managed" means. `None` only for a runtime assembled by
     /// hand around [`CompanyRuntime::new`]; every builder-made runtime has one.
-    pub fn platform_default(&self) -> Option<&inference::EnvDefault> {
+    pub fn platform_default(&self) -> Option<&crate::company::inference::EnvDefault> {
         self.platform_default.as_ref()
     }
 
     /// See [`platform_default`](Self::platform_default).
-    pub fn set_platform_default(&mut self, default: inference::EnvDefault) {
+    pub fn set_platform_default(&mut self, default: crate::company::inference::EnvDefault) {
         self.platform_default = Some(default);
     }
 
