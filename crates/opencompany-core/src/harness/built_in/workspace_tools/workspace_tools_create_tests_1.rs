@@ -1,6 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
 
 // -- workspace_create (issue #551) ---------------------------------------
 
@@ -178,13 +178,10 @@ async fn create_inside_existing_own_home_adopts_without_duplication() {
     crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
         .await
         .unwrap();
-    let home = crate::company::workspace_scaffold::ensure_agent_folder(
-        store.as_ref(),
-        &id,
-        TEST_AGENT,
-    )
-    .await
-    .unwrap();
+    let home =
+        crate::company::workspace_scaffold::ensure_agent_folder(store.as_ref(), &id, TEST_AGENT)
+            .await
+            .unwrap();
     let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
 
     let out = tool

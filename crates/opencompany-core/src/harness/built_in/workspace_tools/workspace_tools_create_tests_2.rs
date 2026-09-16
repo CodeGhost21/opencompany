@@ -1,7 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
-
 
 /// Issue #1801, Fix B: a folder create that slips past the up-front
 /// duplicate check because the folder appeared *after* the snapshot was
@@ -345,4 +344,3 @@ async fn a_write_restamps_the_writer_and_preserves_the_creator() {
     );
     assert_eq!(after.updated_by, agent_origin());
 }
-

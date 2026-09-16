@@ -1,6 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
 
 // -- issue #552: an overwrite of a published note reaches its chain ------
 
@@ -406,4 +406,3 @@ fn the_brief_steers_toward_the_agents_own_folder() {
         "the brief still tells agents they cannot tidy their own folder: {brief}"
     );
 }
-

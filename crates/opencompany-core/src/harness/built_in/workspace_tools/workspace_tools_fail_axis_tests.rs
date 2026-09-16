@@ -1,6 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
 
 // -- FAIL-axis: caps, races and the fence ------------------------------
 
@@ -360,12 +360,8 @@ async fn two_writers_at_the_same_revision_cannot_both_be_told_they_succeeded() {
     let b = WorkspaceWriteTool::new(ws(gated, company.clone()));
 
     let (ra, rb) = tokio::join!(
-        a.execute(
-            json!({"path": "notes.md", "content": "A's edit", "expected_updated_at": rev})
-        ),
-        b.execute(
-            json!({"path": "notes.md", "content": "B's edit", "expected_updated_at": rev})
-        ),
+        a.execute(json!({"path": "notes.md", "content": "A's edit", "expected_updated_at": rev})),
+        b.execute(json!({"path": "notes.md", "content": "B's edit", "expected_updated_at": rev})),
     );
     let (ra, rb) = (ra.unwrap(), rb.unwrap());
 

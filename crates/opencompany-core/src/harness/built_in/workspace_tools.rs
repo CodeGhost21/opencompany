@@ -2521,8 +2521,23 @@ pub(crate) async fn mutation_is_owned_by_agent(
 #[path = "workspace_tools/workspace_tools_fixtures_tests.rs"]
 mod tests;
 #[cfg(test)]
+#[path = "workspace_tools/workspace_tools_binary_tests.rs"]
+mod tests_binary;
+#[cfg(test)]
+#[path = "workspace_tools/workspace_tools_create_tests_1.rs"]
+mod tests_create_1;
+#[cfg(test)]
+#[path = "workspace_tools/workspace_tools_create_tests_2.rs"]
+mod tests_create_2;
+#[cfg(test)]
+#[path = "workspace_tools/workspace_tools_fail_axis_tests.rs"]
+mod tests_fail_axis;
+#[cfg(test)]
 #[path = "workspace_tools/workspace_tools_path_tests.rs"]
 mod tests_path;
+#[cfg(test)]
+#[path = "workspace_tools/workspace_tools_publish_scope_tests.rs"]
+mod tests_publish_scope;
 #[cfg(test)]
 #[path = "workspace_tools/workspace_tools_read_failure_tests.rs"]
 mod tests_read_failure;
@@ -2532,18 +2547,3 @@ mod tests_search;
 #[cfg(test)]
 #[path = "workspace_tools/workspace_tools_write_tests.rs"]
 mod tests_write;
-#[cfg(test)]
-#[path = "workspace_tools/workspace_tools_create_tests_1.rs"]
-mod tests_create_1;
-#[cfg(test)]
-#[path = "workspace_tools/workspace_tools_create_tests_2.rs"]
-mod tests_create_2;
-#[cfg(test)]
-#[path = "workspace_tools/workspace_tools_publish_scope_tests.rs"]
-mod tests_publish_scope;
-#[cfg(test)]
-#[path = "workspace_tools/workspace_tools_binary_tests.rs"]
-mod tests_binary;
-#[cfg(test)]
-#[path = "workspace_tools/workspace_tools_fail_axis_tests.rs"]
-mod tests_fail_axis;

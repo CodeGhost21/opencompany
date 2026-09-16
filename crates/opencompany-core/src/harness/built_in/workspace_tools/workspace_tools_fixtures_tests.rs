@@ -1,7 +1,6 @@
 use super::*;
 use crate::store::FsOps;
 
-
 // -- helpers ------------------------------------------------------------
 
 /// The agent every test writes as, so an authorship assertion has a name to
@@ -77,4 +76,3 @@ async fn seeded(company: &str) -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
 pub(super) fn text(result: &ToolResult) -> String {
     result.output()
 }
-

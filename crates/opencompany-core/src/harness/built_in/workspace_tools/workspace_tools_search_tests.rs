@@ -1,6 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
 
 // -- workspace_search (issue #607) ---------------------------------------
 
@@ -316,4 +316,3 @@ async fn search_defaults_its_limit_and_reports_the_true_total() {
     );
     assert_eq!(out.matches("\tid=").count(), DEFAULT_SEARCH_LIMIT);
 }
-

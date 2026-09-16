@@ -1,6 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
 
 // -- read behaviour -----------------------------------------------------
 
@@ -341,8 +341,8 @@ async fn no_workspace_failure_carries_a_host_path() {
 fn assert_own_sentence(outcome: &ToolResult, needle: &str) {
     assert!(outcome.is_error, "this exit is supposed to be a failure");
     let written = outcome.output();
-    let shown = step_result(WORKSPACE_READ_TOOL, outcome)
-        .expect("a failed step must say what came back");
+    let shown =
+        step_result(WORKSPACE_READ_TOOL, outcome).expect("a failed step must say what came back");
 
     assert_ne!(
         shown, GENERIC_CAUSE,
@@ -460,4 +460,3 @@ async fn an_ambiguous_path_refuses_the_read_while_the_listing_still_succeeds() {
     );
     assert!(text(&listing).contains("Charter.md"));
 }
-

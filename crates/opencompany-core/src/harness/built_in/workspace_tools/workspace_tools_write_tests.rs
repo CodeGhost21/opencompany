@@ -1,6 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
 
 // -- write behaviour ----------------------------------------------------
 
@@ -702,4 +702,3 @@ async fn an_oversized_new_body_is_refused() {
     assert!(result.is_error);
     assert!(text(&result).contains("over the"));
 }
-

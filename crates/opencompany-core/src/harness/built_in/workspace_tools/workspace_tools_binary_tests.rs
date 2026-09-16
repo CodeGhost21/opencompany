@@ -1,6 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
 
 // -- binary nodes (issue #553) ------------------------------------------
 
@@ -36,8 +36,7 @@ async fn reading_a_binary_node_returns_metadata_and_never_bytes() {
     let out = text(&result);
     assert!(out.contains("image/png"), "{out}");
     assert!(out.contains("6 bytes"), "the store's size: {out}");
-    let (_, sha) =
-        crate::ports::workspace::blob_metadata(&[0x89, b'P', b'N', b'G', 0xff, 0xfe]);
+    let (_, sha) = crate::ports::workspace::blob_metadata(&[0x89, b'P', b'N', b'G', 0xff, 0xfe]);
     assert!(out.contains(&sha), "the store's digest: {out}");
     // The payload's own bytes must not appear, in any rendering.
     assert!(!out.contains("PNG"), "the bytes must not be echoed: {out}");
@@ -102,8 +101,8 @@ async fn workspace_write_stays_unconfined_by_default() {
 async fn workspace_write_refuses_a_path_outside_the_declared_write_scope() {
     let (_dir, store) = seeded("acme").await;
     let id = CompanyId::new("acme");
-    let workspace = ws(store.clone(), id.clone())
-        .with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
+    let workspace =
+        ws(store.clone(), id.clone()).with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
     let tool = WorkspaceWriteTool::new(workspace);
 
     let result = tool
@@ -154,8 +153,8 @@ async fn workspace_write_allows_a_path_inside_the_declared_write_scope() {
 async fn a_write_scoped_agent_can_still_create_in_its_own_home() {
     let (_dir, store) = seeded("acme").await;
     let id = CompanyId::new("acme");
-    let workspace = ws(store.clone(), id.clone())
-        .with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
+    let workspace =
+        ws(store.clone(), id.clone()).with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
     let tool = WorkspaceCreateTool::new(workspace);
 
     let result = tool
@@ -175,8 +174,8 @@ async fn a_write_scoped_agent_can_still_create_in_its_own_home() {
 async fn workspace_create_refuses_a_path_outside_the_declared_write_scope() {
     let (_dir, store) = seeded("acme").await;
     let id = CompanyId::new("acme");
-    let workspace = ws(store.clone(), id.clone())
-        .with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
+    let workspace =
+        ws(store.clone(), id.clone()).with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
     let tool = WorkspaceCreateTool::new(workspace);
 
     let result = tool
@@ -206,8 +205,8 @@ async fn workspace_create_refuses_a_path_outside_the_declared_write_scope() {
 async fn a_declared_write_scope_cannot_reach_into_the_operator_only_subtree() {
     let (_dir, store) = seeded("acme").await;
     let id = CompanyId::new("acme");
-    let workspace = ws(store.clone(), id.clone())
-        .with_write_scope(Some(vec!["secrets/keys.md".to_string()]));
+    let workspace =
+        ws(store.clone(), id.clone()).with_write_scope(Some(vec!["secrets/keys.md".to_string()]));
     let tool = WorkspaceCreateTool::new(workspace);
 
     let result = tool
@@ -252,8 +251,7 @@ async fn the_operator_only_refusal_precedes_the_write_scope_check() {
 
     // Scoped: the always-writable home is unaffected by the hidden root.
     let scoped = WorkspaceCreateTool::new(
-        ws(store.clone(), id.clone())
-            .with_write_scope(Some(vec!["Somewhere/Else.md".to_string()])),
+        ws(store.clone(), id.clone()).with_write_scope(Some(vec!["Somewhere/Else.md".to_string()])),
     )
     .execute(json!({
         "path": format!("{AGENTS_ROOT}/{TEST_AGENT}/Brief.md"),
@@ -288,4 +286,3 @@ async fn the_listing_marks_binary_entries_with_their_type_and_size() {
         .expect("the note is listed");
     assert!(!note.contains("image/"), "{note}");
 }
-

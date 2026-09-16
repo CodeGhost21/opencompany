@@ -1,6 +1,6 @@
+use super::tests::*;
 use super::*;
 use crate::store::FsOps;
-use super::tests::*;
 
 // -- path rendering and validation --------------------------------------
 
@@ -614,4 +614,3 @@ async fn traversal_paths_cannot_escape_the_company_tree() {
         assert!(!out.contains("root:"), "path {path:?} leaked: {out}");
     }
 }
-
