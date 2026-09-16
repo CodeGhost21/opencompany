@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::super::{CompanyEvent, CompanyRuntime};
+use super::{CompanyEvent, CompanyRuntime};
 use crate::ports::Brain;
 use crate::ports::brain::CycleHost;
 use crate::ports::types::{
@@ -153,9 +153,9 @@ fn ask() -> CompanyEvent {
 
 /// A settled verdict, the receipt `spawn_follow_up` turns into a
 /// continuation turn.
-fn settled(approval: &str) -> super::super::ResolveReceipt {
+fn settled(approval: &str) -> super::ResolveReceipt {
     use crate::ports::types::{ApprovalId, Verdict};
-    super::super::ResolveReceipt::Settled(Box::new(CompanyEvent::ApprovalResolved {
+    super::ResolveReceipt::Settled(Box::new(CompanyEvent::ApprovalResolved {
         approval_id: ApprovalId::new(approval),
         verdict: Verdict::Approve,
         by: operator(),
