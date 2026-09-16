@@ -45,6 +45,7 @@ function status(over: Record<string, unknown> = {}) {
     hubLink: false,
     inferenceHasOwnKey: false,
     composioHasOwnKey: false,
+    searchHasOwnKey: false,
     defaultSet: false,
     ...over,
   };
