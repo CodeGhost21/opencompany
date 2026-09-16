@@ -1,11 +1,11 @@
 use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
-use super::tests_hosting::*;
-use super::tests_fetch_grant::*;
-use super::tests_mcp_roster::*;
-use super::tests_scope_labels::*;
-use super::tests_shell_git_mcp::*;
+use super::consequence_hosting_tests::*;
+use super::consequence_fetch_grant_tests::*;
+use super::consequence_mcp_roster_tests::*;
+use super::consequence_scope_labels_tests::*;
+use super::consequence_shell_git_mcp_tests::*;
 
 pub(super) fn the_auto_tier_line_is_pinned_tool_by_tool() {
     // The whole of what `auto` changes: parks for an operator under

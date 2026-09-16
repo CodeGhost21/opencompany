@@ -1,11 +1,11 @@
 use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
-use super::tests_hosting::*;
-use super::tests_fetch_grant::*;
-use super::tests_composio::*;
-use super::tests_mcp_roster::*;
-use super::tests_shell_git_mcp::*;
+use super::consequence_hosting_tests::*;
+use super::consequence_fetch_grant_tests::*;
+use super::consequence_composio_tests::*;
+use super::consequence_mcp_roster_tests::*;
+use super::consequence_shell_git_mcp_tests::*;
 
 pub(super) fn the_minted_scope_is_the_scope_a_grant_admits() {
     use crate::runtime::grants::{GrantId, StandingGrant};

@@ -1,11 +1,11 @@
 use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
-use super::tests_hosting::*;
-use super::tests_composio::*;
-use super::tests_mcp_roster::*;
-use super::tests_scope_labels::*;
-use super::tests_shell_git_mcp::*;
+use super::consequence_hosting_tests::*;
+use super::consequence_composio_tests::*;
+use super::consequence_mcp_roster_tests::*;
+use super::consequence_scope_labels_tests::*;
+use super::consequence_shell_git_mcp_tests::*;
 
 // -----------------------------------------------------------------------
 // Issue #673: a host-scoped fetch grant, and the `auto` line it must not

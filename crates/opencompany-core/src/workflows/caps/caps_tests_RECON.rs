@@ -857,11 +857,12 @@ async fn a_recovered_reply_does_not_emit_its_pre_recovery_json_parse() {
         .prefix("oc-1990-recover-stale-parse-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) = crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"continue\"}"),
-    ])
-    .await;
+    let (base_url, _script) =
+        crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"continue\"}"),
+        ])
+        .await;
     let (mut deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(base_url, dir.path());
     deps.facts = Some(Arc::new(OneFactStore));
     let record = crate::workflows::gated_tool_turn_tests::record();
@@ -939,11 +940,12 @@ async fn a_recovered_reply_that_fails_its_postcondition_does_not_settle_succeede
         .prefix("oc-1990-recover-postcondition-")
         .tempdir()
         .expect("tempdir");
-    let (base_url, _script) = crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
-        crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"continue\"}"),
-    ])
-    .await;
+    let (base_url, _script) =
+        crate::workflows::gated_tool_turn_tests::spawn_script_recording(vec![
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"recover\"}"),
+            crate::workflows::gated_tool_turn_tests::Turn::Say("{\"verdict\":\"continue\"}"),
+        ])
+        .await;
     let (mut deps, _journal) = crate::workflows::gated_tool_turn_tests::deps(base_url, dir.path());
     deps.facts = Some(Arc::new(OneFactStore));
     let record = crate::workflows::gated_tool_turn_tests::record();

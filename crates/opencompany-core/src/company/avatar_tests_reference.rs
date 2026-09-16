@@ -117,3 +117,4 @@ fn image_types() {
     for no in ["image/svg+xml", "text/html", "application/pdf", ""] {
         assert!(!is_supported_image(no), "{no}");
     }
+}

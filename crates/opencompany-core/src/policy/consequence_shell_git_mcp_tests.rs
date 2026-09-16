@@ -1,11 +1,11 @@
 use super::*;
 use crate::ports::types::Verdict;
 use serde_json::json;
-use super::tests_hosting::*;
-use super::tests_fetch_grant::*;
-use super::tests_composio::*;
-use super::tests_mcp_roster::*;
-use super::tests_scope_labels::*;
+use super::consequence_hosting_tests::*;
+use super::consequence_fetch_grant_tests::*;
+use super::consequence_composio_tests::*;
+use super::consequence_mcp_roster_tests::*;
+use super::consequence_scope_labels_tests::*;
 
 // -----------------------------------------------------------------------
 // Issue #875: `shell`, classified by the command it was handed
