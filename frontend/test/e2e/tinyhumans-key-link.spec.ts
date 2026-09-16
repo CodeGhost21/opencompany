@@ -95,18 +95,21 @@ test("a key grant from the hub sets up TinyHumans without the console ever seein
   expect(authorizeUrl).toContain("/auth/key?");
   expect(authorizeUrl).toContain("code_challenge_method=S256");
 
+  const consoleOrigin = new URL(page.url()).origin;
   await page.goto(authorizeUrl);
   // 2. The backend's own consent page: names the requesting origin and the
   //    scopes; "Connect" is the approve link back to the console.
-  await expect(page.getByText(new URL(page.url()).origin.length > 0 ? /wants to connect|API key|OpenCompany/ : /./)).toBeTruthy();
+  await expect(
+    page.getByRole("heading", { name: "Give this company a TinyHumans key?" }),
+  ).toBeVisible();
+  await expect(page.getByText(consoleOrigin).first()).toBeVisible();
   await page.getByRole("link", { name: "Connect" }).click();
 
   // 3. Back on the console. The landing strips `?key=link&state=&code=` and
   //    stashes the grant for the Account page, which redeems it. A hash
   //    change reaches that page without a reload (a reload would empty the
   //    stash — the code is single-use and must not survive a refresh).
-  await page.waitForURL((url) => url.origin === new URL(authorizeUrl).origin === false);
-  await expect(page).toHaveURL(/127\.0\.0\.1|localhost/);
+  await page.waitForURL((url) => url.origin === consoleOrigin);
   await page.evaluate(() => {
     window.location.hash = "#/connections/api-key";
   });
