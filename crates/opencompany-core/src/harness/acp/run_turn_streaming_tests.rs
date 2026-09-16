@@ -1,3 +1,23 @@
+use super::*;
+use super::run_turn_test_fixtures::*;
+
+/// Drains the live frames a turn published, giving up once the bus goes
+/// quiet — a turn that published nothing must be provable, not merely
+/// unobserved, so this returns an empty vec rather than hanging.
+async fn drain_live(
+    stream: &mut futures::stream::BoxStream<'static, crate::turn_stream::LiveFrame>,
+) -> Vec<crate::turn_stream::TurnStreamEvent> {
+    use futures::StreamExt;
+    let mut frames = Vec::new();
+    while let Ok(Some(frame)) =
+        tokio::time::timeout(Duration::from_millis(50), stream.next()).await
+    {
+        if let Some(event) = frame.as_turn() {
+            frames.push(event.clone());
+        }
+    }
+    frames
+}
     ]
 }
 

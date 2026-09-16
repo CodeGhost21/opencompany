@@ -350,6 +350,8 @@ async fn hit_cap(agent: &CompanyAgent) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Tests, split by topic (this file would otherwise exceed 750 lines).
+// ---------------------------------------------------------------------------
 
 #[path = "iteration_cap_turn_tests_budget.rs"]
 mod tests_budget;

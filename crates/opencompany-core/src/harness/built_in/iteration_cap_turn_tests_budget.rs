@@ -1,8 +1,5 @@
 use super::*;
 
-// Tests
-// ---------------------------------------------------------------------------
-
 /// The in-turn brake arms **only** when the teammate declares a daily cap — and
 /// a malformed manifest value is ignored rather than forwarded.
 ///

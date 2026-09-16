@@ -1,3 +1,5 @@
+use super::*;
+
 /// An agent that answers from a script, so the trait impl can be driven.
 ///
 /// `hang` makes `prompt` never resolve (the grace-expiry path) and
@@ -83,3 +85,24 @@ impl AcpAgent for Scripted {
         Ok(())
     }
 }
+
+/// The updates a coding turn produces: a thought, a tool call that runs
+/// and then completes, and the answer.
+fn a_working_turn() -> Vec<AcpUpdate> {
+    vec![
+        AcpUpdate::ThoughtChunk,
+        AcpUpdate::ThoughtChunk,
+        AcpUpdate::ToolCall {
+            id: "c1".into(),
+            title: "Read src/main.rs".into(),
+        },
+        AcpUpdate::ToolCallUpdate {
+            id: "c1".into(),
+            status: "in_progress".into(),
+            result: None,
+        },
+        AcpUpdate::ToolCallUpdate {
+            id: "c1".into(),
+            status: "completed".into(),
+            result: Some("42 lines".into()),
+        },
