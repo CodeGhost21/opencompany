@@ -330,6 +330,52 @@ async fn matrix_m2() {
     assert!(!report.needs_model);
 }
 
+/// `proxy_base_url` (a staging or local platform's `api_url`) is not just
+/// consulted for the health probe — the stored `tinyhumans` row's `base_url`
+/// itself must carry the derived proxy URL, or a later resolver reading the
+/// row back would probe the wrong platform (tinysweeper review finding on
+/// this PR: every other `fan_out` unit test passes `proxy_base_url: None`,
+/// which only exercises the production fallback in
+/// [`catalogue::tinyhumans_proxy_url`]).
+#[tokio::test]
+async fn proxy_base_url_override_lands_on_the_stored_row() {
+    let cid = company("proxy-base-url");
+    let secrets = MemSecrets::default();
+    let prober = FakeProber::ok(&[MODEL]);
+    let api_url = "https://staging-api.tinyhumans.ai";
+
+    let report = fan_out(
+        &cid,
+        &secrets,
+        FanOutRequest {
+            key: NEW,
+            model: Some(MODEL),
+            confirm_in_use: true,
+            proxy_base_url: Some(api_url),
+        },
+        &prober,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome(&report, Slot::Provider), SlotOutcome::Filled);
+    let providers = inference_store::list_providers(&cid, &secrets)
+        .await
+        .unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].slug, "tinyhumans");
+    assert_eq!(
+        providers[0].base_url,
+        catalogue::tinyhumans_proxy_url(api_url)
+    );
+    assert_ne!(
+        providers[0].base_url,
+        catalogue::cloud_provider(inference::MANAGED_SLUG)
+            .unwrap()
+            .endpoint
+    );
+}
+
 #[tokio::test]
 async fn matrix_m3() {
     let cid = company("m3");
