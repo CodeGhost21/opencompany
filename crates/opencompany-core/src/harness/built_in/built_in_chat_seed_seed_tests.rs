@@ -17,7 +17,7 @@ use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
-use tinyinference::model::{ModelRequest, ModelResponse};
+use tinyinference::model::{ChatModel, ModelRequest, ModelResponse};
 
 use super::built_in_test_fixtures::*;
 use crate::ports::events::EventStreamItem;
