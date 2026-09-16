@@ -376,6 +376,17 @@ impl BoundMemory {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "memory_tests.rs"]
+mod tests;
 #[cfg(test)]
-mod upstream_conformance_test;
+#[path = "memory_behavior_tests.rs"]
+mod tests_behavior;
+#[cfg(test)]
+#[path = "memory_upstream_conformance_tests.rs"]
+mod tests_upstream_conformance;
+#[cfg(test)]
+#[path = "memory_upstream_conformance_vendors_tests.rs"]
+mod tests_upstream_conformance_vendors;
+#[cfg(test)]
+#[path = "memory_upstream_conformance_hosted_tests.rs"]
+mod tests_upstream_conformance_hosted;
