@@ -6078,20 +6078,32 @@ async fn extend_approval(
 }
 
 #[cfg(test)]
-#[path = "operator_test_support_1.rs"]
-mod operator_test_support_1;
-#[cfg(test)]
-#[path = "operator_test_support_2.rs"]
-mod operator_test_support_2;
-#[cfg(test)]
-#[path = "operator_test_support_3.rs"]
-mod operator_test_support_3;
-#[cfg(test)]
-#[path = "operator_test_support_4.rs"]
-mod operator_test_support_4;
-#[cfg(test)]
 #[path = "operator_test_group_1.rs"]
 mod operator_test_group_1;
+#[cfg(test)]
+#[path = "operator_test_group_10.rs"]
+mod operator_test_group_10;
+#[cfg(test)]
+#[path = "operator_test_group_11.rs"]
+mod operator_test_group_11;
+#[cfg(test)]
+#[path = "operator_test_group_12.rs"]
+mod operator_test_group_12;
+#[cfg(test)]
+#[path = "operator_test_group_13.rs"]
+mod operator_test_group_13;
+#[cfg(test)]
+#[path = "operator_test_group_14.rs"]
+mod operator_test_group_14;
+#[cfg(test)]
+#[path = "operator_test_group_15.rs"]
+mod operator_test_group_15;
+#[cfg(test)]
+#[path = "operator_test_group_16.rs"]
+mod operator_test_group_16;
+#[cfg(test)]
+#[path = "operator_test_group_17.rs"]
+mod operator_test_group_17;
 #[cfg(test)]
 #[path = "operator_test_group_2.rs"]
 mod operator_test_group_2;
@@ -6117,26 +6129,14 @@ mod operator_test_group_8;
 #[path = "operator_test_group_9.rs"]
 mod operator_test_group_9;
 #[cfg(test)]
-#[path = "operator_test_group_10.rs"]
-mod operator_test_group_10;
+#[path = "operator_test_support_1.rs"]
+mod operator_test_support_1;
 #[cfg(test)]
-#[path = "operator_test_group_11.rs"]
-mod operator_test_group_11;
+#[path = "operator_test_support_2.rs"]
+mod operator_test_support_2;
 #[cfg(test)]
-#[path = "operator_test_group_12.rs"]
-mod operator_test_group_12;
+#[path = "operator_test_support_3.rs"]
+mod operator_test_support_3;
 #[cfg(test)]
-#[path = "operator_test_group_13.rs"]
-mod operator_test_group_13;
-#[cfg(test)]
-#[path = "operator_test_group_14.rs"]
-mod operator_test_group_14;
-#[cfg(test)]
-#[path = "operator_test_group_15.rs"]
-mod operator_test_group_15;
-#[cfg(test)]
-#[path = "operator_test_group_16.rs"]
-mod operator_test_group_16;
-#[cfg(test)]
-#[path = "operator_test_group_17.rs"]
-mod operator_test_group_17;
+#[path = "operator_test_support_4.rs"]
+mod operator_test_support_4;

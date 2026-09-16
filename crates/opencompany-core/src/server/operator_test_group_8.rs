@@ -1,16 +1,16 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyRecord;
+use crate::ports::types::{EventSeq, StoredEvent};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use crate::ports::types::{EventSeq, StoredEvent};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
@@ -446,8 +446,7 @@ async fn a_member_sees_the_approval_but_not_its_payload_or_amount() {
         "an admin is not told anything was hidden: {admin_row}"
     );
 
-    let as_member =
-        approvals_as(&app, crate::server::test_support::member_cookie("acme")).await;
+    let as_member = approvals_as(&app, crate::server::test_support::member_cookie("acme")).await;
     let member_row = &as_member.as_array().unwrap()[0];
 
     // Still visible: everything that makes stalled work legible. This half

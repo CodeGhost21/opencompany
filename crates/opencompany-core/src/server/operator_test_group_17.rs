@@ -1,16 +1,16 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyRecord;
+use crate::ports::types::{EventSeq, StoredEvent};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use crate::ports::types::{EventSeq, StoredEvent};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
@@ -261,11 +261,7 @@ async fn a_chat_message_may_carry_at_most_twenty_attachments() {
             .workspace()
             .create_binary(
                 &id,
-                &attachment_binary_node(
-                    &node_id,
-                    &format!("f{n}.bin"),
-                    "application/octet-stream",
-                ),
+                &attachment_binary_node(&node_id, &format!("f{n}.bin"), "application/octet-stream"),
                 b"x",
             )
             .await

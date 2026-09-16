@@ -1,16 +1,16 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyRecord;
+use crate::ports::types::{EventSeq, StoredEvent};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use crate::ports::types::{EventSeq, StoredEvent};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_3::*;
@@ -522,11 +522,7 @@ pub(super) async fn assert_refused(body: serde_json::Value, expect_in_error: &st
 /// controllable instant — the gate is what `extend_approval` asks whether an
 /// id is live, and the journal is what projects the deadline, so an extend
 /// test needs both seeded exactly as a real park leaves them.
-async fn park_for_extend(
-    runtime: &Arc<CompanyRuntime>,
-    id: &str,
-    at_millis: u64,
-) -> ApprovalId {
+async fn park_for_extend(runtime: &Arc<CompanyRuntime>, id: &str, at_millis: u64) -> ApprovalId {
     use crate::runtime::journal::{ApprovalConversation, TaskLink};
     let approval = ApprovalId::new(id);
     let effect = crate::ports::types::Effect {
@@ -557,7 +553,10 @@ async fn park_for_extend(
     approval
 }
 
-pub(super) fn extend_request_with_cookie(approval_id: &ApprovalId, cookie: String) -> Request<Body> {
+pub(super) fn extend_request_with_cookie(
+    approval_id: &ApprovalId,
+    cookie: String,
+) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(format!("/api/v1/company/approvals/{approval_id}/extend"))

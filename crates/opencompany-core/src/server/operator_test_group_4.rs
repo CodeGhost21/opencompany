@@ -1,16 +1,16 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyRecord;
+use crate::ports::types::{EventSeq, StoredEvent};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use crate::ports::types::{EventSeq, StoredEvent};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
@@ -241,8 +241,7 @@ async fn create_desk_carries_the_responder_mode_and_omits_the_default() {
         lead.get("responder").is_none(),
         "a mode never stated must not appear on the wire: {lead}"
     );
-    let auto =
-        post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
+    let auto = post(r#"{"name":"Launch week","members":["eng","ceo"],"responder":"auto"}"#).await;
     assert_eq!(auto["responder"], "auto", "{auto}");
 
     // The list re-reads the store, so this is the round-trip half: the

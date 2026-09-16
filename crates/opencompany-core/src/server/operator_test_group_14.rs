@@ -1,16 +1,16 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyRecord;
+use crate::ports::types::{EventSeq, StoredEvent};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use crate::ports::types::{EventSeq, StoredEvent};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
 
 use super::operator_test_support_1::*;
 use super::operator_test_support_2::*;
@@ -235,8 +235,7 @@ async fn a_continuation_answers_in_the_thread_the_sign_off_was_raised_in() {
 #[tokio::test]
 async fn a_workflow_parks_continuation_answers_on_the_run_not_in_a_dm() {
     let home_dir = home();
-    let c =
-        multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None).await;
+    let c = multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092"), None).await;
 
     let response = c
         .app

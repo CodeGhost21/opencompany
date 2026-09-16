@@ -1,16 +1,16 @@
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::tasks::TaskTitle;
 use crate::ports::types::CompanyRecord;
+use crate::ports::types::{EventSeq, StoredEvent};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
-use crate::ports::types::{EventSeq, StoredEvent};
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
 
 use super::operator_test_support_2::*;
 use super::operator_test_support_3::*;
@@ -71,7 +71,11 @@ pub(super) async fn state_with_company(home: &std::path::Path, lifecycle: &str) 
     build_state(home, lifecycle, AppConfig::default()).await
 }
 
-pub(super) async fn build_state(home: &std::path::Path, lifecycle: &str, config: AppConfig) -> AppState {
+pub(super) async fn build_state(
+    home: &std::path::Path,
+    lifecycle: &str,
+    config: AppConfig,
+) -> AppState {
     build_state_with_brain(home, lifecycle, config, None).await
 }
 
@@ -587,7 +591,10 @@ pub(super) fn record_with(manifest: CompanyManifest) -> CompanyRecord {
 }
 
 /// Builds an app state whose sole company carries `manifest`.
-pub(super) async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
+pub(super) async fn state_with_manifest(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     use crate::ports::CompanyStore;
