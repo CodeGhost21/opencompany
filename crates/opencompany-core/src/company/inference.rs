@@ -1310,6 +1310,16 @@ async fn resolve_legacy_scoped(
         let selected_provider = selected_kind(&runtime.provider).to_string();
         let provider = normalize_provider(&runtime.provider).to_string();
         reject_unknown_provider(&provider, "the stored runtime inference config")?;
+        // Trimmed and blank-filtered for the same reason the manifest arm
+        // below normalizes its own `base_url` before asking "did this name an
+        // endpoint": a stored `base_url: Some(String::new())` is not an
+        // endpoint anybody named (tinysweeper/CodeRabbit review, same root
+        // cause as the manifest arm's blank-`base_url` finding).
+        let runtime_base_url = runtime
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
         let key = load_inference_key_for(
             company,
             secrets,
@@ -1318,7 +1328,7 @@ async fn resolve_legacy_scoped(
             scope,
             // It named its own endpoint, so the company's key is for somewhere
             // else. See `load_inference_key_for`.
-            runtime.base_url.is_none(),
+            runtime_base_url.is_none(),
         )
         .await?;
         let had_key = !key.trim().is_empty();
