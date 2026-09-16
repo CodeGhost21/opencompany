@@ -1338,6 +1338,19 @@ mod tests {
         assert_eq!(body["managedKeyConfigured"], true, "{body}");
         assert_eq!(body["providers"], json!([]), "{body}");
         assert!(!body.to_string().contains("th-company-search-key"));
+
+        let (status, body) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/search/providers/managed/key",
+            &admin,
+            Some(json!({"apiKey": ""})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["managedKeyConfigured"], false, "{body}");
+        assert_eq!(body["providers"], json!([]), "{body}");
     }
 
     use crate::ports::types::CompanyId;
