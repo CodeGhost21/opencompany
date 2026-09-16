@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 /// A log that records what was appended, so a test can ask what actually
 /// reached the journal rather than what the tool said it did.
-pub(super) struct RecordingLog(Mutex<Vec<CompanyEvent>>);
+pub(super) struct RecordingLog(pub(super) Mutex<Vec<CompanyEvent>>);
 
 /// Like [`RecordingLog`], but refuses to append to one named channel —
 /// for proving a `desk_dm` to several recipients does not treat one

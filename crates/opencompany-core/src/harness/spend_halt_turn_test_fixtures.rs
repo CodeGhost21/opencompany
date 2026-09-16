@@ -87,7 +87,7 @@ struct Script {
 
 impl Script {
     /// How many model calls the turn actually made.
-    fn calls(&self) -> usize {
+    pub(super) fn calls(&self) -> usize {
         self.seen.lock().unwrap().len()
     }
 }

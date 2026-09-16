@@ -193,11 +193,11 @@ impl WorkflowRevisionStore for MemRevisions {
 
 /// A harness holding every double, so a test can read back what the tools wrote.
 pub(crate) struct Fixture {
-    company: CompanyId,
-    dir: tempfile::TempDir,
-    store: Arc<MemStore>,
-    revisions: Arc<MemRevisions>,
-    log: Arc<MemLog>,
+    pub(crate) company: CompanyId,
+    pub(crate) dir: tempfile::TempDir,
+    pub(crate) store: Arc<MemStore>,
+    pub(crate) revisions: Arc<MemRevisions>,
+    pub(crate) log: Arc<MemLog>,
 }
 
 impl Fixture {
