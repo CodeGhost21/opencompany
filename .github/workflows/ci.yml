@@ -1714,6 +1714,13 @@ jobs:
       # the failure as one. See docs/design-system/README.md.
       - run: ./scripts/ci/assert-design-tokens.sh
 
+      # The wizard's provider dialogs come from `inference/`, never from
+      # `search-providers/`. Both directories ship files of those exact names
+      # and the wrong import type-checks, renders and builds — it is simply the
+      # wrong feature. Review alone has already been judged insufficient for
+      # this one; see the script.
+      - run: ./scripts/ci/assert-setup-inference-imports.sh
+
 
       # The release-notes generator, which is otherwise only ever exercised by a
       # `workflow_dispatch` release — the one moment nobody wants to discover a
