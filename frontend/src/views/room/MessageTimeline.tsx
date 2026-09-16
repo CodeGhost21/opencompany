@@ -395,6 +395,7 @@ export function MessageTimeline({
     if (item.kind === "episode") {
       return (
         <EpisodeBlock
+          agentNames={agentNames}
           key={item.key}
           item={item}
           renderRow={renderRow}
@@ -526,9 +527,19 @@ export function MessageTimeline({
             queued={queued}
           />
         ) : liveStepCount > 0 && !queued ? (
-          <LiveTurnRow channel={channel} steps={liveSteps ?? []} name={turnAgentName} />
+          <LiveTurnRow
+            channel={channel}
+            steps={liveSteps ?? []}
+            name={turnAgentName}
+          />
         ) : (
-          typing && <TypingRow channel={channel} queued={queued} name={turnAgentName} />
+          typing && (
+            <TypingRow
+              channel={channel}
+              queued={queued}
+              name={turnAgentName}
+            />
+          )
         )}
       </div>
     </div>
@@ -822,6 +833,7 @@ function LiveTurnRow({
   channel,
   steps,
   name,
+  label,
 }: {
   channel: Channel;
   steps: TurnStep[];
@@ -833,6 +845,8 @@ function LiveTurnRow({
    * the gaps — before the first step, and between a settled step and the next.
    */
   name?: string;
+  /** A complete line, when a name cannot describe the work — see the prop. */
+  label?: string;
 }) {
   return (
     <div className="flex items-start gap-2.5 px-4 py-1">
@@ -846,7 +860,7 @@ function LiveTurnRow({
       <div className="min-w-0 flex-1 space-y-1.5">
         {/* The line names the step actually in flight (#787), above the
             timeline that details every step. Same source, one phrasing. */}
-        <WorkingIndicator srLabel="Working…" steps={steps} name={name} />
+        <WorkingIndicator srLabel="Working…" steps={steps} name={name} label={label} />
         <StepTimeline steps={steps} defaultOpen />
       </div>
     </div>
@@ -857,11 +871,14 @@ function TypingRow({
   channel,
   queued,
   name,
+  label,
 }: {
   channel: Channel;
   queued?: boolean;
   /** The answering teammate's display name, when the host recorded one. */
   name?: string;
+  /** A complete line, when a name cannot describe the work — see the prop. */
+  label?: string;
 }) {
   return (
     <div className="flex items-center gap-2.5 px-4 py-1">
@@ -872,7 +889,7 @@ function TypingRow({
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9"
       />
-      <WorkingIndicator srLabel="Replying…" queued={queued} name={name} />
+      <WorkingIndicator srLabel="Replying…" queued={queued} name={name} label={label} />
     </div>
   );
 }

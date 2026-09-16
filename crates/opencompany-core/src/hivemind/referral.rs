@@ -389,6 +389,14 @@ pub struct AskedQuestion {
     /// neither. So the pair talked and the answer was orphaned — the asker
     /// could not carry it home because it could not see it.
     pub conversation: Option<String>,
+    /// The sequence this exchange opened at, inside [`Self::conversation`].
+    ///
+    /// The pair key is deterministic, so two agents reuse one thread for every
+    /// crossing they ever have. Without a lower bound a reader of that thread
+    /// gathers all of them, and the asker's continuation was handed months of
+    /// old private exchanges as though they were the answer it just received
+    /// (tinysweeper, #2341).
+    pub opened: Option<u64>,
     /// Whether the question actually left this desk.
     ///
     /// `reach` widens strictly (`local` → `channels` → `desks`), so a desk that
@@ -1031,12 +1039,17 @@ impl<'a> EpisodeReferrals<'a> {
         // so an answer written into a thread whose question failed to append
         // renders as that question: the reader is shown an answer and told it
         // was the ask. Better to carry nothing than to carry it mislabelled.
-        let asked = if by_name {
+        //
+        // The sequence it landed at is kept, not just the fact that it did: it
+        // is the lower bound of THIS exchange. A pair thread is deterministic
+        // (`dm:<a>+<b>`), so the same two agents reuse it for every crossing
+        // they ever have, and a reader with no bound gathers all of them.
+        let opened = if by_name {
             match self
                 .journal(&pair, &referral.source_id, referral.content.clone())
                 .await
             {
-                Ok(_) => true,
+                Ok(seq) => Some(seq),
                 Err(error) => {
                     tracing::warn!(
                         company = %self.company,
@@ -1045,12 +1058,16 @@ impl<'a> EpisodeReferrals<'a> {
                         "[hive] a crossing's question could not be journaled; the turn still runs \
                          and its answer still comes home, but the pair thread keeps neither side"
                     );
-                    false
+                    None
                 }
             }
         } else {
-            true
+            None
         };
+        // A desk crossing journals no question in a pair thread, and has none
+        // to fail — `by_name` is what separates the two, and `opened` is only
+        // ever consulted alongside it.
+        let asked = !by_name || opened.is_some();
         // **A desk was asked, so the desk answers — not whichever seat is
         // listed first on it.**
         //
@@ -1126,12 +1143,20 @@ impl<'a> EpisodeReferrals<'a> {
         //
         // The single-seat path still needs it: there the far desk's only row IS
         // the answer, and nothing else journals it.
+        //
+        // Whether the ANSWER landed gates the follow-ups too, for the same
+        // positional reason the question does. `asked` records only the
+        // question; an answer whose append failed leaves a thread holding the
+        // question and then a follow-up, which reads as the answer to it
+        // (tinysweeper, #2341).
+        let mut answered_in_thread = true;
         if asked
             && !deliberated
             && let Err(error) = self
                 .journal(&pair, &referral.target_id, answer.clone())
                 .await
         {
+            answered_in_thread = false;
             tracing::warn!(
                 company = %self.company,
                 pair = %pair.desk_id,
@@ -1169,7 +1194,7 @@ impl<'a> EpisodeReferrals<'a> {
         // That is the same "better to carry nothing than to carry it
         // mislabelled" the question's own failure path takes; this loop was
         // left outside it (Codex + CodeRabbit, #2341).
-        if by_name && asked {
+        if by_name && asked && answered_in_thread {
             let budget = self.pair_messages;
             while u32::try_from(exchange.len()).unwrap_or(u32::MAX) < budget {
                 let next_is_asker = exchange.len() % 2 == 0;
@@ -1218,6 +1243,9 @@ impl<'a> EpisodeReferrals<'a> {
             desk: referral.to.desk_id.clone(),
             // Where it ran, when the host moved it off the desk.
             conversation: (pair.desk_id != referral.to.desk_id).then(|| pair.desk_id.clone()),
+            // And where in it, so a reader can take this exchange rather than
+            // every exchange this pair has ever had.
+            opened: opened.map(EventSeq::value),
             returned: false,
             crossed: referral.to.desk_id != self.home.desk_id,
         });

@@ -6127,6 +6127,9 @@ async fn extend_approval(
 }
 
 #[cfg(test)]
+#[path = "operator_aside_dto_tests.rs"]
+mod operator_aside_dto_tests;
+#[cfg(test)]
 #[path = "operator_test_group_1.rs"]
 mod operator_test_group_1;
 #[cfg(test)]

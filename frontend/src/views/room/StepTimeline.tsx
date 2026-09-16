@@ -1,4 +1,6 @@
 import { useState } from "react";
+
+import { useCrossingRunning } from "./referral-running";
 import {
   AlertTriangle,
   Brain,
@@ -179,8 +181,20 @@ export function StepTimeline({
  * Closed by default. The count is the whole point of the collapsed state: it
  * says how much was said without saying it.
  */
-export function ReferralConversation({ crossing }: { crossing: ReferralConversationDto }) {
+export function ReferralConversation({
+  crossing,
+  rowId,
+}: {
+  crossing: ReferralConversationDto;
+  /**
+   * The row this crossing folds onto, so the chip can tell a crossing still
+   * being had from one that is over. Optional: a surface that does not know it
+   * renders the finished wording, which is what every surface did before.
+   */
+  rowId?: string;
+}) {
   const [open, setOpen] = useState(false);
+  const running = useCrossingRunning(rowId);
   const count = crossing.lines.length;
   if (count === 0) return null;
 
@@ -205,10 +219,26 @@ export function ReferralConversation({ crossing }: { crossing: ReferralConversat
               the desk doing the asking. `inbound` names the teammate who
               raised it, which is the one thing this side does not already
               know: the chip above says the desk, the fold says who. */}
-          {crossing.inbound
-            ? `asked by @${crossing.otherId}`
-            : `asked ${crossing.direct ? `@${crossing.otherId}` : `#${crossing.otherDeskId}`}`}{" "}
+          {/* **Present tense while it is still happening.**
+
+              "asked @amendments · 1 message" describes a crossing that finished
+              after one reply. Shown the moment the question is journaled, it
+              described a conversation that was still going — and the count was
+              simply however much had landed so far, which is why it read as a
+              finished exchange that had produced one line. Past tense is a
+              claim about something being over, so it waits until it is. */}
+          {running
+            ? crossing.inbound
+              ? `answering @${crossing.otherId}`
+              : `${crossing.askerId} is talking to ${
+                  crossing.direct ? `@${crossing.otherId}` : `#${crossing.otherDeskId}`
+                }`
+            : crossing.inbound
+              ? `asked by @${crossing.otherId}`
+              : `asked ${crossing.direct ? `@${crossing.otherId}` : `#${crossing.otherDeskId}`}`}{" "}
+          {/* "so far" while it runs, because the number is not the total yet. */}
           · {count} message{count === 1 ? "" : "s"}
+          {running ? " so far" : ""}
         </span>
       </button>
       {open && (

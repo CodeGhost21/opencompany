@@ -155,11 +155,14 @@ import {
   deskFromDto,
   dmChannelId,
   dmThreadId,
+  type ReferralWorking,
+  runningCrossingRows,
   HISTORY_UNSTARTED,
   isOperatorChannelDto,
   type DecidedApproval,
   type HistoryStatus,
 } from "@/views/room/model";
+import { ReferralRunningProvider } from "@/views/room/referral-running";
 import { TeamView } from "@/views/TeamView";
 import { NotificationsView } from "@/views/NotificationsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
@@ -2721,8 +2724,37 @@ export function AppShell({
    * once it turns out to be the echo of a reply already rendered. Dedupe by
    * *what the POST turned out to be*, never by how long the frame waited.
    */
+  /**
+   * Who is answering a crossing right now, per asking desk (#2341 live report).
+   *
+   * A referred turn runs through `HiveReferralRunner::refer`, outside the
+   * `turn_started`/`turn_settled` bracket every other turn is announced by — so
+   * while a crossing ran, and `pair_messages` lets that be several model turns,
+   * the desk showed a generic working row naming nobody. The `referral` frame
+   * fires at exactly the right moment and now carries the teammate asked.
+   *
+   * Cleared when the desk speaks again, which is the precise end of the
+   * crossing: the asker's continuation is the next thing journaled on the desk
+   * after its question. A same-desk pair emits no return leg, so there is no
+   * closing frame to wait for and an indicator that waited for one would name
+   * the answerer for the rest of the episode.
+   */
+  const [referralWorking, setReferralWorking] = useState<Record<string, ReferralWorking>>({});
+
   const injectAgentReply = useCallback(
     (event: AgentReplyEvent) => {
+      // The desk speaking again is the end of any crossing it was waiting on.
+      // Rows from the pair's own `dm:<a>+<b>` conversation are not this desk
+      // and must not clear it — they are the crossing still running.
+      if (event.chatId) {
+        setReferralWorking((working) =>
+          working[event.chatId as string] === undefined
+            ? working
+            : Object.fromEntries(
+                Object.entries(working).filter(([chat]) => chat !== event.chatId),
+              ),
+        );
+      }
       if (pendingPostThreadsRef.current.capture(event)) return;
       renderAgentReply(event);
     },
@@ -3368,7 +3400,46 @@ export function AppShell({
     // carries no crossing content, and `reReadSettledThread` is idempotent, so
     // a second call for a thread already holding the fold adds nothing.
     onReferral: useCallback(
-      (event: { chatId: string }) => reReadSettledThread(event.chatId),
+      (event: {
+        chatId: string;
+        sequence?: number;
+        target?: string;
+        asker?: string;
+        toDesk?: string;
+        direct?: boolean;
+        returning?: boolean;
+      }) => {
+        // A forward is a turn starting on the far side; a return is that turn
+        // already finished and carried home, so it announces nobody.
+        if (!event.returning) {
+          // **What is happening differs by kind, not just who is named.**
+          //
+          // A person crossing is a two-way exchange: `pair_messages` lets the
+          // pair alternate, so both seats spend turns and neither is merely
+          // answering. A desk crossing is the far DESK answering — as a whole
+          // room since #2332 — and its `target` is only the library's
+          // first-eligible seat, so naming that seat would credit one member
+          // with a room's work.
+          // Stored structurally and phrased by the view: a desk's display
+          // name and a teammate's live where the channels and roster do, not
+          // here.
+          const crossing: ReferralWorking | undefined =
+            event.direct && event.asker && event.target
+              ? {
+                  direct: true,
+                  asker: event.asker,
+                  target: event.target,
+                  row: event.sequence,
+                }
+              : !event.direct && event.toDesk
+                ? { direct: false, desk: event.toDesk, row: event.sequence }
+                : undefined;
+          if (crossing) {
+            setReferralWorking((working) => ({ ...working, [event.chatId]: crossing }));
+          }
+        }
+        reReadSettledThread(event.chatId);
+      },
       [reReadSettledThread],
     ),
     // Issue #377. Beside the board tick above, not instead of it: a settle both
@@ -3975,6 +4046,10 @@ export function AppShell({
               effect in `RoomView` writing state up here and re-render the whole
               console on every unread tick from every section, rather than only
               from Room. */}
+          <ReferralRunningProvider
+            rows={runningCrossingRows(referralWorking)}
+            byDesk={referralWorking}
+          >
           <RoomView
               client={client}
               company={company}
@@ -4037,6 +4112,7 @@ export function AppShell({
               budgetProximity={budgetProximity}
               onDismissBudgetProximity={() => setBudgetProximity(null)}
             />
+          </ReferralRunningProvider>
           {view === "inbox" && <InboxView client={client} company={company} />}
           {/* All that is left of the Tasks page: the card detail. `sub` is a
               real id by the time this renders — `REWRITE_RETIRED` sent every

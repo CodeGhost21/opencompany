@@ -544,7 +544,7 @@ function Line({
           />
         )}
         {message.referralConversation && (
-          <ReferralConversation crossing={message.referralConversation} />
+          <ReferralConversation crossing={message.referralConversation} rowId={message.id} />
         )}
         {message.asideConversation && (
           <AsideConversation aside={message.asideConversation} />

@@ -171,6 +171,27 @@ export type CompanyStreamEvent =
       /** The row the crossing folds onto. */
       sequence: number;
       toDesk: string;
+      /**
+       * Who was asked, and who asked — so a console can say that a turn is
+       * running and whose.
+       *
+       * A referred turn runs outside the `turn_started`/`turn_settled` bracket
+       * every other turn is announced by, so this frame is the only notice the
+       * console gets that a model is working.
+       */
+      target: string;
+      asker: string;
+      /**
+       * Whether a PERSON was asked rather than a desk.
+       *
+       * It changes what is happening, not just who: a desk crossing is one
+       * side answering (the whole room, since #2332), while a person crossing
+       * is a two-way exchange both seats spend turns on. It also decides
+       * whether `target` may be shown at all — on a desk crossing the library
+       * resolves it to that desk's first eligible seat, so printing it would
+       * name an arbitrary member for a room's work.
+       */
+      direct: boolean;
       /** A return is the leg that completes the exchange. */
       returning: boolean;
     }

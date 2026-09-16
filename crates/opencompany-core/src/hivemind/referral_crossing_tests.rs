@@ -321,6 +321,7 @@ pub(super) fn the_close_tells_a_local_question_from_a_crossing_one() {
         desk: desk.to_owned(),
         // These fixtures describe crossings that ran on a desk, not in a pair.
         conversation: None,
+        opened: None,
         returned: false,
         crossed,
     };
@@ -385,6 +386,7 @@ pub(super) fn the_close_reads_as_english_for_every_combination_of_referral_facts
             target: "account_manager".to_owned(),
             desk: "commercial".to_owned(),
             conversation: None,
+            opened: None,
             returned: false,
             crossed: true,
         }]
