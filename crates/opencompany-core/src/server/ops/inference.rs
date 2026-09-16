@@ -1588,5 +1588,26 @@ async fn test_config(company: ScopedCompany) -> Response {
 }
 
 #[cfg(test)]
-#[path = "inference_tests.rs"]
-mod tests;
+#[path = "inference_a_managed_manifest_also_tests.rs"]
+mod tests_a_managed_manifest_also;
+#[cfg(test)]
+#[path = "inference_clearing_the_key_of_tests.rs"]
+mod tests_clearing_the_key_of;
+#[cfg(test)]
+#[path = "inference_configuring_only_managed_after_tests.rs"]
+mod tests_configuring_only_managed_after;
+#[cfg(test)]
+#[path = "inference_disabling_keeps_the_route_tests.rs"]
+mod tests_disabling_keeps_the_route;
+#[cfg(test)]
+#[path = "inference_restart_rebuilds_the_registered_tests.rs"]
+mod tests_restart_rebuilds_the_registered;
+#[cfg(test)]
+#[path = "inference_rotating_the_key_does_tests.rs"]
+mod tests_rotating_the_key_does;
+#[cfg(test)]
+#[path = "inference_status_reports_the_default_tests.rs"]
+mod tests_status_reports_the_default;
+#[cfg(test)]
+#[path = "inference_switching_to_managed_reads_tests.rs"]
+mod tests_switching_to_managed_reads;
