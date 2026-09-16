@@ -3518,8 +3518,8 @@ impl HarnessBrain {
         let (company, members, desks, candidates, request) = {
             let record = self.record();
             let company = record.id.clone();
-            let members = crate::runtime::hivemind::roster_members(&record);
-            let desks = crate::runtime::hivemind::desk_snapshots(&record);
+            let members = crate::runtime::delegation_tools::tinyhivemind_roster(&record);
+            let desks = crate::runtime::delegation_tools::tinyhivemind_desks(&record);
             let candidates: Vec<tinyhivemind::responder::SelectorCandidate> = record
                 .effective_agents()
                 .into_iter()
