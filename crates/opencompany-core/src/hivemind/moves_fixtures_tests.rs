@@ -102,10 +102,10 @@ impl HiveTurnRunner for Runner {
 /// A memory that answers a fixed set of hits and records every note written.
 #[derive(Default)]
 pub(super) struct ScriptedMemory {
-    hits: Vec<String>,
-    notes: Mutex<Vec<HiveMemoryNote>>,
+    pub(super) hits: Vec<String>,
+    pub(super) notes: Mutex<Vec<HiveMemoryNote>>,
     /// When set, both halves fail — the best-effort contract under test.
-    broken: bool,
+    pub(super) broken: bool,
 }
 
 impl ScriptedMemory {
