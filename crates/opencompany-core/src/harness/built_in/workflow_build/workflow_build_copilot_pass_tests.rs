@@ -7,8 +7,6 @@ use super::tests_copilot_unit::DESC_GRAPH;
 use super::workflow_build_fixtures_tests::*;
 use super::workflow_build_shared_tests::*;
 use super::*;
-use crate::ports::UsageMeter;
-use openhuman_core::tools::traits::Tool;
 
 // ---------------------------------------------------------------------------
 // The copilot agent — pass tier over the native tool-calling loop (issue #840)

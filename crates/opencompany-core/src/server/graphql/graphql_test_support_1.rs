@@ -8,7 +8,6 @@ use crate::runtime::RuntimeBuilder;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 use std::sync::Arc;
-use tower::ServiceExt;
 
 /// The workflow summaries a company itself has: the global baseline is listed
 /// in every company, and these tests are about the company's own graphs.

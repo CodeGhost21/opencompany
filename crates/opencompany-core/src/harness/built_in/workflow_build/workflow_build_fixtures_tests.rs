@@ -25,7 +25,6 @@ use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
-use openhuman_core::tools::traits::Tool;
 
 // ---------------------------------------------------------------------------
 // A scripted model

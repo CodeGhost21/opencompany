@@ -1,4 +1,3 @@
-use crate::ports::CompanyStore;
 use crate::server::router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

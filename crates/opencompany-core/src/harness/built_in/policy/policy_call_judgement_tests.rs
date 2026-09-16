@@ -1,5 +1,4 @@
 use super::*;
-use crate::ports::workspace::WorkspaceStore;
 
 // Issue #470: the `composio_execute` fixtures are built here, from the same
 // key the classifier reads, so a call in a test reaches the same catalogue

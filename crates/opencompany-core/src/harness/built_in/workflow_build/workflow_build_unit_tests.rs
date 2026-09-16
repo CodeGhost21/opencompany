@@ -2,7 +2,6 @@
 
 use super::workflow_build_fixtures_tests::*;
 use super::*;
-use openhuman_core::tools::traits::Tool;
 
 // ---------------------------------------------------------------------------
 // Unit tier

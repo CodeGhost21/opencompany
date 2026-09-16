@@ -5,7 +5,6 @@ use serde_json::json;
 use super::workflow_build_fixtures_tests::*;
 use super::workflow_build_shared_tests::*;
 use super::*;
-use openhuman_core::tools::traits::Tool;
 
 // ---------------------------------------------------------------------------
 // Fix a failed run with the copilot (issue #840, PR-3)

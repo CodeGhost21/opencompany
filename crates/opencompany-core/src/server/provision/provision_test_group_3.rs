@@ -1,6 +1,5 @@
 use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
-use crate::ports::CompanyStore;
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;

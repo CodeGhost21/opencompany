@@ -4,7 +4,6 @@ use serde_json::json;
 
 use crate::ports::EventSeq;
 use crate::ports::users::UserRole;
-use crate::ports::CompanyStore;
 use crate::server::graphql::auth::UserPrincipal;
 
 use super::test_support::*;

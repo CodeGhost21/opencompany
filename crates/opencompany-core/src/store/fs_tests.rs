@@ -1,6 +1,5 @@
 use super::*;
 use crate::store::conformance;
-use futures::StreamExt;
 
 pub(super) fn tmp_root() -> tempfile::TempDir {
     tempfile::Builder::new()

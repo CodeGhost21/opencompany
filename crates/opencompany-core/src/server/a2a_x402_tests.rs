@@ -2,13 +2,11 @@ use super::*;
 
 use axum::body::Body;
 use axum::http::Request;
-use tower::ServiceExt;
 
 use crate::economy::x402::X402Challenge;
 use crate::ports::types::{
     CompanyId, EventSeq,
 };
-use crate::ports::CompanyStore;
 
 use super::test_support::*;
 

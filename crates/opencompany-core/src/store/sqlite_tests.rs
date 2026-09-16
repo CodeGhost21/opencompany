@@ -1,6 +1,5 @@
 use super::*;
 use crate::store::conformance;
-use futures::StreamExt;
 
 pub(super) fn store() -> Arc<SqliteStore> {
     Arc::new(SqliteStore::open_in_memory().expect("open in-memory sqlite"))

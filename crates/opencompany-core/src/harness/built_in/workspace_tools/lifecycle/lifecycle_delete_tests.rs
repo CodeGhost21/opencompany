@@ -3,9 +3,7 @@ use std::sync::Arc;
 use super::lifecycle_fixtures_tests::*;
 use super::*;
 use crate::harness::workspace_tools::tests::{TEST_AGENT, file, text, ws};
-use crate::ports::artifacts::ArtifactStore;
 use crate::ports::types::CompanyId;
-use crate::ports::workspace::WorkspaceStore;
 
 // ---------------------------------------------------------------------------
 // workspace_delete — the happy paths

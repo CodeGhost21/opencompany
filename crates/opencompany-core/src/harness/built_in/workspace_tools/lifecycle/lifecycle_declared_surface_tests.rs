@@ -3,7 +3,6 @@ use std::sync::Arc;
 use super::lifecycle_fixtures_tests::*;
 use super::*;
 use crate::harness::workspace_tools::tests::{text, ws};
-use crate::ports::artifacts::ArtifactStore;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{
     BlobStream, FolderClaim, WorkspaceNode, WorkspaceOrigin, WorkspaceStore,

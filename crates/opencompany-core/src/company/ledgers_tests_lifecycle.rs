@@ -9,7 +9,6 @@ use serde_json::json;
 use super::*;
 use crate::company::runtime::CompanyRuntime;
 use crate::ledger::LedgerAuthor;
-use crate::ports::ledgers::LedgerStore;
 use crate::ports::types::CompanyId;
 
 async fn ledgers() -> (Ledgers, CompanyRuntime, tempfile::TempDir) {
