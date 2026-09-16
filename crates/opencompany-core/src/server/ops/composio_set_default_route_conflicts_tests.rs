@@ -1,7 +1,12 @@
+#[cfg(feature = "composio")]
 use super::composio_test_support::*;
+#[cfg(feature = "composio")]
 use crate::ports::types::CompanyId;
+#[cfg(feature = "composio")]
 use axum::http::StatusCode;
+#[cfg(feature = "composio")]
 use axum::{Json, Router};
+#[cfg(feature = "composio")]
 use serde_json::json;
 
 /// The ops tests that are decidable only in a build carrying `composio`.
