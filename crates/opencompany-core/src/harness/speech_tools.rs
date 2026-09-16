@@ -458,7 +458,7 @@ impl SpeechContext {
         let Some(queue) = self.dispatch.as_ref() else {
             return;
         };
-        let members = crate::runtime::hivemind::roster_members(record);
+        let members = crate::runtime::delegation_tools::tinyhivemind_roster(record);
         let people = Vec::new();
         let retired = Vec::new();
         let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
