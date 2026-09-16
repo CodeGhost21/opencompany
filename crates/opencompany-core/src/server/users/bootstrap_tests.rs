@@ -511,11 +511,7 @@ impl crate::ports::sessions::SessionStore for SessionRevocationFailure {
     async fn delete(&self, company: &CompanyId, id: &str) -> crate::Result<bool> {
         self.0.delete(company, id).await
     }
-    async fn delete_for_user(
-        &self,
-        _company: &CompanyId,
-        _user_id: &str,
-    ) -> crate::Result<u64> {
+    async fn delete_for_user(&self, _company: &CompanyId, _user_id: &str) -> crate::Result<u64> {
         Err(OpenCompanyError::Config(
             "injected session revocation failure".into(),
         ))
