@@ -314,4 +314,5 @@ pub fn audited_shell(
 }
 
 #[cfg(test)]
-mod test;
+#[path = "audit/audit_tests.rs"]
+mod tests;
