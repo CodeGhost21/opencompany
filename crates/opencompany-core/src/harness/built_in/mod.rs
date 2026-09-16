@@ -3861,15 +3861,19 @@ impl HarnessPool {
             return None;
         }
         let Some(secrets) = &deps.secrets else {
-            return deps.search.clone().map(|backend| {
-                backend.with_daily_call_cap(
-                    company
-                        .manifest
-                        .tools
-                        .search_daily_calls
-                        .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
-                )
-            });
+            return deps
+                .search
+                .clone()
+                .filter(|backend| backend.credential.configured())
+                .map(|backend| {
+                    backend.with_daily_call_cap(
+                        company
+                            .manifest
+                            .tools
+                            .search_daily_calls
+                            .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
+                    )
+                });
         };
         let company_key = match crate::company::search::load_managed_key(
             &company.id,
@@ -3903,7 +3907,9 @@ impl HarnessPool {
             }
         };
         let backend = match (&deps.search, company_key) {
-            (Some(backend), _) => backend.clone(),
+            (Some(backend), Some(_)) => backend.clone(),
+            (Some(backend), None) if backend.credential.configured() => backend.clone(),
+            (Some(_), None) => return None,
             (None, Some(_)) => match self
                 .managed_search_backends
                 .read()

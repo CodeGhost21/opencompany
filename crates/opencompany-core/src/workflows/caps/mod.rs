@@ -350,6 +350,24 @@ pub async fn build_capabilities(
             agent: format!("workflow:{workflow_id}"),
             meter: deps.meter.clone(),
         };
+        // The process-wide handle owns the shared ledger. Decorate its clone
+        // with this company's live secret source so workflow calls follow the
+        // same company-first credential order as roster agents. If neither
+        // tier exists, keep the tool absent rather than wiring a guaranteed
+        // authentication failure.
+        let managed_search = match (&deps.search, &deps.secrets) {
+            (Some(backend), Some(secrets)) => {
+                let company_key =
+                    crate::company::search::load_managed_key(&company, secrets.as_ref()).await?;
+                (backend.credential.configured() || company_key.is_some()).then(|| {
+                    backend
+                        .clone()
+                        .with_company_credential(company.clone(), secrets.clone())
+                })
+            }
+            (Some(backend), None) if backend.credential.configured() => Some(backend.clone()),
+            _ => None,
+        };
         // Issue #775: the host-owned shell audit sink, keyed per WORKFLOW (not
         // per run) under `companies/<slug>/audit/_workflow-<id>/`. Per-workflow
         // because the vendored logger registry caches one logger per directory
@@ -370,7 +388,7 @@ pub async fn build_capabilities(
             web_allowed_domains.clone(),
             grants,
             &deps.capabilities,
-            deps.search.as_ref(),
+            managed_search.as_ref(),
             deps.tenant_search.as_ref(),
             search_metering,
             wiring,

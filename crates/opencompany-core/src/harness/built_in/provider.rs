@@ -317,12 +317,26 @@ pub const DEFAULT_TINYHUMANS_SEARCH_BACKEND_URL: &str = "https://api.tinyhumans.
 /// credential problem the environment-only boundary was written to prevent.
 pub fn search_backend_from_env(env: &dyn EnvSource) -> Option<super::search::SearchBackend> {
     let credential = Credential::from_source(Arc::new(TinyhumansTokenSource::from_env(env)?));
-    let backend_url = search_backend_url_from_env(env);
     Some(super::search::SearchBackend::new(
-        backend_url,
+        search_backend_url_from_env(env),
         credential,
         crate::company::DEFAULT_SEARCH_DAILY_CALLS,
     ))
+}
+
+/// A process-wide managed-search handle, even when the deployment credential
+/// is absent. The empty credential keeps requests fail-closed, while the shared
+/// handle lets company credentials use one ledger across workflow and harness
+/// lanes.
+pub fn search_backend_handle_from_env(env: &dyn EnvSource) -> super::search::SearchBackend {
+    let credential = TinyhumansTokenSource::from_env(env)
+        .map(|source| Credential::from_source(Arc::new(source)))
+        .unwrap_or(Credential::None);
+    super::search::SearchBackend::new(
+        search_backend_url_from_env(env),
+        credential,
+        crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+    )
 }
 
 /// The managed-search endpoint, independent of whether the deployment has a
@@ -2830,6 +2844,18 @@ mod tests {
             ("OPENCOMPANY_SEARCH_KEY", "search-specific"),
         ]);
         assert!(search_backend_from_env(&env).is_none());
+    }
+
+    /// Company-only Search still needs one process-wide handle so every lane
+    /// shares its ledger; its empty fallback credential must remain unusable.
+    #[tokio::test]
+    async fn search_backend_handle_is_uncredentialed_without_platform_identity() {
+        let backend = search_backend_handle_from_env(&MapEnv::new([(
+            "OPENCOMPANY_SEARCH_BACKEND_URL",
+            "https://staging-api.tinyhumans.ai",
+        )]));
+        assert_eq!(backend.backend_url, "https://staging-api.tinyhumans.ai");
+        assert_eq!(backend.credential.current().await.unwrap(), None);
     }
 
     // ---- boot-time platform credential status (issue #879) -----------------
