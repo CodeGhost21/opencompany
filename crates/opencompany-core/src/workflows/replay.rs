@@ -705,5 +705,8 @@ fn outward_call_of(node: &tinyflows::model::Node, declared_unrepeatable: bool) -
 const SAFE_METHODS: [&str; 2] = ["GET", "HEAD"];
 
 #[cfg(test)]
-#[path = "replay_tests.rs"]
-mod tests;
+#[path = "replay_recording_tests.rs"]
+mod tests_recording;
+#[cfg(test)]
+#[path = "replay_child_gate_tests.rs"]
+mod tests_child_gate;
