@@ -9,6 +9,10 @@ use super::built_in_test_fixtures::*;
 use super::built_in_test_fixtures_2::*;
 use super::*;
 use async_trait::async_trait;
+use std::sync::Mutex as StdMutex;
+
+use crate::harness::provider::MockProvider;
+use crate::ports::types::{CompanySummary, ContextChunk, LedgerEntry};
 
 /// The roster builds end-to-end with the skill read surface wired: the
 /// effective set materializes, the read tools build, and the catalogue folds
