@@ -588,7 +588,6 @@ fn git_log(workspace: &std::path::Path) -> String {
     .unwrap()
 }
 
-
 #[path = "build_tests_part1.rs"]
 mod tests_part1;
 #[path = "build_tests_part2.rs"]

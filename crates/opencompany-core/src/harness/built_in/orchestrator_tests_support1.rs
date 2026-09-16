@@ -123,7 +123,10 @@ members = ["ceo"]
 }
 
 /// The `writer`'s copy of `delegate_to_desk`: allowed `research` only.
-pub(super) fn member_desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateToDeskTool {
+pub(super) fn member_desk_tool(
+    record: CompanyRecord,
+    queue: &DelegationQueue,
+) -> DelegateToDeskTool {
     let company = record.id.clone();
     DelegateToDeskTool::for_member(
         queue.clone(),
@@ -507,4 +510,3 @@ pub(super) fn run_tool_over(
     );
     (tool, runner)
 }
-

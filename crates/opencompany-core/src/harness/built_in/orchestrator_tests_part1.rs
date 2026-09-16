@@ -368,8 +368,8 @@ fn a_claim_that_exits_early_un_commits_and_clears() {
 #[tokio::test]
 async fn every_delegation_tool_refuses_when_nothing_will_drain() {
     let queue = DelegationQueue::default();
-    let store = Arc::new(MemStore::seeded(desks_record(&CompanyId::new("acme"))))
-        as Arc<dyn CompanyStore>;
+    let store =
+        Arc::new(MemStore::seeded(desks_record(&CompanyId::new("acme")))) as Arc<dyn CompanyStore>;
 
     let cases: Vec<(Box<dyn Tool>, Value, &str)> = vec![
         (
@@ -649,4 +649,3 @@ async fn the_lifecycle_tools_refuse_past_the_cap_too() {
     );
     assert_eq!(queue.queued(), MAX_DELEGATIONS_PER_TURN);
 }
-

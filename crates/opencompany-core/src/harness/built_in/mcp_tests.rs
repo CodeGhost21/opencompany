@@ -388,10 +388,7 @@ async fn a_completed_mcp_call_is_metered_and_a_failed_one_is_not() {
         }
     }
 
-    async fn handler(
-        State(()): State<()>,
-        Json(body): Json<Value>,
-    ) -> axum::response::Response {
+    async fn handler(State(()): State<()>, Json(body): Json<Value>) -> axum::response::Response {
         use axum::response::IntoResponse;
         let id = body.get("id").cloned().unwrap_or(Value::Null);
         let method = body.get("method").and_then(Value::as_str).unwrap_or("");
@@ -417,8 +414,7 @@ async fn a_completed_mcp_call_is_metered_and_a_failed_one_is_not() {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if called == "boom" {
-                    return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom")
-                        .into_response();
+                    return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response();
                 }
                 Json(json!({
                     "jsonrpc": "2.0", "id": id,
@@ -438,8 +434,8 @@ async fn a_completed_mcp_call_is_metered_and_a_failed_one_is_not() {
     });
 
     let endpoint = format!("http://{addr}/mcp");
-    let registry = registry_for_agent(&[decl("fixture", &endpoint)], &grants(&["mcp:*"]))
-        .expect("registry");
+    let registry =
+        registry_for_agent(&[decl("fixture", &endpoint)], &grants(&["mcp:*"])).expect("registry");
 
     let meter = Arc::new(RecordingMeter::default());
     let tool = OcMcpCallTool::new(

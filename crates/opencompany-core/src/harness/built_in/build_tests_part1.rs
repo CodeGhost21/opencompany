@@ -63,8 +63,7 @@ fn sandbox_brief_flags_withhold_a_capability_denied_namespace() {
         "a denied `code` must not be reported even though it was granted"
     );
 
-    let deny_both =
-        toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell", "code"]));
+    let deny_both = toolbelt::CapabilityFilter::DenyNamespaces(HashSet::from(["shell", "code"]));
     assert_eq!(
         sandbox_brief_flags(true, true, true, &deny_both),
         (true, false, false)
@@ -210,8 +209,7 @@ fn a_live_sandbox_is_never_replaced_by_a_legacy_one() {
     let root = tempfile::tempdir().expect("tempdir");
     let company = CompanyId::new("acme");
 
-    let canonical =
-        ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
+    let canonical = ensure_agent_workspace(root.path(), &company, "page_builder").expect("ensure");
     std::fs::write(canonical.join("current.md"), "live").expect("live work");
     let legacy = root
         .path()
@@ -655,4 +653,3 @@ fn the_capability_verdict_matches_what_the_toolbelt_wires() {
         );
     }
 }
-

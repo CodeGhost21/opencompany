@@ -681,4 +681,3 @@ async fn a_republish_extends_by_identity_not_by_whatever_was_edited_last() {
         "nobody edited the spec, so it must report no human edit"
     );
 }
-

@@ -5,8 +5,7 @@ use super::*;
 #[tokio::test]
 async fn steer_cancel_returns_to_todo_and_discards_partial() {
     let dir = tempfile::tempdir().unwrap();
-    let (brain, tasks, _) =
-        brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Cancel]);
+    let (brain, tasks, _) = brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Cancel]);
     tasks
         .upsert(&CompanyId::new("acme"), &card("t1", ""))
         .await
@@ -39,8 +38,7 @@ async fn steer_cancel_returns_to_todo_and_discards_partial() {
 #[tokio::test]
 async fn steer_pause_parks_in_paused_and_preserves_partial() {
     let dir = tempfile::tempdir().unwrap();
-    let (brain, tasks, _) =
-        brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Pause]);
+    let (brain, tasks, _) = brain_that_steers_itself(dir.path(), "t1", vec![SteerAction::Pause]);
     tasks
         .upsert(&CompanyId::new("acme"), &card("t1", ""))
         .await
@@ -244,8 +242,7 @@ async fn an_exhausted_total_ceiling_routes_without_paying_for_a_selection() {
         budgets: Default::default(),
         total_budget: Some(10),
     };
-    let (brain, provider) =
-        brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
+    let (brain, provider) = brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
     assert_eq!(
         brain
             .auto_channel_responder(Some("launch"), "which strategy are we running?")
@@ -280,8 +277,7 @@ async fn an_exhausted_total_ceiling_names_a_card_without_paying_for_a_title() {
         budgets: Default::default(),
         total_budget: Some(10),
     };
-    let (brain, _provider) =
-        brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
+    let (brain, _provider) = brain_that_selects_with(dir.path(), "chief", Some(plan), Some(meter));
     let company = brain.record().id.clone();
 
     assert_eq!(
@@ -406,8 +402,7 @@ async fn delegate_to_desk_relays_the_answer_in_a_second_orchestrator_turn() {
     // `engineer replied:` frame) — proving the operator reply is the SECOND
     // turn relaying the teammate, not the pre-delegation first reply.
     assert!(
-        bubble.text.contains("engineer replied:")
-            && bubble.text.contains("diagnose the outage"),
+        bubble.text.contains("engineer replied:") && bubble.text.contains("diagnose the outage"),
         "the relay carries the teammate's answer: {:?}",
         bubble.text
     );
@@ -625,4 +620,3 @@ async fn a_dispatched_turn_that_delegates_runs_the_delegate_and_links_them_to_th
         "the delegate must be shown working the card while they work it"
     );
 }
-

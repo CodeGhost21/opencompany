@@ -658,4 +658,3 @@ async fn a_budget_paused_approval_continuation_surfaces_the_notice_and_parks_a_m
         .expect("run_steered_background parks a marker on the same terms run_inner does");
     assert_eq!(marker.agent, "ceo");
 }
-

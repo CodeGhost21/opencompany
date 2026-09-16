@@ -161,8 +161,7 @@ async fn run_workflow_tool_rejects_traversal_ids() {
 async fn create_workflow_tool_then_run_workflow_tool() {
     let dir = tempfile::tempdir().unwrap();
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
 
     // Author the graph.
     let create = CreateWorkflowTool::new(
@@ -234,8 +233,7 @@ async fn create_workflow_tool_then_run_workflow_tool() {
 async fn run_workflow_tool_refuses_at_the_in_flight_cap() {
     let dir = tempfile::tempdir().unwrap();
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
 
     // Author a runnable graph on disk so `execute` reaches the cap check.
     let create = CreateWorkflowTool::new(
@@ -310,8 +308,7 @@ async fn run_workflow_tool_refuses_at_the_in_flight_cap() {
 async fn authoring_a_workflow_stages_a_link_and_running_it_upgrades_it() {
     let dir = tempfile::tempdir().unwrap();
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let refs = WorkflowRefQueue::default();
 
     let create = CreateWorkflowTool::new(
@@ -382,8 +379,7 @@ async fn authoring_a_workflow_stages_a_link_and_running_it_upgrades_it() {
 async fn create_workflow_tool_guardrail_failure_is_error_result() {
     let dir = tempfile::tempdir().unwrap();
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(
         company,
         Some(dir.path().to_path_buf()),
@@ -415,8 +411,7 @@ async fn create_workflow_tool_guardrail_failure_is_error_result() {
 #[tokio::test]
 async fn create_workflow_tool_creates_without_source_dir() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(
         company.clone(),
         None,
@@ -502,8 +497,7 @@ async fn create_workflow_tool_errors_on_unreadable_args() {
 #[tokio::test]
 async fn create_workflow_tool_persists_tool_call_config_slug() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_granting_web(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_granting_web(&company)));
     let tool = CreateWorkflowTool::new(
         company.clone(),
         None,
@@ -558,8 +552,7 @@ async fn create_workflow_tool_persists_tool_call_config_slug() {
 #[tokio::test]
 async fn create_workflow_tool_normalizes_a_blank_owner_desk() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(
         company.clone(),
         None,
@@ -615,8 +608,7 @@ fn owner_desk_schema_permits_null() {
 #[tokio::test]
 async fn create_workflow_tool_persists_output_destination() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(
         company.clone(),
         None,
@@ -651,4 +643,3 @@ async fn create_workflow_tool_persists_output_destination() {
         "the persisted graph routes to the destination address: {saved}"
     );
 }
-

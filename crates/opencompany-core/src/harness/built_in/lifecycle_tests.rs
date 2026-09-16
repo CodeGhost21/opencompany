@@ -584,8 +584,7 @@ fn the_relay_reflects_the_landing_column_not_a_presumed_success() {
         );
     }
     assert!(
-        relay_text(&card(COLUMN_PLANNING, None), "maya", "ceo", &[])
-            .contains("is being planned"),
+        relay_text(&card(COLUMN_PLANNING, None), "maya", "ceo", &[]).contains("is being planned"),
         "planning needs its own sentence"
     );
 }

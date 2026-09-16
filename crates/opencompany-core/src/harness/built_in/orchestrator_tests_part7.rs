@@ -6,8 +6,7 @@ use super::*;
 #[tokio::test]
 async fn create_workflow_tool_rejects_tool_call_without_slug() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
     let result = tool
         .execute(json!({
@@ -40,8 +39,7 @@ async fn create_workflow_tool_rejects_tool_call_without_slug() {
 #[tokio::test]
 async fn create_workflow_tool_rejects_agent_turn_tool_call() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
     let result = tool
         .execute(json!({
@@ -77,8 +75,7 @@ async fn create_workflow_tool_rejects_agent_turn_tool_call() {
 #[tokio::test]
 async fn create_workflow_tool_rejects_null_config_value() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
     let result = tool
         .execute(json!({
@@ -117,8 +114,7 @@ async fn create_workflow_tool_rejects_null_config_value() {
 #[tokio::test]
 async fn create_workflow_tool_rejects_tool_call_expression_args() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_granting_web(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_granting_web(&company)));
     let tool = CreateWorkflowTool::new(
         company.clone(),
         None,
@@ -167,8 +163,7 @@ async fn create_workflow_tool_rejects_tool_call_expression_args() {
 #[tokio::test]
 async fn create_workflow_tool_persists_tool_call_literal_args() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_granting_web(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_granting_web(&company)));
     let tool = CreateWorkflowTool::new(
         company.clone(),
         None,
@@ -216,8 +211,7 @@ async fn create_workflow_tool_persists_tool_call_literal_args() {
 #[tokio::test]
 async fn create_workflow_tool_allows_condition_expression_field() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(
         company.clone(),
         None,
@@ -261,8 +255,7 @@ async fn create_workflow_tool_allows_condition_expression_field() {
 #[tokio::test]
 async fn create_workflow_tool_rejects_non_object_config() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
     let result = tool
         .execute(json!({
@@ -300,8 +293,7 @@ async fn create_workflow_tool_rejects_non_object_config() {
 #[tokio::test]
 async fn create_workflow_tool_rejects_destination_on_non_output() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
     let result = tool
         .execute(json!({
@@ -336,8 +328,7 @@ async fn create_workflow_tool_rejects_destination_on_non_output() {
 #[tokio::test]
 async fn create_workflow_tool_non_null_conversion_error_omits_null_hint() {
     let company = CompanyId::new("acme");
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(record_with_assistant(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record_with_assistant(&company)));
     let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
     let result = tool
         .execute(json!({
@@ -654,4 +645,3 @@ fn the_summary_reports_a_declined_node_as_not_needed() {
         "a declined node is not an error: {md}"
     );
 }
-

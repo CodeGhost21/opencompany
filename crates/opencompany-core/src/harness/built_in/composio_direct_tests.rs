@@ -21,8 +21,7 @@ fn a_v3_tool_keeps_the_schema_an_agent_needs_to_call_it() {
 #[test]
 fn an_older_payload_spelling_parameters_still_carries_its_schema() {
     let body: V3Page<V3Tool> =
-        serde_json::from_str(r#"{"items":[{"slug":"X","parameters":{"type":"object"}}]}"#)
-            .unwrap();
+        serde_json::from_str(r#"{"items":[{"slug":"X","parameters":{"type":"object"}}]}"#).unwrap();
     assert!(body.items[0].input_parameters.is_some());
 }
 
@@ -219,10 +218,9 @@ async fn spawn_composio_v3() -> String {
     let app = Router::new()
         .route("/toolkits", get(toolkits))
         .route("/tools", get(tools));
-    let listener =
-        tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
+    let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -299,9 +297,7 @@ async fn a_listing_follows_the_cursor_and_says_what_it_could_not_reach() {
     use std::collections::HashMap;
 
     // Five pages of one row each, against a three-page budget.
-    async fn toolkits(
-        Query(params): Query<HashMap<String, String>>,
-    ) -> Json<serde_json::Value> {
+    async fn toolkits(Query(params): Query<HashMap<String, String>>) -> Json<serde_json::Value> {
         let page: usize = params
             .get("cursor")
             .and_then(|c| c.parse().ok())
@@ -314,10 +310,9 @@ async fn a_listing_follows_the_cursor_and_says_what_it_could_not_reach() {
     }
 
     let app = Router::new().route("/toolkits", get(toolkits));
-    let listener =
-        tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
+    let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -343,9 +338,7 @@ async fn a_truncated_listing_with_no_total_still_reports_dropped() {
     use axum::{Json, Router};
     use std::collections::HashMap;
 
-    async fn toolkits(
-        Query(params): Query<HashMap<String, String>>,
-    ) -> Json<serde_json::Value> {
+    async fn toolkits(Query(params): Query<HashMap<String, String>>) -> Json<serde_json::Value> {
         let page: usize = params
             .get("cursor")
             .and_then(|c| c.parse().ok())
@@ -358,10 +351,9 @@ async fn a_truncated_listing_with_no_total_still_reports_dropped() {
     }
 
     let app = Router::new().route("/toolkits", get(toolkits));
-    let listener =
-        tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
+    let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -404,10 +396,9 @@ async fn a_listing_that_fits_reports_nothing_dropped() {
             }))
         }),
     );
-    let listener =
-        tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
+    let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -451,10 +442,9 @@ async fn an_account_can_be_revoked_on_this_route() {
             }
         }),
     );
-    let listener =
-        tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
+    let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -552,10 +542,9 @@ async fn a_refused_key_is_reported_without_echoing_it() {
         "/toolkits",
         get(|| async { (StatusCode::UNAUTHORIZED, "Invalid API key: ak_live") }),
     );
-    let listener =
-        tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
+    let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -598,10 +587,9 @@ async fn spawn_probe_backend(
             ),
         )
         .with_state(seen.clone());
-    let listener =
-        tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
+    let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;

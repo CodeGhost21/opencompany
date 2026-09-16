@@ -106,9 +106,7 @@ fn search_narrows_to_one_action_on_any_toolkit() {
         slug: "NOTION_SEARCH_PAGES".to_string(),
         toolkit: "notion".to_string(),
         description: "Search pages in the workspace.".to_string(),
-        parameters: Some(
-            json!({"type": "object", "properties": {"query": {"type": "string"}}}),
-        ),
+        parameters: Some(json!({"type": "object", "properties": {"query": {"type": "string"}}})),
     });
 
     let github = render(
@@ -143,9 +141,7 @@ fn an_exact_slug_pasted_into_search_returns_that_schema() {
         slug: "SLACK_POST_MESSAGE".to_string(),
         toolkit: "slack".to_string(),
         description: "Post a message to a channel.".to_string(),
-        parameters: Some(
-            json!({"type": "object", "properties": {"channel": {"type": "string"}}}),
-        ),
+        parameters: Some(json!({"type": "object", "properties": {"channel": {"type": "string"}}})),
     });
     let out = render(
         &actions,
@@ -531,4 +527,3 @@ fn the_composio_brief_names_the_connected_toolkits_lowercased() {
         "{brief}"
     );
 }
-

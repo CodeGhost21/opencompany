@@ -102,4 +102,3 @@ fn a_threaded_settle_is_not_in_the_channel_level_conversation() {
         None
     ));
 }
-

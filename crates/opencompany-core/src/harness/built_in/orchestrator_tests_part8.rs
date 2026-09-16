@@ -631,4 +631,3 @@ async fn a_scope_chain_is_per_claimant_and_depth_is_unchanged() {
         Staged::Queued
     );
 }
-

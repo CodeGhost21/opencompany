@@ -270,10 +270,7 @@ fn brain_with_tasks_and_events(
 /// notification store (issue #1865, PR #1883 review comment 3878668326):
 /// [`FsOps`] implements both, so a test can seed a card, drive a cycle,
 /// and then read back any `dispatch_failed` row a refusal filed.
-fn brain_with_tasks_notified(
-    dir: &std::path::Path,
-    notify: bool,
-) -> (HarnessBrain, Arc<FsOps>) {
+fn brain_with_tasks_notified(dir: &std::path::Path, notify: bool) -> (HarnessBrain, Arc<FsOps>) {
     brain_with_tasks_notified_logging(dir, notify, None)
 }
 
@@ -493,10 +490,7 @@ fn brain_with_artifacts_and_workspace(dir: &std::path::Path) -> (HarnessBrain, A
     brain_with_stores(dir, true)
 }
 
-fn brain_with_stores(
-    dir: &std::path::Path,
-    with_workspace: bool,
-) -> (HarnessBrain, Arc<FsOps>) {
+fn brain_with_stores(dir: &std::path::Path, with_workspace: bool) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let artifacts = ops.clone() as Arc<dyn crate::ports::artifacts::ArtifactStore>;
     brain_with_injected_artifacts(dir, ops, artifacts, with_workspace)
@@ -617,18 +611,10 @@ impl crate::ports::artifacts::ArtifactStore for FailingArtifacts {
     ) -> crate::Result<Vec<ArtifactRecord>> {
         crate::ports::artifacts::ArtifactStore::list(&*self.inner, company, task_id).await
     }
-    async fn get(
-        &self,
-        company: &CompanyId,
-        id: &str,
-    ) -> crate::Result<Option<ArtifactRecord>> {
+    async fn get(&self, company: &CompanyId, id: &str) -> crate::Result<Option<ArtifactRecord>> {
         crate::ports::artifacts::ArtifactStore::get(&*self.inner, company, id).await
     }
-    async fn upsert(
-        &self,
-        company: &CompanyId,
-        artifact: &ArtifactRecord,
-    ) -> crate::Result<()> {
+    async fn upsert(&self, company: &CompanyId, artifact: &ArtifactRecord) -> crate::Result<()> {
         let n = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if n >= self.allowed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(crate::error::OpenCompanyError::Store(
@@ -655,11 +641,7 @@ fn publish_of(source: &str, body: &str) -> crate::harness::publish::PendingPubli
 
 /// The named node under `agents/maya/t-1/`, with its body — the tree's own
 /// answer, read without going through the artifact chain at all.
-async fn note_in_tree(
-    ops: &FsOps,
-    company: &CompanyId,
-    name: &str,
-) -> Option<(String, String)> {
+async fn note_in_tree(ops: &FsOps, company: &CompanyId, name: &str) -> Option<(String, String)> {
     use crate::ports::workspace::WorkspaceStore;
     let nodes = WorkspaceStore::tree(ops, company).await.unwrap();
     let found = nodes.iter().find(|n| n.name == name)?;
@@ -2317,9 +2299,7 @@ async fn dispatch_card(brain: &HarnessBrain, tasks: &Arc<FsOps>, id: &str) {
             .await
             .unwrap_or_default()
             .into_iter()
-            .any(|card| {
-                card.id == id && card.column == crate::ports::tasks::COLUMN_IN_PROGRESS
-            });
+            .any(|card| card.id == id && card.column == crate::ports::tasks::COLUMN_IN_PROGRESS);
         if !handed_on {
             break;
         }
@@ -2418,9 +2398,12 @@ kind = "built_in"
 
 // ── Issue #1861: blockers park instead of settling Failed ───────────────
 
-
 #[path = "brain_tests_part1.rs"]
 mod tests_part1;
+#[path = "brain_tests_part10.rs"]
+mod tests_part10;
+#[path = "brain_tests_part11.rs"]
+mod tests_part11;
 #[path = "brain_tests_part2.rs"]
 mod tests_part2;
 #[path = "brain_tests_part3.rs"]
@@ -2437,7 +2420,3 @@ mod tests_part7;
 mod tests_part8;
 #[path = "brain_tests_part9.rs"]
 mod tests_part9;
-#[path = "brain_tests_part10.rs"]
-mod tests_part10;
-#[path = "brain_tests_part11.rs"]
-mod tests_part11;

@@ -14,6 +14,10 @@ use support2::*;
 
 #[path = "orchestrator_tests_part1.rs"]
 mod tests_part1;
+#[path = "orchestrator_tests_part10.rs"]
+mod tests_part10;
+#[path = "orchestrator_tests_part11.rs"]
+mod tests_part11;
 #[path = "orchestrator_tests_part2.rs"]
 mod tests_part2;
 #[path = "orchestrator_tests_part3.rs"]
@@ -30,7 +34,3 @@ mod tests_part7;
 mod tests_part8;
 #[path = "orchestrator_tests_part9.rs"]
 mod tests_part9;
-#[path = "orchestrator_tests_part10.rs"]
-mod tests_part10;
-#[path = "orchestrator_tests_part11.rs"]
-mod tests_part11;

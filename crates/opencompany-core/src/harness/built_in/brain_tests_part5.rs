@@ -660,4 +660,3 @@ async fn a_turn_that_opens_several_cards_reports_the_first() {
         "the bubble reports the first card opened, not the last"
     );
 }
-

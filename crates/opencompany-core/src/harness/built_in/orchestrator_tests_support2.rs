@@ -106,11 +106,7 @@ impl RunStore for BrokenRunStore {
     ) -> crate::Result<RunRecord> {
         unimplemented!("not exercised by these tests")
     }
-    async fn get_run(
-        &self,
-        _company: &CompanyId,
-        _id: &str,
-    ) -> crate::Result<Option<RunRecord>> {
+    async fn get_run(&self, _company: &CompanyId, _id: &str) -> crate::Result<Option<RunRecord>> {
         Err(OpenCompanyError::Store(
             "simulated run-store read failure".into(),
         ))
@@ -156,11 +152,7 @@ impl RunStore for FailingGetRun {
     ) -> crate::Result<RunRecord> {
         unimplemented!("not exercised by these tests")
     }
-    async fn get_run(
-        &self,
-        _company: &CompanyId,
-        _id: &str,
-    ) -> crate::Result<Option<RunRecord>> {
+    async fn get_run(&self, _company: &CompanyId, _id: &str) -> crate::Result<Option<RunRecord>> {
         Err(OpenCompanyError::Store(
             "simulated run-store read failure".into(),
         ))
@@ -380,4 +372,3 @@ impl CompanyStore for YieldingStore {
         Ok(())
     }
 }
-

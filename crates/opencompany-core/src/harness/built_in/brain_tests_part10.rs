@@ -165,8 +165,7 @@ async fn a_later_answering_hand_off_takes_the_card_over_from_an_earlier_empty_on
         "the second hand-off is recorded, and visibly did not run: {note}"
     );
     assert!(
-        !note.contains("[eng_desk] second attempt")
-            && !note.contains("[engineer] second attempt"),
+        !note.contains("[eng_desk] second attempt") && !note.contains("[engineer] second attempt"),
         "a second hand-off must not produce work under a card owned by the first: {note}"
     );
 }
@@ -619,4 +618,3 @@ fn a_copilot_turn_is_authored_by_the_copilot_not_the_operator_channel() {
         "author and destination must not be the same value — that conflation is issue #885"
     );
 }
-

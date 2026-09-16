@@ -220,13 +220,7 @@ fn reply_by(seq: u64, chat_id: &str, agent_id: &str, text: &str) -> StoredEvent 
 /// `runtime::hivemind`'s adapter maps to
 /// `tinyhivemind_hive::aside::Audience::Aside { members }` and the episode
 /// adapter in `hivemind::log` maps identically.
-fn aside_by(
-    seq: u64,
-    chat_id: &str,
-    agent_id: &str,
-    audience: &[&str],
-    text: &str,
-) -> StoredEvent {
+fn aside_by(seq: u64, chat_id: &str, agent_id: &str, audience: &[&str], text: &str) -> StoredEvent {
     StoredEvent {
         seq: EventSeq::new(seq),
         company: CompanyId::new("acme"),
@@ -344,13 +338,7 @@ fn reply_in(seq: u64, chat_id: &str, text: &str, parent: u64) -> StoredEvent {
 }
 
 /// [`reply_in`] by a named author (#1956).
-fn reply_by_in(
-    seq: u64,
-    chat_id: &str,
-    agent_id: &str,
-    text: &str,
-    parent: u64,
-) -> StoredEvent {
+fn reply_by_in(seq: u64, chat_id: &str, agent_id: &str, text: &str, parent: u64) -> StoredEvent {
     let mut stored = reply_by(seq, chat_id, agent_id, text);
     if let CompanyEvent::AgentReply { parent: p, .. } = &mut stored.event {
         *p = Some(EventSeq::new(parent));
@@ -383,11 +371,7 @@ async fn seed_of_thread(
 /// A seed built for a named viewer. The desk and boundary are fixed —
 /// these cases are about *who spoke*, and every other axis has its own
 /// section above.
-async fn seed_for(
-    log: FixedLog,
-    viewer: &str,
-    thread_root: Option<u64>,
-) -> Vec<(String, String)> {
+async fn seed_for(log: FixedLog, viewer: &str, thread_root: Option<u64>) -> Vec<(String, String)> {
     let events: Arc<dyn EventLog> = Arc::new(log);
     build_chat_seed(
         &events,
@@ -405,7 +389,6 @@ async fn seed_for(
 // ── Peer/boundary collision (#2075 review) ───────────────────────────
 
 // ── Byline forgery (#2075 review) ────────────────────────────────────
-
 
 #[path = "chat_seed_tests_part1.rs"]
 mod tests_part1;

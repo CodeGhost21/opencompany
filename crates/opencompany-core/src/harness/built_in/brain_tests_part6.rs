@@ -691,4 +691,3 @@ async fn a_hive_episode_drains_mcp_failures_and_surfaces_a_response() {
          {logged:?}"
     );
 }
-

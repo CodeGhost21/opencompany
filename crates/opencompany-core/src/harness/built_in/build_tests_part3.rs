@@ -126,8 +126,7 @@ fn no_configured_mcp_server_wires_no_server_backed_mcp_tool() {
         "this test's premise is a company with no configured server"
     );
     assert!(
-        crate::harness::mcp::registry_for_agent(&deps.mcp_servers, &["*".to_string()])
-            .is_none(),
+        crate::harness::mcp::registry_for_agent(&deps.mcp_servers, &["*".to_string()]).is_none(),
         "no configured server must yield no registry, even under `*`"
     );
 
@@ -203,4 +202,3 @@ fn the_tool_iteration_cap_is_uniform_and_not_manifest_configurable() {
         );
     }
 }
-

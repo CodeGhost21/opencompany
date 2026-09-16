@@ -44,11 +44,7 @@ async fn a_store_error_on_a_published_file_propagates() {
     struct BrokenArtifacts;
     #[async_trait]
     impl ArtifactStore for BrokenArtifacts {
-        async fn list(
-            &self,
-            _: &CompanyId,
-            _: Option<&str>,
-        ) -> crate::Result<Vec<ArtifactRecord>> {
+        async fn list(&self, _: &CompanyId, _: Option<&str>) -> crate::Result<Vec<ArtifactRecord>> {
             Ok(Vec::new())
         }
         async fn get(&self, _: &CompanyId, _: &str) -> crate::Result<Option<ArtifactRecord>> {
@@ -499,8 +495,7 @@ async fn a_dispatch_settles_its_attempt_row_from_how_the_run_ended() {
 /// with no origin chat completely silent: no chat reply, no badge,
 /// nothing but the board itself.
 #[tokio::test]
-async fn an_ordinary_failed_dispatch_with_no_origin_chat_files_a_dispatch_failed_notification()
-{
+async fn an_ordinary_failed_dispatch_with_no_origin_chat_files_a_dispatch_failed_notification() {
     use crate::ports::runs::NewRun;
 
     let dir = tempfile::tempdir().unwrap();
@@ -529,13 +524,10 @@ async fn an_ordinary_failed_dispatch_with_no_origin_chat_files_a_dispatch_failed
         "this is exactly the board-created shape with no relay target: {settled:?}"
     );
 
-    let notes = crate::ports::notifications::NotificationStore::list(
-        tasks.as_ref(),
-        &company,
-        "anyone",
-    )
-    .await
-    .expect("list notifications");
+    let notes =
+        crate::ports::notifications::NotificationStore::list(tasks.as_ref(), &company, "anyone")
+            .await
+            .expect("list notifications");
     assert!(
         notes
             .iter()
@@ -637,4 +629,3 @@ async fn a_dispatch_whose_card_is_gone_still_closes_its_attempt() {
     assert_eq!(settled.status, RunStatus::Failed);
     assert_eq!(settled.error.as_deref(), Some(CARD_VANISHED));
 }
-

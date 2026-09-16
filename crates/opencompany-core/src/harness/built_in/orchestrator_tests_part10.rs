@@ -3,8 +3,7 @@ use super::*;
 #[tokio::test]
 async fn query_company_board_section_reports_unavailable_on_a_read_failure_not_empty() {
     let tasks: Arc<dyn TaskStore> = Arc::new(BrokenTaskStore);
-    let tool =
-        QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, Some(tasks));
+    let tool = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, None, Some(tasks));
     let result = tool.execute(json!({})).await.unwrap();
     assert!(!result.is_error, "the whole tool must still answer");
     let text = result.output_for_llm(true);
@@ -618,4 +617,3 @@ async fn read_run_never_leaks_a_run_id_belonging_to_another_company() {
         "must not render beta's run: {out}"
     );
 }
-

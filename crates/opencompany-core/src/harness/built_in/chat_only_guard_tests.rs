@@ -15,9 +15,8 @@ fn guard_replaces_the_reported_dsml_markup() {
 
 #[test]
 fn guard_replaces_a_bare_tool_call_tag() {
-    let leaked =
-        r#"<tool_call id="call_1">{"name":"workspace_search","arguments":{}}</tool_call>"#
-            .to_string();
+    let leaked = r#"<tool_call id="call_1">{"name":"workspace_search","arguments":{}}</tool_call>"#
+        .to_string();
     assert_eq!(guard_suppressed_reply(leaked), FALLBACK_REPLY);
 }
 

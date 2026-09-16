@@ -629,9 +629,7 @@ async fn a_publish_lands_in_the_shared_workspace_and_the_version_names_the_node(
                 title: "Launch spec".to_string(),
                 kind: crate::ports::artifacts::ArtifactKind::Markdown,
                 note: None,
-                payload: crate::harness::publish::PublishPayload::Text(
-                    "the spec body".to_string(),
-                ),
+                payload: crate::harness::publish::PublishPayload::Text("the spec body".to_string()),
             }],
             Some("run-1"),
         )
@@ -659,4 +657,3 @@ async fn a_publish_lands_in_the_shared_workspace_and_the_version_names_the_node(
         "the tree must say which teammate produced this"
     );
 }
-

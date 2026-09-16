@@ -542,8 +542,7 @@ async fn the_depth_bound_is_read_from_the_manifest_at_call_time() {
 fn a_members_delegation_belt_is_the_two_hand_off_tools() {
     let company = CompanyId::new("acme");
     let queue = DelegationQueue::default();
-    let store: Arc<dyn CompanyStore> =
-        Arc::new(MemStore::seeded(nested_desks_record(&company)));
+    let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(nested_desks_record(&company)));
     let tools = member_delegation_tools(
         &queue,
         company,
@@ -639,4 +638,3 @@ async fn the_allowlist_bounds_which_teammates_a_member_may_reach() {
     assert!(!allowed.is_error, "{}", allowed.output_for_llm(true));
     assert_eq!(queue.queued(), 1);
 }
-

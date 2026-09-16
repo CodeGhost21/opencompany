@@ -637,4 +637,3 @@ async fn read_failure_degrades_to_empty() {
     .await;
     assert!(seed.is_empty());
 }
-

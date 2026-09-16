@@ -430,11 +430,7 @@ async fn read_run_folds_a_workflow_run_out_of_the_journal_when_no_attempt_row_ex
 
     #[async_trait]
     impl EventLog for FixedLog {
-        async fn append(
-            &self,
-            _id: &CompanyId,
-            _event: CompanyEvent,
-        ) -> crate::Result<EventSeq> {
+        async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
             unreachable!("read_run only reads")
         }
         async fn read_from(
@@ -630,4 +626,3 @@ async fn read_task_reports_a_read_failure_instead_of_a_missing_card() {
     );
     assert!(text.contains("Couldn't read the task board"), "{text}");
 }
-

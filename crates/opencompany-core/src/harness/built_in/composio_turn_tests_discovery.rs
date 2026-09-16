@@ -138,4 +138,3 @@ async fn an_agent_discovers_and_calls_an_action_unaided_on_two_large_toolkits() 
         );
     }
 }
-

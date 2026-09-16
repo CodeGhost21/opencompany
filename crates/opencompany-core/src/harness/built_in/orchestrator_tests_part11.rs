@@ -178,11 +178,7 @@ async fn spawn_task_fails_open_when_the_company_record_cannot_be_read() {
         async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
             Ok(Vec::new())
         }
-        async fn append_ledger(
-            &self,
-            _id: &CompanyId,
-            _entry: LedgerEntry,
-        ) -> crate::Result<()> {
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
             Ok(())
         }
     }
@@ -488,4 +484,3 @@ async fn concurrent_add_agent_calls_for_one_name_mint_it_once() {
             .collect::<Vec<_>>()
     );
 }
-

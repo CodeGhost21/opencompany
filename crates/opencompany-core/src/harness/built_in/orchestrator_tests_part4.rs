@@ -102,12 +102,11 @@ async fn query_company_lists_a_teammate_under_the_id_delegation_grounds() {
     });
     let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record.clone()));
 
-    let out =
-        QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, Some(store), None)
-            .execute(json!({}))
-            .await
-            .expect("execute")
-            .output_for_llm(true);
+    let out = QueryCompanyTool::new(CompanyId::new("acme"), None, None, None, Some(store), None)
+        .execute(json!({}))
+        .await
+        .expect("execute")
+        .output_for_llm(true);
 
     let line = out
         .lines()
@@ -620,4 +619,3 @@ async fn add_agent_tool_reports_company_not_found() {
         .expect_err("no record for this company id");
     assert!(err.to_string().contains("ghost"), "{err}");
 }
-

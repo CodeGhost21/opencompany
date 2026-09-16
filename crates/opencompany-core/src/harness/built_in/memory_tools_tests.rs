@@ -30,9 +30,7 @@ async fn store_recall_forget_round_trip() {
     let (store, recall, forget) = tools_for(dir.path(), "acme", "ceo");
 
     let stored = store
-        .execute(
-            json!({"title": "Fiscal year", "body": "Acme's fiscal year starts in February."}),
-        )
+        .execute(json!({"title": "Fiscal year", "body": "Acme's fiscal year starts in February."}))
         .await
         .unwrap();
     assert!(!stored.is_error, "{stored:?}");
@@ -321,9 +319,7 @@ async fn store_refuses_oversized_title_and_body_and_persists_nothing() {
 
     // Exactly at the cap is still accepted — the refusal is `>`, not `>=`.
     let ok = store
-        .execute(
-            json!({"title": "t".repeat(MAX_TITLE_BYTES), "body": "b".repeat(MAX_BODY_BYTES)}),
-        )
+        .execute(json!({"title": "t".repeat(MAX_TITLE_BYTES), "body": "b".repeat(MAX_BODY_BYTES)}))
         .await
         .unwrap();
     assert!(!ok.is_error, "at-cap must be accepted: {ok:?}");

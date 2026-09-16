@@ -209,4 +209,3 @@ async fn exhausting_the_raised_cap_still_reports_an_iteration_cap_pause() {
          {MAX_TOOL_ITERATIONS} — the raised cap is not in effect"
     );
 }
-

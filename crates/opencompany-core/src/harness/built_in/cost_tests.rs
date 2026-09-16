@@ -39,11 +39,7 @@ impl UsageMeter for RecordingMeter {
         self.samples.lock().unwrap().push(sample.clone());
         Ok(())
     }
-    async fn query(
-        &self,
-        _company: &CompanyId,
-        _since: u64,
-    ) -> crate::Result<Vec<UsageSample>> {
+    async fn query(&self, _company: &CompanyId, _since: u64) -> crate::Result<Vec<UsageSample>> {
         Ok(self.samples.lock().unwrap().clone())
     }
 }
@@ -249,9 +245,8 @@ fn the_smallest_representable_positive_cost_still_posts_a_ledger_entry() {
         cached_input_tokens: 0,
         cost_usd: smallest,
     };
-    let entry = ledger_entry_for(&turn, "ceo").expect(
-        "a nonzero cost, however small, still posts — the gate is exact equality to zero",
-    );
+    let entry = ledger_entry_for(&turn, "ceo")
+        .expect("a nonzero cost, however small, still posts — the gate is exact equality to zero");
     assert_eq!(entry.amount_usd, -smallest);
 
     let exactly_zero = TurnUsage {

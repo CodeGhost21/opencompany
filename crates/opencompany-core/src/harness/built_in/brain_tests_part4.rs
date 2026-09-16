@@ -107,8 +107,7 @@ async fn a_refused_dispatch_with_no_origin_chat_files_a_dispatch_failed_notifica
     assert!(
         notes
             .iter()
-            .any(|n| n.notification.kind == "dispatch_failed"
-                && n.notification.subject.id == "t1"),
+            .any(|n| n.notification.kind == "dispatch_failed" && n.notification.subject.id == "t1"),
         "a board card refused with no origin chat must still file a \
          dispatch_failed notification, got {notes:?}"
     );
@@ -479,11 +478,7 @@ fn a_mention_outranks_the_addressed_desks_lead() {
     let (brain, _tasks) = brain_with_desk(dir.path());
     assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
     assert_eq!(
-        crate::runtime::mentions::mention_responder(
-            &brain.record(),
-            None,
-            &[mention_of("ceo")]
-        ),
+        crate::runtime::mentions::mention_responder(&brain.record(), None, &[mention_of("ceo")]),
         Some("ceo".to_string()),
         "the named teammate answers even on a desk with its own lead",
     );
@@ -638,4 +633,3 @@ members = ["ceo", "engineer"]
         "and does not reach a teammate who is not on it: {expanded:?}"
     );
 }
-

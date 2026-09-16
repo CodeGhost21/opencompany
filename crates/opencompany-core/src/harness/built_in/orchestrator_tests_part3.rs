@@ -290,11 +290,7 @@ async fn discussion_posts_fold_to_one_line_instead_of_evicting_the_activity_tail
 
     #[async_trait]
     impl EventLog for FixedLog {
-        async fn append(
-            &self,
-            _id: &CompanyId,
-            _event: CompanyEvent,
-        ) -> crate::Result<EventSeq> {
+        async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
             unreachable!("the insight surface only reads")
         }
         async fn read_from(
@@ -396,11 +392,7 @@ async fn query_company_announces_the_dropped_event_tail() {
 
     #[async_trait]
     impl EventLog for FixedLog {
-        async fn append(
-            &self,
-            _id: &CompanyId,
-            _event: CompanyEvent,
-        ) -> crate::Result<EventSeq> {
+        async fn append(&self, _id: &CompanyId, _event: CompanyEvent) -> crate::Result<EventSeq> {
             unreachable!("the insight surface only reads")
         }
         async fn read_from(
@@ -568,12 +560,11 @@ async fn query_company_says_when_the_fact_list_was_cut() {
 
     // Exactly at the cap: complete, so no notice.
     let exact: Arc<dyn FactStore> = Arc::new(ManyFacts(FACT_LIMIT));
-    let out =
-        QueryCompanyTool::new(CompanyId::new("acme"), Some(exact), None, None, None, None)
-            .execute(json!({}))
-            .await
-            .expect("execute")
-            .output_for_llm(true);
+    let out = QueryCompanyTool::new(CompanyId::new("acme"), Some(exact), None, None, None, None)
+        .execute(json!({}))
+        .await
+        .expect("execute")
+        .output_for_llm(true);
     assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
 
     // Past the cap: the cut is announced, counted, and points at `query`.
@@ -702,4 +693,3 @@ async fn query_company_bounds_the_insight_document_size() {
     assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
     assert!(!out.contains('…'), "nothing was truncated: {out}");
 }
-

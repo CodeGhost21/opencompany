@@ -49,4 +49,3 @@ fn projects_records_nested_under_the_composio_envelope() {
         "answering fields survive: {projected}"
     );
 }
-
