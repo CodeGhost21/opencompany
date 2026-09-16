@@ -1073,3 +1073,6 @@ fn is_pure_social(lower: &str) -> bool {
 #[cfg(test)]
 #[path = "task_intent_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "task_intent_blocker_reply_tests.rs"]
+mod blocker_reply_tests;
