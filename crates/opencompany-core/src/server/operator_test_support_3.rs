@@ -89,7 +89,7 @@ pub(super) async fn await_reply_journaled(runtime: &Arc<CompanyRuntime>) -> bool
 /// waiter while `notify_waiters` wakes only those already parked. Permits
 /// are held whether or not anybody is waiting yet, so the release cannot
 /// race the turns into a hang.
-struct BlockingChatBrain {
+pub(super) struct BlockingChatBrain {
     /// One permit added per turn that has entered the brain.
     entered: Arc<tokio::sync::Semaphore>,
     /// The test's permission for a turn to finish — one permit each.
