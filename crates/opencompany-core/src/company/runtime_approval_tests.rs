@@ -588,7 +588,7 @@ async fn extend_approval_moves_deadline_and_survives_replay() {
 /// every `ApprovalExtended` line and passes everything else through to an
 /// in-memory backend.
 pub(super) struct RefusingExtendStore {
-    inner: crate::ports::journal::MemoryJournalStore,
+    pub(super) inner: crate::ports::journal::MemoryJournalStore,
 }
 
 #[async_trait::async_trait]
