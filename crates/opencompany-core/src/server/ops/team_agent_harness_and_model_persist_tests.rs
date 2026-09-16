@@ -11,6 +11,7 @@ use crate::runtime::RuntimeBuilder;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
+use super::tests_requested_grants_reads_overlay::*;
 
 /// A company whose grants actually bite: `ceo` asks for one tool the company
 /// does not allow, `writer` asks for nothing at all, and `hermit` sits on no
