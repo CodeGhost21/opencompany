@@ -385,4 +385,5 @@ pub fn payload_at(envelope: &Envelope, event: &Event, at_millis: u64) -> serde_j
 }
 
 #[cfg(test)]
-mod test;
+#[path = "analytics_tests.rs"]
+mod tests;
