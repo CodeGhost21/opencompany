@@ -642,17 +642,24 @@ async fn one_agent_uses_speech_to_coordinate_multiple_dm_sessions_without_cards(
                         "message": "Check the launch implementation and reply here."
                     }),
                 },
-                _ => Reply::Call {
+                2 => Reply::Call {
                     tool: "desk_post",
                     args: json!({ "message": "I asked both specialists." }),
                 },
+                _ => Reply::Say("done".to_string()),
             };
         }
         if user.contains("@greeter sent you this direct message") {
+            if ask.pending_tool.is_some() {
+                return Reply::Say("done".to_string());
+            }
             return Reply::Call {
                 tool: "desk_post",
                 args: json!({ "message": "Checked and ready." }),
             };
+        }
+        if ask.pending_tool.is_some() {
+            return Reply::Say("done".to_string());
         }
         Reply::Call {
             tool: "desk_post",
