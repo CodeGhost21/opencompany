@@ -118,7 +118,7 @@ describe("OpenPanel React tracking", () => {
     root = undefined;
     window.location.hash = "#/overview";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
-    document.body.click();
+    button.click();
 
     expect(track).not.toHaveBeenCalled();
     button.remove();

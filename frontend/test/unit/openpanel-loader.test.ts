@@ -16,6 +16,7 @@ const tauriConfig = readFileSync(
 describe("OpenPanel console analytics", () => {
   beforeEach(() => {
     delete window.op;
+    delete window.__TAURI_INTERNALS__;
     delete window.OPENCOMPANY_CONFIG;
     document.head.querySelectorAll('script[src="https://openpanel.dev/op1.js"]').forEach((script) => {
       script.remove();
@@ -43,6 +44,18 @@ describe("OpenPanel console analytics", () => {
 
   it("stays silent when analytics is explicitly disabled", () => {
     runLoader(false);
+
+    expect(window.op).toBeUndefined();
+    expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).toBeNull();
+  });
+
+  it("stays silent in the Tauri desktop webview", () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+
+    runLoader(true);
 
     expect(window.op).toBeUndefined();
     expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).toBeNull();
