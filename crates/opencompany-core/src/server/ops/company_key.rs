@@ -305,7 +305,7 @@ fn prober_for(runtime: &CompanyRuntime) -> Box<dyn company_key::InferenceProber>
 /// wrote it.
 #[cfg(test)]
 #[path = "company_key_prober_override.rs"]
-mod prober_override;
+pub(crate) mod prober_override;
 
 /// Resolves the credential status DTO for a company.
 ///
