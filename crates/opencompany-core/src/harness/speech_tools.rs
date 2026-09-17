@@ -40,7 +40,7 @@
 //!
 //! # On by default
 //!
-//! Registered unless the manifest says `[speech] enabled = false`. A company
+//! Registered unless the manifest says `[speech] disabled = true`. A company
 //! that opts out keeps the legacy path, and an agent that has
 //! the tools but answers without calling one still has its return text
 //! journaled — see [`crate::harness::built_in::speech_fallback`]. Going silent
