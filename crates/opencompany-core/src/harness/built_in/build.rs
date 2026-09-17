@@ -389,8 +389,8 @@ pub fn build_agent_with_model(
             deps.store.clone(),
         )));
     }
-    // Talking as a tool call (`[speech] enabled`). Off unless the manifest says
-    // so, and on every roster agent's belt when it is — speaking is not a
+    // Talking as a tool call (`[speech] enabled`). On unless the manifest opts
+    // out, and on every roster agent's belt when enabled — speaking is not a
     // capability one teammate has and another does not, so there is no grant
     // for it to be scoped by, exactly as with the two intrinsic tools above.
     //
@@ -398,7 +398,7 @@ pub fn build_agent_with_model(
     // there is nothing for them to do and registering them would advertise a
     // voice the host cannot give. A company in that configuration keeps the
     // return-text path, which is the same fallback an un-called tool gets.
-    // CodeRabbit: `speech_enabled` alone is the manifest's opt-in; whether the
+    // `speech_enabled` is the resolved default-on/opt-out value; whether the
     // tools actually got wired also needs a journal to append to (the comment
     // above). The persona brief below must agree with THIS — the AND, not the
     // flag alone — or a company with no `EventLog` gets a brief instructing it
