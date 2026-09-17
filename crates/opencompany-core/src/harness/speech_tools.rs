@@ -29,28 +29,19 @@
 //! `read_ledger` and `pages_read` — a model reaching for "read" would have four
 //! plausible answers and no way to pick.
 //!
-//! # Nothing here starts a turn
+//! # A DM starts at most one bounded recipient turn
 //!
-//! `desk_dm` is one agent addressing another, so this is the point at which the
-//! agent-to-agent edge stops being hypothetical. It stays an edge that
-//! **journals a row and runs nothing**.
+//! `desk_dm` journals every recipient row, then asks TinyHiveMind's bounded
+//! mention-dispatch algebra for at most one recipient turn. The existing
+//! post-turn drain executes it and writes its reply into that DM. Additional
+//! recipients receive the durable row through their next session delta; one
+//! message never fans out into several immediate turns, and conversation alone
+//! never opens a task card.
 //!
-//! That is not caution for its own sake; it is the rule
-//! [`CompanyEvent::AgentReply`](crate::ports::types::CompanyEvent::AgentReply)
-//! already states about its own `mentions` field — *"never consulted by
-//! dispatch … an agent naming another agent draws a chip and files nothing to
-//! run. The edge does not exist, which is a stronger guarantee than an edge
-//! that is disabled"* — and the `mention_depth` gate beside it is the bound
-//! that would apply if it ever were. A recipient hears about this row the next
-//! time it takes a turn, through its own session delta
-//! ([`agent_session`](crate::harness::built_in::agent_session)), which is the
-//! stigmergic model the whole crate is built on and needs no dispatch edge at
-//! all.
+//! # On by default
 //!
-//! # Off by default
-//!
-//! Registered only when the manifest says `[speech] enabled = true`. A company
-//! that does not opt in behaves byte-for-byte as it did, and an agent that has
+//! Registered unless the manifest says `[speech] enabled = false`. A company
+//! that opts out keeps the legacy path, and an agent that has
 //! the tools but answers without calling one still has its return text
 //! journaled — see [`crate::harness::built_in::speech_fallback`]. Going silent
 //! because a model forgot to call a tool is not an acceptable failure mode.
@@ -1063,11 +1054,10 @@ pub fn speech_brief() -> String {
          - `{POST_TOOL}` — say one thing to a channel. Call it exactly once, at the end of your \
          turn. This is how you answer. It says it in the channel you are answering in unless you \
          pass `desk`, which may name any channel you sit on.\n\
-         - `{DM_TOOL}` — leave one thing for named teammates instead of the whole channel, when \
-         you need to settle something without spending the room's attention. It **leaves** the \
-         message: each of them reads it on their next turn, and nothing wakes them. Do not tell \
-         anybody it was delivered, because it was not. If it needs doing rather than knowing, \
-         raise a card.\n\
+         - `{DM_TOOL}` — leave one thing for named teammates instead of the whole channel. The \
+         message is durable for every recipient; TinyHiveMind may wake exactly one of them now, \
+         bounded by the hop limit, and additional recipients read it on their next turn. A DM \
+         conversation opens no task card.\n\
          - `{CLOSE_TOOL}` — say one last thing AND report the work finished. Only when it \
          genuinely is: a result somebody still has to check is not finished.\n\
          - `{READ_TOOL}` — read further back in this channel than you were handed.\n"
