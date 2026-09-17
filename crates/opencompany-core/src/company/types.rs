@@ -589,7 +589,7 @@ pub struct CompanyManifest {
 /// # On by default, explicitly opt-out, and never silencing
 ///
 /// Every company gets the speech tools unless it explicitly sets
-/// `[speech] enabled = false`. A company that opts out keeps the old return-text
+/// `[speech] disabled = true`. A company that opts out keeps the old return-text
 /// path. A company that uses speech still has that path underneath it: an agent that answers
 /// without calling a speech tool has its return text journaled as before, and
 /// the omission is counted rather than dropped. Going quiet because a model
