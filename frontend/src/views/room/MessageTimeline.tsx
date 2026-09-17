@@ -11,7 +11,6 @@ import { ApprovalRow } from "./ApprovalRow";
 import { ChatLiveReceipt, type ChatReceipt } from "./ChatLiveReceipt";
 import { EpisodeBlock } from "./EpisodeBlock";
 import { MessageRow } from "./MessageRow";
-import { StepTimeline } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 import {
   channelIntroSentence,
@@ -858,10 +857,8 @@ function LiveTurnRow({
         className="size-9 shrink-0"
       />
       <div className="min-w-0 flex-1 space-y-1.5">
-        {/* The line names the step actually in flight (#787), above the
-            timeline that details every step. Same source, one phrasing. */}
+        {/* Chat names the current activity; Raw turns owns the detailed calls. */}
         <WorkingIndicator srLabel="Working…" steps={steps} name={name} label={label} />
-        <StepTimeline steps={steps} defaultOpen />
       </div>
     </div>
   );
