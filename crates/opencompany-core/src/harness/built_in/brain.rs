@@ -3689,8 +3689,16 @@ fn task_instruction(card: &TaskRecord) -> String {
     match card.note.as_deref().filter(|n| !n.is_empty()) {
         Some(note) => {
             let (assignment, history) = task_note_sections(note);
+            let research_hint = if public_research_assignment(&assignment) {
+                " This is a public-source research assignment: begin with `web_search` now. Do \
+                 not inspect the company workspace, ledgers, prior artifacts, or skill catalogue \
+                 first. Open the strongest search results with `web_fetch` and cite what you \
+                 actually read."
+            } else {
+                ""
+            };
             if history.is_empty() {
-                format!("Task: {}\n\n{}", card.title, assignment)
+                format!("Task: {}\n\n{}{}", card.title, assignment, research_hint)
             } else {
                 format!(
                     "Task: {}\n\n## Prior attempt history\n\
@@ -3700,13 +3708,21 @@ fn task_instruction(card: &TaskRecord) -> String {
                      task, so do not read the tasks ledger to rediscover it. If it asks for current \
                      public-source research and `web_search` is on your current tool belt, call \
                      `web_search`, then verify the strongest sources with `web_fetch`, before \
-                     reporting that research is blocked.",
-                    card.title, history, assignment
+                     reporting that research is blocked.{}",
+                    card.title, history, assignment, research_hint
                 )
             }
         }
         None => format!("Task: {}", card.title),
     }
+}
+
+fn public_research_assignment(assignment: &str) -> bool {
+    let lower = assignment.to_ascii_lowercase();
+    lower.contains("research")
+        && (lower.contains("source")
+            || lower.contains("competitor")
+            || lower.contains("landscape"))
 }
 
 /// Separate operator/reviewer instructions from result blocks accumulated on a
