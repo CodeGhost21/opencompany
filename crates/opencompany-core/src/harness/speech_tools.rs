@@ -127,6 +127,34 @@ pub struct SpeechContext {
     dispatch: Option<crate::harness::orchestrator::DelegationQueue>,
 }
 
+/// What happened when a `desk_dm` tried to run its recipient's turn inline.
+///
+/// Three outcomes and not two, because "no reply" hides a fork that decides
+/// whether the message may be queued afterwards. `None` used to cover both
+/// "nobody ran" and "ran, then failed or said nothing" — so a peer whose turn
+/// had already executed, with whatever tool effects that turn had, was queued
+/// to execute a second time. That reintroduces the very thing this path exists
+/// to remove: a recipient answering after the asking turn has closed (CodeRabbit,
+/// #2368).
+enum PeerTurn {
+    /// Nobody ran — no engine in scope, or the hop cap was already reached.
+    /// Queueing is safe and is exactly what this path did before.
+    NotAttempted,
+    /// The turn ran and produced a reply.
+    Answered {
+        reply: String,
+        /// Whether the reply reached the pair thread. A reply that could not be
+        /// journaled is still the peer's answer and is still worth handing
+        /// back, but it must not be described as a durable exchange: the chip
+        /// renders from those rows and later turns read them.
+        recorded: bool,
+    },
+    /// The turn RAN and produced nothing usable. Must not be queued: the peer
+    /// has already had its turn, and whatever it did before failing has already
+    /// happened.
+    Ran,
+}
+
 impl SpeechContext {
     pub fn new(
         company: CompanyId,
@@ -404,15 +432,26 @@ impl SpeechContext {
         }
         // Ask, then wait for the answer — and only fall back to posting the
         // letter when nobody can be run now (#2368).
-        let mut answered: Option<(String, String)> = None;
+        let mut answered: Option<(String, String, bool)> = None;
         let mut woke_recipient = false;
+        let mut ran_without_answer = false;
         if let Some((peer, chat_id, trigger)) = first_committed {
-            match self.run_recipient_turn(record, &peer, &chat_id, &text).await {
-                Some(reply) => answered = Some((peer, reply)),
-                None => {
+            match self
+                .run_recipient_turn(record, &peer, &chat_id, &text)
+                .await
+            {
+                PeerTurn::Answered { reply, recorded } => {
+                    answered = Some((peer, reply, recorded));
+                }
+                // Queue ONLY when nobody ran. A turn that ran and then failed
+                // has already spent itself, and queueing it would run the peer
+                // a second time — repeating whatever its first attempt did and
+                // landing an answer after this turn has closed.
+                PeerTurn::NotAttempted => {
                     woke_recipient =
                         self.stage_recipient_turn(record, &peer, chat_id, trigger, &text);
                 }
+                PeerTurn::Ran => ran_without_answer = true,
             }
         }
         if !failed_for.is_empty() {
@@ -442,8 +481,26 @@ impl SpeechContext {
         // whole point: a receipt gives a seat nothing to say, which is why one
         // live `desk_dm`-only turn handed the operator an empty bubble — it had
         // been told its request succeeded and had learned nothing.
-        if let Some((peer, reply)) = answered {
-            return ToolResult::success(format!("{peer} replied:\n\n{reply}"));
+        if let Some((peer, reply, recorded)) = answered {
+            // The caveat rides the same result rather than a second call: the
+            // seat is composing an answer out of this text, and "you have their
+            // reply but the thread does not" changes whether it should promise
+            // the exchange is on the record.
+            let caveat = match recorded {
+                true => "",
+                false => {
+                    "\n\n(This reply could not be written to your shared \
+                          thread, so neither of you will read it back later.)"
+                }
+            };
+            return ToolResult::success(format!("{peer} replied:\n\n{reply}{caveat}"));
+        }
+        if ran_without_answer {
+            return ToolResult::success(format!(
+                "Left for {}. They took their turn and said nothing back, so there is no \
+                 answer to carry — do not wait on one.",
+                left_for.join(", "),
+            ));
         }
         let delivery = if woke_recipient {
             " TinyHiveMind routed one bounded recipient turn now; any additional recipients read it on their next turn."
@@ -540,8 +597,10 @@ impl SpeechContext {
         peer: &str,
         chat_id: &str,
         text: &str,
-    ) -> Option<String> {
-        let runner = crate::runtime::delegation::peer_runner()?;
+    ) -> PeerTurn {
+        let Some(runner) = crate::runtime::delegation::peer_runner() else {
+            return PeerTurn::NotAttempted;
+        };
         // The same bound the queue path applies, checked before anyone runs
         // rather than at push time: this path has no queue to refuse it, and a
         // pair that can each reach for the other is exactly the shape that
@@ -555,7 +614,7 @@ impl SpeechContext {
         );
         let hop = crate::runtime::delegation::turn_message_hop();
         if hop >= max_hops {
-            return None;
+            return PeerTurn::NotAttempted;
         }
         let outcome = crate::runtime::delegation::with_turn_message_hop(
             hop + 1,
@@ -566,11 +625,15 @@ impl SpeechContext {
                 crate::runtime::delegation::ChatTarget::channel(Some(chat_id)),
             ),
         )
-        .await
-        .ok()?;
+        .await;
+        // Ran-and-failed, NOT not-attempted: the turn executed, so the peer has
+        // had its turn and anything it did before erroring has happened.
+        let Ok(outcome) = outcome else {
+            return PeerTurn::Ran;
+        };
         let reply = outcome.reply.trim().to_string();
         if reply.is_empty() {
-            return None;
+            return PeerTurn::Ran;
         }
         // **The answer belongs in the pair thread, not only in the tool
         // result.**
@@ -583,10 +646,23 @@ impl SpeechContext {
         // already answered ("i already answered above", live). Returning the
         // reply without writing it left the journal holding a question with no
         // answer and a chip that could only ever show one line.
-        let _ = self
-            .append_as(peer.to_string(), chat_id.to_string(), reply.clone(), Vec::new())
-            .await;
-        Some(reply)
+        let recorded = self
+            .append_as(
+                peer.to_string(),
+                chat_id.to_string(),
+                reply.clone(),
+                Vec::new(),
+            )
+            .await
+            .is_ok();
+        if !recorded {
+            tracing::warn!(
+                company = %self.company,
+                peer = %peer,
+                "[speech] a peer's inline reply could not be journaled; the asker is told so"
+            );
+        }
+        PeerTurn::Answered { reply, recorded }
     }
 
     fn stage_recipient_turn(

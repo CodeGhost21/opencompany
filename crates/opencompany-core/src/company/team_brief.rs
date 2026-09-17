@@ -31,8 +31,8 @@
 
 use crate::ports::types::CompanyRecord;
 use crate::runtime::delegation_tools::{
-    DELEGATE_TO_TEAMMATE_TOOL, desk_lead, desks_of_member,
-    reach_is_unrestricted, roster_agent_ids, teammate_targets,
+    DELEGATE_TO_TEAMMATE_TOOL, desk_lead, desks_of_member, reach_is_unrestricted, roster_agent_ids,
+    teammate_targets,
 };
 
 /// The heading the section opens with. Named so the tool descriptions and the

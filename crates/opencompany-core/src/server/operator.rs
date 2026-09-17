@@ -4263,7 +4263,10 @@ async fn mark_turn_dms(
                     continue;
                 };
                 let _ = agent_id;
-                if floor.get(chat_id).is_some_and(|at| stored.seq.value() < *at) {
+                if floor
+                    .get(chat_id)
+                    .is_some_and(|at| stored.seq.value() < *at)
+                {
                     continue;
                 }
                 let at = stored.seq.value();

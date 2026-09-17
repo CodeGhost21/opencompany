@@ -39,6 +39,16 @@ impl HarnessRunTurn {
     pub fn new(pool: Arc<HarnessPool>, deps: Arc<HarnessDeps>) -> Self {
         Self { pool, deps }
     }
+
+    /// A lane over this one's pool and deps, for a turn's tools to run ONE
+    /// bounded peer turn on.
+    ///
+    /// A fresh lane rather than a `Weak<Self>`: both `Arc`s are already owned
+    /// here, cloning them is two refcount bumps, and a self-reference would tie
+    /// the lane's lifetime to whoever still holds it.
+    fn peer_lane(&self) -> Arc<dyn RunTurn> {
+        Arc::new(Self::new(self.pool.clone(), self.deps.clone()))
+    }
 }
 
 #[async_trait]
@@ -68,10 +78,8 @@ impl RunTurn for HarnessRunTurn {
         // is correct (a peer may need to ask someone as well) and is why
         // `desk_dm` checks the hop against `max_delegation_depth` before it
         // runs anyone.
-        let runner: Arc<dyn RunTurn> =
-            Arc::new(Self::new(self.pool.clone(), self.deps.clone()));
         crate::runtime::delegation::with_peer_runner(
-            Some(runner),
+            Some(self.peer_lane()),
             self.pool.run(company, agent_id, message, &self.deps, chat),
         )
         .await
@@ -86,11 +94,13 @@ impl RunTurn for HarnessRunTurn {
         chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
-        self.pool
-            .run_steered(
+        crate::runtime::delegation::with_peer_runner(
+            Some(self.peer_lane()),
+            self.pool.run_steered(
                 company, agent_id, message, &self.deps, control, chat, run_sink,
-            )
-            .await
+            ),
+        )
+        .await
     }
 
     async fn run_steered_background(
@@ -102,11 +112,13 @@ impl RunTurn for HarnessRunTurn {
         chat: ChatTarget<'_>,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
-        self.pool
-            .run_steered_background(
+        crate::runtime::delegation::with_peer_runner(
+            Some(self.peer_lane()),
+            self.pool.run_steered_background(
                 company, agent_id, message, &self.deps, control, chat, run_sink,
-            )
-            .await
+            ),
+        )
+        .await
     }
 
     async fn run_background(
@@ -116,9 +128,12 @@ impl RunTurn for HarnessRunTurn {
         message: &str,
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
-        self.pool
-            .run_background(company, agent_id, message, &self.deps, run_sink)
-            .await
+        crate::runtime::delegation::with_peer_runner(
+            Some(self.peer_lane()),
+            self.pool
+                .run_background(company, agent_id, message, &self.deps, run_sink),
+        )
+        .await
     }
 
     async fn run_background_workflow(
@@ -130,8 +145,9 @@ impl RunTurn for HarnessRunTurn {
         workflow_run_id: &str,
         node_id: &str,
     ) -> Result<TurnOutcome> {
-        self.pool
-            .run_background_workflow(
+        crate::runtime::delegation::with_peer_runner(
+            Some(self.peer_lane()),
+            self.pool.run_background_workflow(
                 company,
                 agent_id,
                 message,
@@ -139,8 +155,9 @@ impl RunTurn for HarnessRunTurn {
                 run_sink,
                 workflow_run_id,
                 node_id,
-            )
-            .await
+            ),
+        )
+        .await
     }
 
     async fn ensure(&self, company: &CompanyRecord) -> Result<()> {

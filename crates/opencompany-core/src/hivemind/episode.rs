@@ -447,9 +447,7 @@ impl<'a> EpisodeDriver<'a> {
                     // everybody — and being offered the room you are already
                     // sitting in is a move that spends the asking room's turn
                     // and can return nothing it did not already hold.
-                    .filter(|desk| {
-                        federation.general_desk.as_deref() != Some(desk.id.as_str())
-                    })
+                    .filter(|desk| federation.general_desk.as_deref() != Some(desk.id.as_str()))
                     .map(|desk| {
                         (
                             desk.id.clone(),
