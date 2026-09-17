@@ -91,6 +91,20 @@ of moments where a human signs off:
 Twenty-two companies. One operator. Pick one and run it, or run several at once.
 [`companies/README.md`](companies/README.md) has the full catalog.
 
+## Download
+
+The quickest way in is the desktop app. Get it from the website or straight
+from the GitHub release:
+
+- **Website**: **[tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)**
+  — picks the right build for your machine.
+- **GitHub Releases**:
+  **[github.com/tinyhumansai/opencompany/releases/latest](https://github.com/tinyhumansai/opencompany/releases/latest)**
+  — every platform build, with checksums and release notes.
+
+Install it, sign in with your TinyHumans account, pick a company, and your
+agents are running. Prefer to run the host yourself? Keep reading.
+
 ## Quickstart
 
 You do not need a software background to run a company. You need
@@ -223,6 +237,28 @@ questions get answered and large changes get argued out before they're built.
 - **X**: [@tinyhumansai](https://x.com/tinyhumansai)
 - **Reddit**: [r/tinyhumansai](https://www.reddit.com/r/tinyhumansai/)
 - **Website**: [tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)
+
+## Star us on GitHub
+
+_Running a company with a headcount of one? Star the repo and help others find the path._
+
+<p align="center">
+ <a href="https://www.star-history.com/#tinyhumansai/opencompany&type=date&legend=top-left">
+ <picture>
+ <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=tinyhumansai/opencompany&type=date&theme=dark&legend=top-left" />
+ <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=tinyhumansai/opencompany&type=date&legend=top-left" />
+ <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=tinyhumansai/opencompany&type=date&legend=top-left" />
+ </picture>
+ </a>
+</p>
+
+## Contributors Hall of Fame
+
+Show some love and end up in the hall of fame. Contributors get free merch and special access to our [Discord](https://discord.tinyhumans.ai/).
+
+<a href="https://github.com/tinyhumansai/opencompany/graphs/contributors">
+ <img src="https://contrib.rocks/image?repo=tinyhumansai/opencompany" alt="OpenCompany contributors" />
+</a>
 
 ## License
 
