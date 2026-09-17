@@ -13,8 +13,9 @@ declare global {
 export function currentScreen(location: Location = window.location): string {
   const [head = ""] = location.hash.replace(/^#\/?/, "").split("?", 1)[0].split("/", 1);
   if (!head) return "home";
-  return VIEWS.includes(head.toLowerCase() as (typeof VIEWS)[number])
-    ? head.toLowerCase()
+  const normalizedHead = head.toLowerCase();
+  return normalizedHead === "styleguide" || VIEWS.includes(normalizedHead as (typeof VIEWS)[number])
+    ? normalizedHead
     : "unknown";
 }
 
