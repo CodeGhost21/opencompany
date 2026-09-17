@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, createElement } from "react";
+import { act, createElement, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { currentScreen, installOpenPanelTracking, OpenPanelTracking } from "@/lib/openpanel";
@@ -123,5 +123,16 @@ describe("OpenPanel React tracking", () => {
 
     expect(track).not.toHaveBeenCalled();
     button.remove();
+  });
+
+  it("does not duplicate the initial screen view when StrictMode replays effects", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    act(() => root?.render(createElement(StrictMode, null, createElement(OpenPanelTracking))));
+
+    expect(track).toHaveBeenCalledTimes(1);
+    expect(track).toHaveBeenCalledWith("track", "screen_viewed", { screen: "settings" });
   });
 });

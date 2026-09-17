@@ -12,6 +12,24 @@ const tauriConfig = readFileSync(
   resolve(frontendRoot, "../crates/opencompany-app/tauri.conf.json"),
   "utf8",
 );
+const tauriManifest = JSON.parse(tauriConfig) as {
+  app: { security: { csp: string } };
+};
+
+function cspSources(csp: string, directiveName: string): string[] {
+  const directive = csp
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${directiveName} `));
+  return directive?.split(/\s+/).slice(1) ?? [];
+}
+
+function sourceAllowsOrigin(source: string, origin: URL): boolean {
+  if (source === "*" || source === origin.protocol) return true;
+  if (!source.startsWith(`${origin.protocol}//`)) return false;
+  const hostname = source.slice(`${origin.protocol}//`.length).split(/[/:]/, 1)[0];
+  return hostname === origin.hostname || (hostname.startsWith("*.") && origin.hostname.endsWith(hostname.slice(1)));
+}
 
 describe("OpenPanel console analytics", () => {
   beforeEach(() => {
@@ -98,9 +116,14 @@ describe("OpenPanel console analytics", () => {
   });
 
   it("permits exactly the required OpenPanel origins in the desktop webview", () => {
-    expect(tauriConfig).toContain("script-src 'self'");
-    expect(tauriConfig).toContain("connect-src 'self' ipc: http://ipc.localhost");
-    expect(tauriConfig).not.toContain("https://openpanel.dev");
-    expect(tauriConfig).not.toContain("https://panel.tinyhumans.ai");
+    const csp = tauriManifest.app.security.csp;
+    const scriptSources = cspSources(csp, "script-src");
+    const connectSources = cspSources(csp, "connect-src");
+    const openPanelOrigin = new URL("https://openpanel.dev");
+
+    expect(scriptSources).toContain("'self'");
+    expect(connectSources).toEqual(["'self'", "ipc:", "http://ipc.localhost"]);
+    expect(scriptSources.some((source) => sourceAllowsOrigin(source, openPanelOrigin))).toBe(false);
+    expect(connectSources.some((source) => sourceAllowsOrigin(source, openPanelOrigin))).toBe(false);
   });
 });

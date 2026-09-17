@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { VIEWS } from "./console-routes";
 
 type OpenPanelCommand = ((
@@ -31,7 +31,10 @@ function track(event: string, properties: Record<string, unknown>): void {
  * Captures navigation and activation across the React console without exposing
  * control labels, routes' dynamic segments, or any operator-provided content.
  */
-export function installOpenPanelTracking(doc: Document = document): () => void {
+export function installOpenPanelTracking(
+  doc: Document = document,
+  initialScreenView = true,
+): () => void {
   const screenView = () => track("screen_viewed", { screen: currentScreen() });
   const buttonClick = (event: MouseEvent) => {
     const target = event.target;
@@ -46,7 +49,7 @@ export function installOpenPanelTracking(doc: Document = document): () => void {
     });
   };
 
-  screenView();
+  if (initialScreenView) screenView();
   window.addEventListener("hashchange", screenView);
   doc.addEventListener("click", buttonClick, true);
   return () => {
@@ -57,6 +60,11 @@ export function installOpenPanelTracking(doc: Document = document): () => void {
 
 /** React lifecycle owner for the console-wide OpenPanel listeners. */
 export function OpenPanelTracking(): null {
-  useEffect(() => installOpenPanelTracking(), []);
+  const hasRun = useRef(false);
+  useEffect(() => {
+    const dispose = installOpenPanelTracking(document, !hasRun.current);
+    hasRun.current = true;
+    return dispose;
+  }, []);
   return null;
 }
