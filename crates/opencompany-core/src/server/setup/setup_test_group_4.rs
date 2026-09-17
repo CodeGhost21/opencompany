@@ -190,6 +190,11 @@ mod setup_model_preference {
     }
 
     #[test]
+    fn the_preferred_setup_model_is_deepseek_v4_flash() {
+        assert_eq!(PREFERRED_SETUP_MODEL, "deepseek/deepseek-v4-flash");
+    }
+
+    #[test]
     fn the_preferred_model_is_probed_before_whatever_the_catalogue_lists_first() {
         let candidates = probe_model_candidates(vec![
             model("vendor/reasoning-heavy"),
