@@ -1296,6 +1296,7 @@ impl CompanyAgent {
             })
             .or_else(|| chat.chat_id.map(str::to_string));
         let thread_root = chat.thread_root;
+        let has_run_sink = run_sink.is_some();
         // The company this turn's chat seed (if any) projects from — same
         // "captured before `stream` moves" reasoning as `turn_chat_id` above.
         // Only meaningful alongside `turn_chat_id`, so `None` for exactly the
@@ -1399,7 +1400,7 @@ impl CompanyAgent {
         // rebuilt agent's current system prompt take effect instead of reviving
         // a transcript whose frozen prompt predates newly wired tools.
         let isolated_background_turn =
-            Self::isolates_background_history(turn_chat_id.as_deref(), run_sink.is_some());
+            Self::isolates_background_history(turn_chat_id.as_deref(), has_run_sink);
         let mut isolated_context_turn = isolated_background_turn;
         if isolated_background_turn {
             if !agent.history().is_empty() {
