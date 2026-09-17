@@ -1001,6 +1001,18 @@ pub fn build_agent_with_model(
         sandbox_code,
     ));
 
+    // Name public-web fetch and discovery separately. A broad `web.*` grant
+    // wires URL readers, while `web_search` also needs the explicit priced
+    // `search` grant and a live provider credential. Research agents must know
+    // which half they actually have or they fall back to rereading unrelated
+    // workspace/ledger state until the loop guard stops them.
+    let web_fetch_wired = wants_web && !toolbelt::namespace_denied(&deps.capabilities, "web");
+    let web_search_wired = tools
+        .iter()
+        .any(|tool| tool.name() == crate::harness::search::WEB_SEARCH_TOOL)
+        && !toolbelt::namespace_denied(&deps.capabilities, "search");
+    persona.push_str(&toolbelt::web_brief(web_fetch_wired, web_search_wired));
+
     // Issue #244: what a deliverable is, and how to hand one over. Only when
     // the tool was actually wired above — describing a tool the agent does not
     // have is how you get a turn spent calling something that does not exist.
