@@ -470,7 +470,7 @@ impl SpeechContext {
                 offset: 0,
                 quiet: false,
             }],
-            hop: u32::try_from(queue.scope_depth()).unwrap_or(u32::MAX),
+            hop: crate::runtime::delegation::turn_message_hop(),
         };
         let max_hops = u32::from(
             record
