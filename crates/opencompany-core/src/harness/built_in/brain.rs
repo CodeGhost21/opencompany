@@ -4147,10 +4147,12 @@ impl HarnessBrain {
                                 decision.rung,
                                 tinyhivemind::responder::ResponderRung::ExplicitMention
                                     | tinyhivemind::responder::ResponderRung::DirectAgent
-                            ) => decision.responder_id,
+                            ) =>
+                        {
+                            decision.responder_id
+                        }
                         Some(decision) => overseer.unwrap_or(decision.responder_id),
-                        None => overseer
-                            .unwrap_or_else(|| self.responder_for(chat.as_deref())),
+                        None => overseer.unwrap_or_else(|| self.responder_for(chat.as_deref())),
                     };
                     // Everyone else the message named, for the answering turn's
                     // context. A list, not a fan-out: one operator message still

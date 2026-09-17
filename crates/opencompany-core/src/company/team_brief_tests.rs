@@ -63,9 +63,18 @@ fn every_other_teammate_is_listed_with_role_and_mandate_but_not_the_agent_itself
     let section = team_section(&record(TEAM), "designer");
     assert!(section.starts_with("\n\n## Your team"), "{section}");
     assert!(section.contains("one of 4 teammates at Acme"), "{section}");
-    assert!(section.contains("- `pm` — Product Manager (the orchestrator"), "{section}");
-    assert!(section.contains("owns the board): Own the roadmap.\n"), "{section}");
-    assert!(section.contains("- `backend` — Backend Engineer: Build the services.\n"), "{section}");
+    assert!(
+        section.contains("- `pm` — Product Manager (the orchestrator"),
+        "{section}"
+    );
+    assert!(
+        section.contains("owns the board): Own the roadmap.\n"),
+        "{section}"
+    );
+    assert!(
+        section.contains("- `backend` — Backend Engineer: Build the services.\n"),
+        "{section}"
+    );
     assert!(section.contains("- `writer` — Writer\n"), "{section}");
     assert!(!section.contains("- `designer`"), "{section}");
 }
@@ -73,16 +82,28 @@ fn every_other_teammate_is_listed_with_role_and_mandate_but_not_the_agent_itself
 #[test]
 fn desks_list_their_members_and_lead_and_the_agents_own_seat() {
     let section = team_section(&record(TEAM), "designer");
-    assert!(section.contains("- `engineering` — Engineering: backend (lead), designer\n"), "{section}");
-    assert!(section.contains("- `content` — Content: writer (lead)\n"), "{section}");
-    assert!(section.contains("\nYou sit on: engineering.\n"), "{section}");
+    assert!(
+        section.contains("- `engineering` — Engineering: backend (lead), designer\n"),
+        "{section}"
+    );
+    assert!(
+        section.contains("- `content` — Content: writer (lead)\n"),
+        "{section}"
+    );
+    assert!(
+        section.contains("\nYou sit on: engineering.\n"),
+        "{section}"
+    );
 }
 
 #[test]
 fn an_unrestricted_reach_is_stated_once_at_the_top_and_not_as_a_list() {
     // `designer` declares no `delegates_to`, so it may reach everyone.
     let section = team_section(&record(TEAM), "designer");
-    assert!(section.contains("Every teammate below is a real agent you can hand work to"), "{section}");
+    assert!(
+        section.contains("Every teammate below is a real agent you can hand work to"),
+        "{section}"
+    );
     assert!(!section.contains("You may hand work to:"), "{section}");
     assert!(!section.contains("does not let you hand work"), "{section}");
 }
@@ -92,7 +113,10 @@ fn a_narrowed_reach_names_exactly_who_the_tool_would_accept() {
     // `backend` may reach the engineering desk only: its desk-mate `designer`,
     // and nobody on the content desk or the orchestrator.
     let section = team_section(&record(TEAM), "backend");
-    assert!(section.contains("\nYou may hand work to: `designer`."), "{section}");
+    assert!(
+        section.contains("\nYou may hand work to: `designer`."),
+        "{section}"
+    );
     let reach = teammate_targets(&record(TEAM), "backend", &["engineering".to_string()]);
     assert_eq!(reach, vec!["designer".to_string()]);
 }
@@ -100,8 +124,14 @@ fn a_narrowed_reach_names_exactly_who_the_tool_would_accept() {
 #[test]
 fn the_section_names_the_tools_by_their_real_names() {
     let section = team_section(&record(TEAM), "writer");
-    assert!(section.contains(&format!("`{DELEGATE_TO_TEAMMATE_TOOL}`")), "{section}");
-    assert!(section.contains(&format!("`{DELEGATE_TO_DESK_TOOL}`")), "{section}");
+    assert!(
+        section.contains(&format!("`{DELEGATE_TO_TEAMMATE_TOOL}`")),
+        "{section}"
+    );
+    assert!(
+        section.contains(&format!("`{DELEGATE_TO_DESK_TOOL}`")),
+        "{section}"
+    );
 }
 
 #[test]
@@ -131,17 +161,22 @@ role = "B"
 #[test]
 fn an_operator_added_teammate_is_listed_by_name_and_role() {
     let mut record = record(TEAM);
-    record.overlay_agents.push(crate::ports::types::OverlayAgent {
-        id: "sam".to_string(),
-        name: "Sam".to_string(),
-        role: "Copywriter".to_string(),
-        description: Some("Write the words.".to_string()),
-        provider: None,
-        tools: None,
-        model: None,
-        harness: None,
-    });
+    record
+        .overlay_agents
+        .push(crate::ports::types::OverlayAgent {
+            id: "sam".to_string(),
+            name: "Sam".to_string(),
+            role: "Copywriter".to_string(),
+            description: Some("Write the words.".to_string()),
+            provider: None,
+            tools: None,
+            model: None,
+            harness: None,
+        });
     let section = team_section(&record, "designer");
     assert!(section.contains("one of 5 teammates"), "{section}");
-    assert!(section.contains("- `sam` — Sam, Copywriter: Write the words.\n"), "{section}");
+    assert!(
+        section.contains("- `sam` — Sam, Copywriter: Write the words.\n"),
+        "{section}"
+    );
 }

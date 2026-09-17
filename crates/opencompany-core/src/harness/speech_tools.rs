@@ -493,16 +493,16 @@ impl SpeechContext {
         };
         matches!(
             queue.push_within_cap(
-            crate::harness::orchestrator::Delegation::ConversationDispatch {
-                source: request.source_id,
-                target: request.target_id,
-                message: request.content,
-                chat_id: request.conversation.desk_id,
-                trigger_sequence: request.key.trigger_sequence,
-                child_hop: request.child_hop,
-            },
-            crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN,
-            usize::try_from(max_hops).unwrap_or(usize::MAX),
+                crate::harness::orchestrator::Delegation::ConversationDispatch {
+                    source: request.source_id,
+                    target: request.target_id,
+                    message: request.content,
+                    chat_id: request.conversation.desk_id,
+                    trigger_sequence: request.key.trigger_sequence,
+                    child_hop: request.child_hop,
+                },
+                crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN,
+                usize::try_from(max_hops).unwrap_or(usize::MAX),
             ),
             crate::harness::orchestrator::Staged::Queued
         )

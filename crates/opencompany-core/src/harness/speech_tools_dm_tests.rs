@@ -23,7 +23,11 @@ async fn a_committed_dm_stages_one_bounded_recipient_turn_without_a_card() {
     assert!(!result.is_error, "{result:?}");
 
     let staged = queue.drain(crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN);
-    assert_eq!(staged.len(), 1, "one DM call may wake at most one recipient");
+    assert_eq!(
+        staged.len(),
+        1,
+        "one DM call may wake at most one recipient"
+    );
     assert!(matches!(
         &staged[0],
         crate::harness::orchestrator::Delegation::ConversationDispatch {

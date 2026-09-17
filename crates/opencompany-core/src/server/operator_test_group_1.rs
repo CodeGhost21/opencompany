@@ -247,7 +247,11 @@ async fn an_unaddressed_chat_leaves_the_card_unassigned() {
     let app = router(state);
 
     for thread in [None, Some(""), Some("main"), Some(DEFAULT_DESK)] {
-        let r = app.clone().oneshot(workflow_chat_to(CROSSED, thread)).await.unwrap();
+        let r = app
+            .clone()
+            .oneshot(workflow_chat_to(CROSSED, thread))
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "thread {thread:?}");
     }
 
@@ -405,7 +409,11 @@ async fn a_chat_card_remembers_the_thread_inside_the_channel() {
     let app = router(state);
 
     let r = app
-        .oneshot(workflow_chat_in_thread(CROSSED, Some("dm:designer"), Some(41)))
+        .oneshot(workflow_chat_in_thread(
+            CROSSED,
+            Some("dm:designer"),
+            Some(41),
+        ))
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);

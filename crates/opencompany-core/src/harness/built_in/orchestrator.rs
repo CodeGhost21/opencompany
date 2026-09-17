@@ -869,9 +869,7 @@ impl DelegationQueue {
                 return Staged::NoDrain(match delegation {
                     Delegation::DelegateToDesk { .. }
                     | Delegation::DelegateToTeammate { .. }
-                    | Delegation::ConversationDispatch { .. } => {
-                        NoDrainReason::WorkflowHandOff
-                    }
+                    | Delegation::ConversationDispatch { .. } => NoDrainReason::WorkflowHandOff,
                     _ => NoDrainReason::WorkflowLifecycle,
                 });
             }

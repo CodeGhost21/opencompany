@@ -60,7 +60,11 @@ async fn only_an_explicit_workflow_request_opens_a_card_from_the_route() {
 
     for intent in [None, Some("chat"), Some("once")] {
         let r = app.clone().oneshot(chat(intent)).await.unwrap();
-        assert_eq!(r.status(), StatusCode::OK, "{intent:?}: the message is still answered");
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "{intent:?}: the message is still answered"
+        );
         assert!(
             runtime.tasks().list(&id).await.unwrap().is_empty(),
             "{intent:?}: a chat message opens no card by itself"
@@ -70,7 +74,11 @@ async fn only_an_explicit_workflow_request_opens_a_card_from_the_route() {
     let r = app.oneshot(chat(Some("workflow"))).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let tasks = runtime.tasks().list(&id).await.unwrap();
-    assert_eq!(tasks.len(), 1, "`workflow` is the operator's positive statement of intent");
+    assert_eq!(
+        tasks.len(),
+        1,
+        "`workflow` is the operator's positive statement of intent"
+    );
     assert_eq!(
         tasks[0].deliverable,
         TaskDeliverable::Workflow,

@@ -43,9 +43,7 @@ use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::ports::types::{CompanyRecord, TeammateResolution};
 
 /// TinyHiveMind's active roster snapshot for one routing/dispatch decision.
-pub fn tinyhivemind_roster(
-    record: &CompanyRecord,
-) -> Vec<tinyhivemind_core::roster::RosterMember> {
+pub fn tinyhivemind_roster(record: &CompanyRecord) -> Vec<tinyhivemind_core::roster::RosterMember> {
     record
         .effective_agents()
         .into_iter()

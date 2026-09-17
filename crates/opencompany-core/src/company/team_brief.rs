@@ -100,7 +100,8 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
         true => Vec::new(),
         false => teammate_targets(record, agent_id, delegates_to),
     };
-    let narrowed = !unrestricted && reachable.len() < roster_agent_ids(record).len().saturating_sub(1);
+    let narrowed =
+        !unrestricted && reachable.len() < roster_agent_ids(record).len().saturating_sub(1);
 
     let mut out = String::new();
     out.push_str("\n\n");

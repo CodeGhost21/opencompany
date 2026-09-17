@@ -441,9 +441,8 @@ fn a_desk_lead_may_hand_work_to_a_peer_on_its_own_desk() {
 fn a_teammate_out_of_reach_is_refused_with_the_reachable_set() {
     let record = desk_record();
     let narrowed = vec!["strategy".to_string()];
-    let message =
-        reject_teammate_target(&record, Some("brand_strategist"), &narrowed, "analyst")
-            .expect("rejected");
+    let message = reject_teammate_target(&record, Some("brand_strategist"), &narrowed, "analyst")
+        .expect("rejected");
     assert!(message.contains("analyst"), "{message}");
     assert!(message.contains("seo_specialist"), "{message}");
     assert!(message.contains(DELEGATE_TO_TEAMMATE_TOOL), "{message}");

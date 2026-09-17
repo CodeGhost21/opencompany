@@ -183,10 +183,9 @@ fn speech_is_on_by_default_and_can_be_opted_out() {
         "an omitted [speech] section must wire the speech belt"
     );
 
-    let opted_out: CompanyManifest = toml::from_str(
-        "[company]\nname = \"Acme\"\n[speech]\nenabled = false\n",
-    )
-    .expect("speech opt-out parses");
+    let opted_out: CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n[speech]\nenabled = false\n")
+            .expect("speech opt-out parses");
     assert!(!opted_out.speech.enabled);
 }
 
