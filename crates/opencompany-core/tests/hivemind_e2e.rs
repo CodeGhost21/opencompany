@@ -688,11 +688,16 @@ async fn one_agent_uses_speech_to_coordinate_multiple_dm_sessions_without_cards(
         );
     }
     let cards = runtime.tasks().list(runtime.id()).await.unwrap();
-    assert!(cards.is_empty(), "conversation alone must create no task: {cards:?}");
+    assert!(
+        cards.is_empty(),
+        "conversation alone must create no task: {cards:?}"
+    );
 
     // The same greeter now handles its private chat as a second conversation;
     // its per-agent session remains one continuous cross-channel session.
-    let _ = client.say("dm:greeter", "What did the specialists say?").await;
+    let _ = client
+        .say("dm:greeter", "What did the specialists say?")
+        .await;
     let rows = runtime
         .events()
         .read_from(runtime.id(), EventSeq::new(0), 10_000)
