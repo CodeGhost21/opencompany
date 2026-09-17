@@ -694,6 +694,16 @@ impl Drained {
             self.refused_cards.push(refused);
         }
     }
+
+    fn merge(&mut self, nested: Drained) {
+        self.bubbles.extend(nested.bubbles);
+        self.desk_replies.extend(nested.desk_replies);
+        self.cancelled_desks.extend(nested.cancelled_desks);
+        self.refused_cards.extend(nested.refused_cards);
+        if let Some(id) = nested.spawned_task {
+            self.spawned_task.get_or_insert(id);
+        }
+    }
 }
 
 /// The operator-facing result of one operator message after delegation: the
@@ -2110,6 +2120,10 @@ impl<'a> DelegationRunner<'a> {
         for outcome in dispatched {
             let (out, target) = outcome?;
             drained.absorb(out, target);
+        }
+        if self.queue.queued() > 0 {
+            let nested = Box::pin(self.drain_and_execute(chat_id, ctx, hand_offs)).await?;
+            drained.merge(nested);
         }
         Ok(drained)
     }
