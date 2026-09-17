@@ -68,6 +68,7 @@ test("a card raised from a channel line links back to the channel", async ({
   page,
   request,
 }) => {
+  test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
   // The deterministic "Track" triage cards an imperative lead on its own,
   // independent of whatever the brain answers with — so the round trip below
   // is provable on a default host, with no scripted backend.
@@ -173,6 +174,7 @@ test("a card raised inside a thread opens that thread on the jump back, not just
   page,
   request,
 }) => {
+  test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
   const API = "/api/v1/company";
   const marker = Date.now();
   const rootText = `quick sync on Q3 priorities ${marker}`;
