@@ -514,6 +514,19 @@ fn refusal(rejection: UtteranceRejection) -> ToolResult {
     ToolResult::error(rejection.to_string())
 }
 
+#[cfg(test)]
+fn tool_result_text(result: &ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            oh::tools::traits::ToolContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The journal `chat_id` a `desk_dm` to `peer` should use.
 ///
 /// Bare, unless `peer` collides with a desk id — in which case that desk
