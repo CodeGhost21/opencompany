@@ -778,10 +778,18 @@ pub fn web_brief(fetch: bool, search: bool) -> String {
         );
     }
     if search {
-        brief.push_str(
-            "Use `web_search` to discover current sources, then open the strongest results with \
-             `web_fetch` before making claims.\n",
-        );
+        if fetch {
+            brief.push_str(
+                "Use `web_search` to discover current sources, then open the strongest results \
+                 with `web_fetch` before making claims.\n",
+            );
+        } else {
+            brief.push_str(
+                "Use `web_search` to discover current sources. URL fetching is not granted for \
+                 this turn, so ground claims in the search results and do not invent page \
+                 contents you could not open.\n",
+            );
+        }
     } else {
         brief.push_str(
             "No `web_search` provider is connected for this turn. For research, verify official \
