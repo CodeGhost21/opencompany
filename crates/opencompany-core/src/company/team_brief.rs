@@ -31,8 +31,8 @@
 
 use crate::ports::types::CompanyRecord;
 use crate::runtime::delegation_tools::{
-    DELEGATE_TO_DESK_TOOL, DELEGATE_TO_TEAMMATE_TOOL, desk_ids, desk_lead, desks_of_member,
-    reach_is_unrestricted, roster_agent_ids, teammate_targets,
+    DELEGATE_TO_TEAMMATE_TOOL, desk_lead, desks_of_member, reach_is_unrestricted, roster_agent_ids,
+    teammate_targets,
 };
 
 /// The heading the section opens with. Named so the tool descriptions and the
@@ -153,12 +153,24 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
         out.push('\n');
     }
 
-    let desks = desk_ids(record);
+    // **The desks this agent sits on, not every desk the company has.**
+    //
+    // A seat acts where it sits. The full org chart was the whole of this
+    // section on a large roster, listing membership and a lead for rooms this
+    // agent will never take a turn in — and in a hive turn it arrives beside
+    // `EpisodePrompt::peers`, which lists the desks it may actually ask,
+    // filtered by the referral policy. The same desk was therefore described
+    // twice in one turn, once as somewhere to hand work whose lead answers and
+    // once as somewhere to put a question that the room answers, which are
+    // different mechanisms with different costs (#2368).
+    //
+    // What is deliberately NOT filtered is the roster above: knowing who does
+    // what is how a seat knows who is worth asking, and hiding that is the
+    // failure this whole section exists to fix — "declined, guessed, or said it
+    // could not contact a colleague sitting on the same desk".
+    let desks = desks_of_member(record, agent_id);
     if !desks.is_empty() {
-        out.push_str(&format!(
-            "\nDesks (desk id — name: members). Hand work to a whole desk with \
-             `{DELEGATE_TO_DESK_TOOL}` and its lead answers:\n"
-        ));
+        out.push_str("\nYou sit on (desk id — name: members):\n");
         for desk in &desks {
             let lead = desk_lead(record, desk);
             let members: Vec<String> = record
@@ -181,10 +193,6 @@ pub fn team_section(record: &CompanyRecord, agent_id: &str) -> String {
             });
             out.push_str(&members.join(", "));
             out.push('\n');
-        }
-        let mine = desks_of_member(record, agent_id);
-        if !mine.is_empty() {
-            out.push_str(&format!("\nYou sit on: {}.\n", mine.join(", ")));
         }
     }
 

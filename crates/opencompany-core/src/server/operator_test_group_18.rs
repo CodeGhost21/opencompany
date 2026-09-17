@@ -61,6 +61,7 @@ fn a_direct_crossing_names_both_sides_of_the_exchange() {
         to_desk: "order_ops".into(),
         target: "amendments".into(),
         returning: false,
+        rows: None,
     }))
     .expect("a direct crossing is projected");
 

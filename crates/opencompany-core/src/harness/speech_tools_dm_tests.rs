@@ -70,7 +70,7 @@ async fn a_dm_to_a_display_name_resolves_to_the_canonical_id() {
         panic!("expected an AgentReply, got {:?}", appended[0]);
     };
     assert_eq!(
-        chat_id, "nova",
+        chat_id, "dm:designer+nova",
         "the row must be journaled under the canonical id, not the typed display name"
     );
 }
@@ -231,9 +231,15 @@ async fn a_post_to_a_desk_this_agent_is_not_on_is_refused() {
 /// The contract text is the crate's, not this host's. It is the only place a
 /// seat is told that text outside a tool call reaches nobody, so a host that
 /// paraphrased it would be quietly rewriting the rule.
+///
+/// `desk_dm` is the one exception, and it is one because the rule itself
+/// changed here — see [`the_dm_description_says_the_answer_comes_back`].
 #[test]
 fn the_descriptions_are_the_crates_own() {
     for name in SPEECH_TOOLS {
+        if bare(name) == bare(DM_TOOL) {
+            continue;
+        }
         let ours = crate_description(name);
         let theirs = speech::tool_specs()
             .iter()
@@ -242,6 +248,37 @@ fn the_descriptions_are_the_crates_own() {
             .description;
         assert_eq!(ours, theirs, "{name} paraphrased the crate");
     }
+}
+
+/// `desk_dm` is an ASK on this host, and the crate's text says it is not.
+///
+/// TinyHiveMind describes `dm` as a way to "say one thing" that costs the
+/// seat's one message for the turn, and states that the room learns an exchange
+/// happened and not what it said. Read against "find out what this teammate
+/// knows", that is a price with no return — and a seat holding a factual gap
+/// correctly reached for `delegate_to_teammate` instead, the only tool on the
+/// belt that promised an answer, at a board card per call.
+///
+/// Here the recipient's turn runs inline and their reply is the call's result,
+/// so the crate's sentence is no longer true of this host and describes the one
+/// behaviour that would stop the tool being used (#2368).
+#[test]
+fn the_dm_description_says_the_answer_comes_back() {
+    let ours = crate_description(DM_TOOL);
+    let theirs = speech::tool_specs()
+        .iter()
+        .find(|spec| spec.name == bare(DM_TOOL))
+        .expect("the crate names this tool")
+        .description;
+    assert_ne!(ours, theirs, "the override must not silently fall back");
+    assert!(
+        ours.contains("reply") && ours.contains("result"),
+        "a seat must be able to read that the answer comes back: {ours}"
+    );
+    assert!(
+        !ours.contains("settle a disagreement"),
+        "the crate's framing is what steered seats away from asking: {ours}"
+    );
 }
 
 /// A post is a *request* to speak: it does not append, it is collected and
@@ -311,9 +348,11 @@ async fn a_dm_lands_in_the_recipients_own_channel() {
     };
     assert_eq!(agent_id, "designer");
     assert_eq!(
-        chat_id, "copy",
-        "a DM belongs in the recipient's channel; `brand` here is the speaker's own, which \
-         the recipient cannot read"
+        chat_id, "dm:copy+designer",
+        "a DM belongs in the PAIR's own thread (#2368). The recipient's own channel is the \
+         one the operator uses to DM them, so agent-to-agent traffic landed in a human's \
+         thread authored by somebody not talking to them — and the sender could not read it \
+         back at all, because `agent_channels` gives an agent its own line and not its peers'"
     );
     assert!(
         audience.is_empty(),
@@ -399,9 +438,10 @@ members = ["designer"]
         panic!("expected an AgentReply, got {:?}", appended[0]);
     };
     assert_eq!(
-        chat_id, "dm:platform",
-        "the bare id collides with the `platform` desk, so every desk member \
-         could read a bare-keyed row; the prefixed key keeps it private"
+        chat_id, "dm:designer+platform",
+        "the bare id collides with the `platform` desk, so a bare-keyed row would be \
+         readable by every member of it. The pair key is collision-free by construction — it \
+         names BOTH parties — which is what retired the prefixing this case used to need"
     );
 }
 
@@ -483,10 +523,11 @@ members = ["designer"]
         panic!("expected an AgentReply, got {:?}", appended[0]);
     };
     assert_eq!(
-        chat_id, "dm:support",
+        chat_id, "dm:designer+support",
         "the bare id collides with the `triage` desk's display NAME (\"support\"), \
-         which `owns` matches exactly like an id collision; the prefixed key keeps \
-         it private"
+         which `owns` matches exactly like an id collision. Naming both parties \
+         sidesteps the whole class: a pair key can only collide with the same \
+         pair's own thread"
     );
 }
 
@@ -519,7 +560,12 @@ async fn a_dm_to_two_teammates_leaves_a_row_in_each_of_their_channels() {
             other => panic!("expected an AgentReply, got {other:?}"),
         })
         .collect();
-    assert_eq!(channels, vec!["copy", "researcher"]);
+    assert_eq!(
+        channels,
+        vec!["dm:copy+designer", "dm:designer+researcher"],
+        "one row per pair thread, and `pair_conversation` sorts the ids so the same two \
+         teammates share ONE thread whichever of them speaks"
+    );
 }
 
 /// Codex P2: `to` naming the same recipient twice — by a repeated raw id,
@@ -567,7 +613,9 @@ async fn a_dm_failure_for_one_recipient_does_not_undo_or_hide_an_earlier_success
     let company = CompanyId::new("acme");
     let events = Arc::new(FlakyLog {
         events: Mutex::new(Vec::new()),
-        refuses: "researcher",
+        // The PAIR thread, not the bare id — that is the key a `desk_dm` writes
+        // under since #2368, and a fixture refusing the old one refuses nothing.
+        refuses: "dm:designer+researcher",
     });
     let context = SpeechContext::new(
         company.clone(),
@@ -652,7 +700,7 @@ members = ["designer", "copy", "researcher"]
     let CompanyEvent::AgentReply { chat_id, .. } = &appended[0] else {
         panic!("expected an AgentReply, got {:?}", appended[0]);
     };
-    assert_eq!(chat_id, "copy");
+    assert_eq!(chat_id, "dm:copy+designer");
     let text = tool_result_text(&result);
     assert!(
         text.contains("copy"),

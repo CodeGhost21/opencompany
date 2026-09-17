@@ -57,6 +57,7 @@ async fn the_answering_desk_carries_the_question_it_was_asked() {
             to_desk: "design".to_string(),
             target: "product_designer".to_string(),
             returning: false,
+            rows: None,
         },
         // The far seat's turn, on its own desk and under its own id — the
         // only row this crossing leaves here.
