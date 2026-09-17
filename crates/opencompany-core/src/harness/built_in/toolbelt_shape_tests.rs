@@ -66,6 +66,7 @@ fn web_brief_distinguishes_fetching_from_discovery() {
     let with_search = web_brief(true, true);
     assert!(with_search.contains("Use `web_search` to discover"));
     assert!(!with_search.contains("No `web_search` provider is connected"));
+    assert!(with_search.contains("stop after that one call"));
 
     let search_only = web_brief(false, true);
     assert!(search_only.contains("URL fetching is not granted"));

@@ -185,6 +185,8 @@ fn task_instruction_keeps_prior_agent_results_out_of_the_current_assignment() {
     assert!(assignment.contains("`web_search`"));
     assert!(assignment.contains("begin with `web_search` now"));
     assert!(assignment.contains("Do not inspect the company workspace"));
+    assert!(assignment.contains("stop after that one call"));
+    assert!(assignment.contains("Do not retry it with another query"));
 }
 
 #[test]

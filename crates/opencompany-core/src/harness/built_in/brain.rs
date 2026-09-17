@@ -3693,7 +3693,9 @@ fn task_instruction(card: &TaskRecord) -> String {
                 " This is a public-source research assignment: begin with `web_search` now. Do \
                  not inspect the company workspace, ledgers, prior artifacts, or skill catalogue \
                  first. Open the strongest search results with `web_fetch` and cite what you \
-                 actually read."
+                 actually read. If `web_search` reports an authentication, expired-session, \
+                 credential, or provider-availability error, stop after that one call and report \
+                 the exact blocker. Do not retry it with another query."
             } else {
                 ""
             };

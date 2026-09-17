@@ -790,6 +790,12 @@ pub fn web_brief(fetch: bool, search: bool) -> String {
                  contents you could not open.\n",
             );
         }
+        brief.push_str(
+            "If `web_search` reports an authentication, expired-session, missing-credential, or \
+             unavailable-provider error, stop after that one call and report the exact blocker. \
+             A different query cannot repair credentials, so do not retry it or substitute local \
+             workspace reads for the missing public sources.\n",
+        );
     } else {
         brief.push_str(
             "No `web_search` provider is connected for this turn. For research, verify official \
