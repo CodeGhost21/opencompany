@@ -1549,7 +1549,7 @@ const MODEL_PROBE_CANDIDATE_LIMIT: usize = 5;
 /// Without this the default is whichever model the provider happens to list
 /// first, which is a position in someone else's catalogue rather than a choice.
 #[cfg(feature = "openhuman")]
-const PREFERRED_SETUP_MODEL: &str = "z-ai/glm-5.3-flash";
+const PREFERRED_SETUP_MODEL: &str = "deepseek/deepseek-v4-flash";
 
 #[cfg(feature = "openhuman")]
 fn probe_model_candidates(
