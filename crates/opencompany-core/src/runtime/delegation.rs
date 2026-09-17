@@ -2108,14 +2108,14 @@ impl<'a> DelegationRunner<'a> {
         // Separate committed DM messages are independent one-target decisions.
         // Run them together: distinct agents proceed concurrently, while two
         // messages to the same agent serialize on that agent's own session lock.
-        let dispatched = futures::future::join_all(
-            conversation_dispatches.into_iter().map(|delegation| async move {
+        let dispatched = futures::future::join_all(conversation_dispatches.into_iter().map(
+            |delegation| async move {
                 let target = hand_off_target_of(&delegation).map(str::to_string);
                 self.run_delegation(delegation, chat_id, ctx)
                     .await
                     .map(|out| (out, target))
-            }),
-        )
+            },
+        ))
         .await;
         for outcome in dispatched {
             let (out, target) = outcome?;
@@ -4145,10 +4145,7 @@ pub(crate) async fn with_turn_conversation<F: std::future::Future>(
     TURN_CONVERSATION.scope(chat_id, fut).await
 }
 
-pub(crate) async fn with_turn_message_hop<F: std::future::Future>(
-    hop: u32,
-    fut: F,
-) -> F::Output {
+pub(crate) async fn with_turn_message_hop<F: std::future::Future>(hop: u32, fut: F) -> F::Output {
     TURN_MESSAGE_HOP.scope(hop, fut).await
 }
 

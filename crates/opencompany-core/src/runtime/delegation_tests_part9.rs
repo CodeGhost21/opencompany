@@ -99,7 +99,10 @@ async fn independent_dm_messages_run_distinct_agent_sessions_concurrently_withou
         "two independent recipient sessions should overlap"
     );
     assert_eq!(drained.bubbles.len(), 2);
-    assert!(fixture.cards().await.is_empty(), "conversation opens no card");
+    assert!(
+        fixture.cards().await.is_empty(),
+        "conversation opens no card"
+    );
 }
 
 /// Two assignments that read the same card revision admit one writer and
