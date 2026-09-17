@@ -1425,4 +1425,17 @@ pub fn declined_note(unpublished_files: &[String], reply: &str) -> String {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "publish/publish_test_helpers_tests.rs"]
+mod publish_test_helpers_tests;
+#[cfg(test)]
+#[path = "publish/publish_partial_refused_tests.rs"]
+mod tests_partial_refused;
+#[cfg(test)]
+#[path = "publish/publish_path_capture_tests.rs"]
+mod tests_path_capture;
+#[cfg(test)]
+#[path = "publish/publish_queue_scan_nudge_tests.rs"]
+mod tests_queue_scan_nudge;
+#[cfg(test)]
+#[path = "publish/publish_receipts_card_tests.rs"]
+mod tests_receipts_card;

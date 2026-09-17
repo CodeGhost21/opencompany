@@ -77,18 +77,31 @@ pub mod types;
 #[cfg(test)]
 mod aside_test;
 #[cfg(test)]
-mod concurrency_test;
+mod concurrency_tests;
 #[cfg(test)]
-mod deliberation_test;
+mod deliberation_tests;
 #[cfg(test)]
-mod moves_test;
+mod moves_fixtures_tests;
 #[cfg(test)]
-mod referral_test;
+mod moves_grammar_tests;
 #[cfg(test)]
-mod round_test;
+mod moves_memory_tests;
+#[cfg(test)]
+mod moves_misc_tests;
+#[cfg(test)]
+mod moves_readable_tests;
+#[cfg(test)]
+mod referral_crossing_tests;
+#[cfg(test)]
+mod referral_fixtures_tests;
+#[cfg(test)]
+mod referral_manifest_tests;
+#[cfg(test)]
+mod referral_prompt_tests;
+#[cfg(test)]
+mod round_tests;
 #[cfg(test)]
 pub(crate) mod test;
-
 pub use aside::{ASIDE_MARKER, AsideConfig, SURFACE_MARKER};
 pub use episode::{EpisodeDriver, HiveTurnRunner};
 pub use log::EventLogSessionLog;

@@ -20,10 +20,11 @@ import { expect, test } from "@playwright/test";
  * Coverage, beyond the phase-4b doc's own single `needsModel` case (decision
  * "X10" asks for the success path in full since nothing here can reach a
  * live one):
- *  - all three non-null fill-line variants, and the no-line case
+ *  - one fill-line variant per derived slot, the all-three variant, and the
+ *    no-line case
  *  - a rotation (an existing account key replaced by a new one)
  *  - a clear that only touches copies still equal to the old key
- *  - a save that overwrites neither derived slot when both hold a custom key
+ *  - a save that overwrites no derived slot when each holds a custom key
  *  - an auth rejection that rolls the LLM copy back while Composio keeps its
  */
 
@@ -31,6 +32,7 @@ type Page = import("@playwright/test").Page;
 type Route = import("@playwright/test").Route;
 
 const isCredential = (url: URL) => /\/credential$/.test(url.pathname);
+const isBilling = (url: URL) => /\/credential\/billing$/.test(url.pathname);
 
 const KEY_A = "th-not-a-real-key";
 const KEY_B = "th-not-a-real-key-2";
@@ -45,6 +47,11 @@ function status(over: Record<string, unknown> = {}) {
     hubLink: false,
     inferenceHasOwnKey: false,
     composioHasOwnKey: false,
+    // This suite covers the pre-existing LLM and Composio fan-out matrix. Keep
+    // the newer managed Search slot occupied unless a case explicitly tests it,
+    // so `accountFills` has a complete status shape without changing each
+    // sentence's intended two-slot assertion.
+    searchHasOwnKey: true,
     defaultSet: false,
     ...over,
   };
@@ -110,8 +117,25 @@ async function stubSavesWithStatus(
   });
 }
 
+/**
+ * Answers `GET …/credential/billing` so the card's state is decided by this
+ * file and not by whatever the running host's own hub read returns.
+ *
+ * The page reads billing alongside the credential and the account row's state
+ * is drawn from both — a stored key the hub refuses is a different row from a
+ * stored key, and `isCredential` does not match this path. Left to the live
+ * host, every assertion below would depend on a hub answer no stub controls.
+ */
+async function stubBilling(page: Page, body: Record<string, unknown>): Promise<void> {
+  await page.route(isBilling, async (route: Route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    await route.fulfill({ json: body });
+  });
+}
+
 /** Open the Account page with the first-run tour out of the way. */
 async function openAccount(page: Page): Promise<void> {
+  await stubBilling(page, { configured: false });
   await page.goto("/#/connections/api-key");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
@@ -128,26 +152,41 @@ async function openAccount(page: Page): Promise<void> {
 const toasts = (page: Page) => page.locator("[data-sonner-toast]");
 
 test.describe("the fill line names only the slots saving would fill", () => {
-  test("both slots empty: names LLM and Composio, without claiming LLM is connected", async ({
+  test("every slot empty: names LLM, Composio and Search, without claiming LLM is connected", async ({
     page,
   }) => {
-    await stubStatus(page, status({ inferenceHasOwnKey: false, composioHasOwnKey: false }));
+    await stubStatus(
+      page,
+      status({
+        inferenceHasOwnKey: false,
+        composioHasOwnKey: false,
+        searchHasOwnKey: false,
+      }),
+    );
     await openAccount(page);
     await page.getByTestId("account-add-key").click();
 
     const line = page.getByTestId("account-key-fill-line");
     await expect(line).toContainText(
-      "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and connects it for Composio.",
+      "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — connects it for Composio, and uses it as this company's managed Search credential.",
     );
     await expect(line).not.toContainText("connects TinyHumans for LLM");
     await expect(page.getByTestId("account-key-llm-link")).toBeVisible();
     await expect(page.getByTestId("account-key-composio-link")).toBeVisible();
+    await expect(page.getByTestId("account-key-search-link")).toBeVisible();
   });
 
   test("only the LLM slot is empty: names LLM alone, and still does not say connected", async ({
     page,
   }) => {
-    await stubStatus(page, status({ inferenceHasOwnKey: false, composioHasOwnKey: true }));
+    await stubStatus(
+      page,
+      status({
+        inferenceHasOwnKey: false,
+        composioHasOwnKey: true,
+        searchHasOwnKey: true,
+      }),
+    );
     await openAccount(page);
     await page.getByTestId("account-add-key").click();
 
@@ -157,10 +196,18 @@ test.describe("the fill line names only the slots saving would fill", () => {
     );
     await expect(page.getByTestId("account-key-llm-link")).toBeVisible();
     await expect(page.getByTestId("account-key-composio-link")).toHaveCount(0);
+    await expect(page.getByTestId("account-key-search-link")).toHaveCount(0);
   });
 
   test("only the Composio slot is empty: names Composio alone", async ({ page }) => {
-    await stubStatus(page, status({ inferenceHasOwnKey: true, composioHasOwnKey: false }));
+    await stubStatus(
+      page,
+      status({
+        inferenceHasOwnKey: true,
+        composioHasOwnKey: false,
+        searchHasOwnKey: true,
+      }),
+    );
     await openAccount(page);
     await page.getByTestId("account-add-key").click();
 
@@ -168,10 +215,39 @@ test.describe("the fill line names only the slots saving would fill", () => {
     await expect(line).toContainText("Saving also connects TinyHumans for Composio.");
     await expect(page.getByTestId("account-key-llm-link")).toHaveCount(0);
     await expect(page.getByTestId("account-key-composio-link")).toBeVisible();
+    await expect(page.getByTestId("account-key-search-link")).toHaveCount(0);
   });
 
-  test("both slots already hold their own key: no line at all", async ({ page }) => {
-    await stubStatus(page, status({ inferenceHasOwnKey: true, composioHasOwnKey: true }));
+  test("only the Search slot is empty: names Search alone", async ({ page }) => {
+    await stubStatus(
+      page,
+      status({
+        inferenceHasOwnKey: true,
+        composioHasOwnKey: true,
+        searchHasOwnKey: false,
+      }),
+    );
+    await openAccount(page);
+    await page.getByTestId("account-add-key").click();
+
+    const line = page.getByTestId("account-key-fill-line");
+    await expect(line).toContainText(
+      "Saving also uses this key as the company's managed Search credential.",
+    );
+    await expect(page.getByTestId("account-key-llm-link")).toHaveCount(0);
+    await expect(page.getByTestId("account-key-composio-link")).toHaveCount(0);
+    await expect(page.getByTestId("account-key-search-link")).toBeVisible();
+  });
+
+  test("every slot already holds its own key: no line at all", async ({ page }) => {
+    await stubStatus(
+      page,
+      status({
+        inferenceHasOwnKey: true,
+        composioHasOwnKey: true,
+        searchHasOwnKey: true,
+      }),
+    );
     await openAccount(page);
     await page.getByTestId("account-add-key").click();
 
@@ -182,7 +258,14 @@ test.describe("the fill line names only the slots saving would fill", () => {
 test("saving asks for a model when the host needs one, then reposts the key with it", async ({
   page,
 }) => {
-  await stubStatus(page, status({ inferenceHasOwnKey: false, composioHasOwnKey: false }));
+  await stubStatus(
+    page,
+    status({
+      inferenceHasOwnKey: false,
+      composioHasOwnKey: false,
+      searchHasOwnKey: true,
+    }),
+  );
   await stubSaves(page, [
     mutation({
       status: status({ configured: true, source: "company" }),
@@ -515,10 +598,17 @@ test.describe("KR-L3-01: the Remove-key dialog names dependents and honors confi
   });
 });
 
-test("never overwrites a key set on another page — both derived slots are kept", async ({
+test("never overwrites a key set on another page — every derived slot is kept", async ({
   page,
 }) => {
-  await stubStatus(page, status({ inferenceHasOwnKey: true, composioHasOwnKey: true }));
+  await stubStatus(
+    page,
+    status({
+      inferenceHasOwnKey: true,
+      composioHasOwnKey: true,
+      searchHasOwnKey: true,
+    }),
+  );
   await stubSaves(page, [
     mutation({
       note:
@@ -537,7 +627,7 @@ test("never overwrites a key set on another page — both derived slots are kept
 
   await openAccount(page);
   await page.getByTestId("account-add-key").click();
-  // No fill line at all — saving would touch neither derived slot.
+  // No fill line at all — saving would touch no derived slot.
   await expect(page.getByTestId("account-key-fill-line")).toHaveCount(0);
 
   await page.getByTestId("account-key-input").fill(KEY_CUSTOM);
@@ -602,7 +692,7 @@ test("an auth rejection rolls the LLM copy back while the Composio copy stays, s
 test("a response from a host predating slice 4a degrades to a single step, with no fill line", async ({
   page,
 }) => {
-  // No `inferenceHasOwnKey`/`composioHasOwnKey`/`defaultSet`, and a `PUT`
+  // No `inferenceHasOwnKey`/`composioHasOwnKey`/`searchHasOwnKey`/`defaultSet`, and a `PUT`
   // answer with no `slots`/`needsModel` at all — exactly what an older host
   // sends.
   await stubStatus(page, {

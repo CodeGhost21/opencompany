@@ -31,7 +31,8 @@
 pub mod chunk;
 pub mod documents;
 #[cfg(test)]
-mod test;
+#[path = "ingest_tests.rs"]
+mod tests;
 pub mod text;
 
 pub use chunk::{DOCUMENT_LABEL_PREFIX, DocumentChunk, chunk_document, label_for};

@@ -289,4 +289,5 @@ fn registry_heal<'a>(
 }
 
 #[cfg(test)]
-mod test;
+#[path = "skill_effective/skill_effective_tests.rs"]
+mod tests;

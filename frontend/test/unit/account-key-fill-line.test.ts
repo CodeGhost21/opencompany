@@ -155,6 +155,32 @@ describe("accountFillLine", () => {
       "Saving also uses this key as the company's managed Search credential.",
     );
   });
+
+  it("names all three slots when a save would fill all three", () => {
+    const line = accountFillLine({ llm: true, composio: true, search: true, llmHasModel: false });
+    expect(line).toBe(
+      "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — connects it for Composio, and uses it as this company's managed Search credential.",
+    );
+    expect(line?.toLowerCase()).not.toContain("connects tinyhumans for llm");
+  });
+
+  it("names LLM and Search when only Composio holds its own key", () => {
+    expect(accountFillLine({ llm: true, composio: false, search: true, llmHasModel: false })).toBe(
+      "Saving also adds this key to TinyHumans on the LLM page, with the model you choose next — and uses it as this company's managed Search credential.",
+    );
+  });
+
+  it("names Composio and Search when only LLM holds its own key", () => {
+    expect(accountFillLine({ llm: false, composio: true, search: true, llmHasModel: false })).toBe(
+      "Saving also connects TinyHumans for Composio and uses this key as the company's managed Search credential.",
+    );
+  });
+
+  it("drops the LLM clause from the three-slot line once the row already has a model", () => {
+    expect(accountFillLine({ llm: true, composio: true, search: true, llmHasModel: true })).toBe(
+      "Saving also connects TinyHumans for Composio and uses this key as the company's managed Search credential.",
+    );
+  });
 });
 
 describe("modelStepTitle", () => {

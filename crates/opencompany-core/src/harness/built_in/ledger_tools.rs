@@ -751,5 +751,5 @@ pub const LEDGER_TOOL_NAMES: [&str; 5] = [
 const _: Option<Arc<()>> = None;
 
 #[cfg(test)]
-#[path = "ledger_tools_test.rs"]
-mod test;
+#[path = "ledger_tools_tests.rs"]
+mod tests;

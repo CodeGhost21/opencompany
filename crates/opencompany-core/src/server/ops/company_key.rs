@@ -192,9 +192,12 @@ struct HubAccountLinks {
 /// A mutating response: the resulting status plus the switch reminder.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MutationResponse {
+pub(crate) struct MutationResponse {
     status: CredentialStatusDto,
-    note: String,
+    /// The one-line summary of what the fan-out did, for the console's toast —
+    /// and for the host's own return page when no console serves the return
+    /// leg ([`hub_link_callback`](crate::server::hub_link_callback)).
+    pub(crate) note: String,
     /// What the fan-out (`company_key::fan_out`, keys rework #2306, slice 4a)
     /// did to each of the five slots it touches, always in order composio,
     /// inference, provider, default, health.
@@ -301,50 +304,8 @@ fn prober_for(runtime: &CompanyRuntime) -> Box<dyn company_key::InferenceProber>
 /// means a fresh map per test, with no entry able to outlive the test that
 /// wrote it.
 #[cfg(test)]
-pub(crate) mod prober_override {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-
-    use async_trait::async_trait;
-
-    use crate::company::inference::probe::{ProbeClass, ProbeFailure};
-
-    pub(crate) type Outcome = std::result::Result<Vec<String>, ProbeClass>;
-
-    thread_local! {
-        static MAP: RefCell<HashMap<String, Outcome>> = RefCell::new(HashMap::new());
-    }
-
-    pub(crate) fn set(company: &str, outcome: Outcome) {
-        MAP.with(|map| {
-            map.borrow_mut().insert(company.to_string(), outcome);
-        });
-    }
-
-    pub(super) fn get(company: &str) -> Option<Outcome> {
-        MAP.with(|map| map.borrow().get(company).cloned())
-    }
-
-    pub(super) struct Forced(pub(super) Outcome);
-
-    #[async_trait]
-    impl crate::company::company_key::InferenceProber for Forced {
-        async fn probe(
-            &self,
-            _base_url: &str,
-            _key: &str,
-        ) -> std::result::Result<Vec<String>, ProbeFailure> {
-            match &self.0 {
-                Ok(ids) => Ok(ids.clone()),
-                Err(class) => Err(ProbeFailure {
-                    class: *class,
-                    raw: "forced".to_string(),
-                    truncated: false,
-                }),
-            }
-        }
-    }
-}
+#[path = "company_key_prober_override.rs"]
+pub(crate) mod prober_override;
 
 /// Resolves the credential status DTO for a company.
 ///
@@ -607,7 +568,8 @@ async fn set_key(
     // journal-failure-then-retry sequence would otherwise never rebuild a
     // company that has been on the echo brain since the first, unlogged
     // attempt (CodeRabbit review).
-    let journal_result = journal_fan_out(&company, clearing, &report).await;
+    let journal_result =
+        journal_fan_out(&company.runtime, &company.actor(), clearing, &report).await;
 
     // Read off whichever runtime is live after this write — the successor if
     // the fan-out configured inference for a company that booted without any.
@@ -684,7 +646,7 @@ async fn set_model(
     // Same ordering as `set_key`: rebuild before propagating a journal
     // failure, so a retry of an already-configured save is not the only way
     // this company ever leaves the echo brain (CodeRabbit review).
-    let journal_result = journal_fan_out(&company, false, &report).await;
+    let journal_result = journal_fan_out(&company.runtime, &company.actor(), false, &report).await;
 
     let live = rebuild_if_pending(&state, &company.runtime, &report).await;
     journal_result?;
@@ -750,10 +712,9 @@ async fn start_link(
     // Where the hub returns to. `key=link` is this console's own marker, kept
     // distinct from the `key=auth` the hub appends on a sign-in so the two
     // return legs can never be mistaken for each other in `App.tsx`.
-    let origin = callback_origin(&state, &headers);
     let callback_url = format!(
-        "{}/?company={}&key=link&state={}",
-        origin.trim_end_matches('/'),
+        "{}?company={}&key=link&state={}",
+        callback_base(&state, &headers),
         runtime.id(),
         started.state,
     );
@@ -785,45 +746,59 @@ async fn start_link(
     Ok(Json(StartLinkResponse { authorize_url }))
 }
 
-/// Where the hub sends the browser back to.
+/// Where the hub sends the browser back to, up to and including the `?`.
 ///
-/// [`host_base_url`](crate::AppConfig::host_base_url) is the answer wherever a
-/// deployment states one: a hosted tenant is `OPENCOMPANY_PUBLIC_URL`, and that
-/// origin serves the console, so the return leg lands on the page that finishes
-/// the exchange.
+/// Three answers, in order, and the query is appended to whichever wins:
 ///
-/// Its fallback — `http://{bind}` — is the wrong answer for local development,
-/// and wrong in a way that only shows up at the end of the flow. The console in
-/// dev is a Vite server on another port; the host on `127.0.0.1:8080` serves no
-/// page unless somebody set `OPENCOMPANY_CONSOLE_DIR`. So an operator signed in,
-/// approved, and landed on a 404 holding a spent code — with nothing on that
-/// page able to say what had gone wrong, because there was no page.
+/// 1. **A stated origin.** [`host_base_url`](crate::AppConfig::host_base_url)
+///    wherever a deployment states one: a hosted tenant is
+///    `OPENCOMPANY_PUBLIC_URL`, and that origin serves the console, so the
+///    return leg lands at `/` on the page that finishes the exchange.
 ///
-/// So when nothing states an origin, the browser's own is used: whatever
-/// pressed the button is where the answer should come back to, which is exactly
-/// what a dev server on `:5173` needs and needs nobody to configure.
+/// 2. **The browser's own origin.** Local development is a Vite server on one
+///    port and the host on another, and the host serves no page unless somebody
+///    set `OPENCOMPANY_CONSOLE_DIR`. So an operator once signed in, approved,
+///    and landed on a 404 holding a spent code. When nothing states an origin,
+///    whatever pressed the button is where the answer should come back to —
+///    exactly what a dev server on `:5173` needs and needs nobody to configure.
 ///
-/// **Only a loopback origin.** A header is attacker-controllable in principle,
-/// and while a stolen code redeems nothing without the verifier this host keeps
-/// (`server::hub_link`), a callback is not somewhere to accept an arbitrary
-/// address on a request's say-so. Anything else falls through to the bind
-/// address, and a deployment that wants a real origin sets `OPENCOMPANY_PUBLIC_URL`
-/// — which wins over this outright.
-fn callback_origin(state: &AppState, headers: &HeaderMap) -> String {
+///    **Only a loopback origin.** A header is attacker-controllable in
+///    principle, and while a stolen code redeems nothing without the verifier
+///    this host keeps (`server::hub_link`), a callback is not somewhere to
+///    accept an arbitrary address on a request's say-so.
+///
+/// 3. **The host's own return route.** No stated origin and no browser origin
+///    is the desktop: the console is a webview whose requests arrive through
+///    the shell's Rust proxy, so there is no `Origin` header, and the embedded
+///    host serves nothing at `/`. Sending the browser to `http://{bind}/` there
+///    is a 404 at best — and was `http://127.0.0.1:0/` before the shell
+///    recorded the port it actually bound, which Chrome refuses outright. So
+///    the bind fallback names [`hub_link_callback`](crate::server::hub_link_callback)'s
+///    route instead, where the host redeems the code itself and tells the tab
+///    to go back to the app. The hub admits any `http` loopback URL, path and
+///    all, so this is as valid a callback as `/` was.
+fn callback_base(state: &AppState, headers: &HeaderMap) -> String {
     if let Some(url) = state.config().public_url.as_deref() {
         let url = url.trim().trim_end_matches('/');
         if !url.is_empty() {
-            return url.to_string();
+            return format!("{url}/");
         }
     }
 
-    headers
+    if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|origin| is_loopback_origin(origin))
-        .map(|origin| origin.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| state.config().host_base_url())
+    {
+        return format!("{}/", origin.trim_end_matches('/'));
+    }
+
+    format!(
+        "{}{}",
+        state.config().host_base_url().trim_end_matches('/'),
+        crate::server::hub_link_callback::PATH
+    )
 }
 
 /// Whether `origin` is an `http://` address on this machine.
@@ -876,8 +851,32 @@ async fn finish_link(
     company: AdminScopedCompany,
     Json(body): Json<FinishLink>,
 ) -> Result<Json<MutationResponse>, ApiError> {
-    let runtime = company.runtime.as_ref();
+    redeem_link(
+        &state,
+        &company.runtime,
+        &company.actor(),
+        &body.state,
+        &body.code,
+    )
+    .await
+    .map(Json)
+}
 
+/// The whole of a key-grant redemption, shared by [`finish_link`] and the
+/// host's own return route ([`hub_link_callback`](crate::server::hub_link_callback)).
+///
+/// Neither caller decides who may redeem: the parked `state` does. It is
+/// single-use, bound to the company it was started for, and worthless without
+/// the verifier this host never handed out — so a browser tab arriving with no
+/// session at all proves as much as an admin's `POST` does, and the two paths
+/// must store, journal and rebuild identically.
+pub(crate) async fn redeem_link(
+    state: &AppState,
+    runtime: &Arc<CompanyRuntime>,
+    actor: &crate::ports::types::Actor,
+    link_state: &str,
+    code: &str,
+) -> Result<MutationResponse, ApiError> {
     let Some(exchange) = state.hub_identity().cloned() else {
         return Err(ApiError(OpenCompanyError::NotFound(
             "this host is not part of a TinyHumans ecosystem".to_string(),
@@ -887,14 +886,14 @@ async fn finish_link(
     // Single-use, and bound to the company it was started for. An expired or
     // replayed handle is indistinguishable from one that never existed, which
     // is the right amount to say: the remedy is the same either way.
-    let Some(link) = state.hub_links().take(&body.state, runtime.id().as_ref()) else {
+    let Some(link) = state.hub_links().take(link_state, runtime.id().as_ref()) else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "that connection attempt has expired — start it again".to_string(),
         )));
     };
 
     let key = exchange
-        .redeem_key_grant(&body.code, &link.verifier)
+        .redeem_key_grant(code, &link.verifier)
         .await
         .map_err(ApiError)?;
 
@@ -909,7 +908,7 @@ async fn finish_link(
     // `None` and the confirm flag is set unconditionally rather than threaded
     // from a request that has no such field.
     let report = fan_out_and_evict(
-        &state,
+        state,
         runtime,
         company_key::FanOutKey::Explicit(&key),
         None,
@@ -923,12 +922,12 @@ async fn finish_link(
     // an identical retry cannot re-run this fan-out — but a rebuild skipped
     // here still has no other trigger for this company, and journaling is
     // never allowed to be the thing that costs it (CodeRabbit review).
-    let journal_result = journal_fan_out(&company, false, &report).await;
+    let journal_result = journal_fan_out(runtime, actor, false, &report).await;
 
-    let live = rebuild_if_pending(&state, &company.runtime, &report).await;
+    let live = rebuild_if_pending(state, runtime, &report).await;
     journal_result?;
-    Ok(Json(MutationResponse {
-        status: effective_status(&state, live.as_ref()).await?,
+    Ok(MutationResponse {
+        status: effective_status(state, live.as_ref()).await?,
         note: company_key::fan_out_note(false, &report, None),
         slots: report.slots.iter().map(SlotReportDto::from).collect(),
         needs_model: report.needs_model,
@@ -936,7 +935,7 @@ async fn finish_link(
         models: report.models.clone(),
         used_by: None,
         restart_required: restart_required_for(live.as_ref()).await,
-    }))
+    })
 }
 
 /// Records who changed the company's credential (issue #403's discipline).
@@ -946,16 +945,19 @@ async fn finish_link(
 /// to what the company's agents act through is never invisible, and an audit
 /// line that quietly fails to be written is the one failure mode that would
 /// defeat it.
-async fn journal(company: &AdminScopedCompany, change: &str) -> Result<(), ApiError> {
-    company
-        .runtime
+async fn journal(
+    runtime: &CompanyRuntime,
+    actor: &crate::ports::types::Actor,
+    change: &str,
+) -> Result<(), ApiError> {
+    runtime
         .events()
         .append(
-            company.id(),
+            runtime.id(),
             CompanyEvent::ToolAccessChanged {
                 change: change.to_string(),
                 toolkit: None,
-                by: Some(company.actor()),
+                by: Some(actor.clone()),
             },
         )
         .await
@@ -972,12 +974,14 @@ async fn journal(company: &AdminScopedCompany, change: &str) -> Result<(), ApiEr
 /// the health slot, which never changes anything this journal's vocabulary
 /// describes.
 async fn journal_fan_out(
-    company: &AdminScopedCompany,
+    runtime: &CompanyRuntime,
+    actor: &crate::ports::types::Actor,
     clearing: bool,
     report: &company_key::FanOutReport,
 ) -> Result<(), ApiError> {
     journal(
-        company,
+        runtime,
+        actor,
         if clearing {
             "company_key_cleared"
         } else {
@@ -1001,13 +1005,26 @@ async fn journal_fan_out(
             company_key::SlotOutcome::RolledBack => "rolled_back",
             _ => continue,
         };
-        journal(company, &format!("company_key_{slot_name}_{suffix}")).await?;
+        journal(runtime, actor, &format!("company_key_{slot_name}_{suffix}")).await?;
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod test;
+#[path = "company_key_a_companys_own_key_tests.rs"]
+mod tests_a_companys_own_key;
+#[cfg(test)]
+#[path = "company_key_p1_1_legacy_managed_tests.rs"]
+mod tests_p1_1_legacy_managed;
+#[cfg(test)]
+#[path = "company_key_put_credential_rebuild_tests.rs"]
+mod tests_put_credential_rebuild;
+#[cfg(test)]
+#[path = "company_key_put_credential_with_a_tests.rs"]
+mod tests_put_credential_with_a;
+#[cfg(test)]
+#[path = "company_key_the_key_round_trips_tests.rs"]
+mod tests_the_key_round_trips;
 
 /// `GET …/credential/billing` — what the account behind this company's key has
 /// left to spend, and on which plan.
@@ -1046,6 +1063,8 @@ async fn get_billing(
             configured: false,
             summary: None,
             unavailable: None,
+            unavailable_reason: None,
+            unavailable_code: None,
         }));
     };
 
@@ -1055,7 +1074,9 @@ async fn get_billing(
         return Ok(Json(BillingDto {
             configured: true,
             summary: None,
-            unavailable: Some("this host is not part of a TinyHumans ecosystem".to_string()),
+            unavailable: Some("This host is not part of a TinyHumans ecosystem.".to_string()),
+            unavailable_reason: Some("noHub"),
+            unavailable_code: None,
         }));
     };
 
@@ -1064,17 +1085,67 @@ async fn get_billing(
             configured: true,
             summary: Some(summary),
             unavailable: None,
+            unavailable_reason: None,
+            unavailable_code: None,
         })),
         // A hub that will not answer is reported as "not known right now", not
         // as a zero balance. The two look identical on a card and mean opposite
         // things: one is "top up", the other is "try again".
-        Err(error) => Ok(Json(BillingDto {
-            configured: true,
-            summary: None,
-            unavailable: Some(error.to_string()),
-        })),
+        Err(error) => {
+            let (reason, sentence, code) = billing_unavailable(&error);
+            tracing::warn!(
+                company = %runtime.id(),
+                reason,
+                code = code.as_deref().unwrap_or("none"),
+                error = %error,
+                "company billing summary unavailable"
+            );
+            Ok(Json(BillingDto {
+                configured: true,
+                summary: None,
+                unavailable: Some(sentence),
+                unavailable_reason: Some(reason),
+                unavailable_code: code,
+            }))
+        }
     }
 }
+
+/// Classifies a failed billing read into what the console may say about it.
+///
+/// Three values out: the machine-readable `reason` the console switches on, a
+/// sentence **this host owns**, and the hub's stable failure token. The hub's
+/// own `message` is not among them and never reaches the wire: it is a response
+/// body written for whoever reads a log, it can carry anything, and a console
+/// has no way to turn it into something a person can act on.
+///
+/// Only a 401 earns `rejected`, which is the one reason that tells somebody
+/// their key is dead. A 403 is a key the hub recognises and will not let
+/// through this route, and telling its owner to replace it would send them to
+/// mint a second key with the same standing; it goes to `unreachable` with
+/// everything else that means "ask again later". An unrecognised code is
+/// `unknown` rather than the nearest guess: the reasons differ in what they
+/// tell a person to *do*, so guessing between them is worse than declining to.
+fn billing_unavailable(error: &OpenCompanyError) -> (&'static str, String, Option<String>) {
+    let OpenCompanyError::TinyHumans { code, .. } = error else {
+        return ("unknown", BILLING_UNKNOWN.to_string(), None);
+    };
+    let reason = match code.as_str() {
+        "http_401" => "rejected",
+        "unreachable" | "decode" => "unreachable",
+        other if other.starts_with("http_4") || other.starts_with("http_5") => "unreachable",
+        _ => "unknown",
+    };
+    let sentence = match reason {
+        "rejected" => "TinyHumans refused this company's key.",
+        "unreachable" => "TinyHumans could not be reached just now.",
+        _ => BILLING_UNKNOWN,
+    };
+    (reason, sentence.to_string(), Some(code.clone()))
+}
+
+/// What this host says when it cannot tell why the figures are missing.
+const BILLING_UNKNOWN: &str = "The balance could not be read just now.";
 
 /// The billing panel's whole state, including the two ways it can have no
 /// figures to show.
@@ -1086,7 +1157,16 @@ struct BillingDto {
     /// The account's standing, when the hub answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<crate::server::hub_identity::BillingSummary>,
-    /// Why there are no figures, when there are none and a credential exists.
+    /// Why there are no figures, in this host's own words.
     #[serde(skip_serializing_if = "Option::is_none")]
     unavailable: Option<String>,
+    /// Which kind of failure it was: `rejected`, `unreachable`, `noHub` or
+    /// `unknown`. The field a console switches on, so that what it draws does
+    /// not depend on parsing prose — see [`billing_unavailable`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<&'static str>,
+    /// The hub's stable failure token (`http_401`, `unreachable`, …), for a
+    /// report or a log line. Never its message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_code: Option<String>,
 }

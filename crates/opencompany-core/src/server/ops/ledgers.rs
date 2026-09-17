@@ -411,5 +411,5 @@ struct EntryPath {
 }
 
 #[cfg(test)]
-#[path = "ledgers_test.rs"]
-mod test;
+#[path = "ledgers_tests.rs"]
+mod tests;

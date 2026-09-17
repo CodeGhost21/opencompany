@@ -385,4 +385,5 @@ fn lower_with_offsets(body: &str) -> (String, Vec<usize>) {
 }
 
 #[cfg(test)]
-mod test;
+#[path = "workspace_search/workspace_search_tests.rs"]
+mod tests;
