@@ -17,6 +17,29 @@ pub(crate) fn set(company: &str, outcome: Outcome) {
     });
 }
 
+/// Removes a forced outcome, restoring the real prober for that company.
+pub(crate) fn clear(company: &str) {
+    MAP.with(|map| {
+        map.borrow_mut().remove(company);
+    });
+}
+
+/// Holds a forced outcome for as long as it is alive, then clears it.
+pub(crate) struct Scoped(String);
+
+impl Scoped {
+    pub(crate) fn set(company: &str, outcome: Outcome) -> Self {
+        set(company, outcome);
+        Self(company.to_string())
+    }
+}
+
+impl Drop for Scoped {
+    fn drop(&mut self) {
+        clear(&self.0);
+    }
+}
+
 pub(super) fn get(company: &str) -> Option<Outcome> {
     MAP.with(|map| map.borrow().get(company).cloned())
 }
