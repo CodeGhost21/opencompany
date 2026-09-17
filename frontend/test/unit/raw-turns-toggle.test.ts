@@ -56,6 +56,12 @@ describe("the raw-turns renderer", () => {
     expect(raw).toContain('data-testid="agent-session-raw-end"');
   });
 
+  it("quietly refreshes while the raw session is open", () => {
+    expect(session).toContain("if (!raw) return");
+    expect(session).toContain("setInterval(() => void read(true), 2_000)");
+    expect(session).toContain("if (!quiet) setLoad(\"loading\")");
+  });
+
   it("owns the detailed tool calls instead of duplicating them in chat", () => {
     expect(raw).toContain('data-testid="agent-session-raw-steps"');
     expect(raw).toContain("row.steps.map");
