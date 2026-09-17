@@ -79,7 +79,7 @@ The same build works against any host/company. Resolution order (first wins):
 
 ## Product analytics
 
-The console loads OpenPanel's browser client with the TinyHumans project's public client id. React additionally records every hash-routed screen view and native or ARIA button activation with only the route head and control type — never labels, query parameters, or dynamic path segments. OpenPanel also tracks outgoing links and explicitly marked `data-op-*` attributes across the console, including desktop. The id is public by design; do not add a server credential to browser code. Host-side reporting remains separately configured through `OPENCOMPANY_ANALYTICS_*`; see [`docs/spec/runtime/analytics.md`](../docs/spec/runtime/analytics.md).
+The console loads OpenPanel's browser client only in an opted-in, non-Tauri browser, using the TinyHumans project's public client id. React additionally records every hash-routed screen view and native or ARIA button activation with only the route head and control type — never labels, query parameters, or dynamic path segments. Automatic outgoing-link and `data-op-*` attribute collection is disabled. Desktop/Tauri builds remain silent. The id is public by design; do not add a server credential to browser code. Host-side reporting remains separately configured through `OPENCOMPANY_ANALYTICS_*`; see [`docs/spec/runtime/analytics.md`](../docs/spec/runtime/analytics.md).
 
 ## Design system
 

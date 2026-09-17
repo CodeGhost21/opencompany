@@ -1,7 +1,11 @@
 import { useEffect } from "react";
 import { VIEWS } from "./console-routes";
 
-type OpenPanelCommand = (command: "track", event: string, properties: Record<string, unknown>) => void;
+type OpenPanelCommand = ((
+  command: "track",
+  event: string,
+  properties: Record<string, unknown>,
+) => void) & { q?: unknown[] };
 
 declare global {
   interface Window {

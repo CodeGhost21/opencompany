@@ -401,9 +401,8 @@ passer-by could not have asked the host for themselves. Three surfaces apply it:
   network.
 
 The webview also runs under a CSP (`crates/opencompany-app/tauri.conf.json`).
-Host traffic goes through Rust; its only browser-network exception is the
-OpenPanel console client, which loads from `https://openpanel.dev` and posts to
-`https://panel.tinyhumans.ai`.
+Tauri does not load or post to OpenPanel: the browser loader exits for Tauri,
+and OpenPanel is available only in an explicitly opted-in, non-Tauri browser.
 
 ## The embedded host
 
