@@ -79,6 +79,16 @@ fn every_other_teammate_is_listed_with_role_and_mandate_but_not_the_agent_itself
     assert!(!section.contains("- `designer`"), "{section}");
 }
 
+/// The desk block is the seat's OWN desks, with their members and lead.
+///
+/// It used to list every desk in the company. A seat was then handed the same
+/// desk twice in one turn under two different mechanisms — here as somewhere to
+/// hand work, whose lead takes one turn, and in `EpisodePrompt::peers` as
+/// somewhere to put a question, which the room answers — with different costs
+/// and no way to tell them apart (#2368).
+///
+/// The roster of PEOPLE above is deliberately not narrowed the same way:
+/// knowing who does what is how a seat knows who is worth asking.
 #[test]
 fn desks_list_their_members_and_lead_and_the_agents_own_seat() {
     let section = team_section(&record(TEAM), "designer");
@@ -87,12 +97,18 @@ fn desks_list_their_members_and_lead_and_the_agents_own_seat() {
         "{section}"
     );
     assert!(
-        section.contains("- `content` — Content: writer (lead)\n"),
+        !section.contains("- `content` — Content"),
+        "`designer` does not sit on `content`, so this block must not describe \
+         it as somewhere they sit: {section}"
+    );
+    assert!(
+        section.contains("You sit on (desk id — name: members):"),
         "{section}"
     );
     assert!(
-        section.contains("\nYou sit on: engineering.\n"),
-        "{section}"
+        section.contains("- `writer` — Writer"),
+        "the roster of people stays whole — `writer` is still someone to ask, \
+         even though their desk is not one `designer` sits on: {section}"
     );
 }
 
