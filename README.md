@@ -42,6 +42,22 @@
 
 ---
 
+## Download
+
+The quickest way in is the desktop app. Get it from the website or straight
+from the GitHub release:
+
+- **Website**: **[tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)**
+  — the download button picks the right build for your machine.
+- **GitHub Releases**:
+  **[github.com/tinyhumansai/opencompany/releases/latest](https://github.com/tinyhumansai/opencompany/releases/latest)**
+  — the `.dmg` for Apple Silicon (`aarch64`) or Intel (`x64`) Macs, plus the
+  release notes.
+
+Open the `.dmg`, drag OpenCompany into Applications, launch it, and pick a
+company. The app updates itself from the same releases page. Prefer to run the
+host yourself, in Docker or from source? Keep reading.
+
 ## The company of one
 
 For a century, ambition meant headcount. Want to ship a product? Hire engineers.
@@ -136,22 +152,6 @@ of moments where a human signs off:
 
 Twenty-two companies. One operator. Pick one and run it, or run several at once.
 [`companies/README.md`](companies/README.md) has the full catalog.
-
-## Download
-
-The quickest way in is the desktop app. Get it from the website or straight
-from the GitHub release:
-
-- **Website**: **[tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)**
-  — the download button picks the right build for your machine.
-- **GitHub Releases**:
-  **[github.com/tinyhumansai/opencompany/releases/latest](https://github.com/tinyhumansai/opencompany/releases/latest)**
-  — the `.dmg` for Apple Silicon (`aarch64`) or Intel (`x64`) Macs, plus the
-  release notes.
-
-Open the `.dmg`, drag OpenCompany into Applications, launch it, and pick a
-company. The app updates itself from the same releases page. Prefer to run the
-host yourself, in Docker or from source? Keep reading.
 
 ## Quickstart
 
