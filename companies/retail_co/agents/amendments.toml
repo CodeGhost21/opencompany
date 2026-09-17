@@ -5,7 +5,10 @@ tier = "reasoning"
 # The desks this seat may refer work INTO. `authorized()` checks the source
 # AGENT against the TARGET DESK id, so an empty list refuses every crossing
 # as `Unauthorized` and the sibling desk never takes a turn.
-delegates_to = ["returns"]
+# `policy` as well as `returns`: `delegates_to` is the authorization key a
+# crossing is checked against, so a desk a seat may be OFFERED is still refused
+# unless it is named here. The two controls are separate and can disagree.
+delegates_to = ["returns", "policy"]
 context = ["GOAL.md", "brief.md", "board.md"]
 
 # One MCP grant: this seat's own role server. Scope is enforced at the
