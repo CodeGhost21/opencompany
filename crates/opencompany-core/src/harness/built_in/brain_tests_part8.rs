@@ -153,7 +153,7 @@ fn task_instruction_carries_a_reviewer_note_block() {
 }
 
 #[test]
-fn task_instruction_keeps_prior_agent_results_out_of_the_current_assignment() {
+fn public_research_task_instruction_keeps_prior_agent_results_out_of_the_current_assignment() {
     let mut card = card_in_review("card-1");
     card.note = Some(
         "[operator] Research competitors and cite sources.\n\n\
