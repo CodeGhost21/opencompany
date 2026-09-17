@@ -1569,8 +1569,8 @@ fn probe_model_candidates(
         .collect()
 }
 
-/// `POST /api/v1/setup/inference/test` — a live one-turn probe of a credential
-/// the operator has just typed, before anything is written.
+/// `POST /api/v1/setup/inference/test` — a live probe of a credential the
+/// operator has just typed, before anything is written.
 ///
 /// The company-scoped `POST {scope}/inference/test` cannot serve the wizard for
 /// the same reason the roster route could not: it resolves a `CompanyRuntime`
@@ -1821,11 +1821,24 @@ async fn probe_inference<E: EnvSource + Sync>(
         };
     }
 
+    let candidates = probe_model_candidates(models);
+
+    // TinyHumans owns both proxy surfaces. Their model catalog is authenticated,
+    // so a successful read already proves the key; a second chat request proves
+    // only that the account has credit and consumes provider capacity. Let setup
+    // accept the credential here. The first real turn will then report an
+    // insufficient balance (or a genuine runtime rate limit) in its proper place.
+    if matches!(req.provider.as_str(), "managed" | "tinyhumans") {
+        return InferenceTestDto {
+            ok: true,
+            base_url,
+            model: candidates.first().map(|model| model.id.clone()),
+            error: None,
+        };
+    }
+
     let mut last_failure = None;
-    for model in probe_model_candidates(models)
-        .into_iter()
-        .map(|model| model.id)
-    {
+    for model in candidates.into_iter().map(|model| model.id) {
         let candidate = decl.clone().with_chosen_model(model.clone());
         match crate::harness::provider::probe(&candidate, &model, None).await {
             Ok(()) => {
