@@ -3305,13 +3305,7 @@ impl<'a> DelegationRunner<'a> {
                     ),
                 )
                 .await?;
-                let nested = Box::pin(self.drain_and_execute(
-                    Some(&chat_id),
-                    MessageContext::default(),
-                    HandOffs::Run,
-                ))
-                .await?;
-                let mut bubbles = vec![OutboundMessage {
+                let bubbles = vec![OutboundMessage {
                     message_id: None,
                     task_id: None,
                     outputs: Vec::new(),
@@ -3322,7 +3316,6 @@ impl<'a> DelegationRunner<'a> {
                     reply_to: None,
                     mentions: Vec::new(),
                 }];
-                bubbles.extend(nested.bubbles);
                 tracing::debug!(
                     company = %self.company,
                     hop = child_hop,
