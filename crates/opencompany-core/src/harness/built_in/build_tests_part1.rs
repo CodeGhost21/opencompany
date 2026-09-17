@@ -438,7 +438,7 @@ fn speech_tools_respect_the_resolved_enabled_value() {
 fn a_manifest_without_a_speech_section_still_builds_the_dm_tool() {
     let manifest: crate::company::CompanyManifest =
         toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest parses");
-    let names = built_tool_names_with_speech(manifest.speech.enabled);
+    let names = built_tool_names_with_speech(manifest.speech.is_enabled());
     assert!(
         names.contains(&crate::harness::speech_tools::DM_TOOL.to_string()),
         "default-on speech must put desk_dm on the actual belt: {names:?}"
