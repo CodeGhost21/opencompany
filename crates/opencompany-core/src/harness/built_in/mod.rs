@@ -1296,6 +1296,7 @@ impl CompanyAgent {
             })
             .or_else(|| chat.chat_id.map(str::to_string));
         let thread_root = chat.thread_root;
+        let has_run_sink = run_sink.is_some();
         // The company this turn's chat seed (if any) projects from — same
         // "captured before `stream` moves" reasoning as `turn_chat_id` above.
         // Only meaningful alongside `turn_chat_id`, so `None` for exactly the
@@ -1391,6 +1392,22 @@ impl CompanyAgent {
         // Runs inside the `agent` critical section, which already serialises
         // this agent's turns.
         let mut session_cues: Option<String> = None;
+        // A card attempt is one bounded work context, not the continuation of
+        // whatever this teammate last did on another card or in a channel.
+        // `run_sink` uniquely identifies the dispatched-card path here. Start
+        // it clean and clear it again below, while the card note carries the
+        // explicit prior-attempt history it is allowed to use. This also lets a
+        // rebuilt agent's current system prompt take effect instead of reviving
+        // a transcript whose frozen prompt predates newly wired tools.
+        let isolated_background_turn =
+            Self::isolates_background_history(turn_chat_id.as_deref(), has_run_sink);
+        let mut isolated_context_turn = isolated_background_turn;
+        if isolated_background_turn {
+            if !agent.history().is_empty() {
+                agent.clear_history();
+            }
+            overrides.suppress_transcript_autoload = true;
+        }
         // Codex P1: a session delta's `next_state` must not land in
         // `self.session` until the turn it was cued into actually succeeds.
         // The rows it marks delivered are handed to the model as this turn's
@@ -1456,11 +1473,19 @@ impl CompanyAgent {
             // next chat turn.
             let mut reseed = !brings_own_context && (chat_only || session.watermark.is_none());
             if brings_own_context {
+                isolated_context_turn = true;
                 if !agent.history().is_empty() {
                     agent.clear_history();
                 }
                 overrides.suppress_transcript_autoload = true;
-                *session = agent_session::AgentSessionState::default();
+                // The episode prompt already contains the triggering message,
+                // but it does not contain unrelated unseen channel/DM rows.
+                // Preserve the company-wide watermark and mark only the trigger
+                // seen; resetting the whole state here permanently skipped
+                // those unrelated rows on the next cold seed.
+                if let Some(seq) = chat.message_seq {
+                    session.accept_seen(seq);
+                }
             }
             if !reseed
                 && !brings_own_context
@@ -1966,6 +1991,12 @@ impl CompanyAgent {
         // which is right: the outcome describes the attempt that produced the
         // reply being returned.
         let hit_iteration_cap = agent.last_turn_hit_cap();
+        // A Hive turn's attributed/visibility-filtered prompt must not become
+        // ordinary conversational history for the next channel. Its durable
+        // rows remain discoverable through the preserved session watermark.
+        if isolated_context_turn && !agent.history().is_empty() {
+            agent.clear_history();
+        }
         drop(agent);
         let events = collector.await.unwrap_or_default();
         // A hard-failed ATTEMPT's spend, recovered from the progress stream —
@@ -2132,6 +2163,10 @@ impl CompanyAgent {
             budget_paused,
         });
         (outcome, usages)
+    }
+
+    fn isolates_background_history(turn_chat_id: Option<&str>, has_run_sink: bool) -> bool {
+        turn_chat_id.is_none() && has_run_sink
     }
 
     /// This turn's in-turn spend ceiling, in USD — the value that
@@ -6113,7 +6148,8 @@ pub(crate) fn build_roster(
                 .unwrap_or(&[]),
             effective_instructions.as_deref(),
             is_orchestrator,
-            company.manifest.speech.enabled,
+            &crate::company::team_brief::team_section(company, &manifest_agent.id),
+            company.manifest.speech.is_enabled(),
         )?;
         roster.push(Arc::new(CompanyAgent {
             agent_id: manifest_agent.id.clone(),
@@ -6211,7 +6247,8 @@ pub(crate) fn build_roster(
                 .unwrap_or(&[]),
             effective_instructions.as_deref(),
             /* is_orchestrator */ false,
-            company.manifest.speech.enabled,
+            &crate::company::team_brief::team_section(company, &manifest_agent.id),
+            company.manifest.speech.is_enabled(),
         )?;
         roster.push(Arc::new(CompanyAgent {
             agent_id: manifest_agent.id.clone(),
@@ -6273,9 +6310,10 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         // A non-empty list is intersected with `[tools].allow` by that same
         // function below (narrow-only, never a widen).
         tools: overlay.tools.clone(),
-        // Issue #176: an overlay teammate declares no delegation allowlist in
-        // this slice, so it carries today's behaviour — no hand-off tools wired.
-        // Opting overlays in needs a console write surface; see the follow-up.
+        // An overlay teammate declares no delegation allowlist, and an empty
+        // list is unrestricted (`delegation_tools::reach_is_unrestricted`): it
+        // carries the hand-off tools like every roster agent and may reach
+        // anyone. Narrowing an overlay needs a console write surface.
         delegates_to: Vec::new(),
         context: None,
         budget_usd_daily: None,

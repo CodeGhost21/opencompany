@@ -422,6 +422,19 @@ fn reseed_does_not_swallow_an_older_unseen_row_on_another_channel() {
     );
 }
 
+#[test]
+fn an_isolated_hive_turn_marks_only_its_trigger_seen() {
+    let mut state = AgentSessionState {
+        watermark: Some(EventSeq::new(5)),
+        present_above_watermark: BTreeSet::new(),
+    };
+    state.accept_seen(EventSeq::new(7));
+
+    assert_eq!(state.watermark, Some(EventSeq::new(5)));
+    assert!(!state.already_seen(EventSeq::new(6)));
+    assert!(state.already_seen(EventSeq::new(7)));
+}
+
 /// A true cold start (no watermark at all yet) must still come out of its
 /// first reseed WITH a watermark — otherwise `session.watermark.is_none()`
 /// keeps tripping the reseed branch forever and the agent can never walk a

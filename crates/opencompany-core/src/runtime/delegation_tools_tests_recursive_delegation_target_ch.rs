@@ -406,14 +406,22 @@ fn a_desk_the_caller_leads_is_refused_as_self_delegation() {
 }
 
 /// D1 itself: the lead of a three-person desk may hand a slice to either
-/// peer on it, with no allowlist and no orchestrator round-trip.
+/// peer on it, with no allowlist and no orchestrator round-trip — and, with
+/// no allowlist, to everybody else on the roster too, desk-mates first.
 #[test]
 fn a_desk_lead_may_hand_work_to_a_peer_on_its_own_desk() {
     let record = desk_record();
     assert_eq!(
         teammate_targets(&record, "brand_strategist", &[]),
+        ["seo_specialist", "copywriter", "chief", "analyst"],
+        "own-desk peers first, in the desk's own order, then the rest of the roster, never \
+         the caller"
+    );
+    // A list that names desks narrows the same call to desk-mates plus the
+    // named desks' members.
+    assert_eq!(
+        teammate_targets(&record, "brand_strategist", &["strategy".to_string()]),
         ["seo_specialist", "copywriter"],
-        "own-desk peers, in the desk's own order, never the caller"
     );
     assert_eq!(
         reject_teammate_target(&record, Some("brand_strategist"), &[], "seo_specialist"),
@@ -432,7 +440,8 @@ fn a_desk_lead_may_hand_work_to_a_peer_on_its_own_desk() {
 #[test]
 fn a_teammate_out_of_reach_is_refused_with_the_reachable_set() {
     let record = desk_record();
-    let message = reject_teammate_target(&record, Some("brand_strategist"), &[], "analyst")
+    let narrowed = vec!["strategy".to_string()];
+    let message = reject_teammate_target(&record, Some("brand_strategist"), &narrowed, "analyst")
         .expect("rejected");
     assert!(message.contains("analyst"), "{message}");
     assert!(message.contains("seo_specialist"), "{message}");
@@ -446,40 +455,39 @@ fn a_teammate_out_of_reach_is_refused_with_the_reachable_set() {
         reject_teammate_target(&record, Some("brand_strategist"), &allowed, "analyst"),
         None
     );
-    // `"*"` admits every desk's members — `analyst` is on `data` — exactly
-    // as it does for desks. It does NOT admit the whole roster; see
-    // `the_wildcard_teammate_reach_is_desk_members_not_the_whole_roster`
-    // for the orchestrator/no-desk case that distinguishes the two.
+    // `"*"` and an empty list both admit everybody — `analyst` is on `data`.
     assert_eq!(
         reject_teammate_target(&record, Some("brand_strategist"), &["*".into()], "analyst"),
         None
     );
+    assert_eq!(
+        reject_teammate_target(&record, Some("brand_strategist"), &[], "analyst"),
+        None
+    );
 }
 
-/// `"*"` is documented as "every desk the company has"
-/// ([`DELEGATES_TO_WILDCARD`]), not "every roster agent" — the orchestrator
-/// (`chief`, on no desk) must stay unreachable through even the widest
-/// grant, exactly as a wildcard `delegate_to_desk` allowlist cannot reach a
-/// non-desk id.
+/// An unrestricted reach — an empty list or the wildcard — is the **whole
+/// roster**, the orchestrator included, not only the members of desks: a
+/// specialist with a question only the orchestrator can settle must be able
+/// to put it to them, and nobody is written a list by default.
 #[test]
-fn the_wildcard_teammate_reach_is_desk_members_not_the_whole_roster() {
+fn an_unrestricted_teammate_reach_is_the_whole_roster() {
     let record = desk_record();
-    let targets = teammate_targets(&record, "brand_strategist", &["*".to_string()]);
-    assert!(
-        !targets.contains(&"chief".to_string()),
-        "the orchestrator sits on no desk and must not be reachable through a wildcard \
-         desk-based grant: {targets:?}"
-    );
-    assert_eq!(
-        targets,
-        ["seo_specialist", "copywriter", "analyst"],
-        "wildcard must resolve to every desk's members, not the raw roster: {targets:?}"
-    );
-    // The refusal path agrees: the orchestrator is not a valid target even
-    // though the caller holds the widest possible grant.
-    assert!(
-        reject_teammate_target(&record, Some("brand_strategist"), &["*".into()], "chief").is_some()
-    );
+    for allowed in [Vec::new(), vec!["*".to_string()]] {
+        let targets = teammate_targets(&record, "brand_strategist", &allowed);
+        assert_eq!(
+            targets,
+            ["seo_specialist", "copywriter", "chief", "analyst"],
+            "desk-mates first, then the rest of the roster: {targets:?}"
+        );
+        assert_eq!(
+            reject_teammate_target(&record, Some("brand_strategist"), &allowed, "chief"),
+            None
+        );
+    }
+    assert!(reach_is_unrestricted(&[]));
+    assert!(reach_is_unrestricted(&["*".to_string()]));
+    assert!(!reach_is_unrestricted(&["strategy".to_string()]));
 }
 
 /// Handing work to yourself re-enters the turn already running.

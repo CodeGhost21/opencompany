@@ -12,7 +12,7 @@ import { BudgetPauseNoticeCard } from "./BudgetPauseNoticeCard";
 import { EchoPlaceholder, echoMarkerFor } from "./EchoPlaceholder";
 import { FailedSendNotice, OutputLinkRow, TurnFailureNotice } from "./MessageRow";
 import { MessageAttachments } from "./MessageAttachments";
-import { AsideConversation, ReferralChip, ReferralConversation, StepTimeline } from "./StepTimeline";
+import { AsideConversation, ReferralChip, ReferralConversation } from "./StepTimeline";
 import { MessageComposer } from "./MessageComposer";
 import { TypingLine } from "./TypingLine";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -516,18 +516,12 @@ function Line({
             resolveUrl={resolveAttachmentUrl}
           />
         )}
-        {/* The same two step blocks `MessageRow` renders, because a message
-            asked or answered inside a thread is not a lesser message.
-            `buildTimeline` keeps every parented line OUT of the channel
-            timeline, so this panel is the only surface a threaded query has —
-            without these, a turn started from an open thread showed no account
-            of itself anywhere, even after the panel was closed (Codex on
-            #2069). */}
-        {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.outputs && message.outputs.length > 0 && (
           <OutputLinkRow outputs={message.outputs} />
         )}
-        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
+        {!!liveSteps?.length && (
+          <WorkingIndicator srLabel="Working…" steps={liveSteps} />
+        )}
         {/* And the crossings, for the same reason the steps are here: a room's
             turns are threaded, so this panel is the only surface a deliberating
             desk's line has. Rendered only here would be a channel-only feature

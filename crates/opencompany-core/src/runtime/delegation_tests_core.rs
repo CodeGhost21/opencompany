@@ -603,7 +603,7 @@ impl Fixture {
         }
     }
 
-    pub(super) fn runner<'a>(&'a self, turns: &'a ScriptedTurns) -> DelegationRunner<'a> {
+    pub(super) fn runner<'a>(&'a self, turns: &'a dyn RunTurn) -> DelegationRunner<'a> {
         DelegationRunner::new(
             turns,
             &self.record,

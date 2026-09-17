@@ -60,11 +60,11 @@ believing it read something it never saw.
 
 ## Talking as a tool call
 
-`src/harness/speech_tools.rs`. Off unless the manifest says so:
+`src/harness/speech_tools.rs`. On by default; a company may explicitly opt out:
 
 ```toml
 [speech]
-enabled = true
+disabled = true
 ```
 
 **Company-level, not per-desk.** `[group_chat.hive.aside]` and
@@ -147,24 +147,15 @@ journaled, exactly as before. Going quiet because a model forgot a tool call is
 not an acceptable failure mode, so it is not one this knob can produce. The
 suppression is gated on `TurnSpeech::spoke()`, not on the manifest flag.
 
-### Nothing here starts a turn
+### A DM starts at most one bounded turn
 
-`desk_dm` is one agent addressing another, so this is where the agent-to-agent
-edge stops being hypothetical. It stays an edge that **journals a row and runs
-nothing**: the recipient reads it on its next turn, through its own session
-delta. The tool's result sentence says exactly that rather than reporting
-delivery — an agent told "Said." will tell the person who asked that the message
-was sent, which is how three undelivered messages were each reported as
-delivered. That is the rule `CompanyEvent::AgentReply` already states about its
-own `mentions`:
-
-> never consulted by dispatch … an agent naming another agent draws a chip and
-> files nothing to run. The edge does not exist, which is a stronger guarantee
-> than an edge that is disabled.
-
-and `mention_depth` beside it is the bound that would apply if it ever were. A
-recipient hears about the row the next time it takes a turn, through its own
-session delta — which is the stigmergic model, and needs no dispatch edge.
+`desk_dm` durably journals one row per recipient, then presents those recipients
+to TinyHiveMind's mention-dispatch decision. Exactly one eligible recipient may
+be woken immediately; its reply is journaled into the same DM transcript. The
+hop limit is the company's delegation depth, and the host's post-turn queue is
+the execution boundary, so one message cannot fan out into several immediate
+turns. Additional recipients still receive the durable row through their next
+session delta. No task card is opened merely because agents exchanged messages.
 
 ## Reading it back
 
@@ -174,9 +165,9 @@ Projected through the **same** `chat_history::agent_channels` the live session
 uses to decide what it may read, so the page never admits a channel the agent's
 own session would be refused.
 
-Eligible is not the same as *delivered*. A `desk_dm` "journals a row and runs
-nothing" (above): the row exists the instant it is sent, but the recipient does
-not actually receive it until its own next turn walks a session delta past the
+Eligible is not the same as *delivered*. A `desk_dm` row exists the instant it
+is sent. TinyHiveMind may wake one recipient immediately, while additional
+recipients receive it when their next turn walks a session delta past the
 watermark. This route has no access to that in-process watermark — it is
 per-`AgentSessionState`, held by the live [`HarnessPool`](../../../src/harness/built_in/mod.rs)
 under the `openhuman` feature, while this route compiles and answers in every

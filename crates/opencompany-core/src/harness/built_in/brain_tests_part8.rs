@@ -152,6 +152,51 @@ fn task_instruction_carries_a_reviewer_note_block() {
     assert!(instruction.starts_with(&format!("Task: {}", card.title)));
 }
 
+#[test]
+fn public_research_task_instruction_keeps_prior_agent_results_out_of_the_current_assignment() {
+    let mut card = card_in_review("card-1");
+    card.note = Some(
+        "[operator] Research competitors and cite sources.\n\n\
+         [researcher] I stopped because my calls looped.\n\n\
+         The old run produced no findings.\n\n\
+         [reviewer] Include pricing where it is verifiable."
+            .to_string(),
+    );
+
+    let instruction = task_instruction(&card);
+    let history = instruction
+        .split("## Prior attempt history")
+        .nth(1)
+        .and_then(|rest| rest.split("## Current assignment").next())
+        .expect("history section");
+    let assignment = instruction
+        .split("## Current assignment")
+        .nth(1)
+        .expect("assignment section");
+
+    assert!(history.contains("omitted from this turn"));
+    assert!(!history.contains("I stopped because my calls looped"));
+    assert!(!history.contains("The old run produced no findings"));
+    assert!(!assignment.contains("old run produced no findings"));
+    assert!(assignment.contains("Research competitors and cite sources"));
+    assert!(assignment.contains("Include pricing where it is verifiable"));
+    assert!(assignment.contains("Perform the current assignment now"));
+    assert!(assignment.contains("do not read the tasks ledger to rediscover it"));
+    assert!(assignment.contains("`web_search`"));
+    assert!(assignment.contains("begin with `web_search` now"));
+    assert!(assignment.contains("Do not inspect the company workspace"));
+    assert!(assignment.contains("stop after that one call"));
+    assert!(assignment.contains("Do not retry it with another query"));
+}
+
+#[test]
+fn ordinary_task_instructions_do_not_claim_they_are_public_research() {
+    let mut card = card_in_review("card-1");
+    card.note = Some("[operator] Fix the checkout button.".to_string());
+    let instruction = task_instruction(&card);
+    assert!(!instruction.contains("begin with `web_search` now"));
+}
+
 /// **The reachability assertion.** A test that the drain works when called
 /// is not coverage that the drain is reached — and on this path it was not.
 ///

@@ -83,8 +83,8 @@ pub mod handover;
 /// The `tinyhivemind` session adapter: this company's journal read as the
 /// vendored library's [`SessionLog`](tinyhivemind::session::SessionLog) port,
 /// so a turn's transcript can be projected **attributed** rather than collapsed
-/// into the reader's own voice. Off by default and wired to nothing yet; see
-/// [`hivemind`].
+/// into the reader's own voice. The adapter remains feature-gated; the
+/// responder and dispatch algebra are used by the default message path.
 #[cfg(feature = "hivemind")]
 pub mod hivemind;
 pub mod journal;

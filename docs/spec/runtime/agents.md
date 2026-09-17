@@ -76,7 +76,7 @@ provider = "anthropic"                  # this agent's own {provider, model}
 model = "claude-sonnet-5"               # pair — see below. Omit both to
                                         # follow the company default.
 tools = ["docs.*", "mcp:notion"]        # grant globs — see tools.md
-delegates_to = ["creative"]             # desks this agent may hand work to
+delegates_to = ["creative"]             # narrow hand-offs to these desks (omit = anywhere)
 budget_usd_daily = 5.0                  # per-agent daily cap
 
 prompt = """                            # appended to the generated persona
@@ -186,12 +186,49 @@ An agent's system prompt is assembled in this order, and the order is a decision
 1. the generated **persona** — who this teammate is, at which company;
 2. its inline **`prompt`**;
 3. its **`prompt_files`** bodies;
-4. tool briefs (workspace, ledgers, sandbox, publishing, skills catalogue);
-5. its routed **`context`** documents.
+4. its **team** — the roster, the desks, and who it may hand work to;
+5. tool briefs (workspace, ledgers, sandbox, publishing, skills catalogue,
+   and the hand-off brief);
+6. its routed **`context`** documents.
 
 Static material first, volatile last. The prompt prefix is what a provider cache
 reuses across turns, so a workspace note the operator edits between two turns
 must not invalidate the briefing behind it.
+
+### The team section
+
+Step 4 (`company::team_brief::team_section`) tells every agent who else is at
+the company: each other roster teammate by id, role and mandate (the
+orchestrator marked as such), each desk with its members and lead, the desks
+this agent sits on, and — only when its `delegates_to` narrows it — exactly
+which teammates it may hand work to, rendered from the same rule the tools
+enforce at call time so the prompt never names a target the tool would refuse.
+A roster of one gets no section.
+
+It exists because an agent that is not told it has colleagues does not use
+them. A non-orchestrator used to be told who *it* was and nothing else — no
+roster, and (unless it had opted in with `delegates_to`) no hand-off tool —
+so asked for something a teammate owned it declined, guessed, or said it could
+not contact a colleague sitting on the same desk. Every roster agent now
+carries `spawn_task`, `delegate_to_desk` and `delegate_to_teammate`, and the
+brief under them (`orchestrator::member_delegation_brief`) says when to hand
+a slice on and when to open a card. The orchestrator gets the same section
+ahead of its own brief, so it can delegate by id without a `query_company`
+call first.
+
+### The board is a tool call
+
+Nothing said in chat becomes a card on its own. A message typed into a desk
+or a DM used to be carded by construction — the REST handler opened one for
+anything that led with an action verb, and the runtime opened one for anything
+"substantial" said to a desk lead — so every message became a work item nobody
+had asked for and the answering agent had no say. Both paths are gone. A card
+exists because an agent called `spawn_task`, because a hand-off
+(`delegate_to_desk` / `delegate_to_teammate`) opened the card that tracks it,
+or because a person opened one from the console or pressed the composer's
+"Build me the workflow" control. The lexical triage (`company::task_intent`)
+still runs, but only to narrow the model's board tools on a question and to
+take the cheap chat-only path on a greeting.
 
 ### The sandbox brief
 

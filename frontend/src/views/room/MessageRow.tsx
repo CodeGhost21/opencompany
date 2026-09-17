@@ -34,25 +34,14 @@ import {
   ReferralChip,
   AsideConversation,
   ReferralConversation,
-  StepTimeline,
 } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface Props {
   entry: TimelineEntry;
   /**
-   * The live tool rows of a turn answering **this** message, while it runs.
-   *
-   * A settled turn's steps render under its reply, from `message.steps`. Until
-   * the reply exists there is nothing to hang them on, so a running turn's rows
-   * used to go to one per-thread strip at the foot of the channel — which meant
-   * two questions asked at once shared a single timeline, and arming the second
-   * turn cleared the first one's rows.
-   *
-   * Rendered through the same collapsed {@link StepTimeline} the settled steps
-   * use, so a turn looks the same while it runs as it does once it is done.
-   * Absent for a turn whose frames carry no `messageSeq`, which still uses the
-   * thread strip.
+   * Live steps are used only to name the current activity while it runs. The
+   * raw calls and results belong in Raw turns, not in the chat transcript.
    */
   liveSteps?: readonly TurnStep[];
   /** True when the thread panel is showing this row's replies. */
@@ -468,15 +457,12 @@ export function MessageRow({
           />
         )}
 
-        {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.outputs && message.outputs.length > 0 && (
           <OutputLinkRow outputs={message.outputs} />
         )}
-        {/* The running turn this message asked for. Opens by default: unlike a
-            settled turn's steps — which sit behind a count because the answer
-            above them is what the reader came for — there is no answer yet, and
-            these rows are the only account of what is happening. */}
-        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
+        {!!liveSteps?.length && (
+          <WorkingIndicator srLabel="Working…" steps={liveSteps} />
+        )}
         {/* Provenance for a crossing referral: this turn exists because another
             desk asked, and the reader of THIS desk cannot tell otherwise. */}
         {message.referredFrom && (

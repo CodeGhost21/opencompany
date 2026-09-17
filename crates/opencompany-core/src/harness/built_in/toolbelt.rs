@@ -757,6 +757,56 @@ pub fn sandbox_brief(files: bool, shell: bool, code: bool) -> String {
     brief
 }
 
+/// Describe the live public-web surface without promising a search backend the
+/// deployment did not wire.
+///
+/// URL fetch and URL discovery are deliberately separate grants/backends. That
+/// distinction must be visible to the model: otherwise a research agent that
+/// lacks `web_search` repeatedly searches the company workspace, even though it
+/// can still verify known official URLs with `web_fetch`.
+pub fn web_brief(fetch: bool, search: bool) -> String {
+    if !fetch && !search {
+        return String::new();
+    }
+
+    let mut brief = String::from("\n\n## Public web\n");
+    if fetch {
+        brief.push_str(
+            "Use `web_fetch` to read and cite a public URL you already know. Use `http_request` \
+             for an API or a non-GET request, and `curl` only when you need to download a file \
+             into your sandbox. These fetch tools do not discover URLs.\n",
+        );
+    }
+    if search {
+        if fetch {
+            brief.push_str(
+                "Use `web_search` to discover current sources, then open the strongest results \
+                 with `web_fetch` before making claims.\n",
+            );
+        } else {
+            brief.push_str(
+                "Use `web_search` to discover current sources. URL fetching is not granted for \
+                 this turn, so ground claims in the search results and do not invent page \
+                 contents you could not open.\n",
+            );
+        }
+        brief.push_str(
+            "If `web_search` reports an authentication, expired-session, missing-credential, or \
+             unavailable-provider error, stop after that one call and report the exact blocker. \
+             A different query cannot repair credentials, so do not retry it or substitute local \
+             workspace reads for the missing public sources.\n",
+        );
+    } else {
+        brief.push_str(
+            "No `web_search` provider is connected for this turn. For research, verify official \
+             URLs you know with `web_fetch`; if discovery is essential, say specifically that a \
+             Search provider must be connected. Do not substitute repeated workspace or ledger \
+             reads for public-web discovery.\n",
+        );
+    }
+    brief
+}
+
 /// The `code` namespace tools, sharing the exec-grade `security` policy and
 /// pinned to the agent's `workspace`. Disjoint from [`shell_tools`] (see there
 /// for why the split is a security boundary, not just cosmetics). Unlike shell,

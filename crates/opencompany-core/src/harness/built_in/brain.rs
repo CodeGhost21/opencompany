@@ -3489,8 +3489,7 @@ impl HarnessBrain {
         last_speaker
     }
 
-    /// The per-message pick for a message addressed to an `auto` channel — or
-    /// `None` wherever the deterministic answer should stand (issue #1835).
+    /// TinyHiveMind's one-responder decision for an inbound chat message.
     ///
     /// `None` covers every case, deliberately in one place: the chat key names
     /// no desk, the desk is lead-routed, the channel has fewer than two roster
@@ -3510,77 +3509,149 @@ impl HarnessBrain {
     /// (edits applied), the overlay row plus its stored edit for a
     /// console-created one — so the selector judges fit by what an operator
     /// reads on the members pane.
-    async fn auto_channel_responder(&self, chat: Option<&str>, text: &str) -> Option<String> {
-        let chat = chat?;
-        let (company, desk_id, candidates) = {
+    async fn tinyhivemind_responder(
+        &self,
+        chat: Option<&str>,
+        text: &str,
+        mentions: &[crate::ports::types::Mention],
+    ) -> Option<tinyhivemind::responder::ResponderDecision> {
+        let (company, members, desks, candidates, request) = {
             let record = self.record();
-            let desk_id = record.resolve_desk_id(chat)?;
-            if record.desk_responder_mode(&desk_id).is_lead() {
-                return None;
-            }
-            let candidates: Vec<crate::harness::selector::SelectorCandidate> = record
-                .effective_desk_members(&desk_id)
+            let company = record.id.clone();
+            let members = crate::runtime::delegation_tools::tinyhivemind_roster(&record);
+            let desks = crate::runtime::delegation_tools::tinyhivemind_desks(&record);
+            let candidates: Vec<tinyhivemind::responder::SelectorCandidate> = record
+                .effective_agents()
                 .into_iter()
-                .filter(|m| record.is_roster_agent(m))
-                .filter_map(|id| selector_candidate(&record, &id))
+                .filter_map(|agent| {
+                    selector_candidate(&record, &agent.id).map(|candidate| {
+                        tinyhivemind::responder::SelectorCandidate {
+                            id: candidate.id,
+                            label: agent.name.clone().unwrap_or_else(|| agent.role.clone()),
+                            role: candidate.role,
+                            description: candidate.description,
+                        }
+                    })
+                })
                 .collect();
-            (record.id.clone(), desk_id, candidates)
+            let request = tinyhivemind::responder::ResponderRequest {
+                message: text.to_string(),
+                chat: chat.map(str::to_string),
+                mentions: mentions.iter().map(tinyhivemind_mention).collect(),
+                orchestrator_id: self.responder.clone(),
+                selection_policy: tinyhivemind::responder::SelectionPolicy::Allowed,
+            };
+            (company, members, desks, candidates, request)
         };
-        match candidates.len() {
-            // Every member has left the roster since the channel was created —
-            // `POST …/desks` refuses an empty auto channel, but `DELETE
-            // …/team/{id}` can empty one later (codex on #1872). There is
-            // nobody to pick, so this defers to the caller's fallback ladder
-            // and the orchestrator answers, exactly as it does for any desk
-            // whose members have all gone. Refusing the deletion instead would
-            // be worse — a teammate you cannot remove because a channel names
-            // them — so the gap is closed by saying so rather than by
-            // pretending the channel still routes.
-            0 => {
-                tracing::warn!(
-                    company = %company,
-                    chat = %desk_id,
-                    "[selector] this channel has no roster members left, so there is nobody to \
-                     pick; the orchestrator is answering a message addressed to the channel"
-                );
-                None
-            }
-            1 => Some(candidates[0].id.clone()),
-            // The plan-level total-token ceiling gates the selection too, not
-            // only the responder turn it precedes (codex on #1872). Selection
-            // runs *before* a responder exists, so `total_ceiling_refusal` has
-            // no agent to refuse as — but it is a real model call, and without
-            // this a tenant past its hard ceiling could keep paying to route
-            // by posting into an auto channel, one selector call per message,
-            // after the ceiling that is supposed to permit no model calls at
-            // all. Falling through to the deterministic first member costs
-            // nothing and is the same answer a lead desk would give.
-            _ if crate::harness::HarnessPool::total_ceiling_spent(&company, &self.deps).await => {
+        let people = Vec::new();
+        let retired = Vec::new();
+        let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
+        let mut request = request;
+        if crate::harness::HarnessPool::total_ceiling_spent(&company, &self.deps).await {
+            request.selection_policy = tinyhivemind::responder::SelectionPolicy::Disabled;
+        }
+        let selector = TinyHiveSelector(self.selector_pass(&company));
+        match tinyhivemind::responder::choose_responder(
+            Some(&selector),
+            &request,
+            &roster,
+            &desks.set(),
+            &candidates,
+        )
+        .await
+        {
+            Ok(decision) => {
                 tracing::info!(
                     company = %company,
-                    chat = %desk_id,
-                    "[selector] total token ceiling reached; routing to the channel's first \
-                     member without a selection call"
+                    responder = %decision.responder_id,
+                    rung = ?decision.rung,
+                    disposition = ?decision.disposition,
+                    "[tinyhivemind] routed one inbound message to one responder"
+                );
+                Some(decision)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    company = %company,
+                    %error,
+                    "[tinyhivemind] responder ladder failed; using the host fallback"
                 );
                 None
             }
-            _ => match self.selector_pass(&company).select(text, &candidates).await {
-                crate::harness::selector::SelectorVerdict::Member(id) => {
-                    tracing::info!(
-                        company = %company,
-                        chat = %desk_id,
-                        picked = %id,
-                        "[selector] routed an unmentioned channel message to its best-fit member"
-                    );
-                    Some(id)
-                }
-                crate::harness::selector::SelectorVerdict::Unavailable => None,
-            },
         }
+    }
+
+    #[cfg(test)]
+    async fn auto_channel_responder(&self, chat: Option<&str>, text: &str) -> Option<String> {
+        let chat = chat?;
+        let record = self.record();
+        let desk = record.resolve_desk_id(chat)?;
+        if record.desk_responder_mode(&desk).is_lead() {
+            return None;
+        }
+        drop(record);
+        self.tinyhivemind_responder(Some(chat), text, &[])
+            .await
+            .and_then(|decision| {
+                matches!(
+                    decision.disposition,
+                    tinyhivemind::responder::SelectionDisposition::Selected
+                        | tinyhivemind::responder::SelectionDisposition::NotApplicable
+                )
+                .then_some(decision.responder_id)
+            })
     }
 }
 
-/// One channel member as [`HarnessBrain::auto_channel_responder`] hands it to
+struct TinyHiveSelector<'a>(&'a crate::harness::selector::MeteredSelector);
+
+impl tinyhivemind::responder::Selector for TinyHiveSelector<'_> {
+    fn select<'a>(
+        &'a self,
+        request: &'a tinyhivemind::responder::SelectionRequest,
+    ) -> tinyhivemind::responder::SelectorFuture<'a> {
+        Box::pin(async move {
+            let candidates = request
+                .candidates
+                .iter()
+                .map(|candidate| crate::harness::selector::SelectorCandidate {
+                    id: candidate.id.clone(),
+                    role: candidate.role.clone(),
+                    description: candidate.description.clone(),
+                    tools: Vec::new(),
+                })
+                .collect::<Vec<_>>();
+            match self.0.select(&request.message, &candidates).await {
+                crate::harness::selector::SelectorVerdict::Member(id) => Ok(id),
+                crate::harness::selector::SelectorVerdict::Unavailable => {
+                    Err("the responder selector was unavailable".into())
+                }
+            }
+        })
+    }
+}
+
+fn tinyhivemind_mention(
+    mention: &crate::ports::types::Mention,
+) -> tinyhivemind_core::mention::Mention {
+    use crate::ports::types::MentionTarget as HostTarget;
+    use tinyhivemind_core::mention::MentionTarget;
+
+    let target = match &mention.target {
+        HostTarget::Agent { id } => MentionTarget::Agent { id: id.clone() },
+        HostTarget::User { id } => MentionTarget::Person { id: id.clone() },
+        HostTarget::Desk { id } => MentionTarget::Desk { id: id.clone() },
+        HostTarget::Everyone => MentionTarget::Everyone,
+    };
+    tinyhivemind_core::mention::Mention {
+        target,
+        text: mention.text.clone(),
+        offset: mention.offset,
+        quiet: mention.quiet,
+    }
+}
+
+/// One channel member as [`HarnessBrain::tinyhivemind_responder`] hands it to
 /// the selection: the manifest half through
 /// [`CompanyRecord::effective_agent`] (stored edits applied), the overlay half
 /// from its row with any stored edit's role/description preferred — the same
@@ -3623,9 +3694,84 @@ fn selector_candidate(
 /// carries one, framed as a work item to act on.
 fn task_instruction(card: &TaskRecord) -> String {
     match card.note.as_deref().filter(|n| !n.is_empty()) {
-        Some(note) => format!("Task: {}\n\n{}", card.title, note),
+        Some(note) => {
+            let (assignment, history) = task_note_sections(note);
+            let research_hint = if public_research_assignment(&assignment) {
+                " This is a public-source research assignment: begin with `web_search` now. Do \
+                 not inspect the company workspace, ledgers, prior artifacts, or skill catalogue \
+                 first. Open the strongest search results with `web_fetch` and cite what you \
+                 actually read. If `web_search` reports an authentication, expired-session, \
+                 credential, or provider-availability error, stop after that one call and report \
+                 the exact blocker. Do not retry it with another query."
+            } else {
+                ""
+            };
+            if history.is_empty() {
+                format!("Task: {}\n\n{}{}", card.title, assignment, research_hint)
+            } else {
+                format!(
+                    "Task: {}\n\n## Prior attempt history\n\
+                     Earlier agent/system output exists on the card but is omitted from this turn \
+                     ({} bytes). It is history only. Do not summarize an earlier failure as the \
+                     result of this run.\n\n## Current assignment\n{}\n\nPerform the current assignment now \
+                     with the tools available in this turn. This card is already the authoritative \
+                     task, so do not read the tasks ledger to rediscover it. If it asks for current \
+                     public-source research and `web_search` is on your current tool belt, call \
+                     `web_search`, then verify the strongest sources with `web_fetch`, before \
+                     reporting that research is blocked.{}",
+                    card.title,
+                    history.len(),
+                    assignment,
+                    research_hint
+                )
+            }
+        }
         None => format!("Task: {}", card.title),
     }
+}
+
+fn public_research_assignment(assignment: &str) -> bool {
+    let lower = assignment.to_ascii_lowercase();
+    lower.contains("research")
+        && (lower.contains("source") || lower.contains("competitor") || lower.contains("landscape"))
+}
+
+/// Separate operator/reviewer instructions from result blocks accumulated on a
+/// card by prior runs. `append_result` uses blank-line-separated `[label] `
+/// blocks; continuation paragraphs inherit their preceding label.
+fn task_note_sections(note: &str) -> (String, String) {
+    let mut assignment = Vec::new();
+    let mut history = Vec::new();
+    let mut current_is_assignment = true;
+
+    for paragraph in note.split("\n\n") {
+        if let Some(label) = note_attribution(paragraph) {
+            current_is_assignment = matches!(label, "operator" | "operator redirect" | "reviewer");
+        }
+        if current_is_assignment {
+            assignment.push(paragraph);
+        } else {
+            history.push(paragraph);
+        }
+    }
+
+    // A machine-authored-only note is unusual but still used by a few failure
+    // paths. Never manufacture an empty assignment: the whole note remains the
+    // work description in that case.
+    if assignment.is_empty() {
+        return (note.to_string(), String::new());
+    }
+    (assignment.join("\n\n"), history.join("\n\n"))
+}
+
+fn note_attribution(paragraph: &str) -> Option<&str> {
+    let rest = paragraph.strip_prefix('[')?;
+    let (label, _) = rest.split_once("] ")?;
+    (!label.is_empty()
+        && label.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_- ".contains(&byte)
+        }))
+    .then_some(label)
 }
 
 /// Records one run ending on the card: the result block on its note, and the
@@ -4071,24 +4217,24 @@ impl HarnessBrain {
                     // One thread, one card: a follow-up joins the work its
                     // thread already opened instead of opening another.
                     let thread_card = self.thread_card(chat.as_deref(), *parent).await;
-                    let responder = match crate::runtime::mentions::mention_responder(
-                        &self.record(),
-                        chat.as_deref(),
-                        mentions,
-                    )
-                    .or(overseer)
-                    {
-                        Some(responder) => responder,
-                        // Issue #1835: below a mention, above the deterministic
-                        // answer, an `auto` channel picks its best-fit member
-                        // for this message. Every way the pick cannot happen —
-                        // not an auto channel, one member, selection failed —
-                        // is `None`, and the ladder continues exactly where it
-                        // always stood.
-                        None => match self.auto_channel_responder(chat.as_deref(), text).await {
-                            Some(responder) => responder,
-                            None => self.responder_for(chat.as_deref()),
-                        },
+                    let routed = self
+                        .tinyhivemind_responder(chat.as_deref(), text, mentions)
+                        .await;
+                    // A direct address remains stronger than thread ownership.
+                    // Otherwise the last agent holding the thread keeps it;
+                    // TinyHiveMind supplies the channel/DM/orchestrator fallback.
+                    let responder = match routed {
+                        Some(decision)
+                            if matches!(
+                                decision.rung,
+                                tinyhivemind::responder::ResponderRung::ExplicitMention
+                                    | tinyhivemind::responder::ResponderRung::DirectAgent
+                            ) =>
+                        {
+                            decision.responder_id
+                        }
+                        Some(decision) => overseer.unwrap_or(decision.responder_id),
+                        None => overseer.unwrap_or_else(|| self.responder_for(chat.as_deref())),
                     };
                     // Everyone else the message named, for the answering turn's
                     // context. A list, not a fan-out: one operator message still

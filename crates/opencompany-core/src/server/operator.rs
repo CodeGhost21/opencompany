@@ -2703,86 +2703,36 @@ async fn run_chat(
     } else {
         None
     };
-    // Deterministic task card, opened only for a message the triage calls
-    // `Track`: an actionable operator request ("build the landing page", "can
-    // you set up the newsletter") opens a `todo` card so "do X" always leaves a
-    // visible work item on the dashboard — independent of whether the
-    // orchestrator model also calls `spawn_task` (it may open sub-tasks on top).
-    // Best-effort: a card write failure must never sink the chat reply.
+    // A card from the composer is opened on ONE signal only: the operator
+    // pressed the control named "Build me the workflow" (issue #845). That is a
+    // positive statement of intent about this message, made by the person who
+    // wrote it.
     //
-    // Issue #267 turned the boolean this used to read into a positive three-way
-    // classification. `Answer` (a question about state, a read request) and
-    // `Chatter` (greetings, acknowledgements, anything ambiguous) both open
-    // nothing here — but they are NOT the same answer, and the difference
-    // matters one layer down: `Answer` additionally takes the model's own
-    // board-writing tools away for the turn, in
-    // `DelegationRunner::handle_operator_message`, because a question was the
-    // other door dead cards came through. This site is Layer A of that pair: it
-    // is compiled into every build and fronts both cognition brains, whereas the
-    // gate is on the harness path only.
+    // There used to be a second, lexical signal here: `task_intent::triage_message`
+    // read the message's words and opened a `todo`/`planning` card whenever it
+    // led with an action verb ("build the landing page", "can you set up the
+    // newsletter"). It is gone, along with its twin on the runtime side
+    // (`DelegationRunner::open_direct_work_card`, which carded anything
+    // "substantial" said to a desk or a teammate). Between them, nearly every
+    // message typed into a desk became a board card that nobody had asked for,
+    // and the agent answering it had no say in the matter. Tracking is now the
+    // agent's own decision, made with a tool call — `spawn_task` opens a card,
+    // and a hand-off through `delegate_to_desk` / `delegate_to_teammate` opens
+    // the card that tracks the hand-off — so a card on the board means an agent
+    // (or the operator, through the console or this control) put it there.
     //
-    // NOT on a workflow copilot thread (issue #416). A copilot question is
-    // phrased at the workflow — "add a node that emails the report", "why does
-    // this fail on Mondays" — and the triage reads the first of those as a
-    // request to the company, which would put a card on the board from a
-    // conversation the operator was having *about a graph*. The confinement in
-    // the harness stops the turn from acting; this stops the route from acting
-    // on its behalf, and it holds in every build because it is here rather than
-    // behind the `openhuman` feature.
+    // The triage itself still runs, one layer down: `handle_operator_message`
+    // reads it to narrow the model's board tools on a question and to take the
+    // cheap chat-only path on a greeting. It just never mints anything.
     //
-    // Issue #845: an explicit `workflow` deliverable opens a card whatever the
-    // triage said. The operator reached for a control **named** "Build me the
-    // workflow" and pressed it — that is a positive statement of intent about
-    // this message, and it is better evidence than a lexical classifier's guess.
-    // Where the two disagreed, the classifier won and the choice was dropped on
-    // the floor: no card, so no builder pass, so nothing built, and no error
-    // either — the operator got a conversational reply to a request they had
-    // asked to be turned into a workflow.
-    //
-    // Deliberately narrow. It does not change what the card *is* (the title
-    // still comes from the triage, or from the message when the triage declined
-    // to name one), it does not touch `Track`'s existing behaviour, and it stays
-    // inside the `!confined` guard — a copilot thread still opens nothing,
-    // because a message *about* a graph is not a request to build one.
+    // NOT on a workflow copilot thread (issue #416): a copilot conversation is
+    // ABOUT one graph, so a message there is never a request to the company to
+    // build one — the confinement in the harness stops the turn from acting,
+    // and this stops the route from acting on its behalf.
     let workflow_requested =
         !confined && message.deliverable == Some(crate::ports::types::MessageIntent::Workflow);
-    // Issue #1152: and the other direction — the operator said this message is
-    // NOT a request for work ("Just chatting"), so no deterministic path may
-    // card it whatever the triage read in the words.
-    //
-    // The operator could already *mint* a card the classifier declined
-    // (`workflow_requested`, above) and could never *withhold* one. That
-    // asymmetry is the bug: a message the triage happens to read as `Track` —
-    // "we should probably rewrite the pricing page some day" — opened a card,
-    // assigned it to a desk, and there was no control anywhere that said
-    // otherwise. This is that control, and it is the same kind of evidence the
-    // override above is: a positive statement by the person who wrote the
-    // message, which is better than a lexical guess about it.
-    //
-    // **No `!confined` term, deliberately.** `workflow_requested` needs one
-    // because it *mints* a card, and minting one on a workflow copilot thread —
-    // a conversation ABOUT one graph — is exactly what #416 suppresses. This
-    // only ever *subtracts*, and on a copilot thread the branch below is already
-    // suppressed, so a `!confined` term here would be inert at best and would
-    // read as though the two were symmetrical.
-    let not_work = message
-        .deliverable
-        .is_some_and(crate::ports::types::MessageIntent::is_chat);
-    // The lexical layer answers two questions at once, and only the first is a
-    // decision: whether this message becomes a card, and — for a host with no
-    // model wired — what to call it. The second is now a fallback. Keeping it
-    // matters: the classifier returns a *tidied* title, so discarding it would
-    // make an offline company's cards worse than before rather than no better.
-    let lexical = (!confined && !not_work)
-        .then(|| crate::company::task_intent::triage_message(&message.text))
-        .and_then(|triage| match triage {
-            crate::company::task_intent::MessageTriage::Track(title) => Some(title),
-            crate::company::task_intent::MessageTriage::Answer
-            | crate::company::task_intent::MessageTriage::Chatter => None,
-        })
-        .or_else(|| {
-            workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
-        })
+    let lexical = workflow_requested
+        .then(|| crate::company::task_intent::to_title(message.text.trim()))
         .filter(|title| !title.trim().is_empty());
     if let Some(lexical) = lexical {
         let title = crate::ports::tasks::mint_task_title(
@@ -4253,6 +4203,14 @@ pub(crate) async fn journal_chat_replies(
         if response.message_id.is_some() {
             continue;
         }
+        let response_desk = if response.channel == crate::runtime::OPERATOR_CHANNEL {
+            desk.to_string()
+        } else {
+            response.channel.clone()
+        };
+        let response_parent = (response.channel == crate::runtime::OPERATOR_CHANNEL)
+            .then_some(parent)
+            .flatten();
         // Scanned host-side from the reply text — the console's picker never
         // touched this message. The author is passed so a teammate naming
         // itself in its own answer does not chip itself.
@@ -4284,7 +4242,7 @@ pub(crate) async fn journal_chat_replies(
                     mention_depth: 0,
                     // The answer joins the thread its question was asked in,
                     // rather than opening one under the question (issue #364).
-                    parent,
+                    parent: response_parent,
                     // Issue #246: carry the card this turn opened onto the
                     // durable record, so the console's "card opened" chip
                     // survives a transcript reload instead of living only on
@@ -4295,7 +4253,7 @@ pub(crate) async fn journal_chat_replies(
                     // which is the lineage an operator wants and costs no
                     // schema change.
                     task_id: response.task_id.clone(),
-                    chat_id: desk.to_string(),
+                    chat_id: response_desk.clone(),
                     // Issue #885: the author, falling back to the channel only
                     // when the producer did not name one. `agent_id`'s contract
                     // is "the agent that produced the reply"; `channel` is the
@@ -4330,7 +4288,7 @@ pub(crate) async fn journal_chat_replies(
                 // offline when the reply lands.
                 if !reply_mentions.is_empty() {
                     runtime
-                        .notify_mentions(id, &reply_mentions, &seq, None, desk)
+                        .notify_mentions(id, &reply_mentions, &seq, None, &response_desk)
                         .await;
                 }
             }

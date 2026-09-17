@@ -411,19 +411,17 @@ fn persona_omits_absent_or_blank_description() {
     assert!(persona.trim_end().ends_with("role."), "{persona}");
 }
 
-/// `[speech] enabled` is what puts a voice on the belt, and nothing else is.
+/// The resolved speech setting is what puts a voice on the belt.
 ///
-/// Pinned by name because the whole knob is "does this company talk by
-/// calling a tool", and a company that did not ask for it must keep the
-/// belt it had — an agent that suddenly grows four tools it was never told
-/// about is a behaviour change nobody opted into.
+/// `false` is now an explicit opt-out; omitted manifests resolve to `true` in
+/// the manifest test below.
 #[test]
-fn speech_tools_are_registered_only_when_the_manifest_asks() {
+fn speech_tools_respect_the_resolved_enabled_value() {
     let off = built_tool_names_with_speech(false);
     for tool in crate::harness::speech_tools::SPEECH_TOOLS {
         assert!(
             !off.contains(&tool.to_string()),
-            "{tool} must not be on the belt of a company that did not ask for it: {off:?}"
+            "{tool} must not be on the belt after an explicit opt-out: {off:?}"
         );
     }
 
@@ -434,6 +432,17 @@ fn speech_tools_are_registered_only_when_the_manifest_asks() {
             "{tool} must be on the belt when `[speech] enabled`: {on:?}"
         );
     }
+}
+
+#[test]
+fn a_manifest_without_a_speech_section_still_builds_the_dm_tool() {
+    let manifest: crate::company::CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest parses");
+    let names = built_tool_names_with_speech(manifest.speech.is_enabled());
+    assert!(
+        names.contains(&crate::harness::speech_tools::DM_TOOL.to_string()),
+        "default-on speech must put desk_dm on the actual belt: {names:?}"
+    );
 }
 
 /// CodeRabbit: `speech_enabled` is the manifest's opt-in, but the tools

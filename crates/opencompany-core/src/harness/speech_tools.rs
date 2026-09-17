@@ -29,28 +29,19 @@
 //! `read_ledger` and `pages_read` — a model reaching for "read" would have four
 //! plausible answers and no way to pick.
 //!
-//! # Nothing here starts a turn
+//! # A DM starts at most one bounded recipient turn
 //!
-//! `desk_dm` is one agent addressing another, so this is the point at which the
-//! agent-to-agent edge stops being hypothetical. It stays an edge that
-//! **journals a row and runs nothing**.
+//! `desk_dm` journals every recipient row, then asks TinyHiveMind's bounded
+//! mention-dispatch algebra for at most one recipient turn. The existing
+//! post-turn drain executes it and writes its reply into that DM. Additional
+//! recipients receive the durable row through their next session delta; one
+//! message never fans out into several immediate turns, and conversation alone
+//! never opens a task card.
 //!
-//! That is not caution for its own sake; it is the rule
-//! [`CompanyEvent::AgentReply`](crate::ports::types::CompanyEvent::AgentReply)
-//! already states about its own `mentions` field — *"never consulted by
-//! dispatch … an agent naming another agent draws a chip and files nothing to
-//! run. The edge does not exist, which is a stronger guarantee than an edge
-//! that is disabled"* — and the `mention_depth` gate beside it is the bound
-//! that would apply if it ever were. A recipient hears about this row the next
-//! time it takes a turn, through its own session delta
-//! ([`agent_session`](crate::harness::built_in::agent_session)), which is the
-//! stigmergic model the whole crate is built on and needs no dispatch edge at
-//! all.
+//! # On by default
 //!
-//! # Off by default
-//!
-//! Registered only when the manifest says `[speech] enabled = true`. A company
-//! that does not opt in behaves byte-for-byte as it did, and an agent that has
+//! Registered unless the manifest says `[speech] disabled = true`. A company
+//! that opts out keeps the legacy path, and an agent that has
 //! the tools but answers without calling one still has its return text
 //! journaled — see [`crate::harness::built_in::speech_fallback`]. Going silent
 //! because a model forgot to call a tool is not an acceptable failure mode.
@@ -108,6 +99,7 @@ pub struct SpeechContext {
     agent_id: String,
     events: Arc<dyn EventLog>,
     store: Arc<dyn crate::ports::store::CompanyStore>,
+    dispatch: Option<crate::harness::orchestrator::DelegationQueue>,
 }
 
 impl SpeechContext {
@@ -122,7 +114,19 @@ impl SpeechContext {
             agent_id,
             events,
             store,
+            dispatch: None,
         }
+    }
+
+    /// Attach the post-turn drain that turns a committed `desk_dm` into one
+    /// bounded recipient turn. Tests and non-harness callers may omit it; the
+    /// durable message still lands and is picked up by a later session delta.
+    pub fn with_dispatch(
+        mut self,
+        dispatch: crate::harness::orchestrator::DelegationQueue,
+    ) -> Self {
+        self.dispatch = Some(dispatch);
+        self
     }
 
     /// The channel this turn is answering in.
@@ -278,13 +282,9 @@ impl SpeechContext {
     /// make [`fold_asides`](crate::server::chat_history) lift the row out of the
     /// transcript as a deliberation aside, which it is not.
     ///
-    /// # What it does not do
-    ///
-    /// Start a turn. The recipient reads this on its next turn, through its own
-    /// session delta — the stigmergic model the vendored crate is built on, and
-    /// the reason `AgentReply::mentions` is never consulted by dispatch. The
-    /// result sentence says so rather than claiming delivery, because an agent
-    /// that is told "delivered" will tell the person who asked that it was.
+    /// Once every row is durable, TinyHiveMind may select the first eligible
+    /// recipient for one immediate bounded turn. Other recipients read the row
+    /// on their next turn. The wakeup is conversation-only and opens no card.
     async fn dm(
         &self,
         peers: Vec<String>,
@@ -308,6 +308,7 @@ impl SpeechContext {
         // the model, or by whoever reads the result) can address only the
         // ones that still need it.
         let mut failed_for: Vec<(String, String)> = Vec::new();
+        let mut first_committed: Option<(String, String, EventSeq)> = None;
         for peer in &peers {
             // Codex P1: a desk whose id happens to equal this recipient's
             // agent id also "owns" a row journaled under the bare id
@@ -319,11 +320,14 @@ impl SpeechContext {
             // row is journaled somewhere only that desk's own id would match,
             // which is far less likely to collide.
             let key = dm_journal_key(record, peer);
-            let result = self.say(key, text.clone(), Vec::new()).await;
-            if result.is_error {
-                failed_for.push((peer.clone(), tool_result_text(&result)));
-                continue;
-            }
+            let seq = match self.append(key.clone(), text.clone(), Vec::new()).await {
+                Ok(seq) => seq,
+                Err(error) => {
+                    failed_for.push((peer.clone(), error));
+                    continue;
+                }
+            };
+            first_committed.get_or_insert((peer.clone(), key, seq));
             // A DM is a hop from one openhuman session to another, and
             // this is the only place both ends are known at once. Both
             // teammates hold a live openhuman session named
@@ -350,6 +354,14 @@ impl SpeechContext {
             );
             left_for.push(format!("@{peer}"));
         }
+        if first_committed.is_some() {
+            crate::runtime::delegation::mark_turn_spoke();
+        }
+        let woke_recipient = first_committed
+            .map(|(peer, chat_id, trigger)| {
+                self.stage_recipient_turn(record, &peer, chat_id, trigger, &text)
+            })
+            .unwrap_or(false);
         if !failed_for.is_empty() {
             let failures = failed_for
                 .iter()
@@ -371,11 +383,12 @@ impl SpeechContext {
                 ))
             };
         }
-        ToolResult::success(format!(
-            "Left for {}. Not delivered now — each of them reads it on their next turn, and \
-             nothing here wakes them. If it needs doing rather than knowing, raise a card.",
-            left_for.join(", "),
-        ))
+        let delivery = if woke_recipient {
+            " TinyHiveMind routed one bounded recipient turn now; any additional recipients read it on their next turn."
+        } else {
+            " No recipient turn was started; they read it on their next turn."
+        };
+        ToolResult::success(format!("Left for {}.{delivery}", left_for.join(", ")))
     }
 
     async fn say(&self, chat_id: String, text: String, audience: Vec<String>) -> ToolResult {
@@ -385,6 +398,21 @@ impl SpeechContext {
                     .to_string(),
             );
         }
+        match self.append(chat_id, text, audience).await {
+            Ok(seq) => {
+                crate::runtime::delegation::mark_turn_spoke();
+                ToolResult::success(format!("Said. Journaled at [{seq}]."))
+            }
+            Err(error) => ToolResult::error(error),
+        }
+    }
+
+    async fn append(
+        &self,
+        chat_id: String,
+        text: String,
+        audience: Vec<String>,
+    ) -> Result<EventSeq, String> {
         let event = CompanyEvent::AgentReply {
             chat_id,
             agent_id: self.agent_id.clone(),
@@ -403,16 +431,81 @@ impl SpeechContext {
             mention_depth: 0,
             audience,
         };
-        match self.events.append(&self.company, event).await {
-            Ok(seq) => {
-                // The turn has now been heard. What it returns from here is
-                // private thinking, and the return-text fallback must not
-                // journal it a second time — see `delegation::TURN_SPOKE`.
-                crate::runtime::delegation::mark_turn_spoke();
-                ToolResult::success(format!("Said. Journaled at [{seq}]."))
-            }
-            Err(error) => ToolResult::error(format!("The message could not be journaled: {error}")),
-        }
+        self.events
+            .append(&self.company, event)
+            .await
+            .map_err(|error| format!("The message could not be journaled: {error}"))
+    }
+
+    fn stage_recipient_turn(
+        &self,
+        record: &crate::ports::types::CompanyRecord,
+        peer: &str,
+        chat_id: String,
+        trigger: EventSeq,
+        text: &str,
+    ) -> bool {
+        let Some(queue) = self.dispatch.as_ref() else {
+            return false;
+        };
+        let members = crate::runtime::delegation_tools::tinyhivemind_roster(record);
+        let people = Vec::new();
+        let retired = Vec::new();
+        let roster = tinyhivemind_core::roster::Roster::new(&members, &people, &retired);
+        let input = tinyhivemind_core::dispatch::MentionDispatchInput {
+            key: tinyhivemind_core::dispatch::DispatchKey {
+                trigger_sequence: trigger.value(),
+            },
+            conversation: tinyhivemind_core::dispatch::DispatchConversation {
+                desk_id: chat_id,
+                thread_root: None,
+            },
+            author_id: self.agent_id.clone(),
+            content: text.to_string(),
+            mentions: vec![tinyhivemind_core::mention::Mention {
+                target: tinyhivemind_core::mention::MentionTarget::Agent {
+                    id: peer.to_string(),
+                },
+                text: format!("@{peer}"),
+                offset: 0,
+                quiet: false,
+            }],
+            hop: crate::runtime::delegation::turn_message_hop(),
+        };
+        let max_hops = u32::from(
+            record
+                .manifest
+                .tools
+                .max_delegation_depth
+                .unwrap_or(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
+        );
+        let Ok(tinyhivemind_core::dispatch::MentionDispatchDecision::One { request }) =
+            tinyhivemind_core::dispatch::mention_dispatch(
+                tinyhivemind_core::dispatch::MentionDispatchPolicy {
+                    enabled: true,
+                    max_hops,
+                },
+                &input,
+                &roster,
+            )
+        else {
+            return false;
+        };
+        matches!(
+            queue.push_within_cap(
+                crate::harness::orchestrator::Delegation::ConversationDispatch {
+                    source: request.source_id,
+                    target: request.target_id,
+                    message: request.content,
+                    chat_id: request.conversation.desk_id,
+                    trigger_sequence: request.key.trigger_sequence,
+                    child_hop: request.child_hop,
+                },
+                crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN,
+                usize::try_from(max_hops).unwrap_or(usize::MAX),
+            ),
+            crate::harness::orchestrator::Staged::Queued
+        )
     }
 }
 
@@ -421,8 +514,7 @@ fn refusal(rejection: UtteranceRejection) -> ToolResult {
     ToolResult::error(rejection.to_string())
 }
 
-/// The plain-text half of a [`ToolResult`], for folding one recipient's
-/// failure into another tool's own reply.
+#[cfg(test)]
 fn tool_result_text(result: &ToolResult) -> String {
     result
         .content
@@ -971,11 +1063,10 @@ pub fn speech_brief() -> String {
          - `{POST_TOOL}` — say one thing to a channel. Call it exactly once, at the end of your \
          turn. This is how you answer. It says it in the channel you are answering in unless you \
          pass `desk`, which may name any channel you sit on.\n\
-         - `{DM_TOOL}` — leave one thing for named teammates instead of the whole channel, when \
-         you need to settle something without spending the room's attention. It **leaves** the \
-         message: each of them reads it on their next turn, and nothing wakes them. Do not tell \
-         anybody it was delivered, because it was not. If it needs doing rather than knowing, \
-         raise a card.\n\
+         - `{DM_TOOL}` — leave one thing for named teammates instead of the whole channel. The \
+         message is durable for every recipient; TinyHiveMind may wake exactly one of them now, \
+         bounded by the hop limit, and additional recipients read it on their next turn. A DM \
+         conversation opens no task card.\n\
          - `{CLOSE_TOOL}` — say one last thing AND report the work finished. Only when it \
          genuinely is: a result somebody still has to check is not finished.\n\
          - `{READ_TOOL}` — read further back in this channel than you were handed.\n"

@@ -9,6 +9,16 @@ use super::built_in_test_fixtures::*;
 use super::*;
 use crate::ports::types::ContextChunk;
 
+#[test]
+fn dispatched_cards_are_isolated_from_an_agents_other_conversations() {
+    assert!(CompanyAgent::isolates_background_history(None, true));
+    assert!(!CompanyAgent::isolates_background_history(
+        Some("general"),
+        true
+    ));
+    assert!(!CompanyAgent::isolates_background_history(None, false));
+}
+
 /// The fingerprint moves when the tier moves (issue #562).
 ///
 /// This is the assertion that keeps the feature from being a no-op.

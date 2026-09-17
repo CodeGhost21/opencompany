@@ -51,13 +51,12 @@
 //!   `is_orchestrator` — they are the company's *authority* (who owns a card,
 //!   what passes review, who is on the roster) and no desk agent gets them.
 //!
-//!   The two **hand-off** tools, `spawn_task` and `delegate_to_desk`, are also
-//!   wired onto a desk agent whose manifest entry names a
-//!   [`delegates_to`](crate::company::Agent::delegates_to) allowlist (issue
-//!   #176), narrowed to those desks. A member that names none — every agent of
-//!   every manifest written before this — carries no delegation tool at all,
-//!   which is #178's original depth cap = 1 invariant, now the default rather
-//!   than the only possibility.
+//!   The three **hand-off** tools, `spawn_task`, `delegate_to_desk` and
+//!   `delegate_to_teammate`, are wired onto every other roster agent too,
+//!   scoped by its manifest [`delegates_to`](crate::company::Agent::delegates_to):
+//!   unrestricted when the list is empty, narrowed to the named desks when it
+//!   is not. Every agent is also briefed on its team
+//!   (`company::team_brief::team_section`) so it knows who those tools reach.
 //!
 //!   Recursion is bounded **dynamically**, not by which tools were wired: belts
 //!   are cached per roster and rebuilt rarely, so the tool cannot be withheld
@@ -314,6 +313,12 @@ pub fn build_agent_with_model(
     routed_context: &[(String, String)],
     instructions: Option<&str>,
     is_orchestrator: bool,
+    // The `## Your team` section for this agent, pre-rendered by the caller
+    // with `company::team_brief::team_section` over the live record, or `""`
+    // for a roster of one. A string rather than the record itself on the
+    // `is_orchestrator` precedent: this function builds one agent from parts
+    // the caller decided, and the roster is one of them.
+    team_section: &str,
     // Whether this company's `[speech]` block turns talking into a tool call.
     //
     // A `bool` resolved by the caller rather than a `&CompanyManifest` read
@@ -384,8 +389,8 @@ pub fn build_agent_with_model(
             deps.store.clone(),
         )));
     }
-    // Talking as a tool call (`[speech] enabled`). Off unless the manifest says
-    // so, and on every roster agent's belt when it is — speaking is not a
+    // Talking as a tool call (`[speech] enabled`). On unless the manifest opts
+    // out, and on every roster agent's belt when enabled — speaking is not a
     // capability one teammate has and another does not, so there is no grant
     // for it to be scoped by, exactly as with the two intrinsic tools above.
     //
@@ -393,7 +398,7 @@ pub fn build_agent_with_model(
     // there is nothing for them to do and registering them would advertise a
     // voice the host cannot give. A company in that configuration keeps the
     // return-text path, which is the same fallback an un-called tool gets.
-    // CodeRabbit: `speech_enabled` alone is the manifest's opt-in; whether the
+    // `speech_enabled` is the resolved default-on/opt-out value; whether the
     // tools actually got wired also needs a journal to append to (the comment
     // above). The persona brief below must agree with THIS — the AND, not the
     // flag alone — or a company with no `EventLog` gets a brief instructing it
@@ -406,7 +411,8 @@ pub fn build_agent_with_model(
                 manifest_agent.id.clone(),
                 events,
                 deps.store.clone(),
-            ),
+            )
+            .with_dispatch(deps.delegations.clone()),
         ));
     }
     // Installed-MCP-registry surface (`mcp_registry_list_tools` /
@@ -927,6 +933,11 @@ pub fn build_agent_with_model(
     // static-before-volatile is what keeps an operator editing a workspace note
     // from invalidating the briefing behind it.
     persona.push_str(&crate::company::prompt::bundle_section(manifest_agent));
+    // The roster and desks, and who this agent may hand work to — rendered by
+    // the caller from the live company record, which is the only place the
+    // effective roster (overlay teammates and desks included) is known. Static
+    // for the life of the belt: the belt is rebuilt when the roster changes.
+    persona.push_str(team_section);
 
     // Every agent, granted tools or not: an `@` is something any of them can
     // write, and what it does is not guessable from the fact that it renders.
@@ -989,6 +1000,18 @@ pub fn build_agent_with_model(
         sandbox_shell,
         sandbox_code,
     ));
+
+    // Name public-web fetch and discovery separately. A broad `web.*` grant
+    // wires URL readers, while `web_search` also needs the explicit priced
+    // `search` grant and a live provider credential. Research agents must know
+    // which half they actually have or they fall back to rereading unrelated
+    // workspace/ledger state until the loop guard stops them.
+    let web_fetch_wired = wants_web && !toolbelt::namespace_denied(&deps.capabilities, "web");
+    let web_search_wired = tools
+        .iter()
+        .any(|tool| tool.name() == crate::harness::search::WEB_SEARCH_TOOL)
+        && !toolbelt::namespace_denied(&deps.capabilities, "search");
+    persona.push_str(&toolbelt::web_brief(web_fetch_wired, web_search_wired));
 
     // Issue #244: what a deliverable is, and how to hand one over. Only when
     // the tool was actually wired above — describing a tool the agent does not
@@ -1177,24 +1200,22 @@ pub fn build_agent_with_model(
             deps.notifications.clone(),
         ));
     }
-    // Recursive desk delegation (issue #176): a NON-orchestrator agent whose
-    // manifest entry names a `delegates_to` allowlist gets exactly the two
-    // hand-off tools — `spawn_task` and a `delegate_to_desk` narrowed to that
-    // allowlist — and nothing else from the orchestrator's set. It is what lets
-    // a desk lead pull in a specialist for one slice instead of handing the
-    // whole thing back to the CEO.
+    // Every OTHER roster agent gets the three hand-off tools — `spawn_task`,
+    // `delegate_to_desk` and `delegate_to_teammate` — and the brief that goes
+    // with them, whatever its manifest entry says. Issue #176 wired these only
+    // onto a member that opted in with a `delegates_to` allowlist, so a desk
+    // lead or a specialist with no such line had no way to reach the colleague
+    // sitting beside it, and no way to track anything either; the runtime
+    // covered the second gap by carding every message for it, which is how
+    // the board filled with cards nobody asked for. Now the reach is decided
+    // by the list (empty = everyone, see
+    // `delegation_tools::reach_is_unrestricted`) and the tool is always there.
     //
-    // `else if` rather than a second `if`: the orchestrator already has both
-    // tools from `orchestrator_tools` above, and wiring a second, narrowed
-    // `delegate_to_desk` beside its unrestricted one would put two tools with
-    // the same name on one belt.
-    //
-    // An empty allowlist wires nothing, which is the pre-#176 belt exactly — so
-    // this whole block is inert for every manifest that has not opted in.
-    else if !manifest_agent.delegates_to.is_empty() {
-        persona.push_str(&orchestrator::member_delegation_brief(
-            &manifest_agent.delegates_to,
-        ));
+    // `else`, not a second `if`: the orchestrator already has all three from
+    // `orchestrator_tools` above, and wiring a second, scoped copy beside its
+    // unrestricted one would put two tools with the same name on one belt.
+    else {
+        persona.push_str(&orchestrator::member_delegation_brief());
         tools.extend(orchestrator::member_delegation_tools(
             &deps.delegations,
             company.clone(),
@@ -1455,6 +1476,9 @@ pub fn build_agent(
         routed_context,
         instructions,
         is_orchestrator,
+        // Test-only wrapper; the roster section is the caller's to render, and
+        // every caller of this wrapper is exercising something else.
+        "",
         speech_enabled,
     )
     .map(|(agent, _chat_model)| agent)

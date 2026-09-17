@@ -102,9 +102,9 @@ export function AgentSession({
   // the same guard `AgentRuns` carries, for the same reason (issue #1671).
   const generationRef = useRef(0);
 
-  const read = useCallback(async () => {
+  const read = useCallback(async (quiet = false) => {
     const generation = ++generationRef.current;
-    setLoad("loading");
+    if (!quiet) setLoad("loading");
     try {
       const rows: AgentSessionMessageDto[] = await client.agentSession(agentId, company, {
         limit: SESSION_PAGE,
@@ -150,6 +150,16 @@ export function AgentSession({
   useEffect(() => {
     void read();
   }, [read]);
+
+  // Raw turns is the live diagnostic surface now that chat deliberately hides
+  // tool-call rows. Refresh without replacing the populated view with a loader;
+  // the accepted message appears first, then its durable steps arrive when the
+  // turn settles.
+  useEffect(() => {
+    if (!raw) return;
+    const timer = window.setInterval(() => void read(true), 2_000);
+    return () => window.clearInterval(timer);
+  }, [raw, read]);
 
   if (load === "loading") {
     return (

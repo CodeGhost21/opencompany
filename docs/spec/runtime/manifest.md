@@ -33,7 +33,7 @@ description = "Write ads, pages, and campaign copy."
 # NEW optional per-agent keys:
 tier = "reasoning"                 # cognition tier hint (see glossary)
 tools = ["docs.*", "email.send"]   # tool grant globs
-delegates_to = ["research"]        # desks this agent may hand work to ("*" = all)
+delegates_to = ["research"]        # narrow hand-offs to these desks (omit = anywhere)
 budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
 prompt = "Write for the reader."   # appended to the generated persona
 prompt_files = ["prompts/tone.md"] # checked-in briefing docs, under `agents/`
@@ -126,9 +126,10 @@ hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
                                    # accepted for documentation only and
                                    # restricts nothing. See runtime/hivemind.md
 
-[speech]                           # NEW: do agents speak by calling a tool?
-enabled = true                     # off by default. On, every agent's belt
-                                   # gains desk_post / desk_dm / desk_close /
+[speech]                           # optional speech-tool override
+disabled = true                    # on by default; true opts this company out
+                                   # By default every agent's belt carries
+                                   # desk_post / desk_dm / desk_close /
                                    # desk_read, and a turn's return text becomes
                                    # private thinking. A turn that calls none of
                                    # them still has its text journaled, so this

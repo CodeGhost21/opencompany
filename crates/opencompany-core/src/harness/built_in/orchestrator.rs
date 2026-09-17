@@ -9,7 +9,10 @@
 //! first agent when none is tagged (so a company without an orchestrator behaves
 //! exactly as before).
 //!
-//! It reaches sixteen tools, all wired only onto the orchestrator agent:
+//! It reaches sixteen tools, wired onto the orchestrator agent (three of them —
+//! the hand-off tools `spawn_task`, `delegate_to_desk` and
+//! `delegate_to_teammate` — also onto every other roster agent, scoped; see
+//! [`member_delegation_tools`]):
 //!
 //! * [`QueryCompanyTool`] — a read surface over the company's [`FactStore`],
 //!   recent [`EventLog`] history, and (issue #1859) a `## Board` summary of
@@ -303,16 +306,15 @@ before answering rather than guessing, then answer directly and concisely. A boa
 exception and needs a reason. \
 When there IS work, two decisions come up and they are INDEPENDENT — do not collapse them into \
 one. (1) WHO SHOULD DO THIS: when a request belongs to a specialist desk, hand it to that desk \
-with `delegate_to_desk`, naming the desk by an id `query_company` lists under Desks; when it names \
-one PERSON, hand it to them with `delegate_to_teammate`, naming them by a roster id `query_company` \
-lists under Team — a desk id is not a person and a person is not a desk, so pick the tool that \
-matches the target; when it is yours to answer, answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you must not pick a \
-tool in order to influence it. Anything substantial handed to a desk is opened as a board card \
-automatically, and so is anything substantial an operator asks a desk or teammate directly — the \
-hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for the same work, \
-and never prefer one over the other to get something tracked. Reach for `spawn_task` only for work \
-that belongs on the board but must NOT start in this turn: something for later, or for somebody \
-else. Work that is waiting on a PERSON is not a card — a card notifies nobody and resumes \
+with `delegate_to_desk`, naming a desk id from Your team above; when it names one PERSON, hand it \
+to them with `delegate_to_teammate`, naming a roster id from Your team — a desk is not a person, \
+so pick the tool that matches the target; when it is yours to answer, answer it. Your teammates \
+are one call away: never say you cannot reach one. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you must not pick a \
+tool in order to influence it. Anything substantial handed to a desk or a teammate is opened as a board card \
+automatically — the hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` \
+for the same work. Nothing else said in chat is tracked unless an agent tracks it: reach for \
+`spawn_task` for work that belongs on the board but must NOT start in this turn — something for \
+later, or for somebody else — and for real work you take on yourself that outlasts this reply. Work that is waiting on a PERSON is not a card — a card notifies nobody and resumes \
 nothing. When you cannot proceed without something only the operator can give you, call \
 `escalate_to_human` with the question; the work parks and their answer restarts it. \
 WHEN YOU CAN DO THE WORK IN THIS TURN, DO IT — do not park it as a card for later. Asked to \
@@ -372,6 +374,17 @@ pub enum Delegation {
         /// The instruction handed to that teammate.
         instruction: String,
     },
+    /// Deliver a committed chat message into one teammate's DM session and run
+    /// exactly one bounded reply turn. Unlike a work hand-off, this opens no
+    /// task card: conversation is not work merely because another agent speaks.
+    ConversationDispatch {
+        source: String,
+        target: String,
+        message: String,
+        chat_id: String,
+        trigger_sequence: u64,
+        child_hop: u32,
+    },
     /// Set (or change) who owns an existing board card (issue #186 part b).
     AssignTask {
         /// The card's id.
@@ -413,7 +426,9 @@ impl Delegation {
     pub fn answers(&self) -> bool {
         matches!(
             self,
-            Self::DelegateToDesk { .. } | Self::DelegateToTeammate { .. }
+            Self::DelegateToDesk { .. }
+                | Self::DelegateToTeammate { .. }
+                | Self::ConversationDispatch { .. }
         )
     }
 
@@ -852,9 +867,9 @@ impl DelegationQueue {
             // something false about what it may do next.
             DrainClaim::Board if !delegation.writes_board_only() => {
                 return Staged::NoDrain(match delegation {
-                    Delegation::DelegateToDesk { .. } | Delegation::DelegateToTeammate { .. } => {
-                        NoDrainReason::WorkflowHandOff
-                    }
+                    Delegation::DelegateToDesk { .. }
+                    | Delegation::DelegateToTeammate { .. }
+                    | Delegation::ConversationDispatch { .. } => NoDrainReason::WorkflowHandOff,
                     _ => NoDrainReason::WorkflowLifecycle,
                 });
             }
@@ -1049,6 +1064,16 @@ impl DelegationQueue {
             .expect("delegation queue")
             .get(&Self::current_scope())
             .map_or(0, Vec::len)
+    }
+
+    /// Whether the calling scope has work staged for another bounded drain
+    /// pass. Used after a concurrent conversation-dispatch layer completes.
+    pub(crate) fn has_queued(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("delegation queue")
+            .get(&Self::current_scope())
+            .is_some_and(|bucket| !bucket.is_empty())
     }
 }
 
@@ -2706,7 +2731,7 @@ impl Tool for SpawnTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Open a task card on the company's board for work that should NOT start in this turn — something for later, for somebody else, or waiting on a person. Provide a `title`, an optional `note` brief, and an optional `assignee` (a desk or teammate id). Do NOT use this to get a hand-off tracked: work you hand to a desk with `delegate_to_desk` already opens its own card, and calling both for the same work opens two."
+        "Open a task card on the company's board. Nothing said in chat is tracked unless an agent tracks it, so use this when an ask is real work that should be visible and followed up — something you are taking on that outlasts this reply, something for later, or something for somebody else. Provide a `title`, an optional `note` brief, and an optional `assignee` (a desk or teammate id). Do NOT use this to get a hand-off tracked: work you hand off with `delegate_to_desk` or `delegate_to_teammate` already opens its own card, and calling both for the same work opens two."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -3014,7 +3039,7 @@ impl Tool for DelegateToDeskTool {
     }
 
     fn description(&self) -> &str {
-        "Hand a turn to a desk's lead member so a specialist answers. Provide the `desk` (its id or name) and the `instruction` to carry out. A substantial hand-off is opened as a tracked board card automatically, assigned to that lead — you do not need to call `spawn_task` as well."
+        "Hand a turn to a desk's lead member so a specialist answers, and get their reply back in this turn. Provide the `desk` (its id or name, as listed under Your team in your briefing) and the `instruction` to carry out. A substantial hand-off is opened as a tracked board card automatically, assigned to that lead — you do not need to call `spawn_task` as well."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -3236,7 +3261,7 @@ impl Tool for DelegateToTeammateTool {
     }
 
     fn description(&self) -> &str {
-        "Hand a turn to one named teammate so the person who actually owns that specialism answers — including somebody on your own desk. Provide the `teammate` (their roster id, as `query_company` lists them under Team) and the `instruction` to carry out. Use this instead of `delegate_to_desk` whenever a specific person is wanted rather than whoever leads a desk. A substantial hand-off is opened as a tracked board card automatically, assigned to them — you do not need to call `spawn_task` as well."
+        "Hand a turn to one named teammate so the person who actually owns that specialism answers — including somebody on your own desk. Provide the `teammate` (their roster id, exactly as listed under Your team in your briefing) and the `instruction` to carry out. Use this instead of `delegate_to_desk` whenever a specific person is wanted rather than whoever leads a desk. A substantial hand-off is opened as a tracked board card automatically, assigned to them — you do not need to call `spawn_task` as well."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -3639,11 +3664,13 @@ pub fn delegation_tools(
     ]
 }
 
-/// The delegation tools a desk member gets when its manifest entry names a
-/// `delegates_to` allowlist (issue #176): `spawn_task`, a `delegate_to_desk`
-/// narrowed to that allowlist, and — since #884 — a `delegate_to_teammate`
-/// narrowed to its own desk-mates plus the members of the desks that allowlist
-/// permits.
+/// The delegation tools every **non-orchestrator** roster agent gets:
+/// `spawn_task`, a `delegate_to_desk` and a `delegate_to_teammate`, both
+/// scoped by its manifest `delegates_to` — unrestricted when that list is
+/// empty (the ordinary case), narrowed to the named desks (and, for the
+/// teammate tool, its own desk-mates plus those desks' members) when it is not.
+/// Issue #176 wired these only onto a member that opted in with a list; a
+/// specialist with none had no way to reach the colleague beside it.
 ///
 /// Deliberately a subset of [`delegation_tools`] rather than the same list.
 /// `assign_task`, `review_task`, `query_company`, `run_workflow`,
@@ -3688,40 +3715,59 @@ pub fn member_delegation_tools(
     ]
 }
 
-/// The persona brief appended for a desk member that may re-delegate (issue
-/// #176).
+/// The hand-off and tracking brief appended to every **non-orchestrator**
+/// teammate's persona, after the team section
+/// ([`team_brief::team_section`](crate::company::team_brief::team_section))
+/// that lists who it may hand work to.
 ///
 /// It exists because a refusal costs a whole turn. A model handed
-/// `delegate_to_desk` with no idea that its reach is narrowed, or that the chain
-/// it is running inside is nearly at its bound, spends turns discovering both
-/// one refusal at a time — and the depth refusal in particular is not
-/// retryable, so a model that has not been told will burn every remaining call
-/// on it. Naming the allowlist and the shape of the bound up front is cheaper
-/// than the refusals it avoids.
+/// `delegate_to_desk` with no idea that the chain it is running inside is
+/// nearly at its bound spends turns discovering that one refusal at a time —
+/// and the depth refusal in particular is not retryable, so a model that has
+/// not been told will burn every remaining call on it. Naming the shape of the
+/// bound up front is cheaper than the refusals it avoids.
 ///
 /// The bound is stated qualitatively rather than as a number. The number lives
 /// on the live company record and is read at call time; baking a snapshot of it
 /// into a persona that is cached with the belt would be a claim that goes stale
 /// the moment an operator edits the manifest — and a *confidently wrong* bound
 /// is worse guidance than an honest "there is one".
-pub fn member_delegation_brief(desks: &[String]) -> String {
-    let reach = match desks.iter().any(|d| d.trim() == "*") {
-        true => "any desk in the company".to_string(),
-        false => desks.join(", "),
-    };
-    format!(
-        "\n\n## Handing work on\n\nYou can pass a slice of your work to another desk with \
-`delegate_to_desk`, to one named person with `delegate_to_teammate` — including somebody on your \
-own desk — and open a tracked card for anything that should be followed up later with \
-`spawn_task`. The desks you may hand work to: {reach}. When a request names a specific teammate, \
-hand it to THAT PERSON with `delegate_to_teammate` rather than declining it as not \
-yours.\n\nHand on only the part somebody else is genuinely better placed to do, and do the rest \
-yourself — every hand-off costs another turn. The chain is bounded: if you are told the work has \
-already been handed on as far as this company allows, that is final, so do what you can and say \
-plainly what is left rather than calling the tool again. You cannot hand work back to a desk it \
-already came from, to a desk you lead yourself, or to somebody the work already passed \
-through.\n"
-    )
+///
+/// # The board is a tool call
+///
+/// The second paragraph is the tracking rule, and it is here because the
+/// runtime no longer decides it. A message typed into a desk or a DM used to
+/// become a board card by construction — the REST handler carded anything that
+/// led with an action verb, and the runtime carded anything "substantial" said
+/// to a desk lead — so the agent answering was never asked whether the ask was
+/// work at all, and the board filled with cards nobody had commissioned. Now
+/// nothing said in chat is tracked unless an agent tracks it, and this is where
+/// the agent is told so, and told what `spawn_task` is for.
+///
+/// Reach — who this agent may hand work to — is deliberately **not** stated
+/// here: the team section renders it from the same rule the tools enforce, so
+/// there is one place for it to be right.
+pub fn member_delegation_brief() -> String {
+    "\n\n## Handing work on, and tracking it\n\nDo what is yours yourself. When a slice of the ask \
+belongs to a teammate's specialism — a design question to the designer, a security check to the \
+security engineer, a question only the orchestrator can settle — hand that slice to them with \
+`delegate_to_teammate` (naming their roster id from Your team above), or to a whole desk with \
+`delegate_to_desk`, and fold their answer into yours. They run in this turn and their reply comes \
+back to you; the operator hears from you, so relay what they said rather than saying you asked. \
+Every hand-off costs another turn: hand on the part somebody else is genuinely better placed to \
+do, not the whole ask, and never decline something as \"not mine\" when a teammate who owns it is \
+one call away. The chain is bounded: if you are told the work has already been handed on as far \
+as this company allows, that is final, so do what you can and say plainly what is left rather \
+than calling the tool again. You cannot hand work back to where it came from, to yourself, or to \
+somebody it already passed through.\n\nNothing said to you in chat is on the board unless \
+somebody puts it there — a card exists because an agent or the operator opened one, never \
+because a message was sent. Answer questions, discussion and quick asks directly, with no card. \
+When an ask is real work that should be visible and followed up — something you are taking on \
+that outlasts this reply, something for later, or something for somebody else — open a card for \
+it with `spawn_task` (a title, a note with the brief, and the roster id of whoever will do it) \
+and say that you did. A hand-off you make with `delegate_to_teammate` or `delegate_to_desk` \
+opens its own card automatically, so never open a second one for the same work.\n"
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

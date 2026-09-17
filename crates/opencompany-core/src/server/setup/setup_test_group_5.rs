@@ -17,12 +17,12 @@ use std::sync::Arc;
 #[cfg(feature = "openhuman")]
 use async_trait::async_trait;
 
+use crate::company::runtime::CompanyRuntime;
+use crate::ports::types::{CompanyId, SecretValue};
 #[cfg(feature = "openhuman")]
 use crate::runtime::builder::RuntimeBuilder;
 #[cfg(feature = "openhuman")]
 use crate::runtime::rebuild::{RebuildRequest, RuntimeRebuilder};
-use crate::company::runtime::CompanyRuntime;
-use crate::ports::types::{CompanyId, SecretValue};
 use crate::server::router;
 use crate::{AppConfig, AppState};
 

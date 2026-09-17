@@ -45,6 +45,7 @@
 import type { AgentSessionMessageDto, TurnStep } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { useLayoutEffect, useRef } from "react";
 
 export function RawTurns({
   rows,
@@ -64,6 +65,18 @@ export function RawTurns({
    */
   showChannel?: boolean;
 }) {
+  const endRef = useRef<HTMLLIElement>(null);
+  const lastRowId = rows.at(-1)?.id;
+
+  // Raw turns are diagnostic history, so opening the view at row one makes the
+  // operator scroll through everything they already know before reaching the
+  // turn they came to inspect. Run after layout so the sentinel's final
+  // position includes unfolded tool results, and repeat only when a new last
+  // row arrives.
+  useLayoutEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end" });
+  }, [lastRowId]);
+
   // The session's own name, read off the rows and never rebuilt here.
   //
   // Every row of one response carries the same value — the host mints it once
@@ -100,6 +113,12 @@ export function RawTurns({
             showChannel={showChannel}
           />
         ))}
+        <li
+          ref={endRef}
+          className="h-px"
+          aria-hidden="true"
+          data-testid="agent-session-raw-end"
+        />
       </ol>
     </div>
   );
