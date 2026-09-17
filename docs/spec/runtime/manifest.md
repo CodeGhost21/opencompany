@@ -126,8 +126,8 @@ hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
                                    # accepted for documentation only and
                                    # restricts nothing. See runtime/hivemind.md
 
-[speech]                           # NEW: do agents speak by calling a tool?
-enabled = true                     # off by default. On, every agent's belt
+[speech]                           # optional speech-tool override
+enabled = false                    # on by default; false opts this company out
                                    # gains desk_post / desk_dm / desk_close /
                                    # desk_read, and a turn's return text becomes
                                    # private thinking. A turn that calls none of
