@@ -6129,7 +6129,7 @@ pub(crate) fn build_roster(
             effective_instructions.as_deref(),
             is_orchestrator,
             &crate::company::team_brief::team_section(company, &manifest_agent.id),
-            company.manifest.speech.enabled,
+            company.manifest.speech.is_enabled(),
         )?;
         roster.push(Arc::new(CompanyAgent {
             agent_id: manifest_agent.id.clone(),
@@ -6228,7 +6228,7 @@ pub(crate) fn build_roster(
             effective_instructions.as_deref(),
             /* is_orchestrator */ false,
             &crate::company::team_brief::team_section(company, &manifest_agent.id),
-            company.manifest.speech.enabled,
+            company.manifest.speech.is_enabled(),
         )?;
         roster.push(Arc::new(CompanyAgent {
             agent_id: manifest_agent.id.clone(),
