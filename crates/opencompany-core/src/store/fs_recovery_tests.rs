@@ -213,7 +213,7 @@ async fn cancelling_a_save_during_the_first_commit_does_not_orphan_the_second() 
     let after = record("After", "paused");
     let reader = FsCompanyStore::new(&root);
     let handle = tokio::spawn(async move { store.save(&after).await });
-    stall_probe::wait_blocked_commit().await;
+    release.wait_blocked().await;
     handle.abort();
     let joined = handle.await;
     assert!(
@@ -328,7 +328,7 @@ async fn abort_then_concurrent_update_does_not_race_the_orphaned_commit() {
     let stale = record("Stale", "paused");
     let stale_store = FsCompanyStore::new(&root);
     let stale_handle = tokio::spawn(async move { stale_store.save(&stale).await });
-    stall_probe::wait_blocked_commit().await;
+    release.wait_blocked().await;
     stale_handle.abort();
     let joined = stale_handle.await;
     assert!(
@@ -473,7 +473,7 @@ async fn a_racing_load_does_not_lose_an_orphaned_commits_update() {
     let stale = record("Before", "paused");
     let stale_store = FsCompanyStore::new(&root);
     let stale_handle = tokio::spawn(async move { stale_store.save(&stale).await });
-    stall_probe::wait_blocked_commit().await;
+    release.wait_blocked().await;
     stale_handle.abort();
     let joined = stale_handle.await;
     assert!(

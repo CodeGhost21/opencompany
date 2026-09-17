@@ -539,7 +539,7 @@ async fn add_provider(
     let first_provider_ever = if existing.is_empty() {
         let _guard = crate::company::inference::store::index_lock(runtime.id()).await;
         let (manifest, _harness_id) = super::manifest_inference(runtime).await?;
-        let platform = super::platform_default(&crate::app::config::ProcessEnv);
+        let platform = super::platform_default(runtime);
         crate::company::inference::resolve_effective(
             runtime.id(),
             &manifest,
@@ -2073,7 +2073,7 @@ async fn test_managed(
 
     let runtime = company.runtime.as_ref();
     let secrets = runtime.secrets().as_ref();
-    let platform = super::platform_default(&crate::app::config::ProcessEnv);
+    let platform = super::platform_default(runtime);
     let inference_key =
         inference::load_managed_key(runtime.id(), secrets, &inference::HarnessScope::default())
             .await

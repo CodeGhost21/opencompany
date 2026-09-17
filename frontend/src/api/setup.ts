@@ -136,6 +136,12 @@ export interface InferenceReady {
   provider: string | null;
   /** The endpoint it resolves to. Shown so a green tick is checkable. */
   base_url: string | null;
+  /**
+   * The API-keys page of the hub this host is on, for minting a key by hand.
+   * `null` when the host's `api_url` follows no known convention; older hosts
+   * omit it. Never a production default: a staging host links to staging.
+   */
+  keys_url?: string | null;
 }
 
 /** The providers this host can talk to (`INFERENCE_PROVIDERS`). */
