@@ -189,8 +189,25 @@ export function buildChannels(
   // "a desk claims it" is now a fact about the company rather than about which
   // fallback set the console happened to be holding.
   const claimed = desks.some(deskClaimsGeneralChannel);
+  // **EXPERIMENT (#2368): the company-wide line is not a channel.**
+  //
+  // `#general` has no membership of its own — `desk_episode` declines it for
+  // exactly that reason, so it can never be a room and every message on it is
+  // answered by one responder off the fallback ladder. A conversation that
+  // cannot deliberate is not where a company of agents should be talked to;
+  // a desk is, and a desk the operator created has a membership that means
+  // something.
+  //
+  // Hidden here rather than removed from the host: `chat_id: None` still
+  // resolves to General, so nothing is stranded — an older company's existing
+  // rows stay readable, and the address a mention-free message lands on is
+  // unchanged. What goes away is the console offering it as somewhere to type.
+  //
+  // Unconditional for the experiment. If it holds up, the carrier is a
+  // manifest key so a company that wants its main line keeps it.
+  const SHOW_GENERAL_CHANNEL = false;
   const channels: Channel[] = [
-    ...(claimed ? [] : [generalChannel(members)]),
+    ...(claimed || !SHOW_GENERAL_CHANNEL ? [] : [generalChannel(members)]),
     ...desks.map((d) => ({
       id: d.id,
       name: d.channel,
