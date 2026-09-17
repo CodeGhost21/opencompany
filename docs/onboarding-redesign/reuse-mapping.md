@@ -80,6 +80,24 @@ implementation.
   → `addProvider(client, company, input)` → `POST …/inference/providers`
   (`api/inference.ts:538-540`). Same two dialogs, same handler, same endpoint,
   mounted inside the wizard.
+
+  **Corrected while implementing 4b-i.** Two of those sentences did not survive
+  contact:
+
+  - **`ProvidersTab` itself cannot be mounted, and must not be.** It is a
+    controlled view over `InferenceState`/`InferenceActions`, and `useInference`
+    opens with `GET {scope}/inference`, which answers `CompanyNotFound` before a
+    company exists. The two dialogs *are* mountable verbatim — neither makes a
+    request of its own on the add path — so the wizard's step owns the
+    orchestration between them instead, in the shape `submitConnect` already
+    has. `inference-connect-dialog-offline.test.ts` pins the offline claim.
+  - **The endpoint is reached at the apply, not from the step.** `POST
+    …/inference/providers` is admin-scoped to an existing company, so the step
+    stages the add's own body and the apply runs it through
+    `add_provider_inner` — the handler's whole body, split out. The two new
+    first-run routes (`POST /api/v1/setup/inference/probe` for the model list,
+    and the apply's `provider_draft` field) are the same functions behind the
+    first-run gate, not second implementations of them.
 - **Composio.** The exact Composio page's credential dialog —
   `ComposioSection.tsx`'s inline `Dialog` (`:811` on), backed by
   `useComposioCredential` (`use-composio-credential.ts:90`). Its `submit()`
@@ -87,6 +105,22 @@ implementation.
   value, skipVerify, true)` or `setComposioToken(client, company, value)`
   depending on `form.credential` (`api/composio.ts:439`, `:402`). Same dialog,
   same hook, same two calls.
+
+  **Corrected while implementing 4b-ii.** Two more:
+
+  - **The dialog was not a component.** It was inline JSX closing over seven of
+    the page's locals, so "mount it" was not an available move until it was
+    lifted into `ComposioCredentialDialog.tsx` — JSX moved, not rewritten, with
+    the eight `composio-*` unit files untouched as the evidence.
+  - **`useComposioCredential` is not mounted and must not be.** It opens with
+    `GET {scope}/composio` and a `GET …/auth/me`, neither of which a
+    pre-company host can answer. The form's shape comes from the pure pair
+    instead: `composioRows(null)` (which tolerates a null status — `modeOf`
+    reads it as `managed`) and `composioForm(pending, rows)`. The real
+    `ComposioRowList` renders over those, so the card is the Connections card.
+  - **The secret keys are `composio/byok/key` and `composio/tinyhumans/key`.**
+    This folder's "no new keys" list named `composio/managed/key`, which does
+    not exist anywhere in the crate; every mention is corrected.
 
 Each mounted **as-is** — not rebuilt, not trimmed, not a condensed variant —
 each independently skippable via its own "set this up later." No fan-out

@@ -70,6 +70,8 @@ pub(super) struct FarDesk {
     answer: String,
     asked: Mutex<Vec<(String, String, String)>>,
     broken: bool,
+    falters_after: Option<usize>,
+    silent_after: Option<usize>,
 }
 
 impl FarDesk {
@@ -78,6 +80,8 @@ impl FarDesk {
             answer: answer.to_owned(),
             asked: Mutex::new(Vec::new()),
             broken: false,
+            falters_after: None,
+            silent_after: None,
         }
     }
 
@@ -86,6 +90,24 @@ impl FarDesk {
             answer: String::new(),
             asked: Mutex::new(Vec::new()),
             broken: true,
+            falters_after: None,
+            silent_after: None,
+        }
+    }
+
+    /// Answers normally until `turns` have run, then fails every later turn.
+    pub(super) fn failing_after(turns: usize, answer: &str) -> Self {
+        Self {
+            falters_after: Some(turns),
+            ..Self::answering(answer)
+        }
+    }
+
+    /// Answers normally until `turns` have run, then returns an empty reply.
+    pub(super) fn silent_after(turns: usize, answer: &str) -> Self {
+        Self {
+            silent_after: Some(turns),
+            ..Self::answering(answer)
         }
     }
 
@@ -98,12 +120,15 @@ impl FarDesk {
 #[async_trait]
 impl HiveReferralRunner for FarDesk {
     async fn refer(&self, desk_id: &str, agent_id: &str, prompt: &str) -> Result<String> {
-        self.asked.lock().expect("poisoned").push((
-            desk_id.to_owned(),
-            agent_id.to_owned(),
-            prompt.to_owned(),
-        ));
-        if self.broken {
+        let ran = {
+            let mut asked = self.asked.lock().expect("poisoned");
+            asked.push((desk_id.to_owned(), agent_id.to_owned(), prompt.to_owned()));
+            asked.len()
+        };
+        if self.silent_after.is_some_and(|after| ran > after) {
+            return Ok("   ".to_owned());
+        }
+        if self.falters_after.is_some_and(|after| ran > after) || self.broken {
             return Err(crate::error::OpenCompanyError::Config(
                 "turn for 'sre' hit the harness's per-turn wall-clock ceiling after 10m 00s"
                     .to_owned(),

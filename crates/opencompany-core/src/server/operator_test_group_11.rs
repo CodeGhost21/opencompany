@@ -357,6 +357,11 @@ fn a_crossing_names_the_thread_whose_fold_changed() {
     );
     assert_eq!(v["sequence"], 41, "and the row it folds onto");
     assert_eq!(v["toDesk"], "design");
+    assert_eq!(v["asker"], "software_engineer");
+    assert_eq!(
+        v["direct"], false,
+        "a desk crossing is not a person-to-person exchange"
+    );
     assert_eq!(
         v["returning"], false,
         "which leg, read as `ReferredFrom` is"
