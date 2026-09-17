@@ -1398,7 +1398,7 @@ impl CompanyAgent {
         // explicit prior-attempt history it is allowed to use. This also lets a
         // rebuilt agent's current system prompt take effect instead of reviving
         // a transcript whose frozen prompt predates newly wired tools.
-        let isolated_background_turn = isolates_background_history(
+        let isolated_background_turn = Self::isolates_background_history(
             turn_chat_id.as_deref(),
             run_sink.is_some(),
         );
@@ -2166,9 +2166,9 @@ impl CompanyAgent {
         (outcome, usages)
     }
 
-fn isolates_background_history(turn_chat_id: Option<&str>, has_run_sink: bool) -> bool {
-    turn_chat_id.is_none() && has_run_sink
-}
+    fn isolates_background_history(turn_chat_id: Option<&str>, has_run_sink: bool) -> bool {
+        turn_chat_id.is_none() && has_run_sink
+    }
 
     /// This turn's in-turn spend ceiling, in USD — the value that
     /// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts the turn
