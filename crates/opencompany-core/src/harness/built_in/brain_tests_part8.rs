@@ -180,6 +180,8 @@ fn task_instruction_keeps_prior_agent_results_out_of_the_current_assignment() {
     assert!(assignment.contains("Research competitors and cite sources"));
     assert!(assignment.contains("Include pricing where it is verifiable"));
     assert!(assignment.contains("Perform the current assignment now"));
+    assert!(assignment.contains("do not read the tasks ledger to rediscover it"));
+    assert!(assignment.contains("`web_search`"));
 }
 
 /// **The reachability assertion.** A test that the drain works when called
