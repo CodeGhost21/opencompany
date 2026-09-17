@@ -86,7 +86,7 @@ async fn secret(runtime: &crate::company::runtime::CompanyRuntime, key: &str) ->
 async fn the_wizards_account_key_fans_out_onto_the_company_it_seeds() {
     let home_dir = home();
     let state = fresh_state(home_dir.path());
-    let _probe = crate::server::ops::company_key::prober_override::Scoped::set(
+    crate::server::ops::company_key::prober_override::set(
         "acme",
         Ok(vec!["acme/test-model".to_string()]),
     );
