@@ -282,13 +282,9 @@ impl SpeechContext {
     /// make [`fold_asides`](crate::server::chat_history) lift the row out of the
     /// transcript as a deliberation aside, which it is not.
     ///
-    /// # What it does not do
-    ///
-    /// Start a turn. The recipient reads this on its next turn, through its own
-    /// session delta — the stigmergic model the vendored crate is built on, and
-    /// the reason `AgentReply::mentions` is never consulted by dispatch. The
-    /// result sentence says so rather than claiming delivery, because an agent
-    /// that is told "delivered" will tell the person who asked that it was.
+    /// Once every row is durable, TinyHiveMind may select the first eligible
+    /// recipient for one immediate bounded turn. Other recipients read the row
+    /// on their next turn. The wakeup is conversation-only and opens no card.
     async fn dm(
         &self,
         peers: Vec<String>,
