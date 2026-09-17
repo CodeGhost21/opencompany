@@ -1472,17 +1472,15 @@ impl<'a> DelegationRunner<'a> {
             && !crate::company::copilot::is_copilot_thread(chat_id);
         // Issue #463: did the REST chat handler already card this message?
         //
-        // Answered by looking, not by re-deriving the handler's decision: the
-        // handler stamps every card it opens with the message's own journal
-        // position (`origin_message_seq`), so `chat_handler_card` finds it by
-        // identity. The triage naming a title used to be evidence of a card
-        // too — the handler minted one on it — but that road is closed
-        // (tracking is a tool call, see `open_work_card`), and the one signal
-        // the handler still cards on, the composer's workflow control, is
-        // read alongside the lookup because a copilot thread suppresses the
-        // card while leaving the signal set.
-        let handler_card = self.chat_handler_card().await?;
-        let carded_by_handler = workflow_requested || handler_card.is_some();
+        // The handler's task-intent detector is the authority for whether it
+        // carded this message. Its best-effort write may be absent by the time
+        // this runner looks, but that must not reopen the same work through a
+        // delegation: one message still gets at most one card.
+        let carded_by_handler = triage.title().is_some() || workflow_requested;
+        let handler_card = match carded_by_handler {
+            true => self.chat_handler_card().await?,
+            false => None,
+        };
         // Issue #1152: the mirror image of `workflow_requested` — the operator
         // said this message is not a request for work at all.
         //

@@ -3592,7 +3592,10 @@ impl HarnessBrain {
         drop(record);
         self.tinyhivemind_responder(Some(chat), text, &[])
             .await
-            .map(|decision| decision.responder_id)
+            .and_then(|decision| {
+                (decision.disposition == tinyhivemind::responder::SelectionDisposition::Selected)
+                    .then_some(decision.responder_id)
+            })
     }
 }
 
