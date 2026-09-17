@@ -31,6 +31,14 @@
     <meta name="theme-color" content="#191919" />
 
     <!--
+      Product analytics for the operator console. The OpenPanel browser client
+      owns screen-view, outgoing-link, and `data-op-*` attribute collection;
+      this public client id is intentionally safe to ship in the bundle. Keep
+      credentials with write authority in the host-only analytics transport.
+    -->
+    <script src="/openpanel-init.js" defer></script>
+
+    <!--
       Optional runtime configuration for deployments that serve the built assets
       as static files (no rebuild needed). Point it at any OpenCompany host:
 

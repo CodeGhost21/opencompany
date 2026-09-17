@@ -11,6 +11,7 @@ import { purgeStoredSmtpPasswords } from "@/lib/domain";
 import { installExternalLinkOpener } from "@/lib/external-links";
 import { startScrollActivity } from "@/lib/scroll-activity";
 import { initSentry, isReporting } from "@/lib/sentry";
+import { OpenPanelTracking } from "@/lib/openpanel";
 import "./index.css";
 
 /**
@@ -46,6 +47,7 @@ function mount(): void {
           />
         )}
       >
+        <OpenPanelTracking />
         <ThemeProvider
           attribute="class"
           defaultTheme="system"

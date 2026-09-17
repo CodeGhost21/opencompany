@@ -1,0 +1,53 @@
+import { useEffect } from "react";
+
+type OpenPanelCommand = (command: "track", event: string, properties: Record<string, unknown>) => void;
+
+declare global {
+  interface Window {
+    op?: OpenPanelCommand;
+  }
+}
+
+/** The stable, non-identifying screen name for the hash-routed console. */
+export function currentScreen(location: Location = window.location): string {
+  const [head = "home"] = location.hash.replace(/^#\/?/, "").split("?", 1)[0].split("/", 1);
+  return /^[a-z0-9_-]+$/i.test(head) ? head.toLowerCase() : "unknown";
+}
+
+function track(event: string, properties: Record<string, unknown>): void {
+  window.op?.("track", event, properties);
+}
+
+/**
+ * Captures navigation and activation across the React console without exposing
+ * control labels, routes' dynamic segments, or any operator-provided content.
+ */
+export function installOpenPanelTracking(doc: Document = document): () => void {
+  const screenView = () => track("screen_viewed", { screen: currentScreen() });
+  const buttonClick = (event: MouseEvent) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const control = target.closest<HTMLElement>('button, [role="button"]');
+    if (!control) return;
+
+    track("button_clicked", {
+      screen: currentScreen(),
+      control: control.tagName === "BUTTON" ? "button" : "role-button",
+      button_type: control instanceof HTMLButtonElement ? control.type : null,
+    });
+  };
+
+  screenView();
+  window.addEventListener("hashchange", screenView);
+  doc.addEventListener("click", buttonClick, true);
+  return () => {
+    window.removeEventListener("hashchange", screenView);
+    doc.removeEventListener("click", buttonClick, true);
+  };
+}
+
+/** React lifecycle owner for the console-wide OpenPanel listeners. */
+export function OpenPanelTracking(): null {
+  useEffect(() => installOpenPanelTracking(), []);
+  return null;
+}
