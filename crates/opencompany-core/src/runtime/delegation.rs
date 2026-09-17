@@ -4155,6 +4155,43 @@ pub(crate) fn turn_conversation() -> Option<String> {
     TURN_CONVERSATION.try_with(Clone::clone).ok().flatten()
 }
 
+tokio::task_local! {
+    /// The engine a tool may run ONE bounded peer turn on, for the length of
+    /// this turn (#2368).
+    ///
+    /// `desk_dm` starts an exchange it has no way to finish. It queues the
+    /// recipient's turn and returns `"Left for @peer."` — a success for work
+    /// that has not happened — so the asking turn ends on a receipt, the answer
+    /// lands in the pair thread after that turn closed, and nothing wakes the
+    /// asker to read it. In a live run the reply sat unread at seq 49 until an
+    /// operator message a turn later happened to sweep it up. The asker is not
+    /// at fault: it was told its request succeeded.
+    ///
+    /// A task-local for the reason [`TURN_CONVERSATION`] is one — the belt is
+    /// built once per agent, and the engine is not known at that point — and
+    /// set brain-side, where [`RunTurn`] already exists, exactly as
+    /// [`CHAT_ONLY_TURN`] is. Rides an existing scope rather than nesting a new
+    /// one around the turn future: a fourth `task_local!` there already pushed
+    /// type inference past its recursion limit (see [`TurnSpeech`]).
+    ///
+    /// Absent — a test, a non-harness caller, a turn with no engine — means the
+    /// tool keeps the queue path, which is the behaviour this replaces rather
+    /// than a degraded one: the message is still durable, still journaled, and
+    /// still read on the recipient's next turn.
+    static TURN_PEER_RUNNER: Option<Arc<dyn RunTurn>>;
+}
+
+/// Run `fut` with the bounded peer-turn engine available to this turn's tools.
+pub async fn with_peer_runner<F: Future>(runner: Option<Arc<dyn RunTurn>>, fut: F) -> F::Output {
+    TURN_PEER_RUNNER.scope(runner, fut).await
+}
+
+/// The engine a tool may run one bounded peer turn on, if this turn has one.
+#[must_use]
+pub fn peer_runner() -> Option<Arc<dyn RunTurn>> {
+    TURN_PEER_RUNNER.try_with(Clone::clone).ok().flatten()
+}
+
 /// Run `fut` with the [`CHAT_ONLY_TURN`] hint set to `chat_only`.
 pub(crate) async fn with_chat_only_hint<F: std::future::Future>(
     chat_only: bool,

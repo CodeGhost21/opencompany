@@ -4174,6 +4174,148 @@ fn reply_thread(asked_in: Option<EventSeq>, message_seq: EventSeq) -> Option<Eve
     Some(asked_in.unwrap_or(message_seq))
 }
 
+/// Mint a crossing marker for every `desk_dm` a turn sent (#2368).
+///
+/// # Why post-turn, and why it reads the journal
+///
+/// A crossing folds onto the row that RAISED it, and for a tool that row is the
+/// turn's own reply — composed and journaled after every tool has run. The tool
+/// cannot mint its own marker: the sequence it would key on does not exist yet.
+///
+/// The DM rows, however, are already durable by then — the tool appended them
+/// while the turn ran. So this reads them back rather than carrying them out
+/// through `TurnOutcome`, `OperatorTurn` and `OutboundMessage`, which is three
+/// types widened to move data across one function boundary.
+///
+/// # Which rows belong to this crossing
+///
+/// Those in a pair conversation this author is in, below the reply, and above
+/// the last marker already minted for that conversation. That last bound is the
+/// same rule the fold applies forward — *"the rows between two markers are the
+/// rows that marker caused"* — read backwards, so a second `desk_dm` to the
+/// same teammate cannot re-claim the first one's rows.
+async fn mark_turn_dms(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    desk: &str,
+    author: &str,
+    reply_seq: u64,
+) {
+    // **A turn taken INSIDE a pair thread is a leg, not a new crossing.**
+    //
+    // The peer's reply runs as its own turn, journaled to the same `dm:<a>+<b>`
+    // key, so it looks exactly like a DM worth marking — and marking it minted
+    // a second marker for the one exchange, pointing at a `to_desk` that is the
+    // pair thread itself. No operator timeline draws that desk, so the marker
+    // rendered nowhere; worse, it became the boundary that bounds the REAL
+    // chip, truncating it to the question and cutting off the answer it was
+    // minted to show.
+    if pair_peer(desk, author).is_some() {
+        return;
+    }
+    // Bounded: a turn's own DMs are within a page of its reply, and a marker
+    // that is missed renders no chip rather than a wrong one.
+    const SCAN: usize = 256;
+    let Ok(recent) = runtime
+        .events()
+        .read_before(id, Some(EventSeq::new(reply_seq)), SCAN)
+        .await
+    else {
+        return;
+    };
+    let Some(record) = runtime.store().load(id).await.ok().flatten() else {
+        return;
+    };
+    // Newest first, so the first marker seen for a conversation is the most
+    // recent one and everything older than it belongs to an earlier crossing.
+    let mut floor: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut rows: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+    for stored in &recent {
+        match &stored.event {
+            // **This turn's own DMs, and no earlier turn's.**
+            //
+            // Reading newest-first, the turn under way began at the first
+            // `TurnStarted` below its reply; everything older belongs to a turn
+            // that already ended. Bounding on the previous MARKER instead let a
+            // turn that had failed leak into this one — a live run marked
+            // `rows: [39, 46]` where 39 was a question asked by a turn that then
+            // errored, so a fresh chip opened with a stale unanswered line.
+            CompanyEvent::TurnStarted { .. } => break,
+            CompanyEvent::ReferralEnqueued {
+                conversation: Some(seen),
+                ..
+            } => {
+                floor.entry(seen.clone()).or_insert(stored.seq.value());
+            }
+            // **Either party's rows, not only the asker's.**
+            //
+            // When the peer's turn runs inline the answer lands in this same
+            // pair thread during this same turn, authored by the peer. Matching
+            // on the asker alone therefore named a range that covered the
+            // question and stopped short of the reply, and the chip could only
+            // ever say "1 message" — the one shape the range exists to prevent.
+            // `pair_peer` still does the gating: it is `None` for anything that
+            // is not one of THIS author's pair threads.
+            CompanyEvent::AgentReply {
+                chat_id, agent_id, ..
+            } if pair_peer(chat_id, author).is_some() => {
+                let Some(peer) = pair_peer(chat_id, author) else {
+                    continue;
+                };
+                let _ = agent_id;
+                if floor.get(chat_id).is_some_and(|at| stored.seq.value() < *at) {
+                    continue;
+                }
+                let at = stored.seq.value();
+                rows.entry(chat_id.clone())
+                    .and_modify(|(open, _)| *open = (*open).min(at))
+                    .or_insert((at, at));
+                let _ = peer;
+            }
+            _ => {}
+        }
+    }
+    for (conversation, (opened, closed)) in rows {
+        let Some(peer) = pair_peer(&conversation, author) else {
+            continue;
+        };
+        let event = CompanyEvent::ReferralEnqueued {
+            conversation: Some(conversation),
+            rows: Some((opened, closed)),
+            answers: None,
+            from_desk: desk.to_string(),
+            from_desk_name: crate::server::chat_history::desk_display_name(&record, desk),
+            asker: author.to_string(),
+            asker_label: author.to_string(),
+            trigger_sequence: reply_seq,
+            to_desk: desk.to_string(),
+            target: peer,
+            returning: false,
+        };
+        if let Err(error) = runtime.events().append(id, event).await {
+            tracing::warn!(
+                company = %id,
+                error = %error,
+                "[speech] a desk_dm could not be marked; it stays durable but renders no chip"
+            );
+        }
+    }
+}
+
+/// The other party in a `dm:<a>+<b>` conversation, or `None` when this is not
+/// one of `author`'s pair threads.
+///
+/// Agent ids are snake_case, so `+` separates them unambiguously.
+fn pair_peer(conversation: &str, author: &str) -> Option<String> {
+    let rest = conversation.strip_prefix("dm:")?;
+    let (left, right) = rest.split_once('+')?;
+    match (left == author, right == author) {
+        (true, false) => Some(right.to_string()),
+        (false, true) => Some(left.to_string()),
+        _ => None,
+    }
+}
+
 pub(crate) async fn journal_chat_replies(
     runtime: &Arc<CompanyRuntime>,
     id: &CompanyId,
@@ -4280,6 +4422,12 @@ pub(crate) async fn journal_chat_replies(
         match journaled {
             Ok(seq) => {
                 response.message_id = Some(seq.value().to_string());
+                // The chip for any `desk_dm` this turn sent. Here rather than in
+                // the tool because a crossing folds onto the row that raised it,
+                // and that row is the line just journaled above (#2368).
+                if let Some(author) = response.agent.as_deref() {
+                    mark_turn_dms(runtime, id, &response_desk, author, seq.value()).await;
+                }
                 // The durable half of a reply's mention, same as an operator
                 // message's (issue: mentions). Without this an `@user` an agent
                 // types back renders as a chip and nothing else — the badge and

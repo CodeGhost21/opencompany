@@ -55,6 +55,7 @@ async fn two_crossings_to_one_person_each_fold_their_own_exchange() {
         to_desk: "engineering".to_string(),
         target: "researcher".to_string(),
         returning: false,
+        rows: None,
     };
 
     // Two crossings to the same person, each with its own two-row exchange.
@@ -183,6 +184,7 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
                 to_desk: "design".to_string(),
                 target: "product_designer".to_string(),
                 returning: false,
+                rows: None,
             },
         )
         .await
@@ -270,6 +272,7 @@ async fn a_convened_desks_own_turns_are_the_folded_crossing() {
             to_desk: "engineering".to_string(),
             target: "software_engineer".to_string(),
             returning: true,
+            rows: None,
         },
         CompanyEvent::AgentReply {
             chat_id: "engineering".to_string(),
@@ -386,6 +389,7 @@ async fn an_unrelated_pairs_marker_does_not_end_this_crossings_window() {
         to_desk: to.to_string(),
         target: target.to_string(),
         returning: false,
+        rows: None,
     };
     // This crossing: engineering asks design.
     runtime

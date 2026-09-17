@@ -347,6 +347,7 @@ fn a_crossing_names_the_thread_whose_fold_changed() {
         to_desk: "design".into(),
         target: "product_designer".into(),
         returning: false,
+        rows: None,
     }))
     .expect("a crossing is projected at all");
 
@@ -394,6 +395,7 @@ fn a_returning_crossing_names_the_desk_that_asked() {
         to_desk: "engineering".into(),
         target: "software_engineer".into(),
         returning: true,
+        rows: None,
     }))
     .expect("a return is projected at all");
 

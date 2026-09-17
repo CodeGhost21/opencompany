@@ -2149,7 +2149,7 @@ impl CompanyAgent {
             *self.session.lock().await = next_state;
         }
         let outcome = reply.map(|reply| TurnOutcome {
-            reply: if overrides.suppress_tools {
+                reply: if overrides.suppress_tools {
                 chat_only_guard::guard_suppressed_reply(reply)
             } else {
                 reply

@@ -50,9 +50,31 @@ impl RunTurn for HarnessRunTurn {
         message: &str,
         chat: ChatTarget<'_>,
     ) -> Result<TurnOutcome> {
-        self.pool
-            .run(company, agent_id, message, &self.deps, chat)
-            .await
+        // **Hand the turn an engine it can run ONE bounded peer turn on.**
+        //
+        // `desk_dm` starts an exchange and has no way to finish it: it queues
+        // the recipient and returns a success for work that has not happened,
+        // so the asking turn ends on a receipt and the answer lands after it
+        // closed, with nothing to wake the asker (#2368). The engine is the
+        // missing half, and this is the one place every turn passes through —
+        // chat, dispatch, approval, and a room's own seats alike — so scoping
+        // it here reaches them all without a second wiring site.
+        //
+        // A fresh lane over the same two `Arc`s rather than a `Weak<Self>`:
+        // both are already owned here, cloning them is two refcount bumps, and
+        // a self-reference would make the lane's lifetime depend on who still
+        // holds it. Re-entrancy is the tool's to bound, not this seam's — the
+        // peer's own turn arrives back here and is handed an engine too, which
+        // is correct (a peer may need to ask someone as well) and is why
+        // `desk_dm` checks the hop against `max_delegation_depth` before it
+        // runs anyone.
+        let runner: Arc<dyn RunTurn> =
+            Arc::new(Self::new(self.pool.clone(), self.deps.clone()));
+        crate::runtime::delegation::with_peer_runner(
+            Some(runner),
+            self.pool.run(company, agent_id, message, &self.deps, chat),
+        )
+        .await
     }
 
     async fn run_steered(

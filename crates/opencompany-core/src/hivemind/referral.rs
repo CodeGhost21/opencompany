@@ -270,6 +270,30 @@ impl HiveFederation {
             .collect()
     }
 
+    /// The peer desks of `home` that `agent` actually sits on.
+    ///
+    /// [`peers_of`](Self::peers_of) answers for the DESK, and the episode built
+    /// one such list and handed the identical copy to every seat — so a member
+    /// was offered every other desk in the company, including ones it has no
+    /// standing in and cannot read a word of. That is not a cost-free
+    /// over-offer: the block it renders into says in as many words that a
+    /// member who spends its one line on a move it should not make has spent a
+    /// turn of the room's budget on nothing.
+    ///
+    /// Scoped by membership because membership is what makes the answer
+    /// legible. `agent_channels` gives a seat the desks it sits on, so a
+    /// crossing to one of those lands somewhere the asker can read — while a
+    /// crossing to a desk it is not on returns one report line and nothing
+    /// behind it, which is how a live run spent six turns on `returns` and came
+    /// back with a settlement tag both asking seats had to re-ask about.
+    #[must_use]
+    pub fn peers_of_member<'a>(&'a self, home: &str, agent: &str) -> Vec<&'a FederationDesk> {
+        self.peers_of(home)
+            .into_iter()
+            .filter(|desk| desk.members.iter().any(|member| member == agent))
+            .collect()
+    }
+
     /// The roster this federation resolves mentions against.
     #[must_use]
     pub fn roster_members(&self) -> Vec<RosterMember> {
@@ -930,6 +954,10 @@ impl<'a> EpisodeReferrals<'a> {
                     .await
                     .then(|| pair_conversation(&referral.source_id, &referral.target_id)),
             },
+            // A deliberation crossing writes its rows AFTER this marker, so the
+            // fold finds them by scanning forward and needs no range. Only a
+            // tool-sent DM inverts that order (#2368).
+            rows: None,
             from_desk: referral.from.desk_id.clone(),
             from_desk_name: self.desk_name(&referral.from.desk_id),
             asker: referral.source_id.clone(),

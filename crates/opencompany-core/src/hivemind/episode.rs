@@ -430,17 +430,43 @@ impl<'a> EpisodeDriver<'a> {
         let can_ask = referrals
             .as_ref()
             .is_some_and(|(_, _, policy)| policy.enabled);
-        let peers: Vec<(String, String, Option<String>)> = referrals
+        // Carries each peer desk's members, because the list is narrowed PER
+        // SEAT below and this snapshot is the only place the federation is
+        // read. Taken once for the episode for the reason `HiveFederation`
+        // itself is a snapshot: a company whose desks changed mid-episode would
+        // offer later turns a roster the earlier ones never saw.
+        let peers: Vec<(String, String, Option<String>, Vec<String>)> = referrals
             .as_ref()
             .filter(|(_, _, policy)| policy.enabled && policy.reach.addresses_desks())
             .map(|(federation, _, _)| {
                 federation
                     .peers_of(&self.desk.id)
                     .into_iter()
-                    .map(|desk| (desk.id.clone(), desk.name.clone(), desk.description.clone()))
+                    .map(|desk| {
+                        (
+                            desk.id.clone(),
+                            desk.name.clone(),
+                            desk.description.clone(),
+                            desk.members.clone(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
+        // **What ONE seat may ask, not what the desk may ask.**
+        //
+        // The same list used to go to every member of the room, because it was
+        // built from the desk's peers and cloned per turn. A seat was therefore
+        // offered desks it does not sit on, cannot read, and gets nothing back
+        // from but a single report line — which is the whole of the containment
+        // question: membership is what makes a crossing's answer legible.
+        let peers_for = |agent: &str| -> Vec<(String, String, Option<String>)> {
+            peers
+                .iter()
+                .filter(|(_, _, _, members)| members.iter().any(|member| member == agent))
+                .map(|(id, name, about, _)| (id.clone(), name.clone(), about.clone()))
+                .collect()
+        };
 
         let ending = loop {
             let transcript = tinyhivemind_hive::project_session(
@@ -574,7 +600,7 @@ impl<'a> EpisodeDriver<'a> {
                         .with_recall(&recall)
                         .with_elsewhere(&elsewhere)
                         .with_unspoken(&unspoken)
-                        .with_peers(peers.clone())
+                        .with_peers(peers_for(&turn.agent_id))
                         .desks_deliberate(deliberates)
                         .able_to_ask(can_ask)
                         .with_trigger(Sequence(trigger.value()))
@@ -880,7 +906,7 @@ impl<'a> EpisodeDriver<'a> {
                         .with_recall(&recall)
                         .with_elsewhere(&carried)
                         .with_unspoken(&unspoken)
-                        .with_peers(peers.clone())
+                        .with_peers(peers_for(&turn.agent_id))
                         .desks_deliberate(deliberates)
                         .able_to_ask(can_ask)
                         .with_trigger(Sequence(trigger.value()))
@@ -1439,10 +1465,10 @@ impl<'a> EpisodeDriver<'a> {
         // fields: `in_desk` matches on id or name, and a desk that happened to be
         // named like an agent could otherwise widen the match.
         //
-        // The direct line carries TWO targets, not one (Codex P2): a `desk_dm`
-        // is journaled under the bare agent id ordinarily, but under the
+        // The direct line carries TWO targets, not one (Codex P2): an operator
+        // DM is journaled under the bare agent id ordinarily, but under the
         // `dm:<agent-id>` spelling whenever the bare one collides with a desk id
-        // (`speech_tools::dm_journal_key`) or names a General spelling (issue
+        // or names a General spelling (issue
         // #364's grandfather case) — `agent_channels` registers both for exactly
         // this reason, and `EventLogSessionLog::addresses_desk` matches on
         // whichever exact spelling a row was journaled under. Reading only the

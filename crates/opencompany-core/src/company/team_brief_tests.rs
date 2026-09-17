@@ -128,9 +128,22 @@ fn the_section_names_the_tools_by_their_real_names() {
         section.contains(&format!("`{DELEGATE_TO_TEAMMATE_TOOL}`")),
         "{section}"
     );
+}
+
+/// The brief no longer advertises `delegate_to_desk`.
+///
+/// It used to name both tools, which put a desk-wide hand-off in front of every
+/// seat on every turn — and a hand-off takes ONE turn from whoever leads that
+/// desk, quietly skipping the deliberation the desk exists for. A crossing
+/// (`@#desk`) is the move that asks a desk a question, and it is advertised by
+/// the episode prompt to the seats a policy actually permits it to. Naming the
+/// tool here reached further than that policy and said nothing about its cost.
+#[test]
+fn the_section_does_not_advertise_the_desk_hand_off() {
+    let section = team_section(&record(TEAM), "writer");
     assert!(
-        section.contains(&format!("`{DELEGATE_TO_DESK_TOOL}`")),
-        "{section}"
+        !section.contains("delegate_to_desk"),
+        "the brief must not put a desk-wide hand-off on every seat's turn: {section}"
     );
 }
 

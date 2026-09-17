@@ -720,6 +720,22 @@ pub enum CompanyEvent {
         /// every other field here is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         conversation: Option<String>,
+        /// The first and last rows of the exchange inside [`Self::conversation`].
+        ///
+        /// The fold finds a crossing's rows by scanning FORWARD from this
+        /// marker, which holds while the rows are written by the deliberation
+        /// that raised them — the marker goes first, the turns follow. A
+        /// `desk_dm` inverts that: the tool journals during the turn, and the
+        /// marker folds onto the turn's own reply, which is composed after every
+        /// tool has run. So the rows sit BEFORE the marker and a forward scan
+        /// misses the question it is a chip for.
+        ///
+        /// Carrying both ends makes the fold independent of journal order.
+        /// Absent on a crossing whose rows do follow it, which is every marker
+        /// written before this field existed — defaulted for the reason every
+        /// other field here is (#2368).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<(u64, u64)>,
         /// The agent that asked. Defaulted for the reason above.
         #[serde(default)]
         asker: String,
