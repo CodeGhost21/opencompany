@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { VIEWS } from "./console-routes";
 
 type OpenPanelCommand = (command: "track", event: string, properties: Record<string, unknown>) => void;
 
@@ -10,8 +11,11 @@ declare global {
 
 /** The stable, non-identifying screen name for the hash-routed console. */
 export function currentScreen(location: Location = window.location): string {
-  const [head = "home"] = location.hash.replace(/^#\/?/, "").split("?", 1)[0].split("/", 1);
-  return /^[a-z0-9_-]+$/i.test(head) ? head.toLowerCase() : "unknown";
+  const [head = ""] = location.hash.replace(/^#\/?/, "").split("?", 1)[0].split("/", 1);
+  if (!head) return "home";
+  return VIEWS.includes(head.toLowerCase() as (typeof VIEWS)[number])
+    ? head.toLowerCase()
+    : "unknown";
 }
 
 function track(event: string, properties: Record<string, unknown>): void {

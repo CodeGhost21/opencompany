@@ -31,10 +31,11 @@
     <meta name="theme-color" content="#191919" />
 
     <!--
-      Product analytics for the operator console. The OpenPanel browser client
-      owns screen-view, outgoing-link, and `data-op-*` attribute collection;
-      this public client id is intentionally safe to ship in the bundle. Keep
-      credentials with write authority in the host-only analytics transport.
+      Product analytics for the browser operator console is opt-in through
+      `OPENCOMPANY_CONFIG.analytics`. Automatic URL and attribute collection
+      stays disabled; desktop builds remain silent. This public client id is
+      intentionally safe to ship in the bundle. Keep credentials with write
+      authority in the host-only analytics transport.
     -->
     <script src="/openpanel-init.js" defer></script>
 

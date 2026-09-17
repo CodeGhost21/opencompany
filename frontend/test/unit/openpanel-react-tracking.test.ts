@@ -59,4 +59,14 @@ describe("OpenPanel React tracking", () => {
     window.location.hash = "#/customer%20name/private";
     expect(currentScreen()).toBe("unknown");
   });
+
+  it("does not publish an unknown route head", () => {
+    window.location.hash = "#/customer-123/private";
+    expect(currentScreen()).toBe("unknown");
+  });
+
+  it("maps the root route to home", () => {
+    window.location.hash = "#/";
+    expect(currentScreen()).toBe("home");
+  });
 });

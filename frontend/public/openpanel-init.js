@@ -1,5 +1,8 @@
-// Product analytics for the operator console. This stays a same-origin static
-// file so the desktop's strict CSP need not permit inline scripts.
+// Product analytics for the browser console. The host must explicitly opt in;
+// desktop builds and self-hosted consoles stay silent by default.
+if (window.__TAURI_INTERNALS__ || window.OPENCOMPANY_CONFIG?.analytics !== true) {
+  // No analytics client is installed in the desktop or default deployment.
+} else {
 window.op = window.op || function () {
   var queue = [];
   return new Proxy(function () {
@@ -18,11 +21,12 @@ window.op("init", {
   apiUrl: "https://panel.tinyhumans.ai/api",
   clientId: "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a",
   trackScreenViews: true,
-  trackOutgoingLinks: true,
-  trackAttributes: true,
+  trackOutgoingLinks: false,
+  trackAttributes: false,
 });
 
 var openPanelScript = document.createElement("script");
 openPanelScript.src = "https://openpanel.dev/op1.js";
 openPanelScript.async = true;
 document.head.appendChild(openPanelScript);
+}

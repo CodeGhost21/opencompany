@@ -14,7 +14,7 @@ The short version, and the only four sentences most readers need:
   `OPENCOMPANY_ANALYTICS=on`, both deliberate. The shared console separately
   uses OpenPanel's public browser client to record UI navigation; see the
   [console note](#console-browser-events). See [Configuration](#configuration)
-  for the six host-side conditions in full.
+  for the seven host-side conditions in full.
 - A **hosted tenant** — a container the OpenCompany platform provisioned and
   operates — reports **shape and outcome only**, under an **opaque id**.
 - Nothing an operator or an agent wrote ever leaves the process this way. Not
@@ -41,7 +41,7 @@ OpenPanel is AGPL-3.0 and runs from a compose file. Collection now lands on infr
 
 ## Console browser events
 
-The shared React console loads `https://openpanel.dev/op1.js` with public client id `afe8ec4e-0a6a-427a-aa22-49cbbf137d0a`, sending outgoing links and explicitly annotated attributes to `https://panel.tinyhumans.ai/api`, including from the desktop webview. Its React lifecycle additionally records every screen view and native or ARIA button activation, limited to a route head and control type so labels, query parameters, and dynamic segments never leave the console. Its CSP allows only those HTTPS origins. This public id is not the host transport's `OPENCOMPANY_ANALYTICS_CLIENT_ID` / secret pair; never put that secret in a browser bundle.
+The shared React console can load `https://openpanel.dev/op1.js` with public client id `afe8ec4e-0a6a-427a-aa22-49cbbf137d0a` only when its host explicitly opts in with `OPENCOMPANY_CONFIG.analytics: true`. Desktop and default self-hosted builds remain silent. Automatic outgoing-link and attribute collection stay disabled; the React lifecycle records only allowlisted screen names and button control types. This public id is not the host transport's `OPENCOMPANY_ANALYTICS_CLIENT_ID` / secret pair; never put that secret in a browser bundle.
 
 ## What is collected
 
