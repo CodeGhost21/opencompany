@@ -34,7 +34,6 @@ import {
   ReferralChip,
   AsideConversation,
   ReferralConversation,
-  StepTimeline,
 } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -468,15 +467,9 @@ export function MessageRow({
           />
         )}
 
-        {message.steps && message.steps.length > 0 && <StepTimeline steps={message.steps} />}
         {message.outputs && message.outputs.length > 0 && (
           <OutputLinkRow outputs={message.outputs} />
         )}
-        {/* The running turn this message asked for. Opens by default: unlike a
-            settled turn's steps — which sit behind a count because the answer
-            above them is what the reader came for — there is no answer yet, and
-            these rows are the only account of what is happening. */}
-        {!!liveSteps?.length && <StepTimeline steps={[...liveSteps]} defaultOpen />}
         {/* Provenance for a crossing referral: this turn exists because another
             desk asked, and the reader of THIS desk cannot tell otherwise. */}
         {message.referredFrom && (
