@@ -887,9 +887,7 @@ impl DelegationQueue {
         // condition would have given it no bound at all.
         if matches!(
             delegation,
-            Delegation::DelegateToDesk { .. }
-                | Delegation::DelegateToTeammate { .. }
-                | Delegation::ConversationDispatch { .. }
+            Delegation::DelegateToDesk { .. } | Delegation::DelegateToTeammate { .. }
         ) && self.scope_depth() >= max_depth
         {
             return Staged::NoDrain(NoDrainReason::Depth);
