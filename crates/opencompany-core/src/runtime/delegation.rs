@@ -2121,7 +2121,7 @@ impl<'a> DelegationRunner<'a> {
             let (out, target) = outcome?;
             drained.absorb(out, target);
         }
-        if self.queue.queued() > 0 {
+        if self.queue.has_queued() {
             let nested = Box::pin(self.drain_and_execute(chat_id, ctx, hand_offs)).await?;
             drained.merge(nested);
         }
