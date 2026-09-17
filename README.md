@@ -8,13 +8,15 @@
 <h1 align="center">OpenCompany</h1>
 
 <p align="center">
-  <strong>Run an entire company with a headcount of one.</strong>
+  <strong>A hive mind that runs your company. Headcount: one.</strong>
 </p>
 
 <p align="center">
   OpenCompany is the operating layer for one-person businesses powered by
-  agents. You bring the vision and the judgment calls. Your agents do the work:
-  every function, around the clock, at the speed of software.
+  agents. Not a team of agents taking turns, but a hive mind: a roster that
+  deliberates like a colony, converges on decisions it can explain, and does
+  the work of every function around the clock. You bring the vision and the
+  judgment calls. The hive does the rest.
 </p>
 
 <p align="center">
@@ -40,6 +42,22 @@
 
 ---
 
+## Download
+
+The quickest way in is the desktop app. Get it from the website or straight
+from the GitHub release:
+
+- **Website**: **[tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)**
+  — the download button picks the right build for your machine.
+- **GitHub Releases**:
+  **[github.com/tinyhumansai/opencompany/releases/latest](https://github.com/tinyhumansai/opencompany/releases/latest)**
+  — the `.dmg` for Apple Silicon (`aarch64`) or Intel (`x64`) Macs, plus the
+  release notes.
+
+Open the `.dmg`, drag OpenCompany into Applications, launch it, and pick a
+company. The app updates itself from the same releases page. Prefer to run the
+host yourself, in Docker or from source? Jump to the [Quickstart](#quickstart).
+
 ## The company of one
 
 For a century, ambition meant headcount. Want to ship a product? Hire engineers.
@@ -52,10 +70,109 @@ recruiters, all instantiated as agents, coordinated by one host, working while
 you sleep. You stay where humans are irreplaceable: **capital, taste, and the
 decisions that actually matter.** Everything else is delegated.
 
-This isn't a chatbot with a to-do list. It's a **company runtime**: a durable
-host that stands up a roster of specialized agents, gives each one a clear
-mandate, and runs them as a coordinated business on top of the OpenHuman and
+This isn't a chatbot with a to-do list, and it isn't a pipeline of agents
+handing a ticket down the line. It's a **company runtime**: a durable host that
+stands up a roster of specialized agents, gives each one a clear mandate, seats
+them at desks, and lets each desk think as a hive on top of the OpenHuman and
 TinyHumans runtimes.
+
+## Not a team of agents. A hive mind.
+
+Most "multi-agent" systems are fan-out: publish a task, wake N agents, collect
+the replies, average them somehow. That's a thread pool with a prompt attached.
+It has no notion of who is convinced, no way to register a grounded objection,
+no reason to stop other than running out of members, and no answer when you ask
+afterwards why the group chose what it chose.
+
+Real collectives don't work that way. Ant colonies, honeybee swarms and termite
+mounds reach decisions with no leader, no shared memory and far less bandwidth
+than five language models sharing a channel, and the mechanisms that let them
+have been studied for decades. OpenCompany runs its desks on those mechanisms,
+via [tinyhivemind](https://github.com/tinyhumansai/tinyhivemind), the hive-mind
+library that grew out of this repo.
+
+### How a desk thinks
+
+A message to a desk with two or more members doesn't pick a responder. It opens
+an **episode**: a bounded sequence of rounds in which members deposit marker
+lines into the desk's shared transcript, and a pure fold over that transcript
+decides who speaks next and when the room is done.
+
+```text
+!propose #stage Stage the rollout across three regions.
+!support #stage ^1 Staging bounds the blast radius if the migration is wrong.
+!object  >3      The regions are not independent, so this bounds nothing.
+!commit  #stage
+```
+
+- **Stigmergy.** Work leaves a trace in a shared medium, and the trace is the
+  stimulus for the next piece of work. Nobody dispatches anybody and no agent
+  addresses another. The transcript is the medium; a marker line is a deposit
+  in it.
+- **Quorum sensing.** An option carries when enough *distinct* members have
+  *grounded* support for it inside a window, the way a honeybee swarm settles a
+  nest site. Not a majority, not a score to beat. A `!support` with no citation
+  counts for nothing, and a late member folds to exactly the same standing as
+  one that watched live.
+- **Cross-inhibition.** An objection names a *message* and removes its author
+  from the supporter set of whatever they were advocating. It doesn't debit the
+  option. Subtracting from a score can't break a tie between two equally backed
+  options; silencing an advocate can. Honeybees do this too, with stop signals.
+- **Pheromone decay.** A trace's pull on the room's attention decays with
+  distance in the transcript, so whoever spoke first doesn't hold the floor
+  forever. The trace's standing importance is the floor under that decay, which
+  is why a proposal nobody has touched for eighty messages still outranks a
+  fresh question.
+- **Response thresholds.** Every member computes an urge from the salience
+  field and its own affinity, and whoever bids highest takes the floor. A
+  member whose urge never clears its threshold doesn't bid at all. That's the
+  response-threshold model of division of labour in social insects, and it's
+  what keeps a specialist quiet on questions it has nothing to add to.
+
+### Why it converges instead of conforming
+
+- **The first round is blind.** Each member deposits what it knows before it
+  can read its peers, because a shared transcript destroys independence: the
+  third speaker has already read the first two. And what a blind member is
+  asked for is a *deposit*, not a position. On a desk of specialists, where one
+  member holds the decisive fact and the rest share a prior, asking for
+  positions lets the shared prior reach quorum before the informed member says
+  anything. On the hidden-profile benchmark, asking for deposits takes a room
+  from **16% to 67%** correct.
+- **A reason to stop.** An episode ends on a quorum it can name, a deadlock
+  between two carried options, a spent turn budget, or a room that has nothing
+  to say. Never because one agent decided it was finished. One operator message
+  is one bounded number of turns, whatever the desk's size.
+- **Small budgets on purpose.** Conformity among language models rises with
+  interaction time, so a long episode buys correlated error rather than better
+  judgement. The default budget is small, and raising it is a decision you make
+  per desk, not a setting you forget.
+- **Cross-desk referral.** Members of one desk read the same transcript, work
+  the same part of the company, and are wrong about the same things. Averaging
+  correlated error doesn't remove it; only pooling *across* the boundary can. A
+  desk can put a question to another desk, which answers with one real turn on
+  its own channel, and what crosses carries information, never a vote. Three
+  desks each confidently wrong about a different option: deliberating inside
+  them scored **0.2%**; crossing between them, **77.5%**.
+- **Private asides, off by default.** Two members of a desk can compare notes
+  without the room, and the exchange is on the record even though the room
+  can't read it. The library measured it: it loses 15 points on a hidden
+  profile, because averaging inside one correlated desk imports the shared
+  bias. So it's a knob you turn on deliberately, not a feature that's on.
+
+### What you get out of it
+
+Every episode closes with a line the operator can read: what carried, who
+supported it, what was objected to and why, or that the desk deadlocked and
+between what. Decisions that settled long ago stay on a pinboard so they don't
+scroll away, and a desk remembers its past episodes. A desk of one behaves
+byte-for-byte like a single agent, so nothing here costs you anything until a
+desk has somebody to deliberate with.
+
+[`docs/spec/runtime/hivemind.md`](docs/spec/runtime/hivemind.md) has the whole
+mechanism, and the
+[tinyhivemind benchmarks](https://github.com/tinyhumansai/tinyhivemind/wiki/Benchmarks)
+have the numbers.
 
 ## What one person can now run
 
@@ -63,7 +180,7 @@ Every folder under [`companies/`](companies/) is a complete company you can
 launch today, with a roster of agents, their responsibilities, and the handful
 of moments where a human signs off:
 
-| You want to run a… | Your agents handle | You keep |
+| You want to run a… | The hive handles | You keep |
 | --- | --- | --- |
 | **[Venture Studio](companies/venture_studio/)** | Scouting, founding, building, launching, operating a portfolio | Capital allocation & strategy |
 | **[Startup Accelerator](companies/startup_accelerator/)** | Sourcing, screening, mentoring, demo day, investor intros | Investment decisions |
@@ -103,7 +220,6 @@ quickstart below uses `export` and `./scripts/launch-demo.sh`.
 git clone --recurse-submodules https://github.com/tinyhumansai/opencompany.git
 cd opencompany
 export TINYHUMANS_API_KEY="th-..."          # grab yours at tinyhumans.ai
-export OPENCOMPANY_FEATURES="medulla"       # compile in the hosted Medulla brain the key unlocks
 ./scripts/launch-demo.sh marketing up
 ```
 
@@ -118,8 +234,8 @@ itself? That path lives in [docs/running-locally.md](docs/running-locally.md):
 Cargo builds, Compose, feature flags, the Tauri desktop preview, and
 DigitalOcean / AWS deploys.
 
-> **You'll want a TinyHumans API key.** It's what unlocks Medulla and lets the
-> agents think and act. Without one you can still launch a company and look
+> **You'll want a TinyHumans API key.** It's what lets the agents think and
+> act. Without one you can still launch a company and look
 > around; the agents just won't do real work. Grab a key at
 > **[tinyhumans.ai](https://tinyhumans.ai)** and
 > `export TINYHUMANS_API_KEY="th-..."`.
@@ -129,36 +245,27 @@ DigitalOcean / AWS deploys.
 - **A real org chart, not a prompt.** Each company is declared as a roster of
   agents with distinct mandates in a simple `company.toml`. The host
   instantiates them, coordinates them, and keeps them running.
+- **Desks that think as a hive.** Any desk with two or more members answers as
+  a room: an episode of bounded rounds that converges on a named option, with
+  the proposals, support and objections on the record. A desk of one behaves
+  exactly like a single agent. No fan-out, no vote-averaging.
 - **Humans in the loop where it counts.** Every harness names the exact
   decisions reserved for you. Delegate the work; keep the judgment.
-- **Built on proven runtimes.** OpenCompany is a light host over OpenHuman and
-  the TinyHumans agent modules, so it reuses their runtime instead of
-  reinventing it.
+- **Built on proven runtimes.** OpenCompany is a light host over OpenHuman, the
+  TinyHumans agent modules and tinyhivemind, so it reuses their runtime and
+  their mechanics instead of reinventing them.
 - **Rust-fast and inspectable.** An Axum HTTP surface, a small default build,
   and deeper capabilities behind feature flags. Simple to start, honest to
   operate, easy to test.
 - **Yours to own.** GPL-3.0, self-hostable, no lock-in.
 
-## The engine: Medulla
-
-A company of one only works if something can hold the whole company in its head.
-That something is **Medulla**, TinyHumans' orchestrator model, purpose-built to
-run large fleets of agents as a single coordinated business.
-
-Medulla is orchestrator-first. Every event, whether a customer email, a market
-signal or a finished task, lands on a deep orchestration tier that reads the full
-picture, decides what matters, and fans the work out across your agents. As your
-company grows from nine agents to nine hundred, Medulla is what keeps it
-coherent, on-strategy, and moving without you in every message. It's a hosted
-model: you reach it with a TinyHumans API key, and OpenCompany is the open host
-that points your companies at it.
-
 ## Make it yours
 
 Each company folder holds a `company.toml`, a plain text file naming the roles,
-what each one owns, and where you want to be asked before anything happens. It's
-written to be read by people; changing a role is editing a few lines rather than
-programming. `opencompany check` reports any problems in plain language, and
+what each one owns, which desks they sit at, and where you want to be asked
+before anything happens. It's written to be read by people; changing a role, or
+tuning how a desk deliberates (its quorum, its turn budget, whether it can refer
+a question to another desk), is editing a few lines rather than programming. `opencompany check` reports any problems in plain language, and
 adding a new business is a new folder, not a new program.
 [Your first company](docs/gitbooks/get-started/your-first-company.md) walks through it.
 
@@ -196,10 +303,11 @@ configure it, and goes to your own Sentry project rather than ours —
 
 | Where | What's there |
 | --- | --- |
-| [`docs/gitbooks/`](docs/gitbooks/README.md) | The full docs: what OpenCompany is, what one person can run, how [Medulla](docs/gitbooks/overview/medulla.md) drives it |
+| [`docs/gitbooks/`](docs/gitbooks/README.md) | The full docs: what OpenCompany is, what one person can run, and how it holds together |
 | [`docs/running-locally.md`](docs/running-locally.md) | Docker, Compose, from-source builds, feature flags, desktop preview, deploy targets |
 | [`docs/repository-layout.md`](docs/repository-layout.md) | Where everything lives in the tree and what each package owns |
 | [`docs/spec/README.md`](docs/spec/README.md) | Architecture reference |
+| [`docs/spec/runtime/hivemind.md`](docs/spec/runtime/hivemind.md) | How a desk deliberates: episodes, rounds, quorum, [referral](docs/spec/runtime/hivemind-referral.md) and [asides](docs/spec/runtime/hivemind-asides.md) |
 | [`docs/gitbooks/developers/`](docs/gitbooks/developers/README.md) | Build, CLI, authoring companies, deployment, configuration |
 | [`scripts/qa/`](scripts/qa/README.md) | Checking a release against a deployed tenant |
 
@@ -223,6 +331,28 @@ questions get answered and large changes get argued out before they're built.
 - **X**: [@tinyhumansai](https://x.com/tinyhumansai)
 - **Reddit**: [r/tinyhumansai](https://www.reddit.com/r/tinyhumansai/)
 - **Website**: [tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)
+
+## Star us on GitHub
+
+_Running a company with a headcount of one? Star the repo and help others find the path._
+
+<p align="center">
+ <a href="https://www.star-history.com/#tinyhumansai/opencompany&type=date&legend=top-left">
+ <picture>
+ <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=tinyhumansai/opencompany&type=date&theme=dark&legend=top-left" />
+ <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=tinyhumansai/opencompany&type=date&legend=top-left" />
+ <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=tinyhumansai/opencompany&type=date&legend=top-left" />
+ </picture>
+ </a>
+</p>
+
+## Contributors Hall of Fame
+
+Show some love and end up in the hall of fame. Contributors get free merch and special access to our [Discord](https://discord.tinyhumans.ai/).
+
+<a href="https://github.com/tinyhumansai/opencompany/graphs/contributors">
+ <img src="https://contrib.rocks/image?repo=tinyhumansai/opencompany" alt="OpenCompany contributors" />
+</a>
 
 ## License
 
