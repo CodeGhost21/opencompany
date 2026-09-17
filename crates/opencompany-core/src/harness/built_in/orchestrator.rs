@@ -1065,6 +1065,16 @@ impl DelegationQueue {
             .get(&Self::current_scope())
             .map_or(0, Vec::len)
     }
+
+    /// Whether the calling scope has work staged for another bounded drain
+    /// pass. Used after a concurrent conversation-dispatch layer completes.
+    pub(crate) fn has_queued(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("delegation queue")
+            .get(&Self::current_scope())
+            .is_some_and(|bucket| !bucket.is_empty())
+    }
 }
 
 /// What happened when a tool offered a delegation to the queue (issues #419,
