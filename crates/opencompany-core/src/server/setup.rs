@@ -91,6 +91,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/setup", get(read).post(apply))
         .route("/api/v1/setup/roster", post(propose_roster))
         .route("/api/v1/setup/inference/test", post(test_inference))
+        .route("/api/v1/setup/inference/probe", post(probe_inference_draft))
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +340,24 @@ pub struct SetupRequest {
     /// leaves the row unmade and says so through
     /// [`AppliedDto::credential_note`] rather than silently reporting success.
     pub tinyhumans_model: Option<String>,
+    /// The provider the wizard's self-managed branch connected, to be added to
+    /// the company this call seeds.
+    ///
+    /// The **same body** `POST …/inference/providers` accepts, deserialized by
+    /// the same type and applied by the same function
+    /// ([`add_provider_inner`](crate::server::ops::inference::providers::add_provider_inner)).
+    /// Deliberately not a shape of its own: the add carries a slot guard, a
+    /// first-provider default, a credential-then-record rollback pair and a
+    /// probe-class rollback, and a wizard-only flush would have reproduced the
+    /// row without any of them.
+    ///
+    /// Sent here rather than written by the console because that route is
+    /// admin-scoped to an existing company, and first run has neither — the
+    /// same reason [`Self::tinyhumans_key`] travels this way.
+    ///
+    /// Top level for the same reason too: it belongs to whichever company comes
+    /// out of the seed, designed or templated.
+    pub(crate) provider_draft: Option<crate::server::ops::inference::providers::AddProvider>,
 }
 
 /// The company the wizard designed, as it arrives from the review step.
@@ -410,6 +429,15 @@ pub struct AppliedDto {
     /// touch, and a model it was never given leaves the `tinyhumans` row
     /// unmade: "you're set up" alone would paper over both.
     pub credential_note: Option<String>,
+    /// What connecting the self-managed branch's provider did, in the host's
+    /// own words — the same sentence the LLM page's add toast carries.
+    ///
+    /// `None` when no provider was drafted or no company was seeded. It also
+    /// carries the **refusal** when the add was refused: the company is built
+    /// by the time this runs, and an endpoint that stopped answering between
+    /// the wizard's probe and the apply is a reason to say so, not a reason to
+    /// fail a setup that otherwise succeeded.
+    pub provider_note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1077,7 @@ async fn apply_inner(
     };
 
     let credential_note = store_account_key(state, seeded.as_deref(), &req).await?;
+    let provider_note = connect_drafted_provider(state, seeded.as_deref(), &req).await?;
 
     // Companies that already existed still hold the old mode on their cached
     // runtime, so rebuild them in place. `seeded` is excluded — it was just
@@ -1090,7 +1119,50 @@ async fn apply_inner(
         restart_required,
         seeded_company: seeded,
         credential_note,
+        provider_note,
     })
+}
+
+/// Adds the provider the self-managed branch connected to the seeded company,
+/// through the same function `POST …/inference/providers` runs.
+///
+/// Reuse, not a parallel path. Writing the row here with `store::put_provider`
+/// and a secret set would look like the same outcome and would not be: the add
+/// carries the `tinyhumans` slot guard, decision X1's first-provider default
+/// (with its re-validation under the index lock), the model check, the
+/// credential-then-record rollback pair, the probe-class rollback, and the
+/// sole-provider auto-route. Every one of those is the difference between a
+/// company whose provider answers and a row that merely exists.
+///
+/// The company has already been seeded by the time this runs, so every
+/// failure — a refusal or a store that cannot be written — is reported
+/// through the returned note rather than raised.
+async fn connect_drafted_provider(
+    state: &AppState,
+    seeded: Option<&str>,
+    req: &SetupRequest,
+) -> Result<Option<String>, OpenCompanyError> {
+    let Some(draft) = req.provider_draft.clone() else {
+        return Ok(None);
+    };
+    let Some(id) = seeded.map(crate::ports::types::CompanyId::new) else {
+        return Ok(None);
+    };
+    let Some(runtime) = state.registry().get(&id) else {
+        return Ok(None);
+    };
+
+    match crate::server::ops::inference::providers::add_provider_inner(
+        state,
+        runtime.as_ref(),
+        draft,
+    )
+    .await
+    {
+        Ok(mutation) => Ok(Some(mutation.note)),
+        Err(ApiError(OpenCompanyError::InvalidRequest(message))) => Ok(Some(message)),
+        Err(ApiError(err)) => Ok(Some(format!("The provider could not be connected: {err}"))),
+    }
 }
 
 /// Stores the wizard's TinyHumans key as the seeded company's own credential,
@@ -1210,6 +1282,12 @@ mod setup_test_group_3;
 #[cfg(test)]
 #[path = "setup/setup_test_group_4.rs"]
 mod setup_test_group_4;
+#[cfg(test)]
+#[path = "setup/setup_test_group_5.rs"]
+mod setup_test_group_5;
+#[cfg(test)]
+#[path = "setup/setup_test_group_6.rs"]
+mod setup_test_group_6;
 #[cfg(test)]
 #[path = "setup/setup_test_support_1.rs"]
 mod setup_test_support_1;
@@ -1390,6 +1468,48 @@ async fn test_inference(
     Ok(Json(
         probe_inference(&req, &ProcessEnv, &state.config().api_url).await,
     ))
+}
+
+/// `POST /api/v1/setup/inference/probe` — read a drafted endpoint's model
+/// catalogue before there is a company to store it against.
+///
+/// The company-scoped `POST {scope}/inference/probe` is the same probe behind
+/// an `AdminScopedCompany`, and first run has neither a company nor an admin —
+/// so the wizard's self-managed branch reaches
+/// [`probe_draft_inner`](crate::server::ops::inference::providers::probe_draft_inner)
+/// through this gate instead. The probe itself is the same function, not a
+/// second implementation of it.
+///
+/// ## What this widens, and what it does not
+///
+/// It puts one more outward dial behind [`authorize`]'s first-run gate. The
+/// one already there is [`test_inference`], which takes the same
+/// `{provider, key, baseUrl}`, applies the same `endpoint_has_credentials`
+/// refusal, and dials the same address on the same terms — so this adds
+/// another *caller* of a primitive this surface already exposes rather than a
+/// new kind of exposure. Both are loopback-bound, both require a genuinely
+/// local peer with no proxy-forwarding header, and both are reachable only
+/// while setup is incomplete or the registry is empty.
+///
+/// Its own refusals are unchanged and unconditional: a URL carrying userinfo
+/// is refused before the request, and `probe::check_endpoint` screens the URL
+/// and every redirect target inside the probe.
+///
+/// ## Why the wizard needs it rather than reusing the test
+///
+/// `test_inference` answers with one `model`; this step has to *offer* the
+/// endpoint's list, which is what the model step is. And its env-default
+/// fallback means a blank key silently probes the **host's** own credential —
+/// right for "does this host reach a model", wrong for "does the key I just
+/// typed work".
+async fn probe_inference_draft(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(body): Json<crate::server::ops::inference::providers::ProbeDraft>,
+) -> Result<axum::response::Response, crate::server::Rejection> {
+    authorize(&state, &headers, peer).await?;
+    Ok(crate::server::ops::inference::providers::probe_draft_inner("setup", body).await)
 }
 
 /// Runs the probe against the resolved config.
