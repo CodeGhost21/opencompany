@@ -3687,9 +3687,60 @@ fn selector_candidate(
 /// carries one, framed as a work item to act on.
 fn task_instruction(card: &TaskRecord) -> String {
     match card.note.as_deref().filter(|n| !n.is_empty()) {
-        Some(note) => format!("Task: {}\n\n{}", card.title, note),
+        Some(note) => {
+            let (assignment, history) = task_note_sections(note);
+            if history.is_empty() {
+                format!("Task: {}\n\n{}", card.title, assignment)
+            } else {
+                format!(
+                    "Task: {}\n\n## Prior attempt history\n\
+                     This is context only. Do not summarize an earlier failure as the result of \
+                     this run.\n\n{}\n\n## Current assignment\n{}\n\nPerform the current assignment now \
+                     with the tools available in this turn.",
+                    card.title, history, assignment
+                )
+            }
+        }
         None => format!("Task: {}", card.title),
     }
+}
+
+/// Separate operator/reviewer instructions from result blocks accumulated on a
+/// card by prior runs. `append_result` uses blank-line-separated `[label] `
+/// blocks; continuation paragraphs inherit their preceding label.
+fn task_note_sections(note: &str) -> (String, String) {
+    let mut assignment = Vec::new();
+    let mut history = Vec::new();
+    let mut current_is_assignment = true;
+
+    for paragraph in note.split("\n\n") {
+        if let Some(label) = note_attribution(paragraph) {
+            current_is_assignment = matches!(label, "operator" | "operator redirect" | "reviewer");
+        }
+        if current_is_assignment {
+            assignment.push(paragraph);
+        } else {
+            history.push(paragraph);
+        }
+    }
+
+    // A machine-authored-only note is unusual but still used by a few failure
+    // paths. Never manufacture an empty assignment: the whole note remains the
+    // work description in that case.
+    if assignment.is_empty() {
+        return (note.to_string(), String::new());
+    }
+    (assignment.join("\n\n"), history.join("\n\n"))
+}
+
+fn note_attribution(paragraph: &str) -> Option<&str> {
+    let rest = paragraph.strip_prefix('[')?;
+    let (label, _) = rest.split_once("] ")?;
+    (!label.is_empty()
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_- ".contains(&byte)))
+    .then_some(label)
 }
 
 /// Records one run ending on the card: the result block on its note, and the
