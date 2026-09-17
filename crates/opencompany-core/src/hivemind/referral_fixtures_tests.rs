@@ -28,6 +28,21 @@ use crate::ports::types::{CompanyEvent, EventSeq};
 /// `platform` has two members on purpose, so a `@#platform` mention has a real
 /// choice to make and the test asserts the library's pick rather than the only
 /// candidate there was.
+/// The same two desks, with `planner` seated on BOTH.
+///
+/// A seat is offered only the peer desks it is a member of, because membership
+/// is what makes a crossing's answer legible — `agent_channels` gives a seat
+/// the desks it sits on, so a question put to one of those lands somewhere the
+/// asker can read, while a crossing to a desk it is not on returns one report
+/// line and nothing behind it. [`two_desks`] therefore offers `planner`
+/// nothing, which is correct and useless for testing the block's contents.
+pub(super) fn two_desks_sharing_a_seat(hive: &str) -> String {
+    two_desks(hive).replace(
+        "members = [\"sre\", \"dba\"]",
+        "members = [\"sre\", \"dba\", \"planner\"]",
+    )
+}
+
 pub(super) fn two_desks(hive: &str) -> String {
     format!(
         "[company]\nname = \"Acme\"\n\

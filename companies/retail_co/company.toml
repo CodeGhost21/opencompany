@@ -279,3 +279,35 @@ peer_cap = 2
 # exchanges rather than one that settled, the fourth ending "hey — i'm not
 # following what you're asking me here", with no way to ask back.
 pair_messages = 4
+
+# **A desk `amendments` sits on, with somebody `order_ops` does not have.**
+#
+# Added to test that a crossing still works once the episode prompt offers a
+# seat only the desks it is a member of. Before that narrowing, `amendments`
+# was offered `@#returns` — a desk it has no standing on, cannot read a line
+# of, and gets nothing back from but one report line. Membership is what makes
+# a crossing's answer legible: `agent_channels` gives a seat the desks it sits
+# on, so a question put to one of those lands somewhere the asker can read.
+#
+# `refunds` is the point of the desk. It is not on `order_ops`, so a crossing
+# here reaches knowledge the asking room genuinely does not hold, which is the
+# only thing a crossing is for.
+[[group_chat]]
+id = "policy"
+name = "Remedy Policy"
+description = "Which remedy a case is entitled to, and how the money comes back — across pending and delivered orders alike."
+members = ["amendments", "refunds"]
+
+[group_chat.hive]
+enabled = true
+turn_budget = 12
+quorum = 2
+blind_round = true
+
+[group_chat.hive.referral]
+enabled = true
+reach = "desks"
+max_hops = 2
+returns = true
+peer_cap = 2
+pair_messages = 4

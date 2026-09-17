@@ -85,6 +85,31 @@ fn bare(name: &str) -> &str {
 /// nobody. Falls back to a plain sentence only if the crate ever stops naming a
 /// tool this belt registers, which its own tests make unlikely.
 fn crate_description(name: &str) -> &'static str {
+    // **`desk_dm` is an ASK on this host, and the crate's text says it is not.**
+    //
+    // TinyHiveMind describes `dm` as "say one thing to named peers … to settle
+    // a disagreement", adds that "the room is told the exchange happened and
+    // not what it said", and prices it at the seat's one message for the turn.
+    // Read against "find out what this teammate knows", that is a cost with no
+    // return, and a seat holding a factual gap correctly picks
+    // `delegate_to_teammate` instead — the only tool on the belt that promised
+    // an answer. It costs a board card per call and, on a message the triage
+    // read as work, three of them (live run: three `in_progress` cards for one
+    // question).
+    //
+    // Here the recipient's turn runs inline and their reply IS this call's
+    // result (see `run_recipient_turn`), so the crate's sentence is no longer
+    // true of this host and describes the one behaviour that would stop the
+    // tool being used. Overridden rather than patched in `vendor/`: the crate's
+    // text is right for a host that only queues, which is still what this falls
+    // back to when no engine is in scope.
+    if bare(name) == bare(DM_TOOL) {
+        return "Ask named teammates something and get their reply back as this call's result. \
+                Use it when the answer is someone else's to give — their tools, their desk, their \
+                call — instead of guessing or handing them the whole job. They answer now, in \
+                this turn, so you can use what they say in the reply you are composing. Costs \
+                your one message for the turn, and opens no board card.";
+    }
     speech::tool_specs()
         .iter()
         .find(|spec| spec.name == bare(name))
@@ -100,6 +125,34 @@ pub struct SpeechContext {
     events: Arc<dyn EventLog>,
     store: Arc<dyn crate::ports::store::CompanyStore>,
     dispatch: Option<crate::harness::orchestrator::DelegationQueue>,
+}
+
+/// What happened when a `desk_dm` tried to run its recipient's turn inline.
+///
+/// Three outcomes and not two, because "no reply" hides a fork that decides
+/// whether the message may be queued afterwards. `None` used to cover both
+/// "nobody ran" and "ran, then failed or said nothing" — so a peer whose turn
+/// had already executed, with whatever tool effects that turn had, was queued
+/// to execute a second time. That reintroduces the very thing this path exists
+/// to remove: a recipient answering after the asking turn has closed (CodeRabbit,
+/// #2368).
+enum PeerTurn {
+    /// Nobody ran — no engine in scope, or the hop cap was already reached.
+    /// Queueing is safe and is exactly what this path did before.
+    NotAttempted,
+    /// The turn ran and produced a reply.
+    Answered {
+        reply: String,
+        /// Whether the reply reached the pair thread. A reply that could not be
+        /// journaled is still the peer's answer and is still worth handing
+        /// back, but it must not be described as a durable exchange: the chip
+        /// renders from those rows and later turns read them.
+        recorded: bool,
+    },
+    /// The turn RAN and produced nothing usable. Must not be queued: the peer
+    /// has already had its turn, and whatever it did before failing has already
+    /// happened.
+    Ran,
 }
 
 impl SpeechContext {
@@ -319,7 +372,27 @@ impl SpeechContext {
             // reach for it whenever the bare id collides with a desk, so the
             // row is journaled somewhere only that desk's own id would match,
             // which is far less likely to collide.
-            let key = dm_journal_key(record, peer);
+            //
+            // **The pair's own thread (#2368).**
+            //
+            // A DM used to land on the recipient's own line — the same
+            // conversation the OPERATOR uses to DM that teammate. Three faults
+            // followed: the operator read agent-to-agent traffic in their own
+            // DM thread, authored by somebody not talking to them; the sender
+            // could not read it back, since `agent_channels` gives an agent its
+            // own line and not its peers'; and the same pair's referral
+            // exchanges already lived in `dm:<a>+<b>`, so one relationship was
+            // split across conversations by which mechanism spoke.
+            //
+            // Lands WITH the marker `mark_turn_dms` mints, never without it. On
+            // its own this write is invisible: no console surface renders a
+            // pair thread, so the exchange would go from misplaced to missing.
+            // The two are one change.
+            //
+            // `pair_conversation` sorts the ids so direction cannot fork the
+            // thread, and its `dm:` prefix cannot collide with a desk slug —
+            // which retires the bare-id collision guard this line used to need.
+            let key = crate::hivemind::referral::pair_conversation(&self.agent_id, peer);
             let seq = match self.append(key.clone(), text.clone(), Vec::new()).await {
                 Ok(seq) => seq,
                 Err(error) => {
@@ -350,18 +423,37 @@ impl SpeechContext {
                     &self.company,
                     peer,
                 ),
-                "[speech] dm left in the recipient's session"
+                "[speech] dm left in the pair's own thread"
             );
             left_for.push(format!("@{peer}"));
         }
         if first_committed.is_some() {
             crate::runtime::delegation::mark_turn_spoke();
         }
-        let woke_recipient = first_committed
-            .map(|(peer, chat_id, trigger)| {
-                self.stage_recipient_turn(record, &peer, chat_id, trigger, &text)
-            })
-            .unwrap_or(false);
+        // Ask, then wait for the answer — and only fall back to posting the
+        // letter when nobody can be run now (#2368).
+        let mut answered: Option<(String, String, bool)> = None;
+        let mut woke_recipient = false;
+        let mut ran_without_answer = false;
+        if let Some((peer, chat_id, trigger)) = first_committed {
+            match self
+                .run_recipient_turn(record, &peer, &chat_id, &text)
+                .await
+            {
+                PeerTurn::Answered { reply, recorded } => {
+                    answered = Some((peer, reply, recorded));
+                }
+                // Queue ONLY when nobody ran. A turn that ran and then failed
+                // has already spent itself, and queueing it would run the peer
+                // a second time — repeating whatever its first attempt did and
+                // landing an answer after this turn has closed.
+                PeerTurn::NotAttempted => {
+                    woke_recipient =
+                        self.stage_recipient_turn(record, &peer, chat_id, trigger, &text);
+                }
+                PeerTurn::Ran => ran_without_answer = true,
+            }
+        }
         if !failed_for.is_empty() {
             let failures = failed_for
                 .iter()
@@ -382,6 +474,33 @@ impl SpeechContext {
                     failures,
                 ))
             };
+        }
+        // **The conclusion, not the receipt.**
+        //
+        // The asking turn can now build an answer out of this, which is the
+        // whole point: a receipt gives a seat nothing to say, which is why one
+        // live `desk_dm`-only turn handed the operator an empty bubble — it had
+        // been told its request succeeded and had learned nothing.
+        if let Some((peer, reply, recorded)) = answered {
+            // The caveat rides the same result rather than a second call: the
+            // seat is composing an answer out of this text, and "you have their
+            // reply but the thread does not" changes whether it should promise
+            // the exchange is on the record.
+            let caveat = match recorded {
+                true => "",
+                false => {
+                    "\n\n(This reply could not be written to your shared \
+                          thread, so neither of you will read it back later.)"
+                }
+            };
+            return ToolResult::success(format!("{peer} replied:\n\n{reply}{caveat}"));
+        }
+        if ran_without_answer {
+            return ToolResult::success(format!(
+                "Left for {}. They took their turn and said nothing back, so there is no \
+                 answer to carry — do not wait on one.",
+                left_for.join(", "),
+            ));
         }
         let delivery = if woke_recipient {
             " TinyHiveMind routed one bounded recipient turn now; any additional recipients read it on their next turn."
@@ -413,9 +532,25 @@ impl SpeechContext {
         text: String,
         audience: Vec<String>,
     ) -> Result<EventSeq, String> {
+        self.append_as(self.agent_id.clone(), chat_id, text, audience)
+            .await
+    }
+
+    /// Journal a row authored by somebody other than this belt's owner.
+    ///
+    /// Only the inline peer turn uses it, and it needs to: the answer belongs
+    /// to the peer who gave it, and a pair thread whose replies were all
+    /// attributed to the asker would be a false record of the conversation.
+    async fn append_as(
+        &self,
+        agent_id: String,
+        chat_id: String,
+        text: String,
+        audience: Vec<String>,
+    ) -> Result<EventSeq, String> {
         let event = CompanyEvent::AgentReply {
             chat_id,
-            agent_id: self.agent_id.clone(),
+            agent_id,
             text,
             steps: Vec::new(),
             task_id: None,
@@ -435,6 +570,99 @@ impl SpeechContext {
             .append(&self.company, event)
             .await
             .map_err(|error| format!("The message could not be journaled: {error}"))
+    }
+
+    /// Run the recipient's turn **now** and hand back what they said.
+    ///
+    /// This is what makes `desk_dm` a question rather than a receipt. Without
+    /// it the tool returns `"Left for @peer."` — a synchronous success for work
+    /// that completes asynchronously — so the asking turn's completion
+    /// criterion is met while its own question is still outstanding, and the
+    /// answer lands in the pair thread after that turn has closed. Nothing
+    /// wakes the asker: in a live run the reply sat unread until an operator
+    /// message a turn later happened to sweep it up through the session delta.
+    ///
+    /// `ChatTarget::channel`, not `deliberating`: this is an ordinary turn in a
+    /// two-person channel, so the peer SHOULD read the pair thread — that is
+    /// how it knows what was already asked and answered ("i already answered
+    /// above" in the same run). The three reasons a room's turn must not be
+    /// seeded are reasons about a room, and none of them is about a pair.
+    ///
+    /// `None` — no engine, the hop cap reached, a failed turn, an empty reply —
+    /// falls back to the queue, which is the behaviour this replaces rather
+    /// than a degraded one.
+    async fn run_recipient_turn(
+        &self,
+        record: &crate::ports::types::CompanyRecord,
+        peer: &str,
+        chat_id: &str,
+        text: &str,
+    ) -> PeerTurn {
+        let Some(runner) = crate::runtime::delegation::peer_runner() else {
+            return PeerTurn::NotAttempted;
+        };
+        // The same bound the queue path applies, checked before anyone runs
+        // rather than at push time: this path has no queue to refuse it, and a
+        // pair that can each reach for the other is exactly the shape that
+        // recurses.
+        let max_hops = u32::from(
+            record
+                .manifest
+                .tools
+                .max_delegation_depth
+                .unwrap_or(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
+        );
+        let hop = crate::runtime::delegation::turn_message_hop();
+        if hop >= max_hops {
+            return PeerTurn::NotAttempted;
+        }
+        let outcome = crate::runtime::delegation::with_turn_message_hop(
+            hop + 1,
+            runner.run(
+                &self.company,
+                peer,
+                text,
+                crate::runtime::delegation::ChatTarget::channel(Some(chat_id)),
+            ),
+        )
+        .await;
+        // Ran-and-failed, NOT not-attempted: the turn executed, so the peer has
+        // had its turn and anything it did before erroring has happened.
+        let Ok(outcome) = outcome else {
+            return PeerTurn::Ran;
+        };
+        let reply = outcome.reply.trim().to_string();
+        if reply.is_empty() {
+            return PeerTurn::Ran;
+        }
+        // **The answer belongs in the pair thread, not only in the tool
+        // result.**
+        //
+        // `refer` deliberately journals nothing for a single-seat crossing —
+        // there the seat's answer reaches the room folded into the asker's own
+        // row, so a second copy would be a duplicate. A pair thread is not a
+        // room: it is the durable record of this relationship, the surface the
+        // chip renders from, and what the peer reads back to know it has
+        // already answered ("i already answered above", live). Returning the
+        // reply without writing it left the journal holding a question with no
+        // answer and a chip that could only ever show one line.
+        let recorded = self
+            .append_as(
+                peer.to_string(),
+                chat_id.to_string(),
+                reply.clone(),
+                Vec::new(),
+            )
+            .await
+            .is_ok();
+        if !recorded {
+            tracing::warn!(
+                company = %self.company,
+                peer = %peer,
+                "[speech] a peer's inline reply could not be journaled; the asker is told so"
+            );
+        }
+        PeerTurn::Answered { reply, recorded }
     }
 
     fn stage_recipient_turn(
@@ -525,37 +753,6 @@ fn tool_result_text(result: &ToolResult) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// The journal `chat_id` a `desk_dm` to `peer` should use.
-///
-/// Bare, unless `peer` collides with a desk id — in which case that desk
-/// would also `chat_history::owns` a row journaled under the bare spelling,
-/// making a supposedly private DM readable by the whole desk. The `dm:`
-/// prefix is `agent_channels`' own second spelling for this teammate's line
-/// (see its doc comment), so reaching for it here does not add a channel the
-/// recipient cannot already hear on.
-fn dm_journal_key(record: &crate::ports::types::CompanyRecord, peer: &str) -> String {
-    // Codex P1 (fresh evidence after the first collision fix): `owns` /
-    // `same_conversation` match a stored row against EITHER a desk's id OR
-    // its display name, so a collision on the *name* alone is exactly as
-    // readable-by-the-whole-desk as a collision on the id — checking only
-    // `chat.id`/`desk.id` here missed the `{ id = "triage", name = "support"
-    // }` shape entirely, where a DM to agent `support` still collides.
-    let collides_with_desk = record
-        .manifest
-        .group_chats
-        .iter()
-        .any(|chat| chat.id == peer || (!chat.name.trim().is_empty() && chat.name == peer))
-        || record
-            .overlay_desks
-            .iter()
-            .any(|desk| desk.id == peer || (!desk.name.trim().is_empty() && desk.name == peer));
-    if collides_with_desk {
-        format!("{}{peer}", crate::runtime::assignee::DM_PREFIX)
-    } else {
-        peer.to_string()
-    }
 }
 
 /// `desk_post` — say one thing to the whole channel.

@@ -250,6 +250,13 @@ pub struct FederationDesk {
 pub struct HiveFederation {
     /// Every desk in the company, including the one deliberating.
     pub desks: Vec<FederationDesk>,
+    /// The company's own line (`[company].general_desk`), when it names one.
+    ///
+    /// Held so the peer offer can leave it out. It is the one desk EVERY seat
+    /// sits on, so a membership filter cannot remove it — and a crossing to it
+    /// is meaningless twice over: the asker is already in the room, and the
+    /// room is not a specialist desk holding a fact the asker's does not.
+    pub general_desk: Option<String>,
     /// Every teammate seated on any of those desks, as `(id, label)`, sorted by
     /// id.
     ///
@@ -930,6 +937,10 @@ impl<'a> EpisodeReferrals<'a> {
                     .await
                     .then(|| pair_conversation(&referral.source_id, &referral.target_id)),
             },
+            // A deliberation crossing writes its rows AFTER this marker, so the
+            // fold finds them by scanning forward and needs no range. Only a
+            // tool-sent DM inverts that order (#2368).
+            rows: None,
             from_desk: referral.from.desk_id.clone(),
             from_desk_name: self.desk_name(&referral.from.desk_id),
             asker: referral.source_id.clone(),

@@ -21,12 +21,138 @@ use crate::ports::events::EventLog;
 // The prompt
 // ---------------------------------------------------------------------------
 
+/// The company line is never a peer to ask, and a second specialist desk is.
+///
+/// Shaped like a real company: a general desk everyone sits on, the room
+/// deliberating, and a specialist desk one of its seats also sits on. All three
+/// of the offer's rules fall out of this one manifest — the general desk is
+/// excluded even though membership admits it for everybody, the specialist desk
+/// is offered because the seat is on it, and the desk the seat is NOT on stays
+/// out.
+#[tokio::test]
+async fn the_company_line_is_not_offered_but_a_second_desk_is() {
+    let manifest = format!(
+        "[company]\nname = \"Acme\"\ngeneral_desk = \"all_hands\"\n\
+         [[agent]]\nid = \"planner\"\nrole = \"Planner\"\n\
+         [[agent]]\nid = \"scout\"\nrole = \"Scout\"\n\
+         [[agent]]\nid = \"critic\"\nrole = \"Critic\"\n\
+         [[agent]]\nid = \"sre\"\nrole = \"SRE\"\n\
+         [[group_chat]]\nid = \"all_hands\"\nname = \"All Hands\"\n\
+         description = \"The company line\"\n\
+         members = [\"planner\", \"scout\", \"critic\", \"sre\"]\n\
+         [[group_chat]]\nid = \"eng\"\nname = \"Engineering\"\n\
+         description = \"Ship the rollout\"\n\
+         members = [\"planner\", \"scout\", \"critic\"]\n\
+         {REFERRING}\n\
+         [[group_chat]]\nid = \"platform\"\nname = \"Platform\"\n\
+         description = \"Owns the database and the edge\"\n\
+         members = [\"sre\", \"planner\"]\n"
+    );
+    let far = FarDesk::answering("Answered.");
+    let log = Arc::new(MemoryLog::default());
+    let trigger = open(&log).await;
+    let desk = desk_of(&manifest, "eng").expect("a room");
+    let runner = Runner::new(&[
+        ("planner", "!propose #stage Stage it."),
+        ("scout", "!support #stage ^1 Fine."),
+        ("critic", "!commit #stage ^1 Recorded."),
+    ]);
+    let federation = desk_federation(&record(&manifest), &desk).expect("a federation");
+    EpisodeDriver::new(
+        MemoryLog::company(),
+        desk,
+        Arc::clone(&log) as Arc<dyn EventLog>,
+        &runner,
+        "Decide the rollout.",
+    )
+    .with_federation(federation, &far)
+    .run(trigger)
+    .await
+    .expect("the episode runs");
+
+    let planner = runner
+        .prompts_for("planner")
+        .into_iter()
+        .next()
+        .expect("planner spoke");
+    assert!(
+        planner.contains("@#platform"),
+        "planner sits on `platform`, so it is a desk it may ask:\n{planner}"
+    );
+    assert!(
+        !planner.contains("@#all_hands"),
+        "the company line is the one desk EVERY seat is on, so a membership \
+         filter cannot remove it — and being offered the room you are already \
+         sitting in spends a turn to learn nothing:\n{planner}"
+    );
+}
+
+/// A seat is offered only the peer desks it SITS ON.
+///
+/// The list used to be built from the desk and cloned to every member, so each
+/// seat was told it could ask every other desk in the company — including ones
+/// it has no standing on, cannot read a line of, and gets nothing back from but
+/// a single report line. That is not a free over-offer: the block itself says
+/// that a member spending its one line on a move it should not make has spent a
+/// turn of the room's budget on nothing.
+///
+/// `scout` and `planner` share a room and differ only in membership, so this
+/// pins the scope to the SEAT rather than to the desk deliberating.
+#[tokio::test]
+async fn a_seat_is_not_offered_a_desk_it_does_not_sit_on() {
+    let far = FarDesk::answering("Answered.");
+    let log = Arc::new(MemoryLog::default());
+    let trigger = open(&log).await;
+    let manifest = two_desks_sharing_a_seat(REFERRING);
+    let desk = desk_of(&manifest, "eng").expect("a room");
+    let runner = Runner::new(&[
+        ("planner", "!propose #stage Stage it."),
+        ("scout", "!support #stage ^1 Fine."),
+        ("critic", "!commit #stage ^1 Recorded."),
+    ]);
+    let federation = desk_federation(&record(&manifest), &desk).expect("a federation");
+    EpisodeDriver::new(
+        MemoryLog::company(),
+        desk,
+        Arc::clone(&log) as Arc<dyn EventLog>,
+        &runner,
+        "Decide the rollout.",
+    )
+    .with_federation(federation, &far)
+    .run(trigger)
+    .await
+    .expect("the episode runs");
+
+    let planner = runner
+        .prompts_for("planner")
+        .into_iter()
+        .next()
+        .expect("planner spoke");
+    assert!(
+        planner.contains("@#platform"),
+        "planner sits on `platform`, so it may ask it:\n{planner}"
+    );
+    let scout = runner
+        .prompts_for("scout")
+        .into_iter()
+        .next()
+        .expect("scout spoke");
+    assert!(
+        !scout.contains("@#platform"),
+        "scout does not sit on `platform`; offering it a desk it cannot read \
+         spends the room's budget on a move it should not make:\n{scout}"
+    );
+}
+
 #[tokio::test]
 async fn a_referring_desk_is_shown_its_peers_and_told_to_ask_early() {
     let far = FarDesk::answering("Answered.");
     let log = Arc::new(MemoryLog::default());
     let trigger = open(&log).await;
-    let manifest = two_desks(REFERRING);
+    // `planner` sits on `platform` too, which is what entitles it to be offered
+    // `@#platform` at all: the list is scoped to the desks the SEAT is on, not
+    // the desks its room could reach.
+    let manifest = two_desks_sharing_a_seat(REFERRING);
     let desk = desk_of(&manifest, "eng").expect("a room");
     let runner = Runner::new(&[
         ("planner", "!propose #stage Stage it."),

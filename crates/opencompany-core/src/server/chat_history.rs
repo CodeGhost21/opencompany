@@ -323,11 +323,51 @@ pub fn agent_channels(record: &CompanyRecord, agent_id: &str) -> Vec<Channel> {
         });
     }
 
+    // **The private line this teammate shares with each of the others (#2368).**
+    //
+    // A pair thread is `dm:<a>+<b>` — neither a desk nor this agent's own
+    // direct line — so it matched nothing above, and an agent could not read
+    // back a conversation it had itself been part of. Two seats settled
+    // something and rediscovered it from scratch the next day.
+    //
+    // Enumerable rather than searchable: `pair_conversation` sorts the two
+    // ids, so the thread this agent shares with any teammate is computable
+    // without an index, and one that never happened simply holds no rows.
+    // Only threads this agent is IN: every key is built from its own id, so a
+    // pair between two other people is not addressable here at all.
+    //
+    // Agent-scoped by construction. Every caller of this function reads on
+    // behalf of ONE agent — its session delta, its own speech targets, and the
+    // console's Session tab for that agent — so this adds no channel to the
+    // operator's rail.
+    let mut partners: Vec<String> = Vec::new();
+    for agent in record
+        .manifest
+        .agents
+        .iter()
+        .map(|a| a.id.clone())
+        .chain(record.overlay_agents.iter().map(|a| a.id.clone()))
+    {
+        if agent != agent_id && !partners.contains(&agent) {
+            partners.push(agent);
+        }
+    }
+    for partner in partners {
+        let thread = crate::hivemind::referral::pair_conversation(agent_id, &partner);
+        if seen.insert(thread.clone()) {
+            channels.push(Channel {
+                label: format!("@{partner}"),
+                name: thread.clone(),
+                id: thread,
+            });
+        }
+    }
+
     channels
 }
 
 /// The desk's display name, falling back to its id.
-fn desk_display_name(record: &CompanyRecord, desk_id: &str) -> String {
+pub(crate) fn desk_display_name(record: &CompanyRecord, desk_id: &str) -> String {
     record
         .manifest
         .group_chats
@@ -1780,6 +1820,7 @@ async fn attach_referral_origins(
     let mut relayed: Vec<String> = Vec::new();
     for (index, stored) in page.iter().enumerate() {
         let CompanyEvent::ReferralEnqueued {
+            rows: exchange_rows,
             from_desk,
             from_desk_name,
             asker,
@@ -1827,7 +1868,17 @@ async fn attach_referral_origins(
             // Bounded at the next crossing into the SAME pair thread, which is
             // where this one's exchange ends by construction: the rows between
             // two markers are the rows that marker caused.
-            let next_for_pair = page[index + 1..]
+            //
+            // **Unless the marker names its own rows.** The forward scan assumes
+            // the rows follow the marker, which holds for a deliberation
+            // crossing — the marker is written first and the turns follow. A
+            // tool-sent `desk_dm` inverts it: the rows are journaled while the
+            // turn runs, and the marker folds onto that turn's own reply, which
+            // is composed afterwards. Scanning forward from such a marker finds
+            // the answer and misses the question it is a chip for. A marker that
+            // carries its range is read by range instead, which is true whichever
+            // side of it the rows landed on (#2368).
+            let next_marker = page[index + 1..]
                 .iter()
                 .position(|later| {
                     matches!(
@@ -1838,9 +1889,55 @@ async fn attach_referral_origins(
                         } if next == pair
                     )
                 })
-                .map_or(page.len(), |at| index + 1 + at);
+                .map(|at| index + 1 + at);
+            // **The boundary is the next crossing's first ROW, not its marker.**
+            //
+            // A deliberation crossing mints its marker first and the turns
+            // follow, so marker order and row order agree and cutting at the
+            // next marker is exact. A `desk_dm` inverts it: the question is
+            // journaled mid-turn and the marker minted afterwards, onto the
+            // turn's own reply. The rows between marker A and marker B then
+            // include the ones B was minted FOR, so cutting at B let a settled
+            // crossing absorb the opening of the next one — a two-line chip
+            // grew to four the moment the same pair spoke again, the two extra
+            // lines being questions of a crossing still in flight, shown as
+            // part of an exchange that had already finished.
+            let next_for_pair = match next_marker {
+                Some(at) => {
+                    let claimed = match &page[at].event {
+                        CompanyEvent::ReferralEnqueued {
+                            rows: Some((opened, _)),
+                            ..
+                        } => page[index + 1..at]
+                            .iter()
+                            .position(|row| row.seq.value() >= *opened)
+                            .map(|before| index + 1 + before),
+                        _ => None,
+                    };
+                    claimed.unwrap_or(at)
+                }
+                None => page.len(),
+            };
+            // A range EXTENDS the forward scan, it does not replace it. The rows
+            // a marker names are the ones already written when it was minted —
+            // a tool's own DM, journaled mid-turn — and the rows that follow it
+            // are the answer coming back. Reading only the range showed the
+            // question and dropped the reply; reading only forward did the
+            // reverse.
+            let scanned = match exchange_rows {
+                Some(_) => page.as_slice(),
+                None => &page[index + 1..next_for_pair],
+            };
             let mut lines = Vec::new();
-            for later in &page[index + 1..next_for_pair] {
+            for (at, later) in scanned.iter().enumerate() {
+                if let Some((opened, closed)) = exchange_rows {
+                    let seq = later.seq.value();
+                    let named = (*opened..=*closed).contains(&seq);
+                    let follows = at > index && at < next_for_pair;
+                    if !named && !follows {
+                        continue;
+                    }
+                }
                 let CompanyEvent::AgentReply {
                     chat_id, agent_id, ..
                 } = &later.event
