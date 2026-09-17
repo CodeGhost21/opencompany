@@ -436,6 +436,17 @@ fn speech_tools_are_registered_only_when_the_manifest_asks() {
     }
 }
 
+#[test]
+fn a_manifest_without_a_speech_section_still_builds_the_dm_tool() {
+    let manifest: crate::company::CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest parses");
+    let names = built_tool_names_with_speech(manifest.speech.enabled);
+    assert!(
+        names.contains(&crate::harness::speech_tools::DM_TOOL.to_string()),
+        "default-on speech must put desk_dm on the actual belt: {names:?}"
+    );
+}
+
 /// CodeRabbit: `speech_enabled` is the manifest's opt-in, but the tools
 /// ARE the append (module doc, above) — with no `EventLog` wired there is
 /// nothing to append to, so `speech_wired` (not the bare flag) must gate
