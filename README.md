@@ -8,13 +8,15 @@
 <h1 align="center">OpenCompany</h1>
 
 <p align="center">
-  <strong>Run an entire company with a headcount of one.</strong>
+  <strong>A hive mind that runs your company. Headcount: one.</strong>
 </p>
 
 <p align="center">
   OpenCompany is the operating layer for one-person businesses powered by
-  agents. You bring the vision and the judgment calls. Your agents do the work:
-  every function, around the clock, at the speed of software.
+  agents. Not a team of agents taking turns, but a hive mind: a roster that
+  deliberates like a colony, converges on decisions it can explain, and does
+  the work of every function around the clock. You bring the vision and the
+  judgment calls. The hive does the rest.
 </p>
 
 <p align="center">
@@ -52,10 +54,54 @@ recruiters, all instantiated as agents, coordinated by one host, working while
 you sleep. You stay where humans are irreplaceable: **capital, taste, and the
 decisions that actually matter.** Everything else is delegated.
 
-This isn't a chatbot with a to-do list. It's a **company runtime**: a durable
-host that stands up a roster of specialized agents, gives each one a clear
-mandate, and runs them as a coordinated business on top of the OpenHuman and
+This isn't a chatbot with a to-do list, and it isn't a pipeline of agents
+handing a ticket down the line. It's a **company runtime**: a durable host that
+stands up a roster of specialized agents, gives each one a clear mandate, seats
+them at desks, and lets each desk think as a hive on top of the OpenHuman and
 TinyHumans runtimes.
+
+## Not a team of agents. A hive mind.
+
+Most "multi-agent" systems are fan-out: publish a task, wake N agents, collect
+the replies, average them somehow. That's a thread pool with a prompt attached.
+It has no notion of who is convinced, no way to register a grounded objection,
+no reason to stop other than running out of members, and no answer when you ask
+afterwards why the group chose what it chose.
+
+Real collectives don't work that way, and the mechanisms that make them work
+have been studied for decades in colonies with no leader and no shared memory.
+OpenCompany runs its desks on those mechanisms, via
+[tinyhivemind](https://github.com/tinyhumansai/tinyhivemind), the hive-mind
+library that grew out of this repo:
+
+- **Stigmergy.** Work leaves a trace in a shared medium, and the trace is the
+  stimulus for the next piece of work. Nobody dispatches anybody. The desk's
+  transcript is the medium; a `!propose`, `!support` or `!object` is a deposit
+  in it.
+- **Quorum sensing.** An option carries when enough *distinct* members have
+  *grounded* support for it, the way a honeybee swarm settles a nest site. A
+  "+1" with no citation counts for nothing.
+- **Pheromone decay.** A trace's pull on the room's attention fades as the
+  room talks past it, so whoever spoke first doesn't hold the floor forever.
+- **Blind first round.** Each member deposits what it knows before it can read
+  its peers, because a shared transcript destroys independence. On the
+  hidden-profile benchmark that one change takes a room from **16% to 67%**
+  correct.
+- **A reason to stop.** An episode ends on a quorum it can name (or a deadlock,
+  or a spent budget), not when one agent decides it's done. Every message is a
+  bounded number of turns.
+- **Cross-desk referral.** Members of one desk are wrong about the same things,
+  and averaging correlated error doesn't remove it. A desk can put a question
+  to another desk, which answers with one real turn of its own. Same benchmark,
+  three confidently-wrong desks: deliberating inside them scored 0.2%; crossing
+  between them, 77.5%.
+
+None of this is a quality claim about longer conversations. Conformity among
+language models rises with interaction time, so budgets are small by default
+and raising one is a decision, not a setting you forget. What the hive buys is
+independence, a decision you can audit, and a company that keeps thinking
+while you sleep. [`docs/spec/runtime/hivemind.md`](docs/spec/runtime/hivemind.md)
+has the whole mechanism.
 
 ## What one person can now run
 
@@ -63,7 +109,7 @@ Every folder under [`companies/`](companies/) is a complete company you can
 launch today, with a roster of agents, their responsibilities, and the handful
 of moments where a human signs off:
 
-| You want to run a… | Your agents handle | You keep |
+| You want to run a… | The hive handles | You keep |
 | --- | --- | --- |
 | **[Venture Studio](companies/venture_studio/)** | Scouting, founding, building, launching, operating a portfolio | Capital allocation & strategy |
 | **[Startup Accelerator](companies/startup_accelerator/)** | Sourcing, screening, mentoring, demo day, investor intros | Investment decisions |
@@ -145,11 +191,15 @@ DigitalOcean / AWS deploys.
 - **A real org chart, not a prompt.** Each company is declared as a roster of
   agents with distinct mandates in a simple `company.toml`. The host
   instantiates them, coordinates them, and keeps them running.
+- **Desks that think as a hive.** Any desk with two or more members answers as
+  a room: an episode of bounded rounds that converges on a named option, with
+  the proposals, support and objections on the record. A desk of one behaves
+  exactly like a single agent. No fan-out, no vote-averaging.
 - **Humans in the loop where it counts.** Every harness names the exact
   decisions reserved for you. Delegate the work; keep the judgment.
-- **Built on proven runtimes.** OpenCompany is a light host over OpenHuman and
-  the TinyHumans agent modules, so it reuses their runtime instead of
-  reinventing it.
+- **Built on proven runtimes.** OpenCompany is a light host over OpenHuman, the
+  TinyHumans agent modules and tinyhivemind, so it reuses their runtime and
+  their mechanics instead of reinventing them.
 - **Rust-fast and inspectable.** An Axum HTTP surface, a small default build,
   and deeper capabilities behind feature flags. Simple to start, honest to
   operate, easy to test.
@@ -157,24 +207,27 @@ DigitalOcean / AWS deploys.
 
 ## The engine: Medulla
 
-A company of one only works if something can hold the whole company in its head.
+A hive still needs something that can hold the whole company in its head.
 That something is **Medulla**, TinyHumans' orchestrator model, purpose-built to
 run large fleets of agents as a single coordinated business.
 
 Medulla is orchestrator-first. Every event, whether a customer email, a market
 signal or a finished task, lands on a deep orchestration tier that reads the full
-picture, decides what matters, and fans the work out across your agents. As your
-company grows from nine agents to nine hundred, Medulla is what keeps it
-coherent, on-strategy, and moving without you in every message. It's a hosted
-model: you reach it with a TinyHumans API key, and OpenCompany is the open host
-that points your companies at it.
+picture, decides what matters, and routes it to the desk that should deliberate
+on it. The hive mechanics decide *how* a desk reaches a decision; Medulla
+decides *what* the company should be deciding at all. As your company grows
+from nine agents to nine hundred, Medulla is what keeps it coherent,
+on-strategy, and moving without you in every message. It's a hosted model: you
+reach it with a TinyHumans API key, and OpenCompany is the open host that
+points your companies at it.
 
 ## Make it yours
 
 Each company folder holds a `company.toml`, a plain text file naming the roles,
-what each one owns, and where you want to be asked before anything happens. It's
-written to be read by people; changing a role is editing a few lines rather than
-programming. `opencompany check` reports any problems in plain language, and
+what each one owns, which desks they sit at, and where you want to be asked
+before anything happens. It's written to be read by people; changing a role, or
+tuning how a desk deliberates (its quorum, its turn budget, whether it can refer
+a question to another desk), is editing a few lines rather than programming. `opencompany check` reports any problems in plain language, and
 adding a new business is a new folder, not a new program.
 [Your first company](docs/gitbooks/get-started/your-first-company.md) walks through it.
 
@@ -216,6 +269,7 @@ configure it, and goes to your own Sentry project rather than ours —
 | [`docs/running-locally.md`](docs/running-locally.md) | Docker, Compose, from-source builds, feature flags, desktop preview, deploy targets |
 | [`docs/repository-layout.md`](docs/repository-layout.md) | Where everything lives in the tree and what each package owns |
 | [`docs/spec/README.md`](docs/spec/README.md) | Architecture reference |
+| [`docs/spec/runtime/hivemind.md`](docs/spec/runtime/hivemind.md) | How a desk deliberates: episodes, rounds, quorum, [referral](docs/spec/runtime/hivemind-referral.md) and [asides](docs/spec/runtime/hivemind-asides.md) |
 | [`docs/gitbooks/developers/`](docs/gitbooks/developers/README.md) | Build, CLI, authoring companies, deployment, configuration |
 | [`scripts/qa/`](scripts/qa/README.md) | Checking a release against a deployed tenant |
 
