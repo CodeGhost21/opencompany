@@ -97,13 +97,15 @@ The quickest way in is the desktop app. Get it from the website or straight
 from the GitHub release:
 
 - **Website**: **[tinyhumans.ai/opencompany](https://tinyhumans.ai/opencompany)**
-  — picks the right build for your machine.
+  — the download button picks the right build for your machine.
 - **GitHub Releases**:
   **[github.com/tinyhumansai/opencompany/releases/latest](https://github.com/tinyhumansai/opencompany/releases/latest)**
-  — every platform build, with checksums and release notes.
+  — the `.dmg` for Apple Silicon (`aarch64`) or Intel (`x64`) Macs, plus the
+  release notes.
 
-Install it, sign in with your TinyHumans account, pick a company, and your
-agents are running. Prefer to run the host yourself? Keep reading.
+Open the `.dmg`, drag OpenCompany into Applications, launch it, and pick a
+company. The app updates itself from the same releases page. Prefer to run the
+host yourself, in Docker or from source? Keep reading.
 
 ## Quickstart
 
