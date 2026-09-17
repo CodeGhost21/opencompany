@@ -19,6 +19,10 @@ const session = readFileSync("src/views/team/AgentSession.tsx", "utf8");
 const header = readFileSync("src/views/room/ChatHeader.tsx", "utf8");
 const room = readFileSync("src/views/RoomView.tsx", "utf8");
 const types = readFileSync("src/api/types.ts", "utf8");
+const messageRow = readFileSync("src/views/room/MessageRow.tsx", "utf8");
+const threadPanel = readFileSync("src/views/room/ThreadPanel.tsx", "utf8");
+const messageTimeline = readFileSync("src/views/room/MessageTimeline.tsx", "utf8");
+const liveReceipt = readFileSync("src/views/room/ChatLiveReceipt.tsx", "utf8");
 
 describe("the raw-turns renderer", () => {
   /**
@@ -44,6 +48,20 @@ describe("the raw-turns renderer", () => {
   it("takes the host's own rows", () => {
     expect(raw).toContain("rows: AgentSessionMessageDto[];");
     expect(session).toContain("rows={lines.map((line) => line.row)}");
+  });
+
+  it("opens at the latest raw turn", () => {
+    expect(raw).toContain("useLayoutEffect");
+    expect(raw).toContain('scrollIntoView({ block: "end" })');
+    expect(raw).toContain('data-testid="agent-session-raw-end"');
+  });
+
+  it("owns the detailed tool calls instead of duplicating them in chat", () => {
+    expect(raw).toContain('data-testid="agent-session-raw-steps"');
+    expect(raw).toContain("row.steps.map");
+    for (const chatSurface of [messageRow, threadPanel, messageTimeline, liveReceipt]) {
+      expect(chatSurface).not.toContain("<StepTimeline");
+    }
   });
 
   /**
