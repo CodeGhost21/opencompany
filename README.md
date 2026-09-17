@@ -56,7 +56,7 @@ from the GitHub release:
 
 Open the `.dmg`, drag OpenCompany into Applications, launch it, and pick a
 company. The app updates itself from the same releases page. Prefer to run the
-host yourself, in Docker or from source? Keep reading.
+host yourself, in Docker or from source? Jump to the [Quickstart](#quickstart).
 
 ## The company of one
 
