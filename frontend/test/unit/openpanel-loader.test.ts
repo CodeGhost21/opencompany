@@ -22,7 +22,11 @@ describe("OpenPanel console analytics", () => {
     });
   });
 
-  function runLoader(analytics: boolean): void {
+  function runLoader(analytics?: boolean): void {
+    if (analytics === undefined) {
+      new Function(loader)();
+      return;
+    }
     Object.defineProperty(window, "OPENCOMPANY_CONFIG", {
       configurable: true,
       value: { analytics },
@@ -31,6 +35,13 @@ describe("OpenPanel console analytics", () => {
   }
 
   it("does not install a client or script without explicit opt-in", () => {
+    runLoader();
+
+    expect(window.op).toBeUndefined();
+    expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).toBeNull();
+  });
+
+  it("stays silent when analytics is explicitly disabled", () => {
     runLoader(false);
 
     expect(window.op).toBeUndefined();

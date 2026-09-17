@@ -1,13 +1,19 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
 
-import { currentScreen, installOpenPanelTracking } from "@/lib/openpanel";
+import { currentScreen, installOpenPanelTracking, OpenPanelTracking } from "@/lib/openpanel";
 
 const track = vi.fn();
 let dispose: (() => void) | undefined;
+let root: Root | undefined;
+let container: HTMLDivElement | undefined;
 
 beforeEach(() => {
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+    true;
   window.op = track;
   window.location.hash = "#/settings/people?token=never-track-this";
   track.mockReset();
@@ -16,6 +22,10 @@ beforeEach(() => {
 afterEach(() => {
   dispose?.();
   dispose = undefined;
+  if (root) act(() => root?.unmount());
+  container?.remove();
+  root = undefined;
+  container = undefined;
   delete window.op;
 });
 
@@ -81,5 +91,36 @@ describe("OpenPanel React tracking", () => {
     document.body.click();
 
     expect(track).not.toHaveBeenCalled();
+  });
+
+  it("mounts and unmounts its tracking listeners with the React lifecycle", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    act(() => root?.render(createElement(OpenPanelTracking)));
+    expect(track).toHaveBeenCalledWith("track", "screen_viewed", { screen: "settings" });
+
+    window.location.hash = "#/workflows/a-private-id";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    const button = document.createElement("button");
+    document.body.append(button);
+    button.click();
+    expect(track).toHaveBeenCalledWith("track", "screen_viewed", { screen: "workflows" });
+    expect(track).toHaveBeenCalledWith("track", "button_clicked", {
+      screen: "workflows",
+      control: "button",
+      button_type: "submit",
+    });
+
+    track.mockReset();
+    act(() => root?.unmount());
+    root = undefined;
+    window.location.hash = "#/overview";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    document.body.click();
+
+    expect(track).not.toHaveBeenCalled();
+    button.remove();
   });
 });
