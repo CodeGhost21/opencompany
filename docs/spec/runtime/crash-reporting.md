@@ -363,14 +363,12 @@ Named so they are countable rather than implied.
 - **No debug-file upload for the host.** A stripped release binary's stack
   traces stay unsymbolicated until a `sentry-cli upload-dif` step exists. See
   the note under [Source-map upload](#source-map-upload-ci-only).
-- **The desktop app reports nothing, from either half.** The console bundle
-  inside the shell is blocked by `crates/opencompany-app/tauri.conf.json`'s
-  `connect-src 'self' ipc:`, and widening that CSP is a security decision of its
-  own. The embedded *host* would report if the feature were compiled in, but
-  `DESKTOP_RELEASE_FEATURES` in `.github/workflows/build-desktop.yml`
-  does not include `crash-reporting`, so the released binary has no client
-  either. Adding it there is a distribution decision — it changes what ships to
-  end users rather than to operators — and is deliberately left open.
+- **Desktop reporting uses the project Sentry origin only.** The release
+  workflow supplies the console DSN and the shell uses its own
+  `OPENCOMPANY_SENTRY_DSN`; `crates/opencompany-app/tauri.conf.json` therefore
+  permits `https://sentry.tinyhumans.ai` in `connect-src`. It remains a narrow
+  allowlist: OpenPanel stays unavailable in Tauri and a different Sentry host
+  requires an explicit CSP review alongside the release configuration.
 - **Host cognition is not tagged per company.** A multi-company host reports one
   instance id for all of them. Which company an error belongs to is in the
   `tracing` fields on the event, not in a tag.

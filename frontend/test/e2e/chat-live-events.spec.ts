@@ -196,11 +196,20 @@ test("a running turn shows its tool rows in the channel", async ({ page }) => {
   // turn to watch without inventing one. What is being proved is that a frame
   // carrying a desk's thread id reaches *that channel's* timeline — which is
   // what Chat never did.
+  const atMillis = Date.now();
   const frames = [
-    { type: "tool_call", seq: 1, chatId: ENGINEERING.id, toolCallId: "t1", label: "workspace_list" },
+    {
+      type: "tool_call",
+      seq: 1,
+      atMillis,
+      chatId: ENGINEERING.id,
+      toolCallId: "t1",
+      label: "workspace_list",
+    },
     {
       type: "tool_result",
       seq: 2,
+      atMillis: atMillis + 1,
       chatId: ENGINEERING.id,
       toolCallId: "t1",
       label: "workspace_list",
@@ -212,17 +221,40 @@ test("a running turn shows its tool rows in the channel", async ({ page }) => {
       status: "ok",
       elapsedMs: 120,
     },
-    { type: "tool_call", seq: 3, chatId: ENGINEERING.id, toolCallId: "t2", label: "workspace_read" },
+    {
+      type: "tool_call",
+      seq: 3,
+      atMillis: atMillis + 2,
+      chatId: ENGINEERING.id,
+      toolCallId: "t2",
+      label: "workspace_read",
+    },
   ];
-  await page.route("**/events", (route) =>
-    route.fulfill({
+  let releaseFrames: (() => void) | undefined;
+  const framesReleased = new Promise<void>((resolve) => {
+    releaseFrames = resolve;
+  });
+  let streamRequested: (() => void) | undefined;
+  const streamIsWaiting = new Promise<void>((resolve) => {
+    streamRequested = resolve;
+  });
+  await page.route("**/events**", async (route) => {
+    // `EventSource` attaches `onmessage` immediately after construction. A
+    // mock that closes the stream in that tiny window can lose every frame,
+    // unlike the host's long-lived stream. Hold this fixture until the channel
+    // is mounted so it tests routing and rendering rather than that race.
+    streamRequested?.();
+    await framesReleased;
+    await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
       body: frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join(""),
-    }),
-  );
+    });
+  });
 
   await openChannel(page, ENGINEERING.id);
+  await streamIsWaiting;
+  releaseFrames?.();
 
   // The rows themselves, not a typing dot — and the finished one keeps the
   // elapsed time the frame carried.
