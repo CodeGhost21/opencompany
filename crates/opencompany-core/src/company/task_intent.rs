@@ -519,6 +519,16 @@ pub fn triage_message_detailed(text: &str) -> TriageOutcome {
     // judged on its own.
     let core = strip_lead_ins(&lower);
 
+    // Passing a greeting to a teammate is conversation, not tracked work. It
+    // still needs a full tool-bearing turn (`desk_dm`), so classify it as an
+    // answer rather than chatter: the latter takes the tool-less small-talk
+    // fast path. This also narrows the delegation claim so a model that reaches
+    // for `delegate_to_teammate` before `desk_dm` cannot open a task card for
+    // saying hello.
+    if is_greeting_relay(core) {
+        return matched(MessageTriage::Answer);
+    }
+
     // Frame beats interrogative: a polite instruction stays work.
     if REQUEST_FRAMES.iter().any(|f| core.starts_with(f)) && contains_action(core) {
         if refers_to_board_entity(core) {
@@ -541,6 +551,20 @@ pub fn triage_message_detailed(text: &str) -> TriageOutcome {
         triage: MessageTriage::Chatter,
         confidence: TriageConfidence::Abstained,
     }
+}
+
+fn is_greeting_relay(text: &str) -> bool {
+    let words = text
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let greeting = words
+        .iter()
+        .any(|word| matches!(*word, "hi" | "hello" | "hey"));
+    let relay = words
+        .iter()
+        .any(|word| matches!(*word, "tell" | "say" | "send" | "message" | "dm"));
+    greeting && relay
 }
 
 /// A lowercased message reduced to what the whole-message lists are matched
