@@ -1202,16 +1202,24 @@ async fn store_composio_credential(
 
     let note = match draft.credential {
         ComposioCredential::ApiKey => {
-            crate::company::composio::store_api_key(&id, secrets.as_ref(), value).await?;
-            "This company reaches its tools through its own Composio account."
+            match crate::company::composio::store_api_key(&id, secrets.as_ref(), value).await {
+                Ok(_) => {
+                    "This company reaches its tools through its own Composio account.".to_string()
+                }
+                Err(err) => format!("The Composio credential could not be stored: {err}"),
+            }
         }
         ComposioCredential::Token => {
-            crate::company::composio::store_token(&id, secrets.as_ref(), value).await?;
-            "A Composio token is stored for the TinyHumans-managed route."
+            match crate::company::composio::store_token(&id, secrets.as_ref(), value).await {
+                Ok(()) => {
+                    "A Composio token is stored for the TinyHumans-managed route.".to_string()
+                }
+                Err(err) => format!("The Composio credential could not be stored: {err}"),
+            }
         }
     };
     crate::server::ops::composio::evict_catalog_cache(runtime.as_ref());
-    Ok(Some(note.to_string()))
+    Ok(Some(note))
 }
 
 /// Adds the provider the self-managed branch connected to the seeded company,

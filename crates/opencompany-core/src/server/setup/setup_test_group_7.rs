@@ -1,5 +1,5 @@
-//! Setup tests: a provider-credential-store failure after setup has already
-//! committed must surface as a note on the apply response, not fail it.
+//! Setup tests: a credential-store failure after setup has already committed
+//! must surface as a note on the apply response, not fail it.
 
 use axum::http::StatusCode;
 
@@ -72,5 +72,42 @@ async fn a_provider_store_failure_after_setup_is_committed_is_a_note_not_an_erro
     assert!(
         note.contains("could not be connected"),
         "the operator must be told the provider failed, not left guessing: {note}"
+    );
+}
+
+#[tokio::test]
+async fn a_composio_store_failure_after_setup_is_committed_is_a_note_not_an_error() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+    block_secret_write(
+        home_dir.path(),
+        "acme",
+        crate::company::composio::BYOK_KEY_KEY,
+    );
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": {},
+            "template": "law_firm",
+            "name": "Acme",
+            "composio_draft": { "credential": "composio-api-key", "value": "ak-not-a-real-key" },
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a store failure must not fail the apply: {body}"
+    );
+    assert_eq!(body["complete"], true, "{body}");
+    assert_eq!(body["seeded_company"], "acme", "{body}");
+    let note = body["composio_note"]
+        .as_str()
+        .expect("a failed store is still reported as a note");
+    assert!(
+        note.contains("could not be stored"),
+        "the operator must be told the credential failed, not left guessing: {note}"
     );
 }
