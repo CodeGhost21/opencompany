@@ -64,7 +64,7 @@ believing it read something it never saw.
 
 ```toml
 [speech]
-enabled = false
+disabled = true
 ```
 
 **Company-level, not per-desk.** `[group_chat.hive.aside]` and
