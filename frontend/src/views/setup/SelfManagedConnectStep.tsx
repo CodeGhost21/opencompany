@@ -212,8 +212,10 @@ export function SelfManagedConnectStep({
    * default build unable to stage a key at all, because the check can only ever
    * answer "did not complete" there.
    *
-   * `skipVerify` is the "add anyway" path and stages without asking, which is
-   * the same escape the Connections form offers after a refusal.
+   * `skipVerify` is the "add anyway" path and stages without asking. The
+   * `outcome` this check produces never carries `fromHost`/`status`/`code`,
+   * so `offersSkipVerify` (keyed on that shape) never fires here — that
+   * escape only reaches the Connections form's own write failure.
    */
   async function submitComposio(skipVerify = false) {
     if (!composioFormValue) return;
