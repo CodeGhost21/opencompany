@@ -24,7 +24,8 @@ The short version, and the only four sentences most readers need:
   tested in every build, not only in a reporting one.
 
 Two surfaces report independently and are configured independently: the Rust
-host (`OPENCOMPANY_SENTRY_DSN`) and the React console (`VITE_SENTRY_DSN`). They
+host and desktop shell (`OPENCOMPANY_SENTRY_DSN`) and the React console
+(`VITE_SENTRY_DSN`). They
 share a release-tag format so events from one build line up whether the operator
 files them under one Sentry project or two.
 
@@ -117,7 +118,7 @@ close to useless. `@sentry/vite-plugin` handles the upload and is wired in
 
 | Variable | Meaning |
 |---|---|
-| `SENTRY_AUTH_TOKEN` | The gate. Absent — every local checkout and every CI lane in this repository — and the plugin is not constructed at all. |
+| `SENTRY_AUTH_TOKEN` | The gate. Release and staging workflows provide it as a secret; local and ordinary CI builds omit it and construct no plugin. |
 | `SENTRY_URL` | The Sentry instance. **Required for a self-hosted Sentry**: without it the plugin defaults to sentry.io, where the upload lands somewhere the events never will. |
 | `SENTRY_ORG`, `SENTRY_PROJECT` | Where to file the release. |
 | `SENTRY_RELEASE` | Overrides the computed release tag, for a CI that already knows what it is shipping. |
@@ -140,12 +141,11 @@ Two behaviours to know before wiring this into a release pipeline:
   define. If those two ever diverge, Sentry never joins frames to maps and stack
   traces stay minified with no error anywhere to say why.
 
-The Rust host has no equivalent debug-file upload. Symbolicating a stripped
-release binary needs a `sentry-cli upload-dif` step over the Cargo target
-directory, which is a release-pipeline change rather than a code one; the
-vendored runtime's `scripts/upload_sentry_symbols.sh` is the reference if it is
-ever wanted. Until then, a host stack trace names functions and line numbers
-from the debug info the default `dev`/`release` profiles keep.
+Rust release profiles keep packed line tables while stripping shipped binaries.
+`scripts/upload-sentry-symbols.sh` uploads their dSYM/DWP/PDB companions from
+the hosted-image and desktop release pipelines, using the same organization
+token as the console source-map upload. Missing credentials or a failed upload
+fail the release rather than silently shipping unsymbolicated stack traces.
 
 ## What is collected
 
@@ -253,6 +253,7 @@ option. `frontend/src/lib/sentry.ts` re-adds it by hand for that reason.
 | Seam | File | Why there |
 |---|---|---|
 | `sentry::init` | `src/bin/opencompany.rs`, first statement of `async_main` | The panic hook is installed here, so anything that panics earlier panics unobserved — and a malformed data root or an unlockable home are exactly the early panics worth reporting. |
+| desktop `sentry::init` | `crates/opencompany-app/src/lib.rs`, before the subscriber and Tauri runtime | The shell and every embedded host share the core's client, scrubber, panic hook and tracing bridge. |
 | the `tracing` bridge | `observability::tracing_layer`, added to the subscriber | One seam for every `tracing::error!` in the tree, rather than a reporting call at each. |
 | scope identity | `observability::scope::identify`, from the `serve` arm after the port is bound | The instance id and the storage backend are not known until the companies are registered — the same reason `analytics::boot::install` runs there. |
 | flush | `src/bin/opencompany.rs`, after the bound host stops serving | The error that took the host down is queued at the moment it stops. Bounded at 2s (`observability::FLUSH_TIMEOUT`), sized like `analytics`'s: the collector is a third party, and a drain that overruns Kubernetes' 30s grace buys a `SIGKILL` in the middle of the shutdown those seconds protect. |

@@ -142,7 +142,10 @@ path = "src/main.rs"
 #
 # The package is `opencompany-core`; its library crate is still named
 # `opencompany`, which is why the code says `use opencompany::`.
-opencompany-core = { path = "../opencompany-core", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp", "tinymemory", "tinyhumans"] }
+# `crash-reporting` gives the shell and every embedded host the same optional,
+# operator-configured Sentry client as the server binary. It remains inert
+# without `OPENCOMPANY_SENTRY_DSN`.
+opencompany-core = { path = "../opencompany-core", default-features = false, features = ["sqlite", "platform-jwt", "oauth", "mcp", "tinymemory", "tinyhumans", "crash-reporting"] }
 
 tauri = { version = "2", features = [] }
 # The OS credential store, so a device session token never has to live in the
@@ -197,3 +200,10 @@ tinycortex = { path = "../../vendor/openhuman/vendor/tinymemory/vendor/tinycorte
 tinycortex-api = { path = "../../vendor/openhuman/vendor/tinymemory/vendor/tinycortex/api" }
 tinychannels = { path = "../../vendor/openhuman/vendor/tinychannels" }
 motosan-ai-oauth = { path = "../../vendor/openhuman/vendor/motosan-ai-oauth" }
+
+# This crate is its own Cargo world, so it needs the workspace's symbolication
+# policy explicitly.
+[profile.release]
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "symbols"
