@@ -1398,10 +1398,8 @@ impl CompanyAgent {
         // explicit prior-attempt history it is allowed to use. This also lets a
         // rebuilt agent's current system prompt take effect instead of reviving
         // a transcript whose frozen prompt predates newly wired tools.
-        let isolated_background_turn = Self::isolates_background_history(
-            turn_chat_id.as_deref(),
-            run_sink.is_some(),
-        );
+        let isolated_background_turn =
+            Self::isolates_background_history(turn_chat_id.as_deref(), run_sink.is_some());
         let mut isolated_context_turn = isolated_background_turn;
         if isolated_background_turn {
             if !agent.history().is_empty() {

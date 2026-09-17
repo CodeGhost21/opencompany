@@ -12,7 +12,10 @@ use crate::ports::types::ContextChunk;
 #[test]
 fn dispatched_cards_are_isolated_from_an_agents_other_conversations() {
     assert!(CompanyAgent::isolates_background_history(None, true));
-    assert!(!CompanyAgent::isolates_background_history(Some("general"), true));
+    assert!(!CompanyAgent::isolates_background_history(
+        Some("general"),
+        true
+    ));
     assert!(!CompanyAgent::isolates_background_history(None, false));
 }
 
