@@ -3720,9 +3720,7 @@ fn task_instruction(card: &TaskRecord) -> String {
 fn public_research_assignment(assignment: &str) -> bool {
     let lower = assignment.to_ascii_lowercase();
     lower.contains("research")
-        && (lower.contains("source")
-            || lower.contains("competitor")
-            || lower.contains("landscape"))
+        && (lower.contains("source") || lower.contains("competitor") || lower.contains("landscape"))
 }
 
 /// Separate operator/reviewer instructions from result blocks accumulated on a
