@@ -598,15 +598,29 @@ pub struct CompanyManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Speech {
-    /// Whether `desk_post` / `desk_dm` / `desk_close` / `desk_read` are
-    /// registered on every agent's belt.
+    /// Legacy wire field. Older hosts serialized `false` into every company
+    /// because speech used to default off; it is retained for compatibility
+    /// but no longer acts as an opt-out.
     #[serde(default = "default_speech_enabled")]
     pub enabled: bool,
+    /// Explicit default-on opt-out. This new field is what makes a stored choice
+    /// distinguishable from the old automatically-serialized `enabled = false`.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl Default for Speech {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            disabled: false,
+        }
+    }
+}
+
+impl Speech {
+    pub const fn is_enabled(&self) -> bool {
+        !self.disabled
     }
 }
 
