@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::Notify;
 
 static GATES: LazyLock<Mutex<HashMap<PathBuf, Receiver<()>>>> =
@@ -44,23 +44,44 @@ pub(crate) async fn wait_blocked() {
     BLOCKED.notified().await;
 }
 
-static COMMIT_GATES: LazyLock<Mutex<HashMap<PathBuf, Receiver<()>>>> =
+type CommitStall = (Receiver<()>, Arc<Notify>);
+
+static COMMIT_GATES: LazyLock<Mutex<HashMap<PathBuf, CommitStall>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static COMMIT_BLOCKED: LazyLock<Notify> = LazyLock::new(Notify::new);
+
+/// One armed commit stall and the notification that belongs only to it.
+pub(crate) struct CommitGate {
+    release: Sender<()>,
+    blocked: Arc<Notify>,
+}
+
+impl CommitGate {
+    /// Releases the parked commit closure.
+    pub(crate) fn send(self, value: ()) -> Result<(), std::sync::mpsc::SendError<()>> {
+        self.release.send(value)
+    }
+
+    /// Waits until this exact armed commit reaches its stall point.
+    pub(crate) async fn wait_blocked(&self) {
+        self.blocked.notified().await;
+    }
+}
 
 /// Same idea as [`arm`]/[`maybe_block`]/[`wait_blocked`] above, but for
-/// [`commit_staged`]'s blocking closure instead of [`stage_atomic_bytes`]'s
-/// (issue #1828 review, twelfth round follow-up). A separate gate set
-/// because the two stall on the *same* destination path at different
-/// points in the same `save` call — arming one must not be consumed by
-/// the other.
-pub(crate) fn arm_commit(path: &Path) -> Sender<()> {
+/// [`commit_staged`]'s blocking closure instead of [`stage_atomic_bytes`]'s.
+/// The returned gate owns its notification, so parallel tests cannot consume
+/// each other's wakeup merely because they are both stalling commits.
+pub(crate) fn arm_commit(path: &Path) -> CommitGate {
     let (tx, rx) = std::sync::mpsc::channel();
+    let blocked = Arc::new(Notify::new());
     COMMIT_GATES
         .lock()
         .expect("stall-probe poisoned")
-        .insert(key(path), rx);
-    tx
+        .insert(key(path), (rx, blocked.clone()));
+    CommitGate {
+        release: tx,
+        blocked,
+    }
 }
 
 /// Called from inside `commit_staged`'s blocking closure, before the
@@ -70,14 +91,8 @@ pub(crate) fn maybe_block_commit(path: &Path) {
         .lock()
         .expect("stall-probe poisoned")
         .remove(&key(path));
-    if let Some(gate) = gate {
-        COMMIT_BLOCKED.notify_one();
-        let _ = gate.recv();
+    if let Some((release, blocked)) = gate {
+        blocked.notify_one();
+        let _ = release.recv();
     }
-}
-
-/// Waits until an armed commit has reached its stall point, i.e. the
-/// rename is genuinely about to run, not merely staged.
-pub(crate) async fn wait_blocked_commit() {
-    COMMIT_BLOCKED.notified().await;
 }
