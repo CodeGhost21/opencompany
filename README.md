@@ -84,40 +84,95 @@ It has no notion of who is convinced, no way to register a grounded objection,
 no reason to stop other than running out of members, and no answer when you ask
 afterwards why the group chose what it chose.
 
-Real collectives don't work that way, and the mechanisms that make them work
-have been studied for decades in colonies with no leader and no shared memory.
-OpenCompany runs its desks on those mechanisms, via
-[tinyhivemind](https://github.com/tinyhumansai/tinyhivemind), the hive-mind
-library that grew out of this repo:
+Real collectives don't work that way. Ant colonies, honeybee swarms and termite
+mounds reach decisions with no leader, no shared memory and far less bandwidth
+than five language models sharing a channel, and the mechanisms that let them
+have been studied for decades. OpenCompany runs its desks on those mechanisms,
+via [tinyhivemind](https://github.com/tinyhumansai/tinyhivemind), the hive-mind
+library that grew out of this repo.
+
+### How a desk thinks
+
+A message to a desk with two or more members doesn't pick a responder. It opens
+an **episode**: a bounded sequence of rounds in which members deposit marker
+lines into the desk's shared transcript, and a pure fold over that transcript
+decides who speaks next and when the room is done.
+
+```text
+!propose #stage Stage the rollout across three regions.
+!support #stage ^1 Staging bounds the blast radius if the migration is wrong.
+!object  >3      The regions are not independent, so this bounds nothing.
+!commit  #stage
+```
 
 - **Stigmergy.** Work leaves a trace in a shared medium, and the trace is the
-  stimulus for the next piece of work. Nobody dispatches anybody. The desk's
-  transcript is the medium; a `!propose`, `!support` or `!object` is a deposit
+  stimulus for the next piece of work. Nobody dispatches anybody and no agent
+  addresses another. The transcript is the medium; a marker line is a deposit
   in it.
 - **Quorum sensing.** An option carries when enough *distinct* members have
-  *grounded* support for it, the way a honeybee swarm settles a nest site. A
-  "+1" with no citation counts for nothing.
-- **Pheromone decay.** A trace's pull on the room's attention fades as the
-  room talks past it, so whoever spoke first doesn't hold the floor forever.
-- **Blind first round.** Each member deposits what it knows before it can read
-  its peers, because a shared transcript destroys independence. On the
-  hidden-profile benchmark that one change takes a room from **16% to 67%**
-  correct.
-- **A reason to stop.** An episode ends on a quorum it can name (or a deadlock,
-  or a spent budget), not when one agent decides it's done. Every message is a
-  bounded number of turns.
-- **Cross-desk referral.** Members of one desk are wrong about the same things,
-  and averaging correlated error doesn't remove it. A desk can put a question
-  to another desk, which answers with one real turn of its own. Same benchmark,
-  three confidently-wrong desks: deliberating inside them scored 0.2%; crossing
-  between them, 77.5%.
+  *grounded* support for it inside a window, the way a honeybee swarm settles a
+  nest site. Not a majority, not a score to beat. A `!support` with no citation
+  counts for nothing, and a late member folds to exactly the same standing as
+  one that watched live.
+- **Cross-inhibition.** An objection names a *message* and removes its author
+  from the supporter set of whatever they were advocating. It doesn't debit the
+  option. Subtracting from a score can't break a tie between two equally backed
+  options; silencing an advocate can. Honeybees do this too, with stop signals.
+- **Pheromone decay.** A trace's pull on the room's attention decays with
+  distance in the transcript, so whoever spoke first doesn't hold the floor
+  forever. The trace's standing importance is the floor under that decay, which
+  is why a proposal nobody has touched for eighty messages still outranks a
+  fresh question.
+- **Response thresholds.** Every member computes an urge from the salience
+  field and its own affinity, and whoever bids highest takes the floor. A
+  member whose urge never clears its threshold doesn't bid at all. That's the
+  response-threshold model of division of labour in social insects, and it's
+  what keeps a specialist quiet on questions it has nothing to add to.
 
-None of this is a quality claim about longer conversations. Conformity among
-language models rises with interaction time, so budgets are small by default
-and raising one is a decision, not a setting you forget. What the hive buys is
-independence, a decision you can audit, and a company that keeps thinking
-while you sleep. [`docs/spec/runtime/hivemind.md`](docs/spec/runtime/hivemind.md)
-has the whole mechanism.
+### Why it converges instead of conforming
+
+- **The first round is blind.** Each member deposits what it knows before it
+  can read its peers, because a shared transcript destroys independence: the
+  third speaker has already read the first two. And what a blind member is
+  asked for is a *deposit*, not a position. On a desk of specialists, where one
+  member holds the decisive fact and the rest share a prior, asking for
+  positions lets the shared prior reach quorum before the informed member says
+  anything. On the hidden-profile benchmark, asking for deposits takes a room
+  from **16% to 67%** correct.
+- **A reason to stop.** An episode ends on a quorum it can name, a deadlock
+  between two carried options, a spent turn budget, or a room that has nothing
+  to say. Never because one agent decided it was finished. One operator message
+  is one bounded number of turns, whatever the desk's size.
+- **Small budgets on purpose.** Conformity among language models rises with
+  interaction time, so a long episode buys correlated error rather than better
+  judgement. The default budget is small, and raising it is a decision you make
+  per desk, not a setting you forget.
+- **Cross-desk referral.** Members of one desk read the same transcript, work
+  the same part of the company, and are wrong about the same things. Averaging
+  correlated error doesn't remove it; only pooling *across* the boundary can. A
+  desk can put a question to another desk, which answers with one real turn on
+  its own channel, and what crosses carries information, never a vote. Three
+  desks each confidently wrong about a different option: deliberating inside
+  them scored **0.2%**; crossing between them, **77.5%**.
+- **Private asides, off by default.** Two members of a desk can compare notes
+  without the room, and the exchange is on the record even though the room
+  can't read it. The library measured it: it loses 15 points on a hidden
+  profile, because averaging inside one correlated desk imports the shared
+  bias. So it's a knob you turn on deliberately, not a feature that's on.
+
+### What you get out of it
+
+Every episode closes with a line the operator can read: what carried, who
+supported it, what was objected to and why, or that the desk deadlocked and
+between what. Decisions that settled long ago stay on a pinboard so they don't
+scroll away, and a desk remembers its past episodes. A desk of one behaves
+byte-for-byte like a single agent, so nothing here costs you anything until a
+desk has somebody to deliberate with.
+
+[`docs/spec/runtime/hivemind.md`](docs/spec/runtime/hivemind.md) has the whole
+mechanism, and the
+[tinyhivemind benchmarks](https://github.com/tinyhumansai/tinyhivemind/wiki/Benchmarks)
+have the numbers.
 
 ## What one person can now run
 
@@ -165,7 +220,6 @@ quickstart below uses `export` and `./scripts/launch-demo.sh`.
 git clone --recurse-submodules https://github.com/tinyhumansai/opencompany.git
 cd opencompany
 export TINYHUMANS_API_KEY="th-..."          # grab yours at tinyhumans.ai
-export OPENCOMPANY_FEATURES="medulla"       # compile in the hosted Medulla brain the key unlocks
 ./scripts/launch-demo.sh marketing up
 ```
 
@@ -180,8 +234,8 @@ itself? That path lives in [docs/running-locally.md](docs/running-locally.md):
 Cargo builds, Compose, feature flags, the Tauri desktop preview, and
 DigitalOcean / AWS deploys.
 
-> **You'll want a TinyHumans API key.** It's what unlocks Medulla and lets the
-> agents think and act. Without one you can still launch a company and look
+> **You'll want a TinyHumans API key.** It's what lets the agents think and
+> act. Without one you can still launch a company and look
 > around; the agents just won't do real work. Grab a key at
 > **[tinyhumans.ai](https://tinyhumans.ai)** and
 > `export TINYHUMANS_API_KEY="th-..."`.
@@ -204,22 +258,6 @@ DigitalOcean / AWS deploys.
   and deeper capabilities behind feature flags. Simple to start, honest to
   operate, easy to test.
 - **Yours to own.** GPL-3.0, self-hostable, no lock-in.
-
-## The engine: Medulla
-
-A hive still needs something that can hold the whole company in its head.
-That something is **Medulla**, TinyHumans' orchestrator model, purpose-built to
-run large fleets of agents as a single coordinated business.
-
-Medulla is orchestrator-first. Every event, whether a customer email, a market
-signal or a finished task, lands on a deep orchestration tier that reads the full
-picture, decides what matters, and routes it to the desk that should deliberate
-on it. The hive mechanics decide *how* a desk reaches a decision; Medulla
-decides *what* the company should be deciding at all. As your company grows
-from nine agents to nine hundred, Medulla is what keeps it coherent,
-on-strategy, and moving without you in every message. It's a hosted model: you
-reach it with a TinyHumans API key, and OpenCompany is the open host that
-points your companies at it.
 
 ## Make it yours
 
@@ -265,7 +303,7 @@ configure it, and goes to your own Sentry project rather than ours —
 
 | Where | What's there |
 | --- | --- |
-| [`docs/gitbooks/`](docs/gitbooks/README.md) | The full docs: what OpenCompany is, what one person can run, how [Medulla](docs/gitbooks/overview/medulla.md) drives it |
+| [`docs/gitbooks/`](docs/gitbooks/README.md) | The full docs: what OpenCompany is, what one person can run, and how it holds together |
 | [`docs/running-locally.md`](docs/running-locally.md) | Docker, Compose, from-source builds, feature flags, desktop preview, deploy targets |
 | [`docs/repository-layout.md`](docs/repository-layout.md) | Where everything lives in the tree and what each package owns |
 | [`docs/spec/README.md`](docs/spec/README.md) | Architecture reference |
