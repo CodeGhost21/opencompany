@@ -174,8 +174,9 @@ fn task_instruction_keeps_prior_agent_results_out_of_the_current_assignment() {
         .nth(1)
         .expect("assignment section");
 
-    assert!(history.contains("I stopped because my calls looped"));
-    assert!(history.contains("The old run produced no findings"));
+    assert!(history.contains("omitted from this turn"));
+    assert!(!history.contains("I stopped because my calls looped"));
+    assert!(!history.contains("The old run produced no findings"));
     assert!(!assignment.contains("old run produced no findings"));
     assert!(assignment.contains("Research competitors and cite sources"));
     assert!(assignment.contains("Include pricing where it is verifiable"));

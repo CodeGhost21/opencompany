@@ -3702,14 +3702,18 @@ fn task_instruction(card: &TaskRecord) -> String {
             } else {
                 format!(
                     "Task: {}\n\n## Prior attempt history\n\
-                     This is context only. Do not summarize an earlier failure as the result of \
-                     this run.\n\n{}\n\n## Current assignment\n{}\n\nPerform the current assignment now \
+                     Earlier agent/system output exists on the card but is omitted from this turn \
+                     ({} bytes). It is history only. Do not summarize an earlier failure as the \
+                     result of this run.\n\n## Current assignment\n{}\n\nPerform the current assignment now \
                      with the tools available in this turn. This card is already the authoritative \
                      task, so do not read the tasks ledger to rediscover it. If it asks for current \
                      public-source research and `web_search` is on your current tool belt, call \
                      `web_search`, then verify the strongest sources with `web_fetch`, before \
                      reporting that research is blocked.{}",
-                    card.title, history, assignment, research_hint
+                    card.title,
+                    history.len(),
+                    assignment,
+                    research_hint
                 )
             }
         }
