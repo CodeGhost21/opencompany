@@ -1225,12 +1225,9 @@ async fn store_composio_credential(
 /// sole-provider auto-route. Every one of those is the difference between a
 /// company whose provider answers and a row that merely exists.
 ///
-/// A refusal is reported rather than raised. The company has already been
-/// seeded by the time this runs, so failing the apply over an endpoint that
-/// stopped answering between the wizard's probe and this call would leave the
-/// operator with a built company behind an error screen and no way back into
-/// the wizard. Anything that is not a refusal — a store that cannot be written
-/// — is still fatal, because it says nothing about the draft.
+/// The company has already been seeded by the time this runs, so every
+/// failure — a refusal or a store that cannot be written — is reported
+/// through the returned note rather than raised.
 async fn connect_drafted_provider(
     state: &AppState,
     seeded: Option<&str>,
@@ -1239,9 +1236,6 @@ async fn connect_drafted_provider(
     let Some(draft) = req.provider_draft.clone() else {
         return Ok(None);
     };
-    // Only ever onto a company this call created — same rule as the account
-    // key, for the same reason: on a host that already had companies there is
-    // none of them this wizard can claim the operator meant.
     let Some(id) = seeded.map(crate::ports::types::CompanyId::new) else {
         return Ok(None);
     };
@@ -1257,13 +1251,8 @@ async fn connect_drafted_provider(
     .await
     {
         Ok(mutation) => Ok(Some(mutation.note)),
-        // The refusal's own sentence, without the envelope's `invalid request: `
-        // prefix. That prefix says which *kind* of error this is to a caller
-        // that might branch on it, and says nothing at all to the operator
-        // reading this line on the completion screen — where, unlike an error
-        // response, nothing downstream strips it.
         Err(ApiError(OpenCompanyError::InvalidRequest(message))) => Ok(Some(message)),
-        Err(ApiError(err)) => Err(err),
+        Err(ApiError(err)) => Ok(Some(format!("The provider could not be connected: {err}"))),
     }
 }
 
@@ -1390,6 +1379,9 @@ mod setup_test_group_5;
 #[cfg(test)]
 #[path = "setup/setup_test_group_6.rs"]
 mod setup_test_group_6;
+#[cfg(test)]
+#[path = "setup/setup_test_group_7.rs"]
+mod setup_test_group_7;
 #[cfg(test)]
 #[path = "setup/setup_test_support_1.rs"]
 mod setup_test_support_1;
