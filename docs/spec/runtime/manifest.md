@@ -128,7 +128,8 @@ hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
 
 [speech]                           # optional speech-tool override
 enabled = false                    # on by default; false opts this company out
-                                   # gains desk_post / desk_dm / desk_close /
+                                   # By default every agent's belt carries
+                                   # desk_post / desk_dm / desk_close /
                                    # desk_read, and a turn's return text becomes
                                    # private thinking. A turn that calls none of
                                    # them still has its text journaled, so this
