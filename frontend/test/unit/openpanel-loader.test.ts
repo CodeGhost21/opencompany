@@ -23,14 +23,14 @@ describe("OpenPanel console analytics", () => {
     });
   });
 
-  function runLoader(analytics?: boolean): void {
+  function runLoader(analytics?: boolean, analyticsEndpoint?: string): void {
     if (analytics === undefined) {
       new Function(loader)();
       return;
     }
     Object.defineProperty(window, "OPENCOMPANY_CONFIG", {
       configurable: true,
-      value: { analytics },
+      value: { analytics, analyticsEndpoint },
     });
     new Function(loader)();
   }
@@ -55,20 +55,20 @@ describe("OpenPanel console analytics", () => {
       value: {},
     });
 
-    runLoader(true);
+    runLoader(true, "https://collector.example/track");
 
     expect(window.op).toBeUndefined();
     expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).toBeNull();
   });
 
   it("installs the configured client and script after explicit opt-in", () => {
-    runLoader(true);
+    runLoader(true, "https://collector.example/track");
 
     expect(window.op).toBeDefined();
     expect(window.op?.q).toContainEqual([
       "init",
       {
-        apiUrl: "https://panel.tinyhumans.ai/api",
+        apiUrl: "https://collector.example/track",
         clientId: "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a",
         trackScreenViews: false,
         trackOutgoingLinks: false,
@@ -78,10 +78,17 @@ describe("OpenPanel console analytics", () => {
     expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).not.toBeNull();
   });
 
+  it("stays silent when opt-in has no configured collector endpoint", () => {
+    runLoader(true);
+
+    expect(window.op).toBeUndefined();
+    expect(document.head.querySelector('script[src="https://openpanel.dev/op1.js"]')).toBeNull();
+  });
+
   it("loads the configured browser client only after explicit opt-in", () => {
     expect(indexHtml).toContain('src="/openpanel-init.js"');
     expect(loader).toContain('src = "https://openpanel.dev/op1.js"');
-    expect(loader).toContain('apiUrl: "https://panel.tinyhumans.ai/api"');
+    expect(loader).toContain("apiUrl: window.OPENCOMPANY_CONFIG.analyticsEndpoint");
     expect(loader).toContain('clientId: "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a"');
     expect(loader).toContain("window.OPENCOMPANY_CONFIG?.analytics !== true");
     expect(loader).toContain("trackScreenViews: false");

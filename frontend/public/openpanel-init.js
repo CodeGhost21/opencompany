@@ -1,6 +1,10 @@
 // Product analytics for the browser console. The host must explicitly opt in;
 // desktop builds and self-hosted consoles stay silent by default.
-if (window.__TAURI_INTERNALS__ || window.OPENCOMPANY_CONFIG?.analytics !== true) {
+if (
+  window.__TAURI_INTERNALS__ ||
+  window.OPENCOMPANY_CONFIG?.analytics !== true ||
+  !window.OPENCOMPANY_CONFIG?.analyticsEndpoint
+) {
   // No analytics client is installed in the desktop or default deployment.
 } else {
 window.op = window.op || function () {
@@ -18,7 +22,7 @@ window.op = window.op || function () {
 }();
 
 window.op("init", {
-  apiUrl: "https://panel.tinyhumans.ai/api",
+  apiUrl: window.OPENCOMPANY_CONFIG.analyticsEndpoint,
   clientId: "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a",
   trackScreenViews: false,
   trackOutgoingLinks: false,

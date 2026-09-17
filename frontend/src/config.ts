@@ -61,6 +61,8 @@ declare global {
     OPENCOMPANY_CONFIG?: Partial<ConsoleConfig> & {
       /** Enables the browser-only OpenPanel loader when explicitly true. */
       analytics?: boolean;
+      /** The host-configured OpenPanel collector endpoint. */
+      analyticsEndpoint?: string;
     };
   }
 }

@@ -41,7 +41,7 @@ OpenPanel is AGPL-3.0 and runs from a compose file. Collection now lands on infr
 
 ## Console browser events
 
-The shared React console can load `https://openpanel.dev/op1.js` with public client id `afe8ec4e-0a6a-427a-aa22-49cbbf137d0a` only when its host explicitly opts in with `OPENCOMPANY_CONFIG.analytics: true`. Desktop and default self-hosted builds remain silent. Automatic outgoing-link and attribute collection stay disabled; the React lifecycle records only allowlisted screen names and button control types. This public id is not the host transport's `OPENCOMPANY_ANALYTICS_CLIENT_ID` / secret pair; never put that secret in a browser bundle.
+The shared React console can load `https://openpanel.dev/op1.js` with public client id `afe8ec4e-0a6a-427a-aa22-49cbbf137d0a` only when its host explicitly opts in with `OPENCOMPANY_CONFIG.analytics: true` and supplies its collector as `OPENCOMPANY_CONFIG.analyticsEndpoint`. Desktop and default self-hosted builds remain silent, including when the opt-in has no endpoint. Automatic outgoing-link and attribute collection stay disabled; the React lifecycle records only allowlisted screen names and button control types. This public id is not the host transport's `OPENCOMPANY_ANALYTICS_CLIENT_ID` / secret pair; never put that secret in a browser bundle.
 
 ## What is collected
 

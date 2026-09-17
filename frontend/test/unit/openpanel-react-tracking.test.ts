@@ -99,6 +99,7 @@ describe("OpenPanel React tracking", () => {
     root = createRoot(container);
 
     act(() => root?.render(createElement(OpenPanelTracking)));
+    expect(track.mock.calls.filter(([command, event]) => command === "track" && event === "screen_viewed")).toHaveLength(1);
     expect(track).toHaveBeenCalledWith("track", "screen_viewed", { screen: "settings" });
 
     window.location.hash = "#/workflows/a-private-id";

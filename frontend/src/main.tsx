@@ -28,39 +28,41 @@ function mount(): void {
   const root = document.getElementById("root");
   if (!root) throw new Error("missing #root element");
   createRoot(root).render(
-    <StrictMode>
-      {/*
-        Outermost, outside ThemeProvider and TooltipProvider, because the thing
-        that crashes may be one of them — a boundary inside a provider cannot
-        catch that provider's own throw, and the symptom is the white page this
-        exists to replace. `CrashFallback` depends on no context for the same
-        reason.
-      */}
-      <ErrorBoundary
-        fallback={({ error, resetError, eventId }) => (
-          <CrashFallback
-            error={error}
-            // Only when an event actually left. The SDK mints an id locally
-            // whether or not a DSN is configured; see `isReporting`.
-            eventId={isReporting() ? eventId : null}
-            onReset={resetError}
-          />
-        )}
-      >
-        <OpenPanelTracking />
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
+    <>
+      <OpenPanelTracking />
+      <StrictMode>
+        {/*
+          Outermost, outside ThemeProvider and TooltipProvider, because the thing
+          that crashes may be one of them — a boundary inside a provider cannot
+          catch that provider's own throw, and the symptom is the white page this
+          exists to replace. `CrashFallback` depends on no context for the same
+          reason.
+        */}
+        <ErrorBoundary
+          fallback={({ error, resetError, eventId }) => (
+            <CrashFallback
+              error={error}
+              // Only when an event actually left. The SDK mints an id locally
+              // whether or not a DSN is configured; see `isReporting`.
+              eventId={isReporting() ? eventId : null}
+              onReset={resetError}
+            />
+          )}
         >
-          <TooltipProvider delay={200}>
-            <App />
-            <Toaster position="bottom-right" richColors closeButton />
-          </TooltipProvider>
-        </ThemeProvider>
-      </ErrorBoundary>
-    </StrictMode>,
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            <TooltipProvider delay={200}>
+              <App />
+              <Toaster position="bottom-right" richColors closeButton />
+            </TooltipProvider>
+          </ThemeProvider>
+        </ErrorBoundary>
+      </StrictMode>
+    </>,
   );
 }
 
