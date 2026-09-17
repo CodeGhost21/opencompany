@@ -399,7 +399,7 @@ async fn tinyhumans_row_has_model(runtime: &CompanyRuntime) -> Result<bool, ApiE
 /// company. Never fails — an unreadable manifest reads as "not configured",
 /// which answers `false` here rather than surfacing a second error on top of
 /// whatever the fan-out itself already reported.
-async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
+pub(crate) async fn restart_required_for(runtime: &CompanyRuntime) -> bool {
     let configured = matches!(
         super::inference::inference_resolution(runtime).await,
         InferenceResolution::Resolved

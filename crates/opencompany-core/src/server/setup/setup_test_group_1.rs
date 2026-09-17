@@ -287,6 +287,7 @@ async fn a_write_to_an_env_owned_field_is_refused() {
             tinyhumans_key: None,
             tinyhumans_model: None,
             provider_draft: None,
+            composio_draft: None,
         },
         &env,
     )

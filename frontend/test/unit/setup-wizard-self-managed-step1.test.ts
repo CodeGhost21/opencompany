@@ -69,6 +69,7 @@ interface Sent {
   /** Every path posted, in order. */
   paths: string[];
   probe?: Record<string, unknown>;
+  composioCheck?: Record<string, unknown>;
   roster?: Record<string, unknown>;
   body?: Record<string, unknown>;
 }
@@ -76,7 +77,12 @@ interface Sent {
 function clientWith(
   s: SetupStatus,
   sent: Sent,
-  over: { probe?: () => Promise<unknown>; providerNote?: string | null } = {},
+  over: {
+    probe?: () => Promise<unknown>;
+    composioCheck?: () => Promise<unknown>;
+    providerNote?: string | null;
+    composioNote?: string | null;
+  } = {},
 ): OpenCompanyClient {
   return {
     scopeFor: () => "/api/v1/company",
@@ -87,6 +93,11 @@ function clientWith(
         sent.probe = body as Record<string, unknown>;
         if (over.probe) return over.probe();
         return { ok: true, modelCount: 2, models: [MODEL, "acme/large"] };
+      }
+      if (path === "/api/v1/setup/composio/api-key/test") {
+        sent.composioCheck = body as Record<string, unknown>;
+        if (over.composioCheck) return over.composioCheck();
+        return { ok: true };
       }
       if (path.includes("/setup/roster")) {
         sent.roster = body as Record<string, unknown>;
@@ -108,6 +119,7 @@ function clientWith(
           seeded_company: "agentic-law-firm",
           provider_note:
             "providerNote" in over ? over.providerNote : "Acme is connected and answering.",
+          composio_note: "composioNote" in over ? over.composioNote : null,
         };
       }
       return {};
@@ -406,12 +418,151 @@ describe("what a connected provider is worth before the company exists", () => {
   });
 });
 
+/**
+ * Composio's own half of the step: the Connections card, the Connections
+ * dialog, and two credentials that are not the same credential.
+ */
+async function connectComposio(row: "managed" | "byok") {
+  // The real row list, from `composioRows(null)` — the managed route offers a
+  // token to add, and the own-account route offers to be chosen by supplying
+  // the key that makes it resolve.
+  await clickId(row === "managed" ? "composio-row-managed-add" : "composio-row-byok-select");
+  expect(anywhere("composio-form-dialog"), "the real credential dialog should open").toBeTruthy();
+  await typeInto(
+    row === "managed" ? "#composio-token" : "#composio-api-key",
+    row === "managed" ? "th-not-a-real-token" : "ak-not-a-real-key",
+  );
+  await clickId("composio-form-save");
+}
+
+describe("the self-managed branch's Composio half", () => {
+  it("submits the own-account key and the managed token as different credentials", async () => {
+    const byok: Sent = { paths: [] };
+    await selfManaged(clientWith(status(), byok));
+    await connectComposio("byok");
+    await build();
+    expect(byok.body?.composio_draft).toEqual({
+      credential: "composio-api-key",
+      value: "ak-not-a-real-key",
+    });
+    // The own-account key is the one the host can check, and it was.
+    expect(byok.composioCheck).toEqual({ apiKey: "ak-not-a-real-key" });
+
+    const managed: Sent = { paths: [] };
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await selfManaged(clientWith(status(), managed));
+    await connectComposio("managed");
+    await build();
+    expect(managed.body?.composio_draft).toEqual({
+      credential: "composio-token",
+      value: "th-not-a-real-token",
+    });
+    // The managed route's token is a bearer the TinyHumans backend issues, and
+    // no cheap call tells a bad one apart from a backend that is down — so
+    // there is no check to run, and none is run.
+    expect(managed.composioCheck, "a token has no check to fail").toBeUndefined();
+  });
+
+  it("holds the dialog open on a rejected key rather than staging it", async () => {
+    const sent: Sent = { paths: [] };
+    await selfManaged(
+      clientWith(status(), sent, {
+        composioCheck: async () => ({
+          ok: false,
+          probeClass: "auth",
+          message: "Composio rejected that key.",
+        }),
+      }),
+    );
+    await connectComposio("byok");
+
+    expect(anywhere("composio-form-dialog"), "a rejected key must not close the form").toBeTruthy();
+    expect(find("setup-composio-staged")).toBeNull();
+    expect(document.body.textContent).toContain("Composio rejected that key.");
+  });
+
+  it("stages a key the check could not reach, and says so beside it", async () => {
+    const sent: Sent = { paths: [] };
+    await selfManaged(
+      clientWith(status(), sent, {
+        composioCheck: async () => ({
+          ok: false,
+          probeClass: "unknown",
+          message: "The check did not complete.",
+        }),
+      }),
+    );
+    await connectComposio("byok");
+
+    // Non-destructive: Composio was unreachable, or this build has no client to
+    // check with. The Connections page stores on that class and reports the
+    // reason, and refusing here would leave a default build unable to stage a
+    // key at all — the check can only ever answer this there.
+    expect(anywhere("composio-form-dialog"), "the form is done with").toBeNull();
+    expect(find("setup-composio-staged"), "the key is staged").toBeTruthy();
+    expect(find("setup-composio-advisory")?.textContent).toBe("The check did not complete.");
+  });
+
+  it("is skippable on its own, and so is the provider", async () => {
+    const sent: Sent = { paths: [] };
+    await selfManaged(clientWith(status(), sent));
+
+    // Connect a provider, then say "later" to Composio. The two answers stand
+    // apart: deferring one must leave the other exactly as it was.
+    await connectProvider();
+    await clickId("setup-composio-later");
+    expect(find("setup-composio-later-note")).toBeTruthy();
+    expect(
+      find("setup-provider-staged"),
+      "deferring Composio must not unstage the provider",
+    ).toBeTruthy();
+
+    await build();
+    expect(sent.body?.provider_draft).toBeTruthy();
+    expect(sent.body?.composio_draft ?? null).toBeNull();
+  });
+
+  it("finishes with both skipped, recording neither", async () => {
+    const sent: Sent = { paths: [] };
+    await selfManaged(clientWith(status(), sent));
+    await clickId("setup-provider-later");
+    await clickId("setup-composio-later");
+    await build();
+
+    expect(find("setup-done"), "skipping both must still finish").toBeTruthy();
+    // `null` is the honest state of a company minutes old. There is no
+    // "explicitly deferred" to record, and nothing downstream could act on it.
+    expect(sent.body?.provider_draft ?? null).toBeNull();
+    expect(sent.body?.composio_draft ?? null).toBeNull();
+    // And with nothing written, nothing is claimed on the way out.
+    expect(find("setup-composio-note"), "no note, no line invented for it").toBeNull();
+  });
+
+  it("shows the host's own account of what the credential did", async () => {
+    const sent: Sent = { paths: [] };
+    await selfManaged(
+      clientWith(status(), sent, {
+        composioNote: "This company reaches its tools through its own Composio account.",
+      }),
+    );
+    await connectComposio("byok");
+    await build();
+
+    expect(find("setup-composio-note")?.textContent).toBe(
+      "This company reaches its tools through its own Composio account.",
+    );
+  });
+});
+
 describe("a draft that belongs to a branch the operator has left", () => {
   it("is cleared when the setup way changes", async () => {
     const sent: Sent = { paths: [] };
     await selfManaged(clientWith(status(), sent));
     await connectProvider();
+    await connectComposio("byok");
     expect(find("setup-provider-staged"), "staged before the switch").toBeTruthy();
+    expect(find("setup-composio-staged"), "and so was Composio").toBeTruthy();
 
     await back();
     await clickId("setup-way-managed");
@@ -422,6 +573,10 @@ describe("a draft that belongs to a branch the operator has left", () => {
     expect(
       find("setup-provider-staged"),
       "a provider connected under the other way must not survive",
+    ).toBeNull();
+    expect(
+      find("setup-composio-staged"),
+      "and neither must a Composio credential",
     ).toBeNull();
   });
 

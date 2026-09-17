@@ -65,6 +65,7 @@ import { isDesktopRuntime } from "@/api/transport";
 import { probeEndpoint } from "@/inference/connect";
 import { TINYHUMANS_API_KEYS_URL } from "@/lib/links";
 import { SelfManagedConnectStep } from "./SelfManagedConnectStep";
+import type { ComposioDraft } from "./SelfManagedConnectStep";
 import { cn } from "@/lib/utils";
 import { HOST_SETTINGS_HIDDEN } from "@/product-scope";
 
@@ -411,6 +412,12 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
    */
   const [providerDraft, setProviderDraft] = useState<AddProviderInput | null>(null);
   /**
+   * The Composio credential the self-managed branch collected, staged for the
+   * apply. Independent of {@link providerDraft}: either connection can be made
+   * without the other, and skipping one says nothing about the other.
+   */
+  const [composioDraft, setComposioDraft] = useState<ComposioDraft | null>(null);
+  /**
    * The team, once the host has designed one — and `null` until then.
    *
    * Held as state rather than refetched per render because the operator edits
@@ -688,6 +695,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
       // company run on", and carrying it into Managed would submit a BYOK row
       // for an operator who has just said they want none.
       setProviderDraft(null);
+      setComposioDraft(null);
       setRoster(null);
     }
     // Managed is TinyHumans, so its step 1 has no provider to pick — and the
@@ -941,6 +949,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
         // template/designed fork because the provider belongs to whichever
         // company comes out of it.
         provider_draft: providerDraft,
+        composio_draft: composioDraft,
         template: seedTemplate ? template : null,
         company:
           status.companies.length === 0 && roster && !seedTemplate
@@ -992,6 +1001,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
     email,
     provider,
     providerDraft,
+    composioDraft,
     tested,
     values.tinyhumans_api_key,
     onNameLocalHost,
@@ -1063,6 +1073,11 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
           {applied.provider_note && (
             <p className="text-sm text-muted-foreground" data-testid="setup-provider-note">
               {applied.provider_note}
+            </p>
+          )}
+          {applied.composio_note && (
+            <p className="text-sm text-muted-foreground" data-testid="setup-composio-note">
+              {applied.composio_note}
             </p>
           )}
           {/* The button below cannot restart the host — it only re-enters the
@@ -1418,6 +1433,13 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
               // otherwise survive into Review as a curated one under copy
               // promising a designed one.
               setRoster(null);
+            })(setupWayGenerationRef.current)}
+            composio={composioDraft}
+            onComposio={((generation) => (next: ComposioDraft | null) => {
+              // Same rule as the provider draft — see `setupWayGenerationRef`.
+              // The roster is not cleared here: Composio is what the team can
+              // reach, not what designs it.
+              if (generation === setupWayGenerationRef.current) setComposioDraft(next);
             })(setupWayGenerationRef.current)}
           />
         )}
