@@ -180,3 +180,25 @@ fn an_operator_added_teammate_is_listed_by_name_and_role() {
         "{section}"
     );
 }
+
+#[test]
+fn a_manifest_teammates_operator_rename_is_the_name_other_agents_are_given() {
+    let mut record = record(TEAM);
+    record
+        .overlay_agent_edits
+        .push(crate::ports::types::AgentOverride {
+            agent_id: "backend".to_string(),
+            name: Some("Johnny".to_string()),
+            ..Default::default()
+        });
+
+    let section = team_section(&record, "writer");
+    assert!(
+        section.contains("- `backend` — Johnny, Backend Engineer: Build the services."),
+        "the live overlay name and canonical id must both reach the teammate prompt: {section}"
+    );
+    assert!(
+        section.contains("`delegate_to_teammate`"),
+        "the same prompt must say how to contact Johnny: {section}"
+    );
+}
