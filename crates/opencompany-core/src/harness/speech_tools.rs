@@ -370,9 +370,11 @@ impl SpeechContext {
         if first_committed.is_some() {
             crate::runtime::delegation::mark_turn_spoke();
         }
-        if let Some((peer, chat_id, trigger)) = first_committed {
-            self.stage_recipient_turn(record, &peer, chat_id, trigger, &text);
-        }
+        let woke_recipient = first_committed
+            .map(|(peer, chat_id, trigger)| {
+                self.stage_recipient_turn(record, &peer, chat_id, trigger, &text)
+            })
+            .unwrap_or(false);
         if !failed_for.is_empty() {
             let failures = failed_for
                 .iter()
@@ -394,11 +396,12 @@ impl SpeechContext {
                 ))
             };
         }
-        ToolResult::success(format!(
-            "Left for {}. Not delivered now — each of them reads it on their next turn, and \
-             nothing here wakes them. If it needs doing rather than knowing, raise a card.",
-            left_for.join(", "),
-        ))
+        let delivery = if woke_recipient {
+            " TinyHiveMind routed one bounded recipient turn now; any additional recipients read it on their next turn."
+        } else {
+            " No recipient turn was started; they read it on their next turn."
+        };
+        ToolResult::success(format!("Left for {}.{delivery}", left_for.join(", ")))
     }
 
     async fn say(&self, chat_id: String, text: String, audience: Vec<String>) -> ToolResult {
@@ -454,9 +457,9 @@ impl SpeechContext {
         chat_id: String,
         trigger: EventSeq,
         text: &str,
-    ) {
+    ) -> bool {
         let Some(queue) = self.dispatch.as_ref() else {
-            return;
+            return false;
         };
         let members = crate::runtime::delegation_tools::tinyhivemind_roster(record);
         let people = Vec::new();
@@ -499,9 +502,10 @@ impl SpeechContext {
                 &roster,
             )
         else {
-            return;
+            return false;
         };
-        let _ = queue.push_within_cap(
+        matches!(
+            queue.push_within_cap(
             crate::harness::orchestrator::Delegation::ConversationDispatch {
                 source: request.source_id,
                 target: request.target_id,
@@ -512,7 +516,9 @@ impl SpeechContext {
             },
             crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN,
             usize::try_from(max_hops).unwrap_or(usize::MAX),
-        );
+            ),
+            crate::harness::orchestrator::Staged::Queued
+        )
     }
 }
 
