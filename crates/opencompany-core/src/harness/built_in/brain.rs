@@ -3737,9 +3737,9 @@ fn note_attribution(paragraph: &str) -> Option<&str> {
     let rest = paragraph.strip_prefix('[')?;
     let (label, _) = rest.split_once("] ")?;
     (!label.is_empty()
-        && label
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_- ".contains(&byte)))
+        && label.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_- ".contains(&byte)
+        }))
     .then_some(label)
 }
 
