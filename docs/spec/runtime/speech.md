@@ -165,9 +165,9 @@ Projected through the **same** `chat_history::agent_channels` the live session
 uses to decide what it may read, so the page never admits a channel the agent's
 own session would be refused.
 
-Eligible is not the same as *delivered*. A `desk_dm` "journals a row and runs
-nothing" (above): the row exists the instant it is sent, but the recipient does
-not actually receive it until its own next turn walks a session delta past the
+Eligible is not the same as *delivered*. A `desk_dm` row exists the instant it
+is sent. TinyHiveMind may wake one recipient immediately, while additional
+recipients receive it when their next turn walks a session delta past the
 watermark. This route has no access to that in-process watermark — it is
 per-`AgentSessionState`, held by the live [`HarnessPool`](../../../src/harness/built_in/mod.rs)
 under the `openhuman` feature, while this route compiles and answers in every
