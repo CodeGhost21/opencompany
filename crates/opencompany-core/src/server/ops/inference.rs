@@ -1055,7 +1055,11 @@ async fn effective_status_with(
             provider: d.selected_provider().to_string(),
             proxied: d.is_proxied(),
             slug: d.telemetry_slug().to_string(),
-            base_url,
+            base_url: if d.selected_provider() == inference::MANAGED_SLUG {
+                managed.base_url.clone()
+            } else {
+                base_url
+            },
             models: d.models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),

@@ -3593,8 +3593,12 @@ impl HarnessBrain {
         self.tinyhivemind_responder(Some(chat), text, &[])
             .await
             .and_then(|decision| {
-                (decision.disposition == tinyhivemind::responder::SelectionDisposition::Selected)
-                    .then_some(decision.responder_id)
+                matches!(
+                    decision.disposition,
+                    tinyhivemind::responder::SelectionDisposition::Selected
+                        | tinyhivemind::responder::SelectionDisposition::NotApplicable
+                )
+                .then_some(decision.responder_id)
             })
     }
 }

@@ -1472,15 +1472,10 @@ impl<'a> DelegationRunner<'a> {
             && !crate::company::copilot::is_copilot_thread(chat_id);
         // Issue #463: did the REST chat handler already card this message?
         //
-        // The handler's task-intent detector is the authority for whether it
-        // carded this message. Its best-effort write may be absent by the time
-        // this runner looks, but that must not reopen the same work through a
-        // delegation: one message still gets at most one card.
-        let carded_by_handler = triage.title().is_some() || workflow_requested;
-        let handler_card = match carded_by_handler {
-            true => self.chat_handler_card().await?,
-            false => None,
-        };
+        // A card actually persisted by the handler is the authority here.
+        // Intent alone must not suppress a later tool-driven delegation.
+        let handler_card = self.chat_handler_card().await?;
+        let carded_by_handler = workflow_requested || handler_card.is_some();
         // Issue #1152: the mirror image of `workflow_requested` — the operator
         // said this message is not a request for work at all.
         //
