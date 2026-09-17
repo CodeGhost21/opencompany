@@ -442,6 +442,14 @@ impl<'a> EpisodeDriver<'a> {
                 federation
                     .peers_of(&self.desk.id)
                     .into_iter()
+                    // The company line is not a peer to ask. Every seat is on
+                    // it, so the membership filter below admits it for
+                    // everybody — and being offered the room you are already
+                    // sitting in is a move that spends the asking room's turn
+                    // and can return nothing it did not already hold.
+                    .filter(|desk| {
+                        federation.general_desk.as_deref() != Some(desk.id.as_str())
+                    })
                     .map(|desk| {
                         (
                             desk.id.clone(),

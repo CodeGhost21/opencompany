@@ -250,6 +250,13 @@ pub struct FederationDesk {
 pub struct HiveFederation {
     /// Every desk in the company, including the one deliberating.
     pub desks: Vec<FederationDesk>,
+    /// The company's own line (`[company].general_desk`), when it names one.
+    ///
+    /// Held so the peer offer can leave it out. It is the one desk EVERY seat
+    /// sits on, so a membership filter cannot remove it — and a crossing to it
+    /// is meaningless twice over: the asker is already in the room, and the
+    /// room is not a specialist desk holding a fact the asker's does not.
+    pub general_desk: Option<String>,
     /// Every teammate seated on any of those desks, as `(id, label)`, sorted by
     /// id.
     ///
@@ -290,6 +297,11 @@ impl HiveFederation {
     pub fn peers_of_member<'a>(&'a self, home: &str, agent: &str) -> Vec<&'a FederationDesk> {
         self.peers_of(home)
             .into_iter()
+            // The company line is not a peer to ask. Every seat is on it, so
+            // membership admits it for everyone — and being offered the room
+            // you are already sitting in is a move that spends the asking
+            // room's turn and can return nothing it did not have.
+            .filter(|desk| self.general_desk.as_deref() != Some(desk.id.as_str()))
             .filter(|desk| desk.members.iter().any(|member| member == agent))
             .collect()
     }

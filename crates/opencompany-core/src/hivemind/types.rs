@@ -755,6 +755,7 @@ pub fn desk_federation(
     }
     let desks = company_desks(record);
     let federation = super::referral::HiveFederation {
+        general_desk: record.manifest.company.general_desk.clone(),
         agents: desks
             .iter()
             .flat_map(|desk| desk.members.iter())
