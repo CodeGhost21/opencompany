@@ -36,7 +36,14 @@ impl RunTurn for ConcurrentConversationTurns {
         tokio::task::yield_now().await;
         self.active
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(TurnOutcome::plain(format!("{agent_id} answered")))
+        Ok(TurnOutcome {
+            reply: format!("{agent_id} answered"),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+            abnormal_stop: None,
+            halted_for_spend: None,
+            budget_paused: None,
+        })
     }
 
     async fn run_steered(
@@ -69,9 +76,9 @@ async fn independent_dm_messages_run_distinct_agent_sessions_concurrently_withou
     let fixture = Fixture::peers();
     let turns = ConcurrentConversationTurns::new();
     let _claim = fixture.queue.claim();
-    for (target, seq) in [("designer", 10), ("writer", 11)] {
+    for (target, seq) in [("seo_specialist", 10), ("copywriter", 11)] {
         fixture.queue.push(Delegation::ConversationDispatch {
-            source: "lead".to_string(),
+            source: "brand_strategist".to_string(),
             target: target.to_string(),
             message: format!("question for {target}"),
             chat_id: target.to_string(),
