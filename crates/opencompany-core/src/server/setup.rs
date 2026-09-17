@@ -1258,9 +1258,29 @@ async fn connect_drafted_provider(
     )
     .await
     {
-        Ok(mutation) => Ok(Some(mutation.note)),
+        Ok(mutation) => {
+            rebuild_after_provider(state, &runtime).await;
+            Ok(Some(mutation.note))
+        }
         Err(ApiError(OpenCompanyError::InvalidRequest(message))) => Ok(Some(message)),
         Err(ApiError(err)) => Ok(Some(format!("The provider could not be connected: {err}"))),
+    }
+}
+
+/// Swaps the seeded company's echo brain for the one its new provider affords.
+async fn rebuild_after_provider(
+    state: &AppState,
+    runtime: &std::sync::Arc<crate::company::runtime::CompanyRuntime>,
+) {
+    if !crate::server::ops::company_key::restart_required_for(runtime.as_ref()).await {
+        return;
+    }
+    if let Err(err) = crate::runtime::rebuild_company(state, runtime.id()).await {
+        tracing::warn!(
+            company = %runtime.id(),
+            error = %err,
+            "provider connected but the runtime could not be rebuilt; a restart is still required",
+        );
     }
 }
 
