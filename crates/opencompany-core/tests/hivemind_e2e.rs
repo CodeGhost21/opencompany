@@ -129,6 +129,15 @@ impl Ask {
         self.speaker.as_deref().unwrap_or("?")
     }
 
+    fn last_user_text(&self) -> &str {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .and_then(|message| message.get("content").and_then(Value::as_str))
+            .unwrap_or_default()
+    }
+
     /// What the operator actually asked, which is what identifies the episode.
     ///
     /// Read from the prompt's own `The operator asked the desk:` block rather
@@ -612,6 +621,88 @@ fn converging_script() -> Responder {
 
 /// A desk of three that must all back a topic with grounds before it carries.
 const UNANIMOUS: &str = "{ enabled = true, turn_budget = 12, quorum = 3, blind_round = true }";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_agent_uses_speech_to_coordinate_multiple_dm_sessions_without_cards() {
+    let script: Responder = Arc::new(|ask: &Ask| {
+        let user = ask.last_user_text();
+        if user.contains("Coordinate the launch") {
+            return match ask.tool_outputs.len() {
+                0 => Reply::Call {
+                    tool: "desk_dm",
+                    args: json!({
+                        "to": [THEORIST],
+                        "message": "Check the launch argument and reply here."
+                    }),
+                },
+                1 => Reply::Call {
+                    tool: "desk_dm",
+                    args: json!({
+                        "to": [PROGRAMMER],
+                        "message": "Check the launch implementation and reply here."
+                    }),
+                },
+                _ => Reply::Call {
+                    tool: "desk_post",
+                    args: json!({ "message": "I asked both specialists." }),
+                },
+            };
+        }
+        if user.contains("@greeter sent you this direct message") {
+            return Reply::Call {
+                tool: "desk_post",
+                args: json!({ "message": "Checked and ready." }),
+            };
+        }
+        Reply::Call {
+            tool: "desk_post",
+            args: json!({ "message": "Acknowledged." }),
+        }
+    });
+    let (base_url, _script) = spawn_script(script).await;
+    let home = tempfile::tempdir().unwrap();
+    let (address, runtime) = boot(home.path(), &base_url, UNANIMOUS, None).await;
+    let client = Client::new(address);
+    client.sign_in().await;
+
+    let response = client.say(SOLO_DESK, "Coordinate the launch").await;
+    assert!(response["responses"].is_array(), "{response}");
+
+    for recipient in [THEORIST, PROGRAMMER] {
+        let dm = replies(&runtime, recipient).await;
+        assert!(
+            dm.iter().any(|(_, author, _)| author == "greeter"),
+            "the outbound DM must be in {recipient}'s transcript: {dm:?}"
+        );
+        assert!(
+            dm.iter()
+                .any(|(_, author, text)| author == recipient && text == "Checked and ready."),
+            "the recipient's tool-call reply must return to the same DM: {dm:?}"
+        );
+    }
+    let cards = runtime.tasks().list(runtime.id()).await.unwrap();
+    assert!(cards.is_empty(), "conversation alone must create no task: {cards:?}");
+
+    // The same greeter now handles its private chat as a second conversation;
+    // its per-agent session remains one continuous cross-channel session.
+    let _ = client.say("dm:greeter", "What did the specialists say?").await;
+    let rows = runtime
+        .events()
+        .read_from(runtime.id(), EventSeq::new(0), 10_000)
+        .await
+        .unwrap();
+    let greeter_chats = rows
+        .iter()
+        .filter_map(|row| match &row.event {
+            CompanyEvent::AgentReply {
+                agent_id, chat_id, ..
+            } if agent_id == "greeter" => Some(chat_id.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert!(greeter_chats.contains(SOLO_DESK), "{greeter_chats:?}");
+    assert!(greeter_chats.contains("dm:greeter"), "{greeter_chats:?}");
+}
 
 /// **Deliberation converges through the fold.**
 ///
