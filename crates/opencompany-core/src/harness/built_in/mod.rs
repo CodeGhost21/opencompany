@@ -1391,7 +1391,24 @@ impl CompanyAgent {
         // Runs inside the `agent` critical section, which already serialises
         // this agent's turns.
         let mut session_cues: Option<String> = None;
-        let mut isolated_context_turn = false;
+        // A card attempt is one bounded work context, not the continuation of
+        // whatever this teammate last did on another card or in a channel.
+        // `run_sink` uniquely identifies the dispatched-card path here. Start
+        // it clean and clear it again below, while the card note carries the
+        // explicit prior-attempt history it is allowed to use. This also lets a
+        // rebuilt agent's current system prompt take effect instead of reviving
+        // a transcript whose frozen prompt predates newly wired tools.
+        let isolated_background_turn = isolates_background_history(
+            turn_chat_id.as_deref(),
+            run_sink.is_some(),
+        );
+        let mut isolated_context_turn = isolated_background_turn;
+        if isolated_background_turn {
+            if !agent.history().is_empty() {
+                agent.clear_history();
+            }
+            overrides.suppress_transcript_autoload = true;
+        }
         // Codex P1: a session delta's `next_state` must not land in
         // `self.session` until the turn it was cued into actually succeeds.
         // The rows it marks delivered are handed to the model as this turn's
@@ -2148,6 +2165,10 @@ impl CompanyAgent {
         });
         (outcome, usages)
     }
+
+fn isolates_background_history(turn_chat_id: Option<&str>, has_run_sink: bool) -> bool {
+    turn_chat_id.is_none() && has_run_sink
+}
 
     /// This turn's in-turn spend ceiling, in USD — the value that
     /// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts the turn
