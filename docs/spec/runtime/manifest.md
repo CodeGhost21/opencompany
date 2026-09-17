@@ -127,7 +127,7 @@ hive = { enabled = true, turn_budget = 6, quorum = 2, blind_round = true,
                                    # restricts nothing. See runtime/hivemind.md
 
 [speech]                           # optional speech-tool override
-enabled = false                    # on by default; false opts this company out
+disabled = true                    # on by default; true opts this company out
                                    # By default every agent's belt carries
                                    # desk_post / desk_dm / desk_close /
                                    # desk_read, and a turn's return text becomes
