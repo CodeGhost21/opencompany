@@ -673,6 +673,29 @@ pub(crate) struct Drained {
     pub(crate) refused_cards: Vec<RefusedCardWrite>,
 }
 
+impl Drained {
+    fn absorb(&mut self, out: DelegationOutcome, target: Option<String>) {
+        if out.cancelled
+            && let Some(target) = target
+        {
+            self.cancelled_desks.push(target);
+        }
+        if let Some(id) = out.spawned_task {
+            self.spawned_task.get_or_insert(id);
+        }
+        if let Some(bubble) = out.bubble {
+            self.bubbles.push(bubble);
+        }
+        self.bubbles.extend(out.bubbles);
+        if let Some(reply) = out.desk_reply {
+            self.desk_replies.push(reply);
+        }
+        if let Some(refused) = out.refused_card {
+            self.refused_cards.push(refused);
+        }
+    }
+}
+
 /// The operator-facing result of one operator message after delegation: the
 /// bubble's reply and folded step timeline, plus any standalone delegation
 /// bubbles to append as sibling channel responses. None of the current
@@ -2049,6 +2072,7 @@ impl<'a> DelegationRunner<'a> {
         hand_offs: HandOffs,
     ) -> Result<Drained> {
         let mut drained = Drained::default();
+        let mut conversation_dispatches = Vec::new();
         for delegation in self.queue.drain(self.max_delegations) {
             if hand_offs == HandOffs::Drop
                 && let Some(target) = hand_off_target_of(&delegation)
@@ -2061,28 +2085,31 @@ impl<'a> DelegationRunner<'a> {
                 );
                 continue;
             }
+            if matches!(delegation, Delegation::ConversationDispatch { .. }) {
+                conversation_dispatches.push(delegation);
+                continue;
+            }
             // Captured before the delegation is consumed, so a cancellation can
             // be reported against whoever it was aimed at (issues #176, #884).
             let target = hand_off_target_of(&delegation).map(str::to_string);
             let out = self.run_delegation(delegation, chat_id, ctx).await?;
-            if out.cancelled
-                && let Some(desk) = target
-            {
-                drained.cancelled_desks.push(desk);
-            }
-            if let Some(id) = out.spawned_task {
-                drained.spawned_task.get_or_insert(id);
-            }
-            if let Some(bubble) = out.bubble {
-                drained.bubbles.push(bubble);
-            }
-            drained.bubbles.extend(out.bubbles);
-            if let Some(desk) = out.desk_reply {
-                drained.desk_replies.push(desk);
-            }
-            if let Some(unknown) = out.refused_card {
-                drained.refused_cards.push(unknown);
-            }
+            drained.absorb(out, target);
+        }
+        // Separate committed DM messages are independent one-target decisions.
+        // Run them together: distinct agents proceed concurrently, while two
+        // messages to the same agent serialize on that agent's own session lock.
+        let dispatched = futures::future::join_all(
+            conversation_dispatches.into_iter().map(|delegation| async move {
+                let target = hand_off_target_of(&delegation).map(str::to_string);
+                self.run_delegation(delegation, chat_id, ctx)
+                    .await
+                    .map(|out| (out, target))
+            }),
+        )
+        .await;
+        for outcome in dispatched {
+            let (out, target) = outcome?;
+            drained.absorb(out, target);
         }
         Ok(drained)
     }
