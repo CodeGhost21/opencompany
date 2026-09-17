@@ -69,4 +69,17 @@ describe("OpenPanel React tracking", () => {
     window.location.hash = "#/";
     expect(currentScreen()).toBe("home");
   });
+
+  it("stops tracking after disposal", () => {
+    dispose = installOpenPanelTracking();
+    track.mockReset();
+
+    dispose();
+    dispose = undefined;
+    window.location.hash = "#/workflows/after-disposal";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    document.body.click();
+
+    expect(track).not.toHaveBeenCalled();
+  });
 });

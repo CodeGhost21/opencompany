@@ -18,7 +18,7 @@ describe("OpenPanel console analytics", () => {
     expect(loader).toContain('apiUrl: "https://panel.tinyhumans.ai/api"');
     expect(loader).toContain('clientId: "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a"');
     expect(loader).toContain("window.OPENCOMPANY_CONFIG?.analytics !== true");
-    expect(loader).toContain("trackScreenViews: true");
+    expect(loader).toContain("trackScreenViews: false");
     expect(loader).toContain("trackOutgoingLinks: false");
     expect(loader).toContain("trackAttributes: false");
     expect(loader).toContain('window.op("init"');
@@ -27,5 +27,7 @@ describe("OpenPanel console analytics", () => {
   it("permits exactly the required OpenPanel origins in the desktop webview", () => {
     expect(tauriConfig).toContain("script-src 'self'");
     expect(tauriConfig).toContain("connect-src 'self' ipc: http://ipc.localhost");
+    expect(tauriConfig).not.toContain("https://openpanel.dev");
+    expect(tauriConfig).not.toContain("https://panel.tinyhumans.ai");
   });
 });

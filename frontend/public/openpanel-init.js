@@ -20,7 +20,7 @@ window.op = window.op || function () {
 window.op("init", {
   apiUrl: "https://panel.tinyhumans.ai/api",
   clientId: "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a",
-  trackScreenViews: true,
+  trackScreenViews: false,
   trackOutgoingLinks: false,
   trackAttributes: false,
 });
