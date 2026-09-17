@@ -3252,20 +3252,18 @@ impl<'a> DelegationRunner<'a> {
                 trigger_sequence,
                 child_hop,
             } => {
-                let _scope = self
-                    .queue
-                    .enter_scope(delegation_tools::teammate_scope_key(&target));
                 let prompt = format!("@{source} sent you this direct message:\n\n{message}");
-                let outcome = self
-                    .run_turn
-                    .run(
+                let outcome = with_turn_message_hop(
+                    child_hop,
+                    self.run_turn.run(
                         self.company,
                         &target,
                         &prompt,
                         ChatTarget::channel(Some(&chat_id))
                             .answering(Some(EventSeq::new(trigger_sequence))),
-                    )
-                    .await?;
+                    ),
+                )
+                .await?;
                 let nested = Box::pin(self.drain_and_execute(
                     Some(&chat_id),
                     MessageContext::default(),
