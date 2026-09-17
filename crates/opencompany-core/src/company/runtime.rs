@@ -246,6 +246,8 @@ pub struct CompanyRuntime {
     /// Whether this runtime has already said that it cannot dispatch
     /// (issue #1059). Latched so a board with many cards says it once.
     pub(crate) inert_board_reported: std::sync::atomic::AtomicBool,
+    /// The platform managed default — see [`Self::platform_default`].
+    pub(crate) platform_default: Option<crate::company::inference::EnvDefault>,
     pub(crate) id: CompanyId,
     pub(crate) brain: Arc<dyn Brain>,
     pub(crate) store: Arc<dyn CompanyStore>,
@@ -587,6 +589,8 @@ impl CompanyRuntime {
             // resolved config (`set_default_mcp_servers`) rather than taken as a
             // 19th positional argument here.
             default_mcp_servers: Vec::new(),
+            // Likewise host-wide: `set_platform_default`.
+            platform_default: None,
             id,
             brain,
             store,
@@ -1004,6 +1008,23 @@ impl CompanyRuntime {
 
     pub fn secrets(&self) -> &Arc<dyn SecretStore> {
         &self.secrets
+    }
+
+    /// The platform managed default this runtime resolves managed inference
+    /// against: the endpoint on the platform this host was configured for
+    /// (`api_url`), and the instance credential when the deployment has one.
+    ///
+    /// Set by the builder, which is also what hands the same value to the
+    /// harness brain — so a console read and a turn cannot disagree about
+    /// which platform "Managed" means. `None` only for a runtime assembled by
+    /// hand around [`CompanyRuntime::new`]; every builder-made runtime has one.
+    pub fn platform_default(&self) -> Option<&crate::company::inference::EnvDefault> {
+        self.platform_default.as_ref()
+    }
+
+    /// See [`platform_default`](Self::platform_default).
+    pub fn set_platform_default(&mut self, default: crate::company::inference::EnvDefault) {
+        self.platform_default = Some(default);
     }
 
     /// This company's event log (append-only audit trail).

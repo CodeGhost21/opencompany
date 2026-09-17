@@ -1826,6 +1826,9 @@ fn project_event_for_viewer(
             from_desk,
             trigger_sequence,
             to_desk,
+            target,
+            asker,
+            conversation,
             returning,
             ..
         } => {
@@ -1849,6 +1852,11 @@ fn project_event_for_viewer(
             // to find what changed.
             o["sequence"] = json!(trigger_sequence);
             o["toDesk"] = json!(to_desk);
+            o["target"] = json!(target);
+            o["asker"] = json!(asker);
+            // A pair thread exists only for a person-to-person crossing; on a
+            // desk crossing `target` is merely the room's first eligible seat.
+            o["direct"] = json!(conversation.is_some());
             // Which leg this is, read the same way `ReferredFrom::returning`
             // is: a return is the one that completes the exchange, so a console
             // that only wants to re-read once can wait for it.

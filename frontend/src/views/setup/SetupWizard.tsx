@@ -46,7 +46,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { OnboardingShell } from "@/components/onboarding-shell";
 import { PageHeader } from "@/components/page-header";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { useOptionalHosts } from "@/connections/HostsContext";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -145,6 +145,24 @@ const SETUP_WAY_COPY: Record<SetupWay, { label: string; hint: string }> = {
     hint: "Bring your own provider and your own integration keys. Nothing is brokered for you.",
   },
 };
+
+/**
+ * Where a TinyHumans key is minted by hand: the API-keys tab of the hub **this
+ * host is on**, as the host reports it (`inference.keys_url`). Not a constant:
+ * a host on staging sends its operator to staging, because a key minted on
+ * production would be refused by the platform every other surface of this
+ * host talks to. A host too old to report one falls back to the production
+ * link the console always carried; a host whose `api_url` follows no known
+ * convention reports `null`, and then there is no link to offer.
+ */
+function tinyhumansKeySource(
+  status: SetupStatus | null,
+): { label: string; url: string } | undefined {
+  const url =
+    status?.inference.keys_url === undefined ? TINYHUMANS_API_KEYS_URL : status.inference.keys_url;
+  return url ? { label: "TinyHumans", url } : undefined;
+}
+
 
 /**
  * Advanced: the settings that already work, grouped by subject.
@@ -1365,6 +1383,7 @@ export function SetupWizard({ client, onDone, onCancel, expectsShellRemount }: P
 
         {current.id === STEP_ONE_FOR.managed && (
           <ManagedLoginStep
+            status={status}
             client={client}
             value={values.tinyhumans_api_key ?? ""}
             onChange={(v) => {
@@ -1830,12 +1849,14 @@ async function runConnectionTest(
  * Account dialog offers it.
  */
 function ManagedLoginStep({
+  status,
   client,
   value,
   onChange,
   tested,
   onTested,
 }: {
+  status: SetupStatus;
   client: OpenCompanyClient;
   value: string;
   onChange: (v: string) => void;
@@ -1843,6 +1864,7 @@ function ManagedLoginStep({
   onTested: (t: TestState) => void;
 }) {
   const key = value.trim();
+  const keySource = tinyhumansKeySource(status);
   // Read from inside a call that started before it — see `runConnectionTest`.
   const live = useRef<ProbeAnswers>({ provider: MANAGED_PROVIDER, key, baseUrl: "" });
   live.current = { provider: MANAGED_PROVIDER, key, baseUrl: "" };
@@ -1920,20 +1942,23 @@ function ManagedLoginStep({
 
         {/* A link out, not a grant. The key is minted on their own dashboard
             and pasted back, which works with no company in existence — the
-            whole of when this step runs. */}
-        <p className="mt-2 text-xs leading-snug text-muted-foreground">
-          Don&apos;t have one yet?{" "}
-          <a
-            href={TINYHUMANS_API_KEYS_URL}
-            target="_blank"
-            rel="noreferrer"
-            data-testid="setup-key-get-link"
-            className="inline-flex items-center gap-1 font-medium text-foreground underline underline-offset-4"
-          >
-            Get an API key
-            <ExternalLink className="size-3" />
-          </a>
-        </p>
+            whole of when this step runs. The dashboard is the one belonging
+            to the hub this host is on, as the host reports it. */}
+        {keySource && (
+          <p className="mt-2 text-xs leading-snug text-muted-foreground">
+            Don&apos;t have one yet?{" "}
+            <a
+              href={keySource.url}
+              target="_blank"
+              rel="noreferrer"
+              data-testid="setup-key-get-link"
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "ml-1")}
+            >
+              Get an API key
+              <ExternalLink className="size-3.5" />
+            </a>
+          </p>
+        )}
       </div>
 
       <div className="space-y-2">
