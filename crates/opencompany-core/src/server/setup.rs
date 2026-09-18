@@ -1544,12 +1544,30 @@ const MODEL_DISCOVERY_FAILURE: &str = "Could not list models from this provider.
 #[cfg(feature = "openhuman")]
 const MODEL_PROBE_CANDIDATE_LIMIT: usize = 5;
 
-/// The model a first company thinks with when its provider offers it.
+/// The models a first company thinks with when its provider offers one, most
+/// preferred first.
 ///
 /// Without this the default is whichever model the provider happens to list
 /// first, which is a position in someone else's catalogue rather than a choice.
+///
+/// It is a *list* because one preference has to survive three id namespaces,
+/// and a single entry silently covered only one of them. TinyHumans' managed
+/// endpoint answers `GET /v1/models` with **tier** ids — `reasoning-v1`,
+/// `vision-v1`, `chat-v1`, … — and never a vendor slug, so the lone
+/// `deepseek/deepseek-v4-flash` this held matched nothing on the managed path.
+/// The preference was inert exactly where it mattered most, and every managed
+/// install took `reasoning-v1` by catalogue position: the V4 Pro reasoning SKU,
+/// chosen for a first company by nothing but declaration order. A self-managed
+/// OpenRouter key lists `deepseek/deepseek-v4-flash`, and a DeepSeek key lists
+/// the bare `deepseek-v4-flash`, so both spellings stay.
+///
+/// `chat-v1` leads because it is the short-turn conversational SKU a first
+/// company actually wants. It also keeps a managed install off the passthrough
+/// namespace (`openrouter/<author>/<slug>`), whose per-model price cap is a
+/// separate problem — see tinyhumansai/opencompany#2391.
 #[cfg(feature = "openhuman")]
-const PREFERRED_SETUP_MODEL: &str = "deepseek/deepseek-v4-flash";
+const PREFERRED_SETUP_MODELS: &[&str] =
+    &["chat-v1", "deepseek/deepseek-v4-flash", "deepseek-v4-flash"];
 
 #[cfg(feature = "openhuman")]
 fn probe_model_candidates(
@@ -1560,8 +1578,14 @@ fn probe_model_candidates(
         let unusable = ["embed", "rerank", "moderation"]
             .iter()
             .any(|marker| id.contains(marker));
-        let preferred = id == PREFERRED_SETUP_MODEL;
-        (unusable, !preferred)
+        // Rank by position in the preference list. Anything unlisted sorts
+        // after every listed one on an equal key, and `sort_by_key` is stable,
+        // so a catalogue offering none of them keeps its own order untouched.
+        let rank = PREFERRED_SETUP_MODELS
+            .iter()
+            .position(|preferred| id == *preferred)
+            .unwrap_or(PREFERRED_SETUP_MODELS.len());
+        (unusable, rank)
     });
     models
         .into_iter()

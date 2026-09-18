@@ -179,7 +179,24 @@ async fn an_account_key_with_no_company_to_own_it_is_not_written_anywhere() {
 #[cfg(feature = "openhuman")]
 mod setup_model_preference {
     use crate::server::inference_models::InferenceModel;
-    use crate::server::setup::{PREFERRED_SETUP_MODEL, probe_model_candidates};
+    use crate::server::setup::{PREFERRED_SETUP_MODELS, probe_model_candidates};
+
+    /// The tier ids TinyHumans' managed endpoint answers `GET /v1/models`
+    /// with, in the order the backend declares them. It publishes no vendor
+    /// slugs at all — the OpenRouter passthrough namespace is behind an opt-in
+    /// `?catalog=` query the wizard never sends.
+    const MANAGED_TIER_CATALOGUE: &[&str] = &[
+        "reasoning-v1",
+        "vision-v1",
+        "chat-v1",
+        "burst-v1",
+        "agentic-v1",
+        "coding-v1",
+        "whisper-v1",
+        "stt-v1",
+        "embedding-v1",
+        "summarization-v1",
+    ];
 
     fn model(id: &str) -> InferenceModel {
         InferenceModel {
@@ -190,8 +207,63 @@ mod setup_model_preference {
     }
 
     #[test]
-    fn the_preferred_setup_model_is_deepseek_v4_flash() {
-        assert_eq!(PREFERRED_SETUP_MODEL, "deepseek/deepseek-v4-flash");
+    fn the_preferred_setup_model_is_the_chat_tier() {
+        assert_eq!(
+            PREFERRED_SETUP_MODELS.first().copied(),
+            Some("chat-v1"),
+            "a first company thinks with the short-turn conversational SKU"
+        );
+    }
+
+    /// The bug in tinyhumansai/opencompany#2391: the preference named a vendor
+    /// slug, the managed endpoint publishes only tier ids, so nothing matched
+    /// and a fresh managed install silently took `reasoning-v1` — the first
+    /// tier the backend happens to declare.
+    #[test]
+    fn a_managed_tier_catalogue_lands_on_the_chat_tier_not_catalogue_position() {
+        let candidates =
+            probe_model_candidates(MANAGED_TIER_CATALOGUE.iter().copied().map(model).collect());
+
+        assert_eq!(
+            candidates.first().map(|model| model.id.as_str()),
+            Some("chat-v1"),
+            "a managed install must not inherit its model from tier declaration order"
+        );
+    }
+
+    #[test]
+    fn a_vendor_slug_catalogue_still_lands_on_deepseek_v4_flash() {
+        for slug in ["deepseek/deepseek-v4-flash", "deepseek-v4-flash"] {
+            let candidates = probe_model_candidates(vec![
+                model("vendor/reasoning-heavy"),
+                model("vendor/another"),
+                model(slug),
+            ]);
+
+            assert_eq!(
+                candidates.first().map(|model| model.id.as_str()),
+                Some(slug),
+                "a self-managed key must keep its preference in its own namespace"
+            );
+        }
+    }
+
+    #[test]
+    fn an_earlier_preference_outranks_a_later_one() {
+        let candidates = probe_model_candidates(vec![
+            model("deepseek-v4-flash"),
+            model("deepseek/deepseek-v4-flash"),
+            model("chat-v1"),
+        ]);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chat-v1", "deepseek/deepseek-v4-flash", "deepseek-v4-flash"],
+            "an endpoint offering several preferences takes the most preferred"
+        );
     }
 
     #[test]
@@ -199,12 +271,12 @@ mod setup_model_preference {
         let candidates = probe_model_candidates(vec![
             model("vendor/reasoning-heavy"),
             model("vendor/another"),
-            model(PREFERRED_SETUP_MODEL),
+            model("chat-v1"),
         ]);
 
         assert_eq!(
             candidates.first().map(|model| model.id.as_str()),
-            Some(PREFERRED_SETUP_MODEL),
+            Some("chat-v1"),
             "a first company must not inherit a default from catalogue position"
         );
     }
@@ -229,14 +301,12 @@ mod setup_model_preference {
 
     #[test]
     fn an_embedding_model_never_outranks_the_preferred_one() {
-        let candidates = probe_model_candidates(vec![
-            model("vendor/text-embed-3"),
-            model(PREFERRED_SETUP_MODEL),
-        ]);
+        let candidates =
+            probe_model_candidates(vec![model("vendor/text-embed-3"), model("chat-v1")]);
 
         assert_eq!(
             candidates.first().map(|model| model.id.as_str()),
-            Some(PREFERRED_SETUP_MODEL)
+            Some("chat-v1")
         );
     }
 }
