@@ -425,8 +425,21 @@ Named so they are countable rather than implied.
   surfaces that only at its own debug log level. So an install can be correctly
   configured, correctly scrubbed, transmitting well-formed envelopes, and still
   be reporting nothing, with every signal in this product saying it is healthy.
-  This was observed against a real project, not imagined. Check quota in Sentry
-  itself; nothing in the boot line or `sentry-test` will say.
+  This was observed against a real project, not imagined — and then again, at
+  scale: between 2026-09-15 and 2026-09-18 `sentry.tinyhumans.ai` recorded
+  **zero** accepted events org-wide, down from ~124k/day, while Relay kept
+  answering `200 {"id":…}` to every sender. Every service pointed at it reported
+  into a void for three days and every one of them looked healthy. Check quota
+  and accepted-outcome stats in Sentry itself; nothing in the boot line or
+  `sentry-test` will say.
+
+  The one place this *is* now caught is `release-production.yml`, which reads
+  the event back through `/api/0/organizations/{org}/eventids/{id}/` after
+  sending and fails the release if it was never stored. That is the only check
+  in this repository that distinguishes "the ingest answered" from "the event
+  exists", and it is why the gate is a readback rather than an exit code. Note
+  the id must be unhyphenated for that lookup; the SDK prints a hyphenated UUID
+  and the hyphenated form 404s forever.
 - **Nothing enforces that the two surfaces' versions stay in step.** Both tags
   are shaped `opencompany@<version>[+<commit>]`, but the host reads
   `Cargo.toml`'s version and the console reads `frontend/package.json`'s. They
