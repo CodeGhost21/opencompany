@@ -147,6 +147,40 @@ the hosted-image and desktop release pipelines, using the same organization
 token as the console source-map upload. Missing credentials or a failed upload
 fail the release rather than silently shipping unsymbolicated stack traces.
 
+### Who supplies each variable, per deployment
+
+Every variable above is read from *somewhere*, and "somewhere" differs per
+surface. The table is here because the failure this document keeps naming —
+silence that looks like health — is almost always a variable nobody owns rather
+than a variable set wrong (issue #2392).
+
+| Surface | Host DSN comes from | Console DSN comes from |
+|---|---|---|
+| Hosted tenant (staging) | the manager's per-tenant env | `deploy-staging.yml` build-args, baked by Vite into the image |
+| Hosted tenant (production, Firecracker) | `OCM_TENANT_ENV_OVERRIDES_FILE` on the fleet host — the manager's own template does **not** carry Sentry variables | the console bundle inside the tenant rootfs, so it is fixed when that rootfs is built |
+| Desktop | the shell's process env — **nothing supplies it today**, see the limitation below | `build-desktop.yml` build-args |
+| Self-hosted | the operator, by design | the operator's own console build |
+
+Two consequences worth stating rather than deriving.
+
+**A hosted tenant's console DSN is decided when its image is built, and cannot
+be changed afterwards.** Vite inlines it; an `OPENCOMPANY_SENTRY_DSN` set on a
+running tenant reaches the host and not the bundle. On Firecracker that means
+the tenant rootfs, not the tenant's env file — rolling a DSN onto the console
+half is a rootfs rebuild.
+
+**A host DSN, by contrast, takes effect at the next process start** — which on
+Firecracker means the next *cold* boot, because a parked tenant resumes from a
+snapshot and never re-reads its environment. Editing the overrides file changes
+nothing observable until the snapshot is discarded.
+
+`OPENCOMPANY_SENTRY_ENVIRONMENT` is one repository variable read by three
+workflows, and setting it defeats each one's fallback. Left unset, the hosted
+image tags `hosted-tenant`, the desktop build tags `desktop`, and the host
+agrees with each because both halves derive the same default from the
+deployment kind. Set to a single value, all three surfaces file under it and
+stop being separable in a filter. Prefer leaving it unset.
+
 ## What is collected
 
 | | Host | Console |
@@ -363,6 +397,18 @@ Named so they are countable rather than implied.
 - **No debug-file upload for the host.** A stripped release binary's stack
   traces stay unsymbolicated until a `sentry-cli upload-dif` step exists. See
   the note under [Source-map upload](#source-map-upload-ci-only).
+- **The desktop shell's Rust half reports nothing, and cannot yet.** The
+  `crash-reporting` feature is compiled into `crates/opencompany-app` and
+  `run()` initialises the client, so everything is in place except the DSN —
+  which is read from the process env, and a double-clicked `.app` has none.
+  Nothing in `build-desktop.yml` supplies one, and nothing may simply be baked
+  in: the console's DSN is public by construction, but the host's names a
+  *server* project, and shipping it inside a downloadable bundle hands that
+  project's ingest to anyone who unzips the `.dmg`. Delivery therefore needs a
+  decision — its own desktop project, or a value fetched after sign-in — not
+  just a build-arg. Until it lands, a desktop crash is invisible: the console
+  half of the same app reports, so Sentry shows desktop traffic and the silence
+  looks like reliability. Tracked by issue #2392.
 - **Desktop reporting uses the project Sentry origin only.** The release
   workflow supplies the console DSN and the shell uses its own
   `OPENCOMPANY_SENTRY_DSN`; `crates/opencompany-app/tauri.conf.json` therefore
