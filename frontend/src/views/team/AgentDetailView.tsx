@@ -95,6 +95,13 @@ import { fetchBoardColumns } from "@/lib/board-columns";
 import { avatarRef } from "@/lib/avatar";
 import { AvatarPicker } from "@/components/avatar-picker";
 import { usd } from "@/lib/money";
+import {
+  SCOPE_ONLY_TAKES_AWAY,
+  droppedSlugs,
+  scopeUnchanged,
+  showingInherited,
+  toggleSkillInScope,
+} from "@/lib/skill-scope";
 import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
@@ -1614,17 +1621,11 @@ function Skills({
     setTouched(false);
   }, [agent.id, agent.skills.requested]);
 
-  const showingInherited = inherits && !touched;
+  const inherited = showingInherited(agent.skills.requested, touched);
   const draftSet = new Set(draft);
-  const held = (slug: string) => (showingInherited ? true : draftSet.has(slug));
-  const stored = agent.skills.requested;
-  const unchanged =
-    stored === null
-      ? draft.length === available.length && available.every((slug) => draftSet.has(slug))
-      : stored.length === draft.length && stored.every((slug) => draftSet.has(slug));
-  const dropped = (agent.skills.requested ?? []).filter(
-    (slug) => !agent.skills.effective.includes(slug),
-  );
+  const held = (slug: string) => (inherited ? true : draftSet.has(slug));
+  const unchanged = scopeUnchanged(agent.skills.requested, draft, available);
+  const dropped = droppedSlugs(agent.skills.requested, agent.skills.effective);
 
   return (
     <Section
@@ -1666,15 +1667,11 @@ function Skills({
                     checked={held(slug)}
                     data-testid={`agent-skill-toggle-${slug}`}
                     onCheckedChange={(on) => {
-                      // An inherited scope holds every enabled skill, so the
-                      // first switch turned off has to write the rest out
-                      // explicitly — otherwise the save would read as "narrow
-                      // to nothing but this one".
-                      const base = showingInherited ? available : draft;
                       setDraft(
-                        on
-                          ? [...new Set([...base, slug])]
-                          : base.filter((s) => s !== slug),
+                        toggleSkillInScope(agent.skills.requested, available, slug, on, {
+                          slugs: draft,
+                          touched,
+                        }),
                       );
                       setTouched(true);
                     }}
@@ -1688,10 +1685,7 @@ function Skills({
             </p>
           )}
 
-          <p className="text-xs text-muted-foreground">
-            A scope only ever takes away — it can never give this teammate a skill the
-            company has disabled.
-          </p>
+          <p className="text-xs text-muted-foreground">{SCOPE_ONLY_TAKES_AWAY}</p>
 
           {touched && draft.length === 0 && (
             <p className="text-xs text-status-blocked-text" data-testid="agent-skills-empty-warning">
