@@ -212,30 +212,32 @@ fn a_bulk_install_is_capped_and_says_how_many_it_left_out() {
     );
 }
 
-/// The mirror of the case above: an agent over the cap on declared servers alone
-/// must be sent to the declared enumeration tool, not the registry one.
+/// Declared servers are never dropped to stay under the cap. Nothing lists them
+/// — no company agent is scoped to list the configured servers — so one left out
+/// of the brief could not be recovered by any call the agent can make.
 #[test]
-fn a_declared_overflow_points_at_the_declared_enumeration_tool() {
+fn a_declared_list_is_never_truncated_because_no_tool_can_list_it() {
     let decls: Vec<McpServerDecl> = (0..CAP + 2)
         .map(|n| decl(&format!("server-{n}"), &format!("https://n{n}.example/mcp")))
         .collect();
     let brief = server_family_brief(&decls, &[], &grants(&["mcp:*"]));
-    assert!(brief.contains("…and 2 more"), "{brief}");
-    assert!(brief.contains("`mcp_list_servers`"), "{brief}");
-    assert!(
-        !brief.contains("`mcp_registry_installed_list`"),
-        "an agent with no install reachable must not be sent to the registry listing: {brief}"
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- `")).count(),
+        CAP + 2,
+        "{brief}"
     );
+    assert!(!brief.contains("more"), "nothing was left out: {brief}");
 }
 
-/// An agent over the cap on both families needs both tools named, since neither
-/// one alone enumerates the servers it is missing.
+/// With both families present the declared lines take their room first and the
+/// installs absorb the cap, so the overflow points at the listing that can
+/// actually return them.
 #[test]
-fn an_overflow_across_both_families_names_both_enumeration_tools() {
-    let decls: Vec<McpServerDecl> = (0..CAP)
+fn installs_absorb_the_cap_and_the_overflow_points_at_the_install_listing() {
+    let decls: Vec<McpServerDecl> = (0..5)
         .map(|n| decl(&format!("server-{n}"), &format!("https://d{n}.example/mcp")))
         .collect();
-    let installs: Vec<RegistryServerRow> = (0..3)
+    let installs: Vec<RegistryServerRow> = (0..CAP)
         .map(|n| {
             install(
                 &format!("id-{n}"),
@@ -245,8 +247,20 @@ fn an_overflow_across_both_families_names_both_enumeration_tools() {
         })
         .collect();
     let brief = server_family_brief(&decls, &installs, &grants(&["mcp:*", "mcp_registry"]));
-    assert!(brief.contains("`mcp_list_servers`"), "{brief}");
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- `")).count(),
+        CAP,
+        "{brief}"
+    );
+    assert!(brief.contains("…and 5 more"), "{brief}");
     assert!(brief.contains("`mcp_registry_installed_list`"), "{brief}");
+    assert!(
+        !brief.contains("`mcp_list_servers`"),
+        "no company agent is scoped to list the configured servers: {brief}"
+    );
+    for n in 0..5 {
+        assert!(brief.contains(&format!("`server-{n}`")), "{brief}");
+    }
 }
 
 /// A name carrying a newline would end the list item and let whatever follows

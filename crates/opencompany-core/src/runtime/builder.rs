@@ -3341,6 +3341,7 @@ impl RuntimeBuilder {
                                 }),
                             );
                             let mut deps = HarnessDeps {
+                                takeovers: Default::default(),
                                 emergency_gate: Some(gate.clone()),
                                 // Issue #1861: the same store the console's and
                                 // the scheduler's runs badge through, so a run

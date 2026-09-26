@@ -30,6 +30,11 @@ use crate::runtime::tools::{grants_cover_registry_server, grants_cover_server};
 /// an agent prompt is not the place to pay for it. The overflow is a count plus
 /// a pointer at live enumeration, never a truncated name: a half-written name is
 /// one a model may pass verbatim and get refused for.
+///
+/// Only installs are dropped to stay under it. No company agent is scoped to
+/// list the configured servers, so a declared server left out here could not be
+/// recovered by any call — and the count of them is what an operator declared,
+/// not something a directory can inflate.
 const CAP: usize = 25;
 
 const HEADING: &str = "\n\n## MCP servers connected to this company";
@@ -98,8 +103,6 @@ pub(crate) fn server_family_brief(
         .copied()
         .filter(|row| renderable(&row.server_id) && renderable(&row.display_name))
         .collect();
-    let unnameable =
-        (reachable_decls.len() - declared.len()) + (reachable_installs.len() - installed.len());
 
     if declared.is_empty() && installed.is_empty() {
         return String::new();
@@ -143,15 +146,22 @@ pub(crate) fn server_family_brief(
         }
         lines.push(line);
     }
-    for row in registry_only {
-        lines.push(format!(
-            "- `{}` — `mcp_registry_tool_call` with `\"server_id\": \"{}\"`",
-            row.display_name, row.server_id
-        ));
-    }
+    let unnameable_declared = reachable_decls.len() - declared.len();
 
-    let hidden = lines.len().saturating_sub(CAP) + unnameable;
-    lines.truncate(CAP);
+    let mut install_lines: Vec<String> = registry_only
+        .iter()
+        .map(|row| {
+            format!(
+                "- `{}` — `mcp_registry_tool_call` with `\"server_id\": \"{}\"`",
+                row.display_name, row.server_id
+            )
+        })
+        .collect();
+    let room = CAP.saturating_sub(lines.len());
+    let hidden_installs =
+        install_lines.len().saturating_sub(room) + (reachable_installs.len() - installed.len());
+    install_lines.truncate(room);
+    lines.append(&mut install_lines);
 
     let mut brief = String::from(HEADING);
     brief.push_str(
@@ -160,15 +170,15 @@ pub(crate) fn server_family_brief(
          company.\n\n",
     );
     brief.push_str(&lines.join("\n"));
+    let hidden = hidden_installs + unnameable_declared;
     if hidden > 0 {
-        let enumerate = match (!reachable_decls.is_empty(), !reachable_installs.is_empty()) {
-            (true, true) => "`mcp_list_servers` and `mcp_registry_installed_list`",
-            (false, true) => "`mcp_registry_installed_list`",
-            _ => "`mcp_list_servers`",
-        };
-        brief.push_str(&format!(
-            "\n- …and {hidden} more. Call {enumerate} for the rest."
-        ));
+        if hidden_installs > 0 {
+            brief.push_str(&format!(
+                "\n- …and {hidden} more. Call `mcp_registry_installed_list` for the rest."
+            ));
+        } else {
+            brief.push_str(&format!("\n- …and {hidden} more this brief cannot name."));
+        }
     }
     brief.push('\n');
     brief

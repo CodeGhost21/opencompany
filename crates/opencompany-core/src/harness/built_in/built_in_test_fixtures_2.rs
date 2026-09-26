@@ -31,6 +31,7 @@ pub(super) fn scripted_agent(
 pub(super) fn scripted_agent_over(provider: ScriptedProvider) -> (Arc<CompanyAgent>, HarnessDeps) {
     let dir = tempfile::tempdir().expect("tempdir");
     let deps = HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -303,6 +304,7 @@ pub(super) fn deps_with_plan(
     plan: Option<crate::harness::capability_budget::CapabilityPlan>,
 ) -> HarnessDeps {
     HarnessDeps {
+        takeovers: Default::default(),
         emergency_gate: None,
         notifications: None,
         ledgers: None,
@@ -457,9 +459,8 @@ pub(super) fn belt(grants: &[&str], is_orchestrator: bool, wire_everything: bool
             crate::company::credentials::Credential::from_value("managed-platform-token"),
             crate::company::DEFAULT_SEARCH_DAILY_CALLS,
         ));
-        // A registered MCP server is what puts `mcp_list_servers`,
-        // `mcp_list_tools` and `mcp_call_tool` on the belt — the three
-        // tools issue #443 is about. Without one the coverage check would
+        // A registered MCP server is what puts `mcp_list_tools` and
+        // `mcp_call_tool` on the belt — the tools issue #443 is about. Without one the coverage check would
         // pass while never having looked at them.
         // A skills source dir is what puts `list_skills`, `describe_skill`
         // and `read_skill_resource` on the belt (named for skills since
