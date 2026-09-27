@@ -427,7 +427,7 @@ async fn console_config_route_serves_only_safe_hosted_configuration() {
     assert_eq!(
         body_text(response).await,
         "window.OPENCOMPANY_CONFIG=Object.assign(window.OPENCOMPANY_CONFIG||{},\
-{analytics:true,analyticsEndpoint:\"https://collector.example/\"});\n"
+{analytics:true,analyticsEndpoint:\"https://collector.example/api\"});\n"
     );
 
     env.set(
