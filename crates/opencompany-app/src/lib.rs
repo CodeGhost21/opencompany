@@ -15,6 +15,8 @@
 //! - **[`update`]** — replacing this application with a newer one, which is the
 //!   one thing a desktop build cannot get from the host it is talking to.
 //! - **[`commands`]** — the thin Tauri surface over all three.
+//! - **[`bundle_migration`]** — carrying state over from the pre-rename
+//!   bundle identifier, once.
 //! - **[`crash`]** — where the shell's crash reports go, including the
 //!   desktop project's compiled-in DSN and the hidden `sentry-test` check.
 //!
@@ -23,6 +25,9 @@
 //! seam it already had.
 
 pub mod acp;
+/// State the OS filed under the pre-rename bundle identifier, carried over once
+/// before the webview starts. See the module docs.
+pub mod bundle_migration;
 pub mod commands;
 /// Where the shell's crash reports go: the operator's DSN, else the desktop
 /// project's compiled-in one. See the module docs.
@@ -112,6 +117,11 @@ pub fn run() {
         .with(opencompany::observability::tracing_layer())
         .init();
     tracing::info!("{}", crash_reporting.describe());
+
+    // Before anything creates the webview: its data store (the console's saved
+    // connections live in its `localStorage`) is filed under the bundle
+    // identifier, and a fresh one would be created empty under the new id.
+    bundle_migration::run();
 
     let data_dir = default_data_dir();
 
