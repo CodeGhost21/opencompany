@@ -132,9 +132,9 @@ fn a_credential_is_trimmed() {
 /// now travels. Mixpanel's token rode in the JSON body, where any string is
 /// legal, so a mangled one was simply refused by the collector. The client
 /// id rides in the `openpanel-client-id` header, and `reqwest` refuses to
-/// *build* a request whose header value holds a control byte — so an id with an embedded newline (`kubectl create secret` over
-/// a wrapped file is the usual way one arrives) would install a tracker that
-/// never constructs a single request, forever, behind a `debug!` nobody has
+/// *build* a request whose header value holds a control byte — so an id
+/// with an embedded newline (`kubectl create secret` over a wrapped file is
+/// the usual way one arrives) would install a tracker that never constructs a single request, forever, behind a `debug!` nobody has
 /// enabled. Trimming does not save it: the newline is in the middle.
 #[test]
 fn a_credential_that_cannot_go_in_a_header_is_silence() {
