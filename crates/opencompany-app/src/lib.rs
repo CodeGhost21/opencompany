@@ -15,6 +15,8 @@
 //! - **[`update`]** — replacing this application with a newer one, which is the
 //!   one thing a desktop build cannot get from the host it is talking to.
 //! - **[`commands`]** — the thin Tauri surface over all three.
+//! - **[`crash`]** — where the shell's crash reports go, including the
+//!   desktop project's compiled-in DSN and the hidden `sentry-test` check.
 //!
 //! The console itself is unchanged: it is the same `frontend/` bundle the web
 //! deployment serves, and it reaches all of the above through the `Transport`
