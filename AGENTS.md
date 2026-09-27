@@ -191,8 +191,11 @@ injects its environment. When developing hosted behavior, know the seams:
   / `OPENCOMPANY_SENTRY=off` silence them, and there is no client secret. Any
   endpoint must be `https`, or `http` to a loopback host: the client id is a
   request header on every request, and the workload refuses a plain-`http`
-  collector rather than warning about it. The defaults never apply to desktop
-  or self-hosted deployments.
+  collector rather than warning about it. These particular defaults — the
+  hosted-tenant analytics client id/endpoint and the `opencompany-core`
+  Sentry DSN — never apply to desktop or self-hosted deployments. The desktop
+  shell has its own, separate compiled-in Sentry default (the
+  `opencompany-tauri` project); see `docs/spec/runtime/crash-reporting.md`.
   None of them is required to boot: an instance that says nothing is treated as **self-hosted**
   and reports nothing, which is the safe direction and the documented default
   (`docs/spec/runtime/analytics.md`). `OPENCOMPANY_TENANT_ID` alone also implies
