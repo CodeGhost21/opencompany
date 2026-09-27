@@ -260,11 +260,20 @@ fn reserved_path_matches_prefixes_and_subpaths_only() {
 fn browser_analytics_config_accepts_only_plain_collector_urls() {
     assert_eq!(
         public_browser_endpoint("https://collector.example/api/track").as_deref(),
-        Some("https://collector.example/")
+        Some("https://collector.example/api")
+    );
+    assert_eq!(
+        public_browser_endpoint("https://collector.example/api/track/").as_deref(),
+        Some("https://collector.example/api")
     );
     assert_eq!(
         public_browser_endpoint("http://localhost:3000/track").as_deref(),
         Some("http://localhost:3000/")
+    );
+    // A path that is not the ingestion route is never echoed to the browser.
+    assert_eq!(
+        public_browser_endpoint("https://collector.example/private/ingest").as_deref(),
+        Some("https://collector.example/")
     );
     assert!(public_browser_endpoint("http://127.0.0.1:3000/track").is_some());
     assert!(public_browser_endpoint("http://[::1]:3000/track").is_some());
@@ -281,7 +290,7 @@ fn hosted_console_config_enables_openpanel_without_exposing_credentials() {
     assert_eq!(
         script,
         "window.OPENCOMPANY_CONFIG=Object.assign(window.OPENCOMPANY_CONFIG||{},\
-{analytics:true,analyticsEndpoint:\"https://collector.example/\"});\n"
+{analytics:true,analyticsEndpoint:\"https://collector.example/api\"});\n"
     );
 
     for endpoint in [
