@@ -266,6 +266,12 @@ fn browser_analytics_config_accepts_only_plain_collector_urls() {
         public_browser_endpoint("https://collector.example/api/track/").as_deref(),
         Some("https://collector.example/api")
     );
+    // The TinyHumans self-hosted collector: the host posts to `…/api/track`,
+    // and the browser SDK (`openpanel-init.js`) must get the `…/api` base.
+    assert_eq!(
+        public_browser_endpoint("https://panel.tinyhumans.ai/api/track").as_deref(),
+        Some("https://panel.tinyhumans.ai/api")
+    );
     assert_eq!(
         public_browser_endpoint("http://localhost:3000/track").as_deref(),
         Some("http://localhost:3000/")
