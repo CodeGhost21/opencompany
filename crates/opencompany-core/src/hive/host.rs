@@ -618,6 +618,16 @@ fn recipients(utterance: &tinyhivemind::speech::Utterance) -> Vec<String> {
     }
 }
 
+/// The seat a conversation row names as its `askee`.
+///
+/// The company rows (`ConversationOpened` / `ConversationConcluded`) name one
+/// askee, as they did while an ask could name only one seat. A group ask
+/// names the first seat it asked there; the full set is in the row's
+/// `conversation_id` (see [`crate::hive::referral::conversation_channel`]).
+fn primary_askee(askees: &[String]) -> String {
+    askees.first().cloned().unwrap_or_default()
+}
+
 /// The failure an episode reports when this company's journal refuses a row.
 fn refused(error: &crate::error::OpenCompanyError) -> tinyhivemind_openhuman::Error {
     tinyhivemind_openhuman::Error::Harness(anyhow::anyhow!("{error}"))
@@ -861,7 +871,7 @@ impl Journal for DeskHost {
                 conversation_id: conversation_id.clone(),
                 root: root.0,
                 asker: seat.clone(),
-                askee: askee.clone(),
+                askee: primary_askee(askees),
             };
             self.conversations
                 .lock()
@@ -873,7 +883,7 @@ impl Journal for DeskHost {
         if let Event::Concluded {
             root,
             asker,
-            askee,
+            askees,
             forced,
             ..
         } = event
@@ -881,10 +891,10 @@ impl Journal for DeskHost {
             let row = CompanyEvent::ConversationConcluded {
                 chat_id: self.desk_id.clone(),
                 episode_id: self.episode_id.clone(),
-                conversation_id: crate::hive::referral::pair_conversation(asker, askee),
+                conversation_id: crate::hive::referral::conversation_channel(asker, askees),
                 root: root.0,
                 asker: asker.clone(),
-                askee: askee.clone(),
+                askee: primary_askee(askees),
                 forced: *forced,
             };
             self.journal_or_warn(row);
@@ -951,7 +961,7 @@ impl Journal for DeskHost {
             DESK_AUTHOR,
             note.body.clone(),
             note.thread,
-            note.only_for.as_deref(),
+            note.only_for.as_slice(),
         );
         self.append(event).map_err(|error| refused(&error))?;
         Ok(())
