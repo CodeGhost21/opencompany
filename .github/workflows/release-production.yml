@@ -345,6 +345,11 @@ jobs:
     needs: [prepare-build]
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # The Sentry DSNs and project slugs baked into the image, and the ones the
+    # `sentry-test` gate below reports with, are `Production` environment
+    # variables (branch-policied to `main`/`release`). This workflow only runs
+    # from `release` — `prepare-build` enforces it — so the policy always holds.
+    environment: Production
     steps:
       - name: Checkout build ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

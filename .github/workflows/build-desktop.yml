@@ -114,6 +114,13 @@ jobs:
     name: Guard build inputs
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Set on THIS workflow's jobs because a caller's `uses:` job cannot carry
+    # an `environment`. The Sentry variables validated below live on
+    # `Production`, which is branch-policied to `main` and `release`; the
+    # policy is checked against the CALLER's `github.ref` (a reusable workflow
+    # inherits it), not `build_ref`, and both callers only run from those two
+    # branches. A call from anywhere else fails here, in seconds.
+    environment: Production
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -167,10 +174,17 @@ jobs:
           SENTRY_URL: ${{ vars.SENTRY_URL }}
           SENTRY_ORG: ${{ vars.SENTRY_ORG }}
           SENTRY_PROJECT_REACT: ${{ vars.SENTRY_PROJECT_REACT }}
-          SENTRY_PROJECT_RUST: ${{ vars.SENTRY_PROJECT_RUST }}
+          # The desktop shell's own project, falling back to the host's while
+          # a repository has only the one Rust project.
+          SENTRY_PROJECT_TAURI: ${{ vars.SENTRY_PROJECT_TAURI || vars.SENTRY_PROJECT_RUST }}
+          # Baked into the shell at compile time (`crates/opencompany-app/src/crash.rs`).
+          # Required: a desktop build without it ships a Rust half that reports
+          # nothing while the console half of the same app does, and that
+          # silence reads as reliability.
+          OPENCOMPANY_TAURI_SENTRY_DSN: ${{ vars.OPENCOMPANY_TAURI_SENTRY_DSN }}
         run: |
           missing=0
-          for var in SENTRY_AUTH_TOKEN SENTRY_URL SENTRY_ORG SENTRY_PROJECT_REACT SENTRY_PROJECT_RUST; do
+          for var in SENTRY_AUTH_TOKEN SENTRY_URL SENTRY_ORG SENTRY_PROJECT_REACT SENTRY_PROJECT_TAURI OPENCOMPANY_TAURI_SENTRY_DSN; do
             if [ -z "${!var}" ]; then
               echo "::error::Required Sentry artifact-upload setting is missing: $var" >&2
               missing=1
@@ -197,6 +211,9 @@ jobs:
     needs: guard
     runs-on: macos-latest
     timeout-minutes: 90
+    # Same environment as `guard`, for the DSNs baked into the bundle and the
+    # project slugs the symbol and source-map uploads file under.
+    environment: Production
     strategy:
       # One arch failing must not cancel the other: a green arm64 DMG is worth
       # having even while the Intel leg is being fixed, and the two failure
@@ -319,6 +336,12 @@ jobs:
           # crates/opencompany-app/tauri.conf.json — the Wry system-WebView floor.
           MACOSX_DEPLOYMENT_TARGET: "12.0"
           OPENCOMPANY_BUILD_COMMIT: ${{ steps.release-commit.outputs.sha }}
+          # The desktop Sentry project's DSN, compiled in via `option_env!` as
+          # the fallback for an unset `OPENCOMPANY_SENTRY_DSN` — a launched
+          # `.app` has no environment to read one from. A runtime DSN still
+          # wins and `OPENCOMPANY_SENTRY=off` still silences it; see
+          # `crates/opencompany-app/src/crash.rs`.
+          OPENCOMPANY_TAURI_SENTRY_DSN: ${{ vars.OPENCOMPANY_TAURI_SENTRY_DSN }}
         run: |
           ../../frontend/node_modules/.bin/tauri build \
             --target ${{ matrix.target }} \
@@ -329,7 +352,9 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_URL: ${{ vars.SENTRY_URL }}
           SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT_RUST }}
+          # The shell reports to the desktop project, so its symbols go there;
+          # the host project is the fallback for a repo with only one.
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT_TAURI || vars.SENTRY_PROJECT_RUST }}
           SENTRY_CLI: ${{ github.workspace }}/frontend/node_modules/.bin/sentry-cli
           TARGET: ${{ matrix.target }}
         run: scripts/upload-sentry-symbols.sh "crates/opencompany-app/target/${TARGET}/release"

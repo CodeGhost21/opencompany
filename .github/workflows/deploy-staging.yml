@@ -112,6 +112,14 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # The Sentry DSNs, project slugs and URL this job bakes into the image live
+    # on the `Production` environment, branch-policied to `main` and `release`
+    # (admins cannot bypass). A dispatch from any other branch is therefore
+    # refused before it can build an image carrying them. `SENTRY_AUTH_TOKEN`
+    # is still a repository secret and resolves either way. The AWS OIDC role
+    # trusts `repo:tinyhumansai/opencompany:*`, which covers the
+    # `environment:Production` subject this switches the token to.
+    environment: Production
 
     steps:
       - name: Checkout
