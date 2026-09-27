@@ -67,8 +67,7 @@ case "$PUBKEY" in
 
   Put the PUBLIC key it prints into plugins.updater.pubkey in $CONF, and the
   PRIVATE key into the TAURI_SIGNING_PRIVATE_KEY secret of the Production
-  environment — never into
-  a file in this repository. Full steps, and what to verify afterwards, are in
+  environment — never into a file in this repository. Full steps, and what to verify afterwards, are in
   docs/spec/runtime/desktop-updates.md.
 EOF
     exit 1
