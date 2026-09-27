@@ -222,8 +222,8 @@ jobs:
     uses: ./.github/workflows/build-desktop.yml
     # Only the repository-level Sentry token is passed. The APPLE_*,
     # APP_STORE_CONNECT_* and TAURI_SIGNING_* secrets live in the `Production`
-    # environment, which the
-    # called workflow's own jobs declare — see its `secrets:` note.
+    # environment, which the called workflow's own jobs declare — see its
+    # `secrets:` note.
     secrets:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     with:

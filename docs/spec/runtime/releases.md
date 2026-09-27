@@ -145,8 +145,9 @@ Secrets in the `Production` GitHub environment (branch-policied to `main` and
 Developer-ID signing; `APP_STORE_CONNECT_API_KEY_ID`,
 `APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64` (the `.p8`, base64) and
 `APP_STORE_CONNECT_ISSUER_ID` for notarization, which authenticates with an
-App Store Connect API key rather than an Apple ID and password; `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) for the updater
-([desktop-updates.md](desktop-updates.md#operator-setup)), and optionally
+App Store Connect API key rather than an Apple ID and password;
+`TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) for the updater
+([desktop-updates.md](desktop-updates.md#operator-setup)); and optionally
 `OPENAI_API_KEY` for polished notes. Every job that reads one declares
 `environment: Production` itself — `build-desktop.yml`'s `guard` and `build`,
 and `create-release` — so the callers pass only the repository-level
