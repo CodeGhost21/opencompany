@@ -140,8 +140,12 @@ numbers only and is verified by the cut itself.
 ## What is needed once
 
 Secrets in the `Production` GitHub environment (branch-policied to `main` and
-`release`, no admin bypass): the six `APPLE_*` values for signing and
-notarization, `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) for the updater
+`release`, no admin bypass): `APPLE_CERTIFICATE_BASE64`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` and `APPLE_TEAM_ID` for
+Developer-ID signing; `APP_STORE_CONNECT_API_KEY_ID`,
+`APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64` (the `.p8`, base64) and
+`APP_STORE_CONNECT_ISSUER_ID` for notarization, which authenticates with an
+App Store Connect API key rather than an Apple ID and password; `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) for the updater
 ([desktop-updates.md](desktop-updates.md#operator-setup)), and optionally
 `OPENAI_API_KEY` for polished notes. Every job that reads one declares
 `environment: Production` itself — `build-desktop.yml`'s `guard` and `build`,
