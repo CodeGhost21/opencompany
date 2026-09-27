@@ -247,7 +247,7 @@ async fn console_config() -> Response {
         },
     };
     let body = render_console_config(
-        Some(&endpoint),
+        endpoint.as_deref(),
         hosted_deployment(),
         browser_analytics_enabled(),
     );
