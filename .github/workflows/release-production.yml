@@ -658,6 +658,8 @@ jobs:
   # the draft (asset-less or half-filled) and the tag both go, so the next
   # dispatch bumps to the next patch cleanly and nothing half-built is
   # reachable. The version-bump commit stays on `release`; that is harmless.
+  # A `:v<version>` image already pushed to GHCR also stays: nothing pulls a
+  # version no Release names, and `:latest` never moved (see `promote-image`).
   cleanup-failed-release:
     name: Remove draft and tag if a step failed
     # Including `publish-release`: a failed asset check or a failed
