@@ -99,6 +99,14 @@ RUN --mount=type=cache,target=/build/target \
 FROM docker.io/library/node:22-slim AS console
 WORKDIR /console
 
+# `node:22-slim` ships no CA bundle. Node itself carries its own roots, but the
+# native `sentry-cli` that `@sentry/vite-plugin` runs during `npm run build`
+# uses the system store, and without it every call (`releases new`, sourcemap
+# upload) dies with "unable to get local issuer certificate" and fails the build.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Console crash reporting (`docs/spec/runtime/crash-reporting.md`).
 #
 # These are read by Vite at BUILD time and inlined into the bundle, so unlike
