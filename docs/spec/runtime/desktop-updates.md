@@ -277,6 +277,17 @@ Dispatch `Release Production` from the `release` branch
 ([releases.md](releases.md)). Its `guard` job proves the key and the secret are
 both present before anything builds.
 
+### The 2026 identity change
+
+The keypair was rotated (minisign key id `C10A9CFAF2A579C7`) in the same change
+that moved the bundle identifier from `ai.tinyhumans.opencompany` to
+`com.tinyhumans.opencompany`. A build carrying the previous key cannot verify an
+update signed with the new one, so existing installs must take one DMG by hand.
+On first launch the renamed build copies the state macOS filed under the old
+identifier — notably the webview `localStorage` holding saved connections —
+(`crates/opencompany-app/src/bundle_migration.rs`); the keychain keeps the old
+identifier as its service name, so stored device tokens are untouched.
+
 ## Verifying it end to end
 
 The signature path cannot be exercised from a development machine without a real
