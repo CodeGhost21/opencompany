@@ -18,10 +18,28 @@ pub const ENABLE_ENV: &str = "OPENCOMPANY_ANALYTICS";
 /// `openpanel-client-id` header; a secret would be one more value to provision
 /// and rotate for no additional check on the collector side.
 pub const CLIENT_ID_ENV: &str = "OPENCOMPANY_ANALYTICS_CLIENT_ID";
-/// The collector URL. **Required, with no default**, because a self-hosted
-/// collector has no canonical address and guessing one means reporting to
-/// somebody else's — see [`resolve`].
+/// The collector URL. Defaults to [`DEFAULT_ENDPOINT`] for a hosted tenant
+/// only — see [`resolve`].
 pub const ENDPOINT_ENV: &str = "OPENCOMPANY_ANALYTICS_ENDPOINT";
+
+/// The TinyHumans OpenPanel client id a [`Deployment::HostedTenant`] reports
+/// as when `OPENCOMPANY_ANALYTICS_CLIENT_ID` is unset or blank. The same id the
+/// browser console ships in `frontend/public/openpanel-init.js`.
+pub const DEFAULT_CLIENT_ID: &str = "afe8ec4e-0a6a-427a-aa22-49cbbf137d0a";
+
+/// The TinyHumans OpenPanel ingestion URL a [`Deployment::HostedTenant`]
+/// reports to when `OPENCOMPANY_ANALYTICS_ENDPOINT` is unset or blank.
+///
+/// **Hosted tenants only, never any other deployment.** The `analytics`
+/// feature is compiled into the TinyHumans tenant image
+/// (`deploy-staging.yml` `TENANT_FEATURES`) and into no other official build —
+/// not the desktop app, not a default `cargo build` — but it is not
+/// *impossible* to compile elsewhere: a self-hoster can add it through
+/// `OPENCOMPANY_FEATURES` in `deploy/docker-compose.yml`. A self-hoster who
+/// then sets `OPENCOMPANY_ANALYTICS=on` has opted in to reporting to *their*
+/// collector, not to ours, so for them an absent endpoint or id is still
+/// silence with a reason.
+pub const DEFAULT_ENDPOINT: &str = "https://panel.tinyhumans.ai/api/track";
 /// The secret that makes a hosted tenant's analytics id unguessable.
 ///
 /// **Configuration, never a compiled-in constant**, and for a sharper reason
@@ -288,7 +306,10 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
     // A non-Unicode id already fails closed on its own: `get` maps it to
     // `None` and the match below reports it missing. Reporting *less* than was
     // configured is always the safe direction for a credential.
-    let credentials = match non_blank(env, CLIENT_ID_ENV) {
+    let hosted = deployment == Deployment::HostedTenant;
+    let credentials = match non_blank(env, CLIENT_ID_ENV)
+        .or_else(|| hosted.then(|| DEFAULT_CLIENT_ID.to_string()))
+    {
         Some(id) if !is_header_safe(&id) => {
             return Decision::Silent(Silence::UnusableCredential);
         }
@@ -306,13 +327,26 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
     // telemetry leaving for an address nobody chose, and no amount of reading
     // the boot line would reveal it, because the line would name a destination
     // that is real.
+    let default_endpoint = || {
+        if hosted {
+            Some(DEFAULT_ENDPOINT.to_string())
+        } else {
+            None
+        }
+    };
     let endpoint = match env.get_os(ENDPOINT_ENV) {
-        None => return Decision::Silent(Silence::NoEndpoint),
+        None => match default_endpoint() {
+            Some(endpoint) => endpoint,
+            None => return Decision::Silent(Silence::NoEndpoint),
+        },
         Some(raw) => match raw.into_string() {
             Err(_) => return Decision::Silent(Silence::UnusableEndpoint),
             Ok(value) => match value.trim() {
                 // Blank is absent, as it is for the credential and the switch.
-                "" => return Decision::Silent(Silence::NoEndpoint),
+                "" => match default_endpoint() {
+                    Some(endpoint) => endpoint,
+                    None => return Decision::Silent(Silence::NoEndpoint),
+                },
                 // Shape before transport security, and the order matters for
                 // the reason an operator is given: a value that does not parse
                 // has no host to judge, and "this will not parse" sends them
