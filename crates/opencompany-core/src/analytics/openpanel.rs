@@ -262,10 +262,10 @@ mod http {
         /// Builds a tracker and starts its drain loop.
         ///
         /// The credential is validated for header-safety in
-        /// [`crate::analytics::config::resolve`], which is why the two
-        /// `from_str` calls here can fall back rather than fail: by the time a
+        /// [`crate::analytics::config::resolve`], which is why the
+        /// `from_str` call here can fall back rather than fail: by the time a
         /// [`Decision::Report`](crate::analytics::config::Decision::Report)
-        /// exists, both halves are printable ASCII with no space, which is a
+        /// exists, the client id is printable ASCII with no space, which is a
         /// strict subset of what `HeaderValue` takes. The fallback is an empty
         /// header value, which the collector refuses with a 401 — a loud,
         /// bounded outcome rather than a panic at boot, for a branch that is
