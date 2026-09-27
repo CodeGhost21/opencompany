@@ -306,7 +306,7 @@ option. `frontend/src/lib/sentry.ts` re-adds it by hand for that reason.
 | Seam | File | Why there |
 |---|---|---|
 | `sentry::init` | `src/bin/opencompany.rs`, first statement of `async_main` | The panic hook is installed here, so anything that panics earlier panics unobserved — and a malformed data root or an unlockable home are exactly the early panics worth reporting. |
-| desktop `sentry::init` | `crates/opencompany-app/src/lib.rs`, before the subscriber and Tauri runtime | The shell and every embedded host share the core's client, scrubber, panic hook and tracing bridge. |
+| desktop `sentry::init` | `crates/opencompany-app/src/lib.rs`, before the subscriber and Tauri runtime | The shell and every embedded host share the core's client, scrubber, panic hook and tracing bridge. The environment is wrapped in `crash::DesktopEnv`, which supplies the compiled-in desktop DSN only when none is set. |
 | the `tracing` bridge | `observability::tracing_layer`, added to the subscriber | One seam for every `tracing::error!` in the tree, rather than a reporting call at each. |
 | scope identity | `observability::scope::identify`, from the `serve` arm after the port is bound | The instance id and the storage backend are not known until the companies are registered — the same reason `analytics::boot::install` runs there. |
 | flush | `src/bin/opencompany.rs`, after the bound host stops serving | The error that took the host down is queued at the moment it stops. Bounded at 2s (`observability::FLUSH_TIMEOUT`), sized like `analytics`'s: the collector is a third party, and a drain that overruns Kubernetes' 30s grace buys a `SIGKILL` in the middle of the shutdown those seconds protect. |
