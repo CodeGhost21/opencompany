@@ -74,14 +74,74 @@ fn a_client_secret_is_neither_required_nor_read() {
     assert_eq!(with_leftover, id_only);
 }
 
-/// A hosted tenant with nothing configured is misconfigured, not reporting
-/// to nowhere — and the reason says so.
+/// **A hosted tenant with nothing configured reports to the TinyHumans
+/// collector as the TinyHumans client** — the compiled-in defaults, so the
+/// tenant image needs no injected analytics configuration.
 #[test]
-fn a_hosted_tenant_without_a_credential_is_silent() {
+fn a_hosted_tenant_without_configuration_uses_the_defaults() {
+    match resolve(Deployment::HostedTenant, &MapEnv::default()) {
+        Decision::Report {
+            endpoint,
+            credentials,
+        } => {
+            assert_eq!(endpoint, DEFAULT_ENDPOINT);
+            assert_eq!(credentials.expose_id(), DEFAULT_CLIENT_ID);
+        }
+        other => panic!("{other:?}"),
+    }
+    // Blank is absent for both, and configuration outranks both defaults.
+    match resolve(
+        Deployment::HostedTenant,
+        &MapEnv::new([(CLIENT_ID_ENV, " \n"), (ENDPOINT_ENV, "  ")]),
+    ) {
+        Decision::Report {
+            endpoint,
+            credentials,
+        } => {
+            assert_eq!(endpoint, DEFAULT_ENDPOINT);
+            assert_eq!(credentials.expose_id(), DEFAULT_CLIENT_ID);
+        }
+        other => panic!("{other:?}"),
+    }
+    match resolve(Deployment::HostedTenant, &configured(&[])) {
+        Decision::Report {
+            endpoint,
+            credentials,
+        } => {
+            assert_eq!(endpoint, TEST_ENDPOINT);
+            assert_eq!(credentials.expose_id(), "not-a-real-client-id");
+        }
+        other => panic!("{other:?}"),
+    }
+    // `off` still wins over the defaults.
     assert_eq!(
-        resolve(Deployment::HostedTenant, &MapEnv::default()),
-        Decision::Silent(Silence::NoClientId)
+        resolve(
+            Deployment::HostedTenant,
+            &MapEnv::new([(ENABLE_ENV, "off")])
+        ),
+        Decision::Silent(Silence::OptedOut)
     );
+}
+
+/// A set-but-malformed endpoint is reported, never papered over by the
+/// default.
+#[test]
+fn a_malformed_endpoint_is_not_replaced_by_the_default() {
+    assert_eq!(
+        resolve(
+            Deployment::HostedTenant,
+            &MapEnv::new([(ENDPOINT_ENV, "collector.internal/track")])
+        ),
+        Decision::Silent(Silence::UnusableEndpoint)
+    );
+}
+
+/// The compiled-in defaults pass the same validation configuration does.
+#[test]
+fn the_defaults_are_themselves_valid() {
+    assert!(is_usable_endpoint(DEFAULT_ENDPOINT));
+    assert!(is_secure_endpoint(DEFAULT_ENDPOINT));
+    assert!(is_header_safe(DEFAULT_CLIENT_ID));
 }
 
 /// The reason names the variable to set, and a blank id is no id: a value
@@ -99,8 +159,8 @@ fn a_missing_or_blank_client_id_names_the_variable() {
     for blank in ["   ", "\n", "\t\n "] {
         assert_eq!(
             resolve(
-                Deployment::HostedTenant,
-                &configured(&[(CLIENT_ID_ENV, blank)])
+                Deployment::SelfHosted,
+                &configured(&[(CLIENT_ID_ENV, blank), (ENABLE_ENV, "on")])
             ),
             Decision::Silent(Silence::NoClientId),
             "an id of {blank:?} must not read as configured"
@@ -189,22 +249,17 @@ fn the_unusable_credential_reason_never_quotes_the_credential() {
     );
 }
 
-/// **There is no default endpoint, and an absent one is silence with its
-/// own reason.**
+/// **Outside a hosted tenant there is no default, and an absent endpoint
+/// or id is silence with its own reason.**
 ///
-/// This replaced `https://api.mixpanel.com/track`, and dropping the default
-/// rather than re-pointing it is the deliberate half of that. OpenPanel is
-/// self-hosted: its address is whatever the operator runs it at, and any
-/// address this crate picked would be somebody else's collector. A tenant
-/// that configured a credential but no endpoint would then have shipped its
-/// telemetry to a third party nobody named — which is the accident
-/// `Silence::UnusableEndpoint` already refuses to make from the other
-/// direction.
+/// A self-hoster who opts in with `OPENCOMPANY_ANALYTICS=on` has asked to
+/// report to *their* collector; the TinyHumans default would be somebody
+/// else's, so it never applies to them.
 #[test]
 fn an_absent_endpoint_is_silence_rather_than_a_default() {
     let decision = resolve(
-        Deployment::HostedTenant,
-        &MapEnv::new([(CLIENT_ID_ENV, "not-a-real-client-id")]),
+        Deployment::SelfHosted,
+        &MapEnv::new([(CLIENT_ID_ENV, "not-a-real-client-id"), (ENABLE_ENV, "on")]),
     );
     assert_eq!(decision, Decision::Silent(Silence::NoEndpoint));
     assert!(!decision.reports());
@@ -215,6 +270,13 @@ fn an_absent_endpoint_is_silence_rather_than_a_default() {
         "the reason must name the variable to set: {}",
         Silence::NoEndpoint.as_str()
     );
+    assert_eq!(
+        resolve(
+            Deployment::SelfHosted,
+            &MapEnv::new([(ENDPOINT_ENV, TEST_ENDPOINT), (ENABLE_ENV, "on")]),
+        ),
+        Decision::Silent(Silence::NoClientId)
+    );
 }
 
 /// A blank endpoint is an absent one, not a broken one: a launcher that
@@ -224,8 +286,8 @@ fn an_absent_endpoint_is_silence_rather_than_a_default() {
 fn a_blank_endpoint_is_absent_rather_than_unusable() {
     assert_eq!(
         resolve(
-            Deployment::HostedTenant,
-            &configured(&[(ENDPOINT_ENV, "  \n")])
+            Deployment::SelfHosted,
+            &configured(&[(ENDPOINT_ENV, "  \n"), (ENABLE_ENV, "on")])
         ),
         Decision::Silent(Silence::NoEndpoint)
     );
