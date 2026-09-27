@@ -90,3 +90,15 @@ fn sentry_test_argument_is_recognised_exactly() {
         Some(Some("yo".to_string()))
     );
 }
+
+/// Every desktop build carries the desktop project's DSN, and it is one the
+/// core accepts.
+#[test]
+fn the_desktop_dsn_is_compiled_in_and_usable() {
+    assert_eq!(baked_dsn(), Some(DESKTOP_DSN));
+    let env = DesktopEnv::new(MapEnv::new(Vec::<(&str, &str)>::new()));
+    assert_eq!(
+        destination(&resolve(Deployment::Desktop, &env)).as_deref(),
+        Some(DESKTOP_DSN)
+    );
+}

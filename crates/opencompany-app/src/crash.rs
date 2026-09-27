@@ -1,22 +1,16 @@
 //! Where the desktop shell's crash reports go.
 //!
-//! The core's rule is that a DSN is configuration, read from
-//! `OPENCOMPANY_SENTRY_DSN` — and it still is here: an operator who sets it
-//! gets exactly that destination. What a double-clicked `.app` does not have is
-//! any environment at all, so the official build carries one more source, below
-//! the process env and never above it: a DSN baked in at compile time from
-//! `OPENCOMPANY_TAURI_SENTRY_DSN`.
+//! A runtime `OPENCOMPANY_SENTRY_DSN` still wins: an operator who sets it gets
+//! exactly that destination. What a double-clicked `.app` does not have is any
+//! environment at all, so the desktop carries one more source, below the
+//! process env and never above it: [`DESKTOP_DSN`], a compiled-in constant.
 //!
-//! That value names the **desktop's own** Sentry project, not the server's. A
-//! key inside a downloadable bundle is readable by anyone who unzips it, so the
-//! only thing it can be trusted to write to is a project that exists for
-//! exactly this binary. It is set by `build-desktop.yml` from the `Production`
-//! environment and is absent from every other build — a source build, a CI
-//! build, a contributor's `cargo run` — which therefore report nothing unless
-//! their operator configures a DSN, exactly as before.
+//! That value names the **desktop's own** Sentry project (`opencompany-tauri`),
+//! not the server's. A key inside a downloadable bundle is readable by anyone
+//! who unzips it, so the only thing it can be trusted to write to is a project
+//! that exists for exactly this binary.
 //!
-//! Nothing about consent moves. The baked value only stands in for an absent
-//! `OPENCOMPANY_SENTRY_DSN`; `OPENCOMPANY_SENTRY=off` is resolved before any DSN
+//! The constant only stands in for an absent `OPENCOMPANY_SENTRY_DSN`; `OPENCOMPANY_SENTRY=off` is resolved before any DSN
 //! is looked at (`observability::config::resolve`) and silences this one too.
 //! See `docs/spec/runtime/crash-reporting.md`.
 
@@ -25,15 +19,12 @@ use std::ffi::OsString;
 use opencompany::app::config::EnvSource;
 use opencompany::observability::config::DSN_ENV;
 
-/// The desktop project's DSN, when this build was given one.
-///
-/// Blank counts as absent: a workflow that expands an unset variable passes an
-/// empty string, and that must build a silent binary rather than one that
-/// resolves `UnusableDsn` on every launch.
+/// The TinyHumans desktop (`opencompany-tauri`) project's DSN.
+pub const DESKTOP_DSN: &str = "https://b76bb868394f25c4e930a2c20bfcbc72@sentry.tinyhumans.ai/14";
+
+/// The desktop project's DSN: always [`DESKTOP_DSN`].
 pub fn baked_dsn() -> Option<&'static str> {
-    option_env!("OPENCOMPANY_TAURI_SENTRY_DSN")
-        .map(str::trim)
-        .filter(|dsn| !dsn.is_empty())
+    Some(DESKTOP_DSN)
 }
 
 /// An [`EnvSource`] that answers `OPENCOMPANY_SENTRY_DSN` from the baked DSN
@@ -91,10 +82,10 @@ pub fn run_sentry_test(message: Option<String>) -> std::process::ExitCode {
         eprintln!("crash reporting is not active in this process, so there is nothing to test");
         return std::process::ExitCode::FAILURE;
     };
-    let drained = guard.flush(std::time::Duration::from_secs(5));
+    let drained = guard.flush(std::time::Duration::from_secs(15));
     println!("{event_id}");
     if !drained {
-        eprintln!("the crash-reporting queue did not drain within 5s; delivery is unconfirmed");
+        eprintln!("the crash-reporting queue did not drain within 15s; delivery is unconfirmed");
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
