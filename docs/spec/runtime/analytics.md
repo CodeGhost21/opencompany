@@ -22,8 +22,8 @@ The short version, and the only four sentences most readers need:
   or company names.
 - The collector is **[OpenPanel](https://github.com/Openpanel-dev/openpanel)**,
   which is AGPL-3.0 and self-hosted by whoever runs the platform. There is no
-  third party in the path and **no default address** — every reporting
-  deployment names its own collector.
+  third party in the path. A **hosted tenant** defaults to the TinyHumans
+  collector; every other reporting deployment names its own.
 
 ## Why the default is silence
 
@@ -191,39 +191,44 @@ symptom in analytics is inflated install counts, not lost data.
 |---|---|
 | `OPENCOMPANY_DEPLOYMENT` | `desktop` \| `self-hosted` \| `hosted-tenant`. Declared by whoever launches the process. Default and fallback: `self-hosted`, including when the declared value cannot be read. |
 | `OPENCOMPANY_ANALYTICS` | `on` forces reporting; `off` forbids it and outranks everything else. |
-| `OPENCOMPANY_ANALYTICS_CLIENT_ID` | the OpenPanel client id — a **UUIDv4** naming a `write` or `root` client configured with **"ignore CORS and secret"**. It is the whole credential: there is no client secret, and a leftover `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` is ignored. |
-| `OPENCOMPANY_ANALYTICS_ENDPOINT` | the collector URL. **Required; there is no default.** Must be an absolute URL with a host, and must be **`https`** — plain `http` is accepted only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`). |
+| `OPENCOMPANY_ANALYTICS_CLIENT_ID` | the OpenPanel client id — a **UUIDv4** naming a `write` or `root` client configured with **"ignore CORS and secret"**. It is the whole credential: there is no client secret, and a leftover `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` is ignored. **Hosted tenant default:** `afe8ec4e-0a6a-427a-aa22-49cbbf137d0a` (`config::DEFAULT_CLIENT_ID`). |
+| `OPENCOMPANY_ANALYTICS_ENDPOINT` | the collector URL. **Hosted tenant default:** `https://panel.tinyhumans.ai/api/track` (`config::DEFAULT_ENDPOINT`); required for any other deployment. Must be an absolute URL with a host, and must be **`https`** — plain `http` is accepted only for a loopback host (`127.0.0.0/8`, `::1`, `localhost`). |
 | `OPENCOMPANY_ANALYTICS_ID_KEY` | the secret a hosted tenant's analytics id is derived under. Injected by the platform, never given to the collector. Absent means the host is known by its random instance id instead. |
 
 For a self-hosted OpenPanel behind its bundled Caddy, the endpoint is
 `https://<your-domain>/api/track` — the reverse proxy strips the `/api` prefix
 before the API container sees it. The TinyHumans collector is
-`https://panel.tinyhumans.ai/api/track`, so a hosted tenant reports with
-exactly `OPENCOMPANY_ANALYTICS_CLIENT_ID` and `OPENCOMPANY_ANALYTICS_ENDPOINT`
-(plus the hosted-tenant deployment, or `OPENCOMPANY_ANALYTICS=on`).
+`https://panel.tinyhumans.ai/api/track`, and a hosted tenant reports there as
+the TinyHumans client with **no analytics variables at all** — it only has to
+know it is a hosted tenant (`OPENCOMPANY_DEPLOYMENT=hosted-tenant`, or
+`OPENCOMPANY_TENANT_ID`). Either variable overrides its default; `off` still
+wins.
 
 Reporting happens only when **all** of these hold:
 
 1. the binary was built with `--features analytics`;
 2. `OPENCOMPANY_ANALYTICS` is not `off`;
 3. the deployment is `hosted-tenant`, **or** `OPENCOMPANY_ANALYTICS=on`;
-4. a client id is configured;
+4. a client id is configured (or defaulted, for a hosted tenant);
 5. it is a value that can go in an HTTP header;
-6. an endpoint is configured, and it is one a client could actually POST to;
+6. an endpoint is configured (or defaulted, for a hosted tenant), and it is one
+   a client could actually POST to;
 7. and it is one the credential can safely cross — `https`, or `http` to loopback.
 
-### Why there is no default endpoint
+### Why the default endpoint is hosted-tenant-only
 
-Mixpanel had one — `https://api.mixpanel.com/track` — and dropping it rather
-than re-pointing it is the deliberate half of this change. A self-hosted
-collector has no canonical address; it lives wherever its operator runs it. Any
-default this crate picked would therefore be *somebody else's* collector, and a
-tenant that configured a credential but forgot the endpoint would ship its
-telemetry to a third party nobody named. That is the same accident condition 6
-already refuses to make from the other direction, and it is worse, because the
-boot line would name a destination that is perfectly real.
+A hosted tenant is TinyHumans' own workload, and the TinyHumans collector is
+the right destination for it, so the tenant image needs no injected analytics
+configuration. The `analytics` feature is compiled only into that image
+(`TENANT_FEATURES` in `deploy-staging.yml`, read by `release-production.yml`) —
+not the desktop app, not a default build — but it is not impossible to compile
+elsewhere: a self-hoster can add it through `OPENCOMPANY_FEATURES`. That
+self-hoster's `OPENCOMPANY_ANALYTICS=on` is consent to report to *their*
+collector, and the TinyHumans default would be somebody else's — a third party
+they never named, announced by a boot line naming a perfectly real destination.
+So the defaults are gated on the deployment, not on the feature alone.
 
-So an absent or blank endpoint is silence with its own reason, a **malformed**
+Outside a hosted tenant, an absent or blank endpoint is silence with its own reason, a **malformed**
 one a second and an **insecure** one a third: "you never set this", "what you
 set will not parse" and "what you set would leak the credential" are three different
 edits, and send an operator to three different places.
@@ -344,8 +349,8 @@ Every one of those exists because the alternative was a line that said
 — a hostname written without a scheme, which is how anyone writes one the first
 time — used to resolve to reporting, so boot announced a destination and every
 batch died inside `reqwest` behind a `debug!` no operator has enabled. That
-matters more now than it did: with no default endpoint, every reporting
-deployment types that variable by hand.
+matters more now than it did: outside a hosted tenant there is no default
+endpoint, so every such reporting deployment types that variable by hand.
 
 The endpoint is named; the credential never is — and the endpoint is named
 **sanitized**. A self-hosted collector is routinely reached through an
