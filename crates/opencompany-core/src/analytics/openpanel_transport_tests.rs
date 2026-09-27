@@ -130,10 +130,7 @@ fn envelope() -> Envelope {
 
 /// A reporting environment pointed at `endpoint`, which `pairs` overrides.
 fn env(endpoint: &str, pairs: &[(&str, &str)]) -> MapEnv {
-    let mut all = vec![
-        (CLIENT_ID_ENV, TEST_CLIENT_ID),
-        (ENDPOINT_ENV, endpoint),
-    ];
+    let mut all = vec![(CLIENT_ID_ENV, TEST_CLIENT_ID), (ENDPOINT_ENV, endpoint)];
     all.extend_from_slice(pairs);
     MapEnv::new(all)
 }

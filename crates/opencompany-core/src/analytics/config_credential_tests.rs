@@ -115,9 +115,7 @@ fn a_missing_or_blank_client_id_names_the_variable() {
 fn a_credential_is_trimmed() {
     match resolve(
         Deployment::HostedTenant,
-        &configured(&[
-            (CLIENT_ID_ENV, "  not-a-real-client-id\n"),
-        ]),
+        &configured(&[(CLIENT_ID_ENV, "  not-a-real-client-id\n")]),
     ) {
         Decision::Report { credentials, .. } => {
             assert_eq!(credentials.expose_id(), "not-a-real-client-id");
