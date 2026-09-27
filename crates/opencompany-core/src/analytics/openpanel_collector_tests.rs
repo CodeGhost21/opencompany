@@ -492,8 +492,8 @@ async fn a_drain_that_finishes_reports_nothing_lost() {
 /// ```
 ///
 /// No client secret: the collector's clients run with "ignore CORS and
-/// secret". The client id comes from the environment and are never written anywhere:
-/// not to a fixture, not to a log line, and not to this test's output,
+/// secret". The client id comes from the environment and is never written
+/// anywhere: not to a fixture, not to a log line, and not to this test's output,
 /// which prints only the `profileId` it sent and the ids the collector
 /// returned — enough to find the event in the dashboard and nothing more.
 ///
