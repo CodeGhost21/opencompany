@@ -17,19 +17,28 @@ fn destination(decision: &Decision) -> Option<String> {
 #[test]
 fn baked_dsn_fills_an_absent_runtime_dsn() {
     let env = DesktopEnv::with_baked(MapEnv::new(Vec::<(&str, &str)>::new()), Some(BAKED));
-    assert_eq!(destination(&resolve(Deployment::Desktop, &env)).as_deref(), Some(BAKED));
+    assert_eq!(
+        destination(&resolve(Deployment::Desktop, &env)).as_deref(),
+        Some(BAKED)
+    );
 }
 
 #[test]
 fn baked_dsn_fills_a_blank_runtime_dsn() {
     let env = DesktopEnv::with_baked(MapEnv::new([(DSN_ENV, "  ")]), Some(BAKED));
-    assert_eq!(destination(&resolve(Deployment::Desktop, &env)).as_deref(), Some(BAKED));
+    assert_eq!(
+        destination(&resolve(Deployment::Desktop, &env)).as_deref(),
+        Some(BAKED)
+    );
 }
 
 #[test]
 fn runtime_dsn_outranks_the_baked_one() {
     let env = DesktopEnv::with_baked(MapEnv::new([(DSN_ENV, RUNTIME)]), Some(BAKED));
-    assert_eq!(destination(&resolve(Deployment::Desktop, &env)).as_deref(), Some(RUNTIME));
+    assert_eq!(
+        destination(&resolve(Deployment::Desktop, &env)).as_deref(),
+        Some(RUNTIME)
+    );
 }
 
 #[test]

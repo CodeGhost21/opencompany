@@ -85,10 +85,8 @@ impl<E: EnvSource> EnvSource for DesktopEnv<E> {
 /// kept out of the UI on purpose — it is a release check, not a feature.
 pub fn run_sentry_test(message: Option<String>) -> std::process::ExitCode {
     let env = DesktopEnv::new(opencompany::app::config::ProcessEnv);
-    let (decision, guard) = opencompany::observability::init(
-        opencompany::app::deployment::Deployment::Desktop,
-        &env,
-    );
+    let (decision, guard) =
+        opencompany::observability::init(opencompany::app::deployment::Deployment::Desktop, &env);
     eprintln!("{}", decision.describe());
     let message = message.unwrap_or_else(|| "opencompany-desktop sentry-test ping".to_string());
     let Some(event_id) = opencompany::observability::capture_test_event(&message) else {
