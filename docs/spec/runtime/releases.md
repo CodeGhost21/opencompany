@@ -80,7 +80,7 @@ Re-dispatching the promotion afterwards merges — it never resets — so fixes 
    and the tag are deleted, so the next dispatch bumps cleanly and no
    half-built version is reachable. The bump commit stays; that is harmless.
 
-`create_release: false` is a rehearsal: bump and build — no tag, no
+`create_release: false` is a rehearsal: bump and build — no tag, no image push, no
 Release, DMGs as Actions artifacts. The version still moves.
 
 Separately, every push to `main` that touches the image's inputs publishes
