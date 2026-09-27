@@ -375,6 +375,44 @@ fn a_non_unicode_switch_is_unreadable_rather_than_absent() {
     );
 }
 
+/// **A client id that is set but is not text fails closed too.**
+///
+/// `non_blank` used to read the credential through [`EnvSource::get`], which
+/// maps a non-Unicode value to `None`. For a hosted tenant that `None` then
+/// fell to [`DEFAULT_CLIENT_ID`] — reporting under the compiled-in credential
+/// for a tenant that *did* configure one, just not one this process could
+/// read, rather than the `Silence::UnusableCredential` a malformed value
+/// should produce. Same leak as the switch above, by a different route.
+#[cfg(unix)]
+#[test]
+fn a_non_unicode_client_id_is_unusable_rather_than_the_default() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    struct NonUnicodeClientId;
+    impl EnvSource for NonUnicodeClientId {
+        fn get_os(&self, key: &str) -> Option<OsString> {
+            match key {
+                CLIENT_ID_ENV => Some(OsString::from_vec(vec![0xff, 0xfe])),
+                ENDPOINT_ENV => Some(OsString::from(TEST_ENDPOINT)),
+                _ => None,
+            }
+        }
+    }
+
+    // The premise: this really is a value `get` cannot see at all.
+    assert_eq!(NonUnicodeClientId.get(CLIENT_ID_ENV), None);
+    assert!(NonUnicodeClientId.get_os(CLIENT_ID_ENV).is_some());
+
+    let decision = resolve(Deployment::HostedTenant, &NonUnicodeClientId);
+    assert_eq!(
+        decision,
+        Decision::Silent(Silence::UnusableCredential),
+        "a client id set to bytes this process cannot read must not fall back to the default"
+    );
+    assert!(!decision.reports());
+}
+
 /// The near-miss control: `off` really is matched case-insensitively and
 /// after trimming, so the test above is finding typos rather than finding
 /// every value that is not lowercase and bare.
