@@ -278,10 +278,12 @@ impl EventLogSessionLog {
 
     /// Whether `chat` is the pair channel of two seats of this desk.
     fn addresses_a_seat_pair(&self, chat: &str) -> bool {
-        let Some((one, two)) = super::referral::pair_seats(chat) else {
+        let Some(members) = super::referral::conversation_seats(chat) else {
             return false;
         };
-        self.seats.iter().any(|seat| seat == one) && self.seats.iter().any(|seat| seat == two)
+        members
+            .iter()
+            .all(|member| self.seats.iter().any(|seat| seat == member))
     }
 
     /// One journal entry as a session row, or `None` when it is not desk chat
@@ -389,8 +391,8 @@ impl EventLogSessionLog {
     /// transcript, and once the ask is a root its first reply is promoted.
     fn audience_of(&self, chat: &str, author: &str, stored: Vec<String>) -> Audience {
         let mut members = stored;
-        if let Some((one, two)) = super::referral::pair_seats(chat) {
-            for seat in [one, two] {
+        if let Some(seats) = super::referral::conversation_seats(chat) {
+            for seat in seats {
                 if seat != author && !members.iter().any(|member| member == seat) {
                     members.push(seat.to_owned());
                 }

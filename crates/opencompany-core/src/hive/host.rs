@@ -377,7 +377,10 @@ impl DeskHost {
     /// prevent.
     fn channel_for(&self, commit: &Commit) -> Result<String, String> {
         if let tinyhivemind::speech::Utterance::Ask { to, .. } = &commit.utterance {
-            return Ok(crate::hive::referral::pair_conversation(&commit.author, to));
+            return Ok(crate::hive::referral::conversation_channel(
+                &commit.author,
+                to,
+            ));
         }
         // **A conclusion belongs to the conversation it concludes.**
         //
@@ -536,15 +539,11 @@ impl DeskHost {
         author: &str,
         text: String,
         thread: Option<Sequence>,
-        only_for: Option<&str>,
+        only_for: &[String],
     ) -> CompanyEvent {
-        let mut audience: Vec<String> = only_for
-            .map(|seat| vec![seat.to_owned()])
-            .into_iter()
-            .flatten()
-            .collect();
-        if let Some((one, two)) = crate::hive::referral::pair_seats(chat) {
-            for seat in [one, two] {
+        let mut audience: Vec<String> = only_for.to_vec();
+        if let Some(seats) = crate::hive::referral::conversation_seats(chat) {
+            for seat in seats {
                 if seat != author && !audience.iter().any(|member| member == seat) {
                     audience.push(seat.to_owned());
                 }
@@ -614,9 +613,19 @@ fn recipients(utterance: &tinyhivemind::speech::Utterance) -> Vec<String> {
     use tinyhivemind::speech::Utterance;
     match utterance {
         Utterance::Dm { to, .. } => to.clone(),
-        Utterance::Ask { to, .. } => vec![to.clone()],
+        Utterance::Ask { to, .. } => to.clone(),
         _ => Vec::new(),
     }
+}
+
+/// The seat a conversation row names as its `askee`.
+///
+/// The company rows (`ConversationOpened` / `ConversationConcluded`) name one
+/// askee, as they did while an ask could name only one seat. A group ask
+/// names the first seat it asked there; the full set is in the row's
+/// `conversation_id` (see [`crate::hive::referral::conversation_channel`]).
+fn primary_askee(askees: &[String]) -> String {
+    askees.first().cloned().unwrap_or_default()
 }
 
 /// The failure an episode reports when this company's journal refuses a row.
@@ -705,7 +714,7 @@ impl Journal for DeskHost {
             &commit.author,
             commit.utterance.message().to_owned(),
             commit.thread.or_else(|| concluded_conversation(commit)),
-            commit.only_for.as_deref(),
+            &commit.only_for,
         );
         // A committed row is an episode's row, and says so. Without this the
         // console cannot tell one from an ordinary chat reply, the
@@ -854,15 +863,15 @@ impl Journal for DeskHost {
         // stays the room's, and the console -- already subscribed to this
         // desk -- can raise the "two seats are talking" indicator without
         // watching every pair channel for one to start.
-        if let Event::Asked { seat, askee, root } = event {
-            let conversation_id = crate::hive::referral::pair_conversation(seat, askee);
+        if let Event::Asked { seat, askees, root } = event {
+            let conversation_id = crate::hive::referral::conversation_channel(seat, askees);
             let row = CompanyEvent::ConversationOpened {
                 chat_id: self.desk_id.clone(),
                 episode_id: self.episode_id.clone(),
                 conversation_id: conversation_id.clone(),
                 root: root.0,
                 asker: seat.clone(),
-                askee: askee.clone(),
+                askee: primary_askee(askees),
             };
             self.conversations
                 .lock()
@@ -874,7 +883,7 @@ impl Journal for DeskHost {
         if let Event::Concluded {
             root,
             asker,
-            askee,
+            askees,
             forced,
             ..
         } = event
@@ -882,10 +891,10 @@ impl Journal for DeskHost {
             let row = CompanyEvent::ConversationConcluded {
                 chat_id: self.desk_id.clone(),
                 episode_id: self.episode_id.clone(),
-                conversation_id: crate::hive::referral::pair_conversation(asker, askee),
+                conversation_id: crate::hive::referral::conversation_channel(asker, askees),
                 root: root.0,
                 asker: asker.clone(),
-                askee: askee.clone(),
+                askee: primary_askee(askees),
                 forced: *forced,
             };
             self.journal_or_warn(row);
@@ -952,7 +961,7 @@ impl Journal for DeskHost {
             DESK_AUTHOR,
             note.body.clone(),
             note.thread,
-            note.only_for.as_deref(),
+            note.only_for.as_slice(),
         );
         self.append(event).map_err(|error| refused(&error))?;
         Ok(())

@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "openhuman"
-version = "0.64.0"
+version = "0.64.4"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -4103,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "openhuman-embed"
-version = "0.64.0"
+version = "0.64.4"
 dependencies = [
  "anyhow",
  "log",
@@ -4119,7 +4119,7 @@ dependencies = [
 
 [[package]]
 name = "openhuman-rpc"
-version = "0.64.0"
+version = "0.64.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -4127,10 +4127,12 @@ dependencies = [
 
 [[package]]
 name = "openhuman-tinyhumans"
-version = "0.64.0"
+version = "0.64.4"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "log",
  "openhuman",
@@ -4139,9 +4141,11 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tinychannels-bus",
  "tinyhumans-sdk",
  "tinytools 0.4.1",
  "tokio",
+ "tracing",
  "url",
  "urlencoding",
 ]
