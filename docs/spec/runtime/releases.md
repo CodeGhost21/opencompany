@@ -64,7 +64,7 @@ Re-dispatching the promotion afterwards merges — it never resets — so fixes 
 4. **`publish-docker`** — the tenant image, built from the tag (so `/spec`
    reports the bumped version) with the feature set in `deploy-staging.yml`,
    run through the `sentry-test` gate, then pushed to
-   `ghcr.io/tinyhumansai/opencompany-tenant:vX.Y.Z`. boat.dev sandboxes
+   `ghcr.io/tinyhumansai/opencompany:vX.Y.Z`. boat.dev sandboxes
    (`tinyhumansai/opencompany-sandbox-manager`) follow the newest GitHub
    Release, so the image has to exist before the Release does. The GHCR package
    must be public for their anonymous pull.

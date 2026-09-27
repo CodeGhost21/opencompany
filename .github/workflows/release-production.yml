@@ -356,9 +356,9 @@ jobs:
   # already public.)
   #
   # THE GHCR PACKAGE MUST BE PUBLIC. A sandbox's pull is anonymous: it holds no
-  # GHCR credential, so `ghcr.io/tinyhumansai/opencompany-tenant` has to be made
+  # GHCR credential, so `ghcr.io/tinyhumansai/opencompany` has to be made
   # **public** in the repository's package settings (Packages ->
-  # opencompany-tenant -> Package settings -> Change visibility -> Public) — or
+  # opencompany -> Package settings -> Change visibility -> Public) — or
   # boat.dev must be handed a pull credential — or every pull gets
   # `denied: denied` and the sandbox cannot start. A freshly created GHCR package
   # is private by default; publishing succeeds while pulling silently fails
@@ -377,7 +377,7 @@ jobs:
       contents: read
       packages: write # push the tenant image to GHCR under this repository's owner
     env:
-      IMAGE: ghcr.io/tinyhumansai/opencompany-tenant
+      IMAGE: ghcr.io/tinyhumansai/opencompany
       TAG: ${{ needs.prepare-build.outputs.tag }}
     steps:
       - name: Checkout build ref
@@ -562,7 +562,7 @@ jobs:
       contents: read
       packages: write # retag the tenant image in GHCR
     env:
-      IMAGE: ghcr.io/tinyhumansai/opencompany-tenant
+      IMAGE: ghcr.io/tinyhumansai/opencompany
       TAG: ${{ needs.prepare-build.outputs.tag }}
     steps:
       - name: Set up Buildx
