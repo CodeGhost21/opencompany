@@ -259,10 +259,12 @@ real-looking key. That test is the tripwire for a key pasted in by accident, so
 the commit that legitimately adds one has to delete or invert it — a deliberate
 edit, in the same change, rather than a silent one.
 
-### 3. Add the private half as a repository secret
+### 3. Add the private half as a `Production` environment secret
 
-In the `tinyhumansai/opencompany` repository settings, under Secrets and
-variables → Actions:
+In the `tinyhumansai/opencompany` repository settings, under Environments →
+`Production` → Environment secrets (not repository secrets: the jobs that sign
+read them through `environment: Production`, which only `main` and `release`
+can deploy to):
 
 | Secret | Value |
 |---|---|

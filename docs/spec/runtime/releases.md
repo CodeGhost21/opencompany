@@ -128,8 +128,12 @@ numbers only and is verified by the cut itself.
 
 ## What is needed once
 
-Repository secrets: the six `APPLE_*` values for signing and notarization,
-`TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) for the updater
-([desktop-updates.md](desktop-updates.md#operator-setup)),
-and optionally `OPENAI_API_KEY` for polished notes. `build-desktop.yml`'s
-`guard` job fails in seconds, naming the missing one, before any build starts.
+Secrets in the `Production` GitHub environment (branch-policied to `main` and
+`release`, no admin bypass): the six `APPLE_*` values for signing and
+notarization, `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) for the updater
+([desktop-updates.md](desktop-updates.md#operator-setup)), and optionally
+`OPENAI_API_KEY` for polished notes. Every job that reads one declares
+`environment: Production` itself — `build-desktop.yml`'s `guard` and `build`,
+and `create-release` — so the callers pass only the repository-level
+`SENTRY_AUTH_TOKEN`. `guard` fails in seconds, naming the missing secret, before
+any build starts.
