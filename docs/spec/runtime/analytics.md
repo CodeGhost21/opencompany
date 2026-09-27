@@ -267,8 +267,8 @@ Condition 5 is new with OpenPanel and exists because of *where* the credential
 travels now. Mixpanel's token rode in the JSON body, where any string is legal,
 so a mangled one was simply refused by the collector. The client id rides in a
 header, and `reqwest` will not build a request whose header value holds a
-control byte — so an id that picked up a newline in the middle (`kubectl create secret` over
-a wrapped file is the usual way one arrives, and trimming does not save it)
+control byte — so an id that picked up a newline in the middle
+(`kubectl create secret` over a wrapped file is the usual way one arrives, and trimming does not save it)
 would install a tracker that never constructs a single request, forever, behind
 a `debug!` nobody has enabled.
 
@@ -484,5 +484,5 @@ its positive control against the same collector, the same events and the same
 code path with one variable changed. Without the second, a zero request count
 would be indistinguishable from a test that never sends anything at all. The
 positive control also pins the wire contract: two events, **two** requests, the
-client-id header by its exact spelling and no client-secret header, and the union body with the identity as
-`profileId`.
+client-id header by its exact spelling and no client-secret header, and the
+union body with the identity as `profileId`.
