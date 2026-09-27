@@ -69,10 +69,8 @@ impl<E: EnvSource> EnvSource for DesktopEnv<E> {
         let blank = value
             .as_ref()
             .is_none_or(|raw| raw.to_str().is_some_and(|s| s.trim().is_empty()));
-        if blank {
-            if let Some(baked) = self.baked {
-                return Some(OsString::from(baked));
-            }
+        if blank && let Some(baked) = self.baked {
+            return Some(OsString::from(baked));
         }
         value
     }
