@@ -377,7 +377,10 @@ impl DeskHost {
     /// prevent.
     fn channel_for(&self, commit: &Commit) -> Result<String, String> {
         if let tinyhivemind::speech::Utterance::Ask { to, .. } = &commit.utterance {
-            return Ok(crate::hive::referral::pair_conversation(&commit.author, to));
+            return Ok(crate::hive::referral::conversation_channel(
+                &commit.author,
+                to,
+            ));
         }
         // **A conclusion belongs to the conversation it concludes.**
         //
@@ -536,15 +539,11 @@ impl DeskHost {
         author: &str,
         text: String,
         thread: Option<Sequence>,
-        only_for: Option<&str>,
+        only_for: &[String],
     ) -> CompanyEvent {
-        let mut audience: Vec<String> = only_for
-            .map(|seat| vec![seat.to_owned()])
-            .into_iter()
-            .flatten()
-            .collect();
-        if let Some((one, two)) = crate::hive::referral::pair_seats(chat) {
-            for seat in [one, two] {
+        let mut audience: Vec<String> = only_for.to_vec();
+        if let Some(seats) = crate::hive::referral::conversation_seats(chat) {
+            for seat in seats {
                 if seat != author && !audience.iter().any(|member| member == seat) {
                     audience.push(seat.to_owned());
                 }
@@ -614,7 +613,7 @@ fn recipients(utterance: &tinyhivemind::speech::Utterance) -> Vec<String> {
     use tinyhivemind::speech::Utterance;
     match utterance {
         Utterance::Dm { to, .. } => to.clone(),
-        Utterance::Ask { to, .. } => vec![to.clone()],
+        Utterance::Ask { to, .. } => to.clone(),
         _ => Vec::new(),
     }
 }
@@ -705,7 +704,7 @@ impl Journal for DeskHost {
             &commit.author,
             commit.utterance.message().to_owned(),
             commit.thread.or_else(|| concluded_conversation(commit)),
-            commit.only_for.as_deref(),
+            &commit.only_for,
         );
         // A committed row is an episode's row, and says so. Without this the
         // console cannot tell one from an ordinary chat reply, the
@@ -854,8 +853,8 @@ impl Journal for DeskHost {
         // stays the room's, and the console -- already subscribed to this
         // desk -- can raise the "two seats are talking" indicator without
         // watching every pair channel for one to start.
-        if let Event::Asked { seat, askee, root } = event {
-            let conversation_id = crate::hive::referral::pair_conversation(seat, askee);
+        if let Event::Asked { seat, askees, root } = event {
+            let conversation_id = crate::hive::referral::conversation_channel(seat, askees);
             let row = CompanyEvent::ConversationOpened {
                 chat_id: self.desk_id.clone(),
                 episode_id: self.episode_id.clone(),
