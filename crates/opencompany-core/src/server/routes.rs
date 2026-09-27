@@ -228,13 +228,26 @@ async fn console_config() -> Response {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
     // Blank or unset falls back to the TinyHumans collector; the render below
-    // still requires a hosted tenant with `OPENCOMPANY_ANALYTICS=on`.
-    let endpoint = std::env::var(crate::analytics::config::ENDPOINT_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| crate::analytics::config::DEFAULT_ENDPOINT.to_string());
+    // still requires a hosted tenant with `OPENCOMPANY_ANALYTICS=on`. Read
+    // through `var_os`, not `var`: the latter maps a non-Unicode configured
+    // value to the same `Err` as an unset one, which would silently publish
+    // the default collector for a value the operator did set but this
+    // process cannot read — the same failure `analytics::config::resolve`
+    // avoids by reading `ENDPOINT_ENV` through `get_os` and reporting
+    // `Silence::UnusableEndpoint` instead of falling back. Passing `None`
+    // here reaches the same silent branch in `render_console_config`.
+    let endpoint = match std::env::var_os(crate::analytics::config::ENDPOINT_ENV) {
+        None => Some(crate::analytics::config::DEFAULT_ENDPOINT.to_string()),
+        Some(raw) => match raw.into_string() {
+            Err(_) => None,
+            Ok(value) if value.trim().is_empty() => {
+                Some(crate::analytics::config::DEFAULT_ENDPOINT.to_string())
+            }
+            Ok(value) => Some(value),
+        },
+    };
     let body = render_console_config(
-        Some(&endpoint),
+        endpoint.as_deref(),
         hosted_deployment(),
         browser_analytics_enabled(),
     );

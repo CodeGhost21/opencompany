@@ -70,8 +70,9 @@ function mount(): void {
 // Crash reporting first, before anything else runs and well before the first
 // render — a crash during the first render is exactly the one worth reporting,
 // and a boundary armed after it would miss it. A production build reports to
-// `VITE_SENTRY_DSN` or the compiled-in console project; the dev server and a
-// `VITE_SENTRY_DSN=off` build are silent.
+// `VITE_SENTRY_DSN` or the compiled-in console project; the dev server falls
+// back to neither, so it is silent unless `VITE_SENTRY_DSN` is explicitly
+// set, and a `VITE_SENTRY_DSN=off` build is always silent.
 // See `docs/spec/runtime/crash-reporting.md`.
 initSentry();
 

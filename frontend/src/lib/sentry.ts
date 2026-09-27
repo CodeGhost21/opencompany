@@ -29,9 +29,12 @@ const RELEASE: string = __SENTRY_RELEASE__;
  *
  * Call once, before the first render, so a crash during the first render is
  * reported rather than being the thing that prevents reporting. A production
- * build reports to `VITE_SENTRY_DSN`, else to the compiled-in console project;
- * the Vite dev server and a `VITE_SENTRY_DSN=off` build are silent: no console
- * warning, no thrown error, no network.
+ * build reports to `VITE_SENTRY_DSN`, else to the compiled-in console project.
+ * The Vite dev server never falls back to that compiled-in project — a
+ * contributor's `npm run dev` must not write to it on a default nobody
+ * chose — but an explicitly configured `VITE_SENTRY_DSN` still reports there
+ * too. A `VITE_SENTRY_DSN=off` build, or a dev server with no DSN configured,
+ * is silent: no console warning, no thrown error, no network.
  */
 export function initSentry(): void {
   const config = resolveCrashReporting(import.meta.env, RELEASE);

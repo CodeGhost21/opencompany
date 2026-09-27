@@ -455,6 +455,61 @@ async fn console_config_route_serves_only_safe_hosted_configuration() {
     );
 }
 
+/// **A configured-but-unreadable endpoint must not fall back to the hosted
+/// default.**
+///
+/// `std::env::var` maps a non-Unicode value to the same `Err` as an unset
+/// one, so reading through it treated an operator's mistyped
+/// `OPENCOMPANY_ANALYTICS_ENDPOINT` as absent and published the TinyHumans
+/// collector to the browser anyway — the same failure
+/// `analytics::config::resolve` avoids for the host tracker by reading
+/// through `get_os` and reporting `Silence::UnusableEndpoint` instead.
+#[cfg(unix)]
+#[tokio::test]
+async fn console_config_route_does_not_default_an_unreadable_endpoint() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let env = crate::test_support::EnvVarGuard::capture(&[
+        "OPENCOMPANY_DEPLOYMENT",
+        "OPENCOMPANY_TENANT_ID",
+        "OPENCOMPANY_ANALYTICS",
+        "OPENCOMPANY_ANALYTICS_ENDPOINT",
+    ]);
+    env.set("OPENCOMPANY_DEPLOYMENT", "hosted-tenant");
+    env.remove("OPENCOMPANY_TENANT_ID");
+    env.set("OPENCOMPANY_ANALYTICS", "on");
+    // SAFETY: single-threaded under the guard's `ENV_LOCK`, like every other
+    // write it makes. Bytes this process cannot decode as UTF-8 are the
+    // premise under test; `EnvVarGuard::set` only accepts `&str`, so this
+    // bypasses it directly. The guard's `Drop` restores from its captured
+    // snapshot regardless of what a test wrote afterward, so this is still
+    // sound to leave unset on the way out.
+    unsafe {
+        std::env::set_var(
+            "OPENCOMPANY_ANALYTICS_ENDPOINT",
+            OsStr::from_bytes(&[0xff, 0xfe]),
+        )
+    };
+
+    let app = router_with_console(AppState::new(AppConfig::default()), None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/opencompany-config.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        body_text(response).await,
+        "window.OPENCOMPANY_CONFIG=window.OPENCOMPANY_CONFIG||{};\n",
+        "an unreadable configured endpoint must not publish the hosted default"
+    );
+}
+
 #[tokio::test]
 async fn root_404s_without_console_dir() {
     let app = router_with_console(AppState::new(AppConfig::default()), None);
