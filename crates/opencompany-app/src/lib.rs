@@ -22,6 +22,9 @@
 
 pub mod acp;
 pub mod commands;
+/// Where the shell's crash reports go: the operator's DSN, else the desktop
+/// project's compiled-in one. See the module docs.
+pub mod crash;
 pub mod embedded;
 /// Who is sitting at this machine, as the OS already knows — read once, to
 /// prefill a profile nobody has filled in yet. See the module docs for why it is
@@ -79,10 +82,13 @@ pub fn run() {
     use tracing_subscriber::util::SubscriberInitExt as _;
 
     // The shell and every embedded host share the core's single process-wide
-    // client, scrubber, panic hook, release format, and tracing bridge.
+    // client, scrubber, panic hook, release format, and tracing bridge. The
+    // DSN is the operator's `OPENCOMPANY_SENTRY_DSN` when set, else the
+    // desktop project's compiled-in one (`crash::DesktopEnv`);
+    // `OPENCOMPANY_SENTRY=off` silences both.
     let (crash_reporting, crash_guard) = opencompany::observability::init(
         opencompany::app::deployment::Deployment::Desktop,
-        &opencompany::app::config::ProcessEnv,
+        &crash::DesktopEnv::new(opencompany::app::config::ProcessEnv),
     );
     // The `tinyagents::observability` directive is the vendored durable-append
     // writer's reporting target, and it has to be named explicitly here for a
