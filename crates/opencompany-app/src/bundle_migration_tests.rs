@@ -44,22 +44,41 @@ fn linux_roots_prefer_xdg_and_fall_back_to_home() {
     let roots = identifier_roots("linux", &env_of(&[("HOME", "/home/op")]));
     assert_eq!(
         roots,
-        vec![PathBuf::from("/home/op/.local/share"), PathBuf::from("/home/op/.config")]
+        vec![
+            PathBuf::from("/home/op/.local/share"),
+            PathBuf::from("/home/op/.config")
+        ]
     );
     let roots = identifier_roots(
         "linux",
-        &env_of(&[("HOME", "/home/op"), ("XDG_DATA_HOME", "/xdg/data"), ("XDG_CONFIG_HOME", "")]),
+        &env_of(&[
+            ("HOME", "/home/op"),
+            ("XDG_DATA_HOME", "/xdg/data"),
+            ("XDG_CONFIG_HOME", ""),
+        ]),
     );
-    assert_eq!(roots, vec![PathBuf::from("/xdg/data"), PathBuf::from("/home/op/.config")]);
+    assert_eq!(
+        roots,
+        vec![
+            PathBuf::from("/xdg/data"),
+            PathBuf::from("/home/op/.config")
+        ]
+    );
 }
 
 #[test]
 fn windows_roots_are_roaming_and_local_app_data() {
     let roots = identifier_roots(
         "windows",
-        &env_of(&[("APPDATA", r"C:\a\Roaming"), ("LOCALAPPDATA", r"C:\a\Local")]),
+        &env_of(&[
+            ("APPDATA", r"C:\a\Roaming"),
+            ("LOCALAPPDATA", r"C:\a\Local"),
+        ]),
     );
-    assert_eq!(roots, vec![PathBuf::from(r"C:\a\Roaming"), PathBuf::from(r"C:\a\Local")]);
+    assert_eq!(
+        roots,
+        vec![PathBuf::from(r"C:\a\Roaming"), PathBuf::from(r"C:\a\Local")]
+    );
 }
 
 #[test]
@@ -68,7 +87,11 @@ fn copies_the_legacy_tree_when_the_new_one_is_absent() {
     let old = root.path().join(LEGACY_IDENTIFIER);
     let new = root.path().join(IDENTIFIER);
     std::fs::create_dir_all(old.join("WebsiteData/LocalStorage")).unwrap();
-    std::fs::write(old.join("WebsiteData/LocalStorage/localstorage.sqlite3"), b"profiles").unwrap();
+    std::fs::write(
+        old.join("WebsiteData/LocalStorage/localstorage.sqlite3"),
+        b"profiles",
+    )
+    .unwrap();
     std::fs::write(old.join("salt"), b"s").unwrap();
 
     assert_eq!(migrate_dir(&old, &new).unwrap(), Outcome::Copied);

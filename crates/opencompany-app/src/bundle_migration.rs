@@ -79,7 +79,8 @@ pub fn identifier_roots(os: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Vec
             let home = var("HOME");
             let data = var("XDG_DATA_HOME")
                 .or_else(|| home.as_ref().map(|h| h.join(".local").join("share")));
-            let config = var("XDG_CONFIG_HOME").or_else(|| home.as_ref().map(|h| h.join(".config")));
+            let config =
+                var("XDG_CONFIG_HOME").or_else(|| home.as_ref().map(|h| h.join(".config")));
             data.into_iter().chain(config).collect()
         }
     }
