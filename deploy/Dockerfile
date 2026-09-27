@@ -115,9 +115,11 @@ RUN apt-get update \
 # them there is no path for a console DSN to reach a hosted tenant at all, and
 # setting one on the StatefulSet is a silent no-op.
 #
-# Both default to empty, which is the shipped behaviour: `resolveCrashReporting`
-# builds no client without a DSN, and `sentryRelease()` falls back to the bare
-# version without a commit. A local `docker build` therefore needs neither.
+# Both default to empty. An empty `VITE_SENTRY_DSN` makes the production bundle
+# report to the compiled-in TinyHumans console project
+# (`DEFAULT_CONSOLE_SENTRY_DSN`); pass `VITE_SENTRY_DSN=off` for a silent one
+# (`deploy/docker-compose.yml` does). `sentryRelease()` falls back to the bare
+# version without a commit.
 #
 # `VITE_SENTRY_ENVIRONMENT` has to be passed for the same reason, and is easy to
 # miss because both surfaces default to something plausible and different: the
