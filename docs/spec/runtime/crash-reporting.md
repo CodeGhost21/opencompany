@@ -9,13 +9,18 @@ never reports, and how an operator turns it on and proves it works.
 
 The short version, and the only four sentences most readers need:
 
-- **Self-hosted installs report nothing unless an operator configures a DSN.**
-  With no DSN there is no client, and in a build without the `crash-reporting`
-  cargo feature there is no code that could construct one. The official
-  TinyHumans builds carry **compiled-in DSNs** for their own projects: a hosted
-  tenant's host (`opencompany-core`), the desktop shell (`opencompany-tauri`)
-  and the production console bundle (`opencompany-frontend`). A configured DSN
-  always wins, and `OPENCOMPANY_SENTRY=off` / `VITE_SENTRY_DSN=off` silence them.
+- **A self-hosted *host* reports nothing unless an operator configures a
+  DSN.** With no DSN there is no client, and in a build without the
+  `crash-reporting` cargo feature there is no code that could construct one.
+  The official TinyHumans builds carry **compiled-in DSNs** for their own
+  projects: a hosted tenant's host (`opencompany-core`), the desktop shell
+  (`opencompany-tauri`) and the production console bundle
+  (`opencompany-frontend`) — **including a self-hosted operator's console**,
+  unless its build set `VITE_SENTRY_DSN=off` (as `deploy/docker-compose.yml`
+  and CI do). See [Who supplies each variable, per
+  deployment](#who-supplies-each-variable-per-deployment) for the console/host
+  split. A configured DSN always wins, and `OPENCOMPANY_SENTRY=off` /
+  `VITE_SENTRY_DSN=off` silence them.
 - For a self-hosted install the destination is **the operator's own Sentry
   project**. This is not [analytics](analytics.md), which reports to a
   collector *this* project runs and is therefore hosted-tenant-only and
