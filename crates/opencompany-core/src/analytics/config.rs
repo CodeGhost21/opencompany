@@ -305,18 +305,34 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
         }
     }
 
-    // A non-Unicode id already fails closed on its own: `get` maps it to
-    // `None` and the match below reports it missing. Reporting *less* than was
-    // configured is always the safe direction for a credential.
+    // Read through `get_os`, like the switch and the endpoint below: [`get`]
+    // maps a non-Unicode value to `None`, which here would read as "nobody
+    // configured a client id" and let a hosted tenant fall back to
+    // [`DEFAULT_CLIENT_ID`] — reporting under a credential the operator never
+    // set, the opposite of "less than was configured". A malformed id is
+    // reported as its own reason instead, exactly like a malformed switch or
+    // endpoint.
     let hosted = deployment == Deployment::HostedTenant;
-    let credentials = match non_blank(env, CLIENT_ID_ENV)
-        .or_else(|| hosted.then(|| DEFAULT_CLIENT_ID.to_string()))
-    {
-        Some(id) if !is_header_safe(&id) => {
-            return Decision::Silent(Silence::UnusableCredential);
-        }
-        Some(id) => ClientCredentials::new(id),
-        None => return Decision::Silent(Silence::NoClientId),
+    let default_client_id = || hosted.then(|| DEFAULT_CLIENT_ID.to_string());
+    let credentials = match env.get_os(CLIENT_ID_ENV) {
+        None => match default_client_id() {
+            Some(id) => ClientCredentials::new(id),
+            None => return Decision::Silent(Silence::NoClientId),
+        },
+        Some(raw) => match raw.into_string() {
+            Err(_) => return Decision::Silent(Silence::UnusableCredential),
+            Ok(value) => match value.trim() {
+                // Blank is absent, as it is for the switch and the endpoint.
+                "" => match default_client_id() {
+                    Some(id) => ClientCredentials::new(id),
+                    None => return Decision::Silent(Silence::NoClientId),
+                },
+                configured if !is_header_safe(configured) => {
+                    return Decision::Silent(Silence::UnusableCredential);
+                }
+                configured => ClientCredentials::new(configured.to_string()),
+            },
+        },
     };
 
     // Read through `get_os`, like the switch, so that bytes this process cannot
