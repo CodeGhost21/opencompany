@@ -58,7 +58,7 @@ that an operator opted into for their own install.
 
 | Variable | Meaning |
 |---|---|
-| `OPENCOMPANY_SENTRY_DSN` | The DSN. **Configuration, never a compiled-in constant** — a DSN baked into a public binary is an ingest endpoint everyone can write to, and it decides whose organisation an install's crashes land in. |
+| `OPENCOMPANY_SENTRY_DSN` | The DSN. **Configuration, never a compiled-in constant** in the host — a DSN baked into a public binary is an ingest endpoint everyone can write to, and it decides whose organisation an install's crashes land in. The one exception is the official desktop build; see [The desktop shell](#the-desktop-shell). |
 | `OPENCOMPANY_SENTRY` | `off` forbids reporting and outranks everything else. `on` is accepted and means only "not off": without a DSN there is nowhere to send, so there is nothing to force. |
 | `OPENCOMPANY_SENTRY_ENVIRONMENT` | Overrides the `environment` tag. Defaults to the deployment kind — `desktop`, `self-hosted`, `hosted-tenant` (see [`app::deployment`](../../../src/app/deployment.rs)). |
 | `OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE` | Fraction of requests recorded as performance transactions, `0`–`1`. **Defaults to `0`.** See [tracing.md](tracing.md), including what a rate costs. |
@@ -147,6 +147,25 @@ the hosted-image and desktop release pipelines, using the same organization
 token as the console source-map upload. Missing credentials or a failed upload
 fail the release rather than silently shipping unsymbolicated stack traces.
 
+### The desktop shell
+
+A double-clicked `.app` has no environment, so the official desktop build
+carries a fallback: `OPENCOMPANY_TAURI_SENTRY_DSN`, read by `option_env!` when
+`build-desktop.yml` compiles the shell (`crates/opencompany-app/src/crash.rs`).
+It names the **desktop's own** Sentry project (`SENTRY_PROJECT_TAURI`), never
+the host's, because anyone who unzips the `.dmg` can read it and a project that
+exists only for this binary is the only one it may write to.
+
+- `OPENCOMPANY_SENTRY_DSN`, when set and non-blank, still wins.
+- `OPENCOMPANY_SENTRY=off` is resolved before any DSN and silences both.
+- A build without the variable — a source build, CI, `cargo run` — bakes nothing
+  and behaves exactly as the host does.
+- `opencompany-desktop sentry-test [--message …]` sends one event through the
+  same decision and client and prints its id, without opening a window.
+
+The shell's Rust debug symbols are uploaded to `SENTRY_PROJECT_TAURI`, falling
+back to `SENTRY_PROJECT_RUST` when a repository has only one Rust project.
+
 ### Who supplies each variable, per deployment
 
 Every variable above is read from *somewhere*, and "somewhere" differs per
@@ -158,7 +177,7 @@ than a variable set wrong (issue #2392).
 |---|---|---|
 | Hosted tenant (staging) | the manager's per-tenant env | `deploy-staging.yml` build-args, baked by Vite into the image |
 | Hosted tenant (production, Firecracker) | `OCM_TENANT_ENV_OVERRIDES_FILE` on the fleet host — the manager's own template does **not** carry Sentry variables | the console bundle inside the tenant rootfs, so it is fixed when that rootfs is built |
-| Desktop | the shell's process env — **nothing supplies it today**, see the limitation below | `build-desktop.yml` build-args |
+| Desktop | the shell's process env, else the desktop project's DSN compiled in by `build-desktop.yml` | `build-desktop.yml` build-args |
 | Self-hosted | the operator, by design | the operator's own console build |
 
 Two consequences worth stating rather than deriving.
@@ -397,18 +416,10 @@ Named so they are countable rather than implied.
 - **No debug-file upload for the host.** A stripped release binary's stack
   traces stay unsymbolicated until a `sentry-cli upload-dif` step exists. See
   the note under [Source-map upload](#source-map-upload-ci-only).
-- **The desktop shell's Rust half reports nothing, and cannot yet.** The
-  `crash-reporting` feature is compiled into `crates/opencompany-app` and
-  `run()` initialises the client, so everything is in place except the DSN —
-  which is read from the process env, and a double-clicked `.app` has none.
-  Nothing in `build-desktop.yml` supplies one, and nothing may simply be baked
-  in: the console's DSN is public by construction, but the host's names a
-  *server* project, and shipping it inside a downloadable bundle hands that
-  project's ingest to anyone who unzips the `.dmg`. Delivery therefore needs a
-  decision — its own desktop project, or a value fetched after sign-in — not
-  just a build-arg. Until it lands, a desktop crash is invisible: the console
-  half of the same app reports, so Sentry shows desktop traffic and the silence
-  looks like reliability. Tracked by issue #2392.
+- **The desktop DSN is readable from the bundle.** It is compiled in (see
+  [The desktop shell](#the-desktop-shell)), so anyone with the `.dmg` can post
+  to the desktop project. That is why it is a project of its own: abuse costs
+  that project's quota and nothing else, and rotating the key is a rebuild.
 - **Desktop reporting uses the project Sentry origin only.** The release
   workflow supplies the console DSN and the shell uses its own
   `OPENCOMPANY_SENTRY_DSN`; `crates/opencompany-app/tauri.conf.json` therefore
