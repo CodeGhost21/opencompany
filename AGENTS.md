@@ -183,13 +183,14 @@ injects its environment. When developing hosted behavior, know the seams:
   every tenant's documents; db-per-tenant stays the security default. See
   `docs/spec/runtime/storage.md`. Unset (the default) is a full no-op.
 - The manager should also inject `OPENCOMPANY_DEPLOYMENT=hosted-tenant` and,
-  when product analytics is on, the three variables the OpenPanel transport
-  needs: `OPENCOMPANY_ANALYTICS_CLIENT_ID`,
-  `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` and `OPENCOMPANY_ANALYTICS_ENDPOINT`.
+  when product analytics is on, the two variables the OpenPanel transport
+  needs: `OPENCOMPANY_ANALYTICS_CLIENT_ID` and `OPENCOMPANY_ANALYTICS_ENDPOINT`
+  (for TinyHumans, `https://panel.tinyhumans.ai/api/track`). There is no client
+  secret — the collector's clients run with "ignore CORS and secret".
   The endpoint has **no default** — the collector is one the operator
   self-hosts, so there is no address the workload could guess that would not be
   somebody else's — and it must be `https`, or `http` to a loopback host: the
-  client secret is a request header on every request, so a plain-`http`
+  client id is a request header on every request, so a plain-`http`
   collector on a container network would put it on the wire in the clear, and
   the workload refuses that rather than warning about it.
   None of them is required to boot: an instance that says nothing is treated as **self-hosted**

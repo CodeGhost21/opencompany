@@ -25,7 +25,8 @@ clients are configured with **"ignore CORS and secret"**, so no
 | `openpanel-sdk-name` | `opencompany` |
 | `openpanel-sdk-version` | the crate version |
 
-The client id is marked sensitive on the `HeaderValue`, which keeps it out of `reqwest`'s own `Debug` and out of HPACK's shared table on HTTP/2.
+The client id is marked sensitive on the `HeaderValue`, which keeps it out of
+`reqwest`'s own `Debug` and out of HPACK's shared table on HTTP/2.
 
 A credential in a header rather than in the body is the quiet improvement in
 this change. Mixpanel wanted its token stamped into every event's property bag,

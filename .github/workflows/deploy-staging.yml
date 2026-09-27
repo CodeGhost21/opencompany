@@ -90,8 +90,10 @@ env:
   # the deployment kind and credential are injected. It costs the image nothing
   # — `analytics = ["dep:reqwest"]`, and `reqwest` is already here via
   # `openhuman` — and stays inert until the manager injects
-  # `OPENCOMPANY_ANALYTICS_CLIENT_ID`, `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` and
-  # `OPENCOMPANY_ANALYTICS_ENDPOINT` (`docs/spec/runtime/analytics.md`).
+  # `OPENCOMPANY_ANALYTICS_CLIENT_ID` and `OPENCOMPANY_ANALYTICS_ENDPOINT`
+  # (`https://panel.tinyhumans.ai/api/track`); there is no client secret, since
+  # the collector's clients run with "ignore CORS and secret"
+  # (`docs/spec/runtime/analytics.md`).
   #
   # `crash-reporting` is the Sentry client, and this list is the ONLY thing that
   # decides whether a tenant has one. The feature is the sole path that compiles
