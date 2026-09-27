@@ -15,9 +15,9 @@ fn a_real_looking_key_is_configured() {
 /// desktop auto-update landed (`846913029`); rotated to minisign key id
 /// `C10A9CFAF2A579C7` when the desktop moved to the `com.tinyhumans.opencompany`
 /// identifier and the signing secrets moved into the `Production` GitHub
-/// environment. Builds carrying the previous key (`7123DDC684770 42C`'s
-/// predecessor, id `7123DDC68477042C`) cannot verify updates signed with this
-/// one, so they must be reinstalled from a DMG once.
+/// environment. Builds carrying the previous key (id `7123DDC68477042C`)
+/// cannot verify updates signed with this one, so they must be reinstalled
+/// from a DMG once.
 ///
 /// Pinned here on purpose. A minisign **public** key is meant to be
 /// distributed — it is what a shipped binary verifies a release against,
