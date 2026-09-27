@@ -189,8 +189,8 @@ async fn a_self_hosted_build_makes_no_request() {
 /// collector, the same events, the same code path, one variable changed.
 ///
 /// It also pins the whole wire contract — **one request per event**, the
-/// client-id header by its exact spelling and **no** client-secret header, and OpenPanel's discriminated-union
-/// body with the identity as `profileId` rather than as a property.
+/// client-id header by its exact spelling and **no** client-secret header,
+/// and OpenPanel's discriminated-union body with the identity as `profileId` rather than as a property.
 #[tokio::test]
 async fn a_hosted_tenant_reports_with_the_full_envelope() {
     let collector = spawn_collector().await;
@@ -371,13 +371,13 @@ async fn a_refused_credential_stops_the_drain() {
     collector.stop().await;
 }
 
-/// **The write secret never follows a redirect to another host.**
+/// **The write credential never follows a redirect to another host.**
 ///
 /// The leak this closes is not exotic. `reqwest`'s default policy follows
 /// ten hops, and its cross-origin sanitization
 /// (`redirect.rs::remove_sensitive_headers`, 0.12.28) removes exactly
 /// `Authorization`, `Cookie`, `cookie2`, `Proxy-Authorization` and
-/// `WWW-Authenticate` — and nothing else. `openpanel-client-secret` is none
+/// `WWW-Authenticate` — and nothing else. `openpanel-client-id` is none
 /// of them, so before [`reqwest::redirect::Policy::none`] a single `307`
 /// from the configured collector handed this instance's long-lived write
 /// credential to whatever host the `Location` named.
@@ -463,7 +463,7 @@ async fn a_redirect_never_carries_the_credential_to_another_host() {
 /// `elsewhere.hits == 0` would also hold if the destination collector were
 /// simply broken, or if `spawn_collector` did not record what it received.
 /// Same collector, same events, pointed at directly rather than through a
-/// redirect: it must see all three requests, carrying the secret, so the
+/// redirect: it must see all three requests, carrying the client id, so the
 /// zero above is about the redirect and nothing else.
 #[tokio::test]
 async fn the_redirect_destination_would_have_recorded_the_credential() {
@@ -486,8 +486,8 @@ async fn the_redirect_destination_would_have_recorded_the_credential() {
          policy rather than a collector that counts nothing"
     );
     assert_eq!(
-        elsewhere.header(0, CLIENT_SECRET_HEADER).as_deref(),
-        Some(TEST_CLIENT_SECRET),
+        elsewhere.header(0, CLIENT_ID_HEADER).as_deref(),
+        Some(TEST_CLIENT_ID),
         "and it records the credential header, which is the thing that must not \
          have arrived across a redirect"
     );
