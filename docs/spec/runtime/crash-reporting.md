@@ -422,7 +422,8 @@ Named so they are countable rather than implied.
   that project's quota and nothing else, and rotating the key is a rebuild.
 - **Desktop reporting uses the project Sentry origin only.** The release
   workflow supplies the console DSN, whose events leave from the webview;
-  `crates/opencompany-app/tauri.conf.json` therefore permits `https://sentry.tinyhumans.ai` in `connect-src`. It remains a narrow
+  `crates/opencompany-app/tauri.conf.json` therefore permits
+  `https://sentry.tinyhumans.ai` in `connect-src`. It remains a narrow
   allowlist: OpenPanel stays unavailable in Tauri and a different Sentry host
   requires an explicit CSP review alongside the release configuration.
 - **Host cognition is not tagged per company.** A multi-company host reports one
