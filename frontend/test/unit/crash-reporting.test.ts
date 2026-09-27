@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_CONSOLE_SENTRY_DSN,
   REDACTED,
   resolveCrashReporting,
   sanitizeEvent,
