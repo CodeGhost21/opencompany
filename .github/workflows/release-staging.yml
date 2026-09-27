@@ -281,7 +281,7 @@ jobs:
           file: deploy/Dockerfile
           push: false
           platforms: linux/amd64
-          tags: opencompany-tenant:${{ needs.prepare-build.outputs.tag }}
+          tags: opencompany:${{ needs.prepare-build.outputs.tag }}
           build-args: |
             FEATURES=${{ steps.features.outputs.value }}
             OPENCOMPANY_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}

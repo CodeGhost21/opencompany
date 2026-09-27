@@ -1,8 +1,8 @@
 # Build this repo's OWN image (the tenant workload) on every push to main and
 # publish it to GitHub Container Registry as the STAGING tenant image.
 #
-#   ghcr.io/tinyhumansai/opencompany-tenant:staging       moves with main
-#   ghcr.io/tinyhumansai/opencompany-tenant:sha-<short>   this exact build
+#   ghcr.io/tinyhumansai/opencompany:staging       moves with main
+#   ghcr.io/tinyhumansai/opencompany:sha-<short>   this exact build
 #
 # That is ALL it does. Tenants are no longer run on a k3s node this workflow
 # reaches into: they are boat.dev sandboxes managed by
@@ -73,7 +73,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: ghcr.io/tinyhumansai/opencompany-tenant
+  IMAGE: ghcr.io/tinyhumansai/opencompany
   # The feature set the hosted tenant ships with. Changing it changes what
   # every tenant can do, so treat edits here as a product change, not a CI
   # tweak. Full belt: adds mcp/media/composio (the credential/real-money tool
