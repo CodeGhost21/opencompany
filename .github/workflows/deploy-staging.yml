@@ -89,21 +89,24 @@ env:
   # of `openpanel::build`, installs a `NullTracker`, and reports nothing however
   # the deployment kind and credential are injected. It costs the image nothing
   # — `analytics = ["dep:reqwest"]`, and `reqwest` is already here via
-  # `openhuman` — and stays inert until the manager injects
-  # `OPENCOMPANY_ANALYTICS_CLIENT_ID`, `OPENCOMPANY_ANALYTICS_CLIENT_SECRET` and
-  # `OPENCOMPANY_ANALYTICS_ENDPOINT` (`docs/spec/runtime/analytics.md`).
+  # `openhuman`. A hosted tenant reports with compiled-in defaults (the
+  # TinyHumans OpenPanel client id and `https://panel.tinyhumans.ai/api/track`);
+  # `OPENCOMPANY_ANALYTICS_CLIENT_ID` / `OPENCOMPANY_ANALYTICS_ENDPOINT` override
+  # them and `OPENCOMPANY_ANALYTICS=off` silences it
+  # (`docs/spec/runtime/analytics.md`).
   #
   # `crash-reporting` is the Sentry client, and this list is the ONLY thing that
   # decides whether a tenant has one. The feature is the sole path that compiles
-  # it, so without this entry the manager can inject `OPENCOMPANY_SENTRY_DSN`
-  # into every container and every one of them resolves `Silence::NotCompiled`,
+  # it, so without this entry every container — even one given an
+  # `OPENCOMPANY_SENTRY_DSN` — resolves `Silence::NotCompiled`,
   # prints "off" at boot and reports nothing — the whole surface inert in
   # exactly the deployment that has no other way to be watched. Same shape as
   # the `analytics` note above, and the same reason it is spelled out: a feature
   # list is not self-documenting, and the symptom of an omission is silence.
   #
-  # It stays inert until a DSN is injected, and it is a second gate rather than
-  # the only one — see `docs/spec/runtime/crash-reporting.md`. The image cost is
+  # A hosted tenant reports to the compiled-in `opencompany-core` DSN unless
+  # `OPENCOMPANY_SENTRY_DSN` overrides it or `OPENCOMPANY_SENTRY=off` silences
+  # it — see `docs/spec/runtime/crash-reporting.md`. The image cost is
   # `sentry` plus a small `ureq` on the `rustls` already in the graph; no second
   # HTTP client and no native TLS (`cargo tree -d` is unchanged but for
   # `base64`).
@@ -152,22 +155,16 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      # Only the upload token is configuration; the Sentry URL, org and project
+      # slugs are hardcoded in the build-args below.
       - name: Validate Sentry artifact-upload settings
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_URL: ${{ vars.SENTRY_URL }}
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT_REACT: ${{ vars.SENTRY_PROJECT_REACT }}
-          SENTRY_PROJECT_RUST: ${{ vars.SENTRY_PROJECT_RUST }}
         run: |
-          missing=0
-          for var in SENTRY_AUTH_TOKEN SENTRY_URL SENTRY_ORG SENTRY_PROJECT_REACT SENTRY_PROJECT_RUST; do
-            if [ -z "${!var}" ]; then
-              echo "::error::Required Sentry artifact-upload setting is missing: $var" >&2
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
+            echo "::error::Required Sentry artifact-upload setting is missing: SENTRY_AUTH_TOKEN" >&2
+            exit 1
+          fi
 
       - name: Build and push image to ECR
         id: build
@@ -181,20 +178,12 @@ jobs:
           # `unknown` forever. `actions/checkout` checked out `github.sha`, so
           # this names the commit that was actually built.
           #
-          # `VITE_SENTRY_DSN` / `VITE_BUILD_COMMIT` are the console's half of
-          # crash reporting, and the host's runtime env cannot supply them: Vite
-          # inlines them into the bundle during this image build, so a DSN set
-          # on the StatefulSet afterwards arrives far too late and is a silent
-          # no-op (`docs/spec/runtime/crash-reporting.md`).
-          #
-          # The DSN is a repository VARIABLE, not a secret. A browser bundle's
-          # DSN is public by construction — anyone who opens the console can
-          # read it — so masking would buy nothing and would only stop this
-          # workflow from being able to report whether it is set.
-          #
-          # Empty when the variable is unset, which keeps the console silent
-          # rather than failing the build: the same "no DSN, no client" gate
-          # every local `npm run build` already takes.
+          # `VITE_SENTRY_DSN` is deliberately NOT passed: the console bundle
+          # defaults to the TinyHumans `opencompany-frontend` DSN in code
+          # (`frontend/src/lib/crash-reporting.ts`). `VITE_BUILD_COMMIT` and the
+          # rest are the console's build-time inputs: Vite inlines them into
+          # the bundle during this image build, so the runtime env cannot
+          # supply them (`docs/spec/runtime/crash-reporting.md`).
           #
           # `VITE_SENTRY_ENVIRONMENT` reads the SAME variable the manager injects
           # into the tenant as `OPENCOMPANY_SENTRY_ENVIRONMENT`, so one value
@@ -228,14 +217,13 @@ jobs:
           build-args: |
             FEATURES=${{ env.TENANT_FEATURES }}
             OPENCOMPANY_BUILD_COMMIT=${{ github.sha }}
-            VITE_SENTRY_DSN=${{ vars.OPENCOMPANY_REACT_SENTRY_DSN }}
             VITE_BUILD_COMMIT=${{ github.sha }}
             VITE_SENTRY_ENVIRONMENT=${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'hosted-tenant' }}
             VITE_SENTRY_TRACES_SAMPLE_RATE=${{ vars.OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE }}
-            SENTRY_URL=${{ vars.SENTRY_URL }}
-            SENTRY_ORG=${{ vars.SENTRY_ORG }}
-            SENTRY_PROJECT_REACT=${{ vars.SENTRY_PROJECT_REACT }}
-            SENTRY_PROJECT_RUST=${{ vars.SENTRY_PROJECT_RUST }}
+            SENTRY_URL=https://sentry.tinyhumans.ai
+            SENTRY_ORG=tinyhumans
+            SENTRY_PROJECT_REACT=opencompany-frontend
+            SENTRY_PROJECT_RUST=opencompany-core
           secrets: |
             sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
           push: true

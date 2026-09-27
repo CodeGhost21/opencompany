@@ -1,7 +1,13 @@
 // Prevents a console window opening alongside the app on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    // Hidden release check: `opencompany-desktop sentry-test [--message …]`
+    // sends one event and exits, without opening a window. See `crash`.
+    if let Some(message) = opencompany_desktop_lib::crash::sentry_test_args(std::env::args()) {
+        return opencompany_desktop_lib::crash::run_sentry_test(message);
+    }
+
     // `OPENHUMAN_WORKSPACE` must be exported HERE, before anything else starts.
     //
     // The library path deliberately does not do it: `journal::prepare`'s
@@ -21,4 +27,5 @@ fn main() {
     }
 
     opencompany_desktop_lib::run();
+    std::process::ExitCode::SUCCESS
 }

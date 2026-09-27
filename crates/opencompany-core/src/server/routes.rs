@@ -227,9 +227,14 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
 async fn console_config() -> Response {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
-    let endpoint = std::env::var("OPENCOMPANY_ANALYTICS_ENDPOINT").ok();
+    // Blank or unset falls back to the TinyHumans collector; the render below
+    // still requires a hosted tenant with `OPENCOMPANY_ANALYTICS=on`.
+    let endpoint = std::env::var(crate::analytics::config::ENDPOINT_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| crate::analytics::config::DEFAULT_ENDPOINT.to_string());
     let body = render_console_config(
-        endpoint.as_deref(),
+        Some(&endpoint),
         hosted_deployment(),
         browser_analytics_enabled(),
     );
@@ -275,10 +280,21 @@ fn public_browser_endpoint(endpoint: &str) -> Option<String> {
         return None;
     }
 
-    // The host transport accepts an exact ingestion URL, whose path may be a
-    // credential. The browser only needs the public collector origin, so never
-    // serialize that path into this unauthenticated response.
-    url.set_path("");
+    // The host transport takes the exact ingestion URL (`…/track`), while the
+    // browser SDK takes the API *base* and appends `/track` itself. So a
+    // `…/track` endpoint hands the browser its parent path: a self-hosted
+    // collector behind its bundled Caddy lives at `https://<domain>/api/track`,
+    // and cutting that to the bare origin sent every browser event to the
+    // dashboard's `/track` instead of the API's. Any other path is not a shape
+    // this can reason about, so it is still never serialized into this
+    // unauthenticated response and the browser gets the origin alone.
+    let base = url
+        .path()
+        .strip_suffix("/track")
+        .or_else(|| url.path().strip_suffix("/track/"))
+        .unwrap_or("")
+        .to_owned();
+    url.set_path(&base);
     Some(url.into())
 }
 

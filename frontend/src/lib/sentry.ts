@@ -28,10 +28,10 @@ const RELEASE: string = __SENTRY_RELEASE__;
  * Initializes crash reporting, or does nothing at all.
  *
  * Call once, before the first render, so a crash during the first render is
- * reported rather than being the thing that prevents reporting. Silent unless
- * `VITE_SENTRY_DSN` is set to a usable DSN: no console warning, no thrown
- * error, no network. That is the state every local checkout and every CI run is
- * in, and a build that complained about it would train people to ignore it.
+ * reported rather than being the thing that prevents reporting. A production
+ * build reports to `VITE_SENTRY_DSN`, else to the compiled-in console project;
+ * the Vite dev server and a `VITE_SENTRY_DSN=off` build are silent: no console
+ * warning, no thrown error, no network.
  */
 export function initSentry(): void {
   const config = resolveCrashReporting(import.meta.env, RELEASE);

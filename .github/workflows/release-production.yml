@@ -396,14 +396,13 @@ jobs:
           build-args: |
             FEATURES=${{ steps.features.outputs.value }}
             OPENCOMPANY_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
-            VITE_SENTRY_DSN=${{ vars.OPENCOMPANY_REACT_SENTRY_DSN }}
             VITE_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
             VITE_SENTRY_ENVIRONMENT=${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'hosted-tenant' }}
             VITE_SENTRY_TRACES_SAMPLE_RATE=${{ vars.OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE }}
-            SENTRY_URL=${{ vars.SENTRY_URL }}
-            SENTRY_ORG=${{ vars.SENTRY_ORG }}
-            SENTRY_PROJECT_REACT=${{ vars.SENTRY_PROJECT_REACT }}
-            SENTRY_PROJECT_RUST=${{ vars.SENTRY_PROJECT_RUST }}
+            SENTRY_URL=https://sentry.tinyhumans.ai
+            SENTRY_ORG=tinyhumans
+            SENTRY_PROJECT_REACT=opencompany-frontend
+            SENTRY_PROJECT_RUST=opencompany-core
           secrets: |
             sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
           cache-from: type=gha,scope=release-docker
@@ -417,8 +416,10 @@ jobs:
       #
       # It runs the RELEASE IMAGE, not a checkout: the three things that break
       # here are the `crash-reporting` cargo feature being dropped from
-      # `TENANT_FEATURES`, the DSN being wrong, and egress to the ingest host
-      # being blocked. Only the built artifact exercises all three, and the first
+      # `TENANT_FEATURES`, the compiled-in default DSN being wrong, and egress to
+      # the ingest host being blocked. No DSN is passed: the container runs as a
+      # hosted tenant (`OPENCOMPANY_DEPLOYMENT=hosted-tenant`), so it reports to
+      # the compiled-in `opencompany-core` project exactly as a tenant does. Only the built artifact exercises all three, and the first
       # is invisible to every test that runs outside it — a build without the
       # feature resolves `Silence::NotCompiled` and reports nothing while every
       # environment variable looks perfect.
@@ -445,24 +446,19 @@ jobs:
         env:
           IMAGE: opencompany-tenant:${{ needs.prepare-build.outputs.tag }}
           TAG: ${{ needs.prepare-build.outputs.tag }}
-          OPENCOMPANY_SENTRY_DSN: ${{ vars.OPENCOMPANY_SENTRY_DSN }}
           OPENCOMPANY_SENTRY_ENVIRONMENT: ${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'hosted-tenant' }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_URL: ${{ vars.SENTRY_URL }}
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_URL: https://sentry.tinyhumans.ai
+          SENTRY_ORG: tinyhumans
         run: |
-          missing=0
-          for var in OPENCOMPANY_SENTRY_DSN SENTRY_AUTH_TOKEN SENTRY_URL SENTRY_ORG; do
-            if [ -z "${!var}" ]; then
-              echo "::error::${var} is not set, so this release cannot be shown to report crashes. See docs/spec/runtime/crash-reporting.md." >&2
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
+            echo "::error::SENTRY_AUTH_TOKEN is not set, so this release cannot be shown to report crashes. See docs/spec/runtime/crash-reporting.md." >&2
+            exit 1
+          fi
 
           event_id="$(docker run --rm \
             --entrypoint opencompany \
-            -e OPENCOMPANY_SENTRY_DSN \
+            -e OPENCOMPANY_DEPLOYMENT=hosted-tenant \
             -e OPENCOMPANY_SENTRY_ENVIRONMENT \
             "$IMAGE" \
             sentry-test --message "release-production ${TAG} ${GITHUB_RUN_ID}")"

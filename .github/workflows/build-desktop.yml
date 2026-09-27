@@ -161,22 +161,17 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
 
+      # Only the upload token is configuration. The DSNs are compiled in
+      # (`frontend/src/lib/crash-reporting.ts`, `crates/opencompany-app/src/crash.rs`)
+      # and the Sentry URL, org and project slugs are hardcoded below.
       - name: Validate Sentry artifact-upload settings
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_URL: ${{ vars.SENTRY_URL }}
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT_REACT: ${{ vars.SENTRY_PROJECT_REACT }}
-          SENTRY_PROJECT_RUST: ${{ vars.SENTRY_PROJECT_RUST }}
         run: |
-          missing=0
-          for var in SENTRY_AUTH_TOKEN SENTRY_URL SENTRY_ORG SENTRY_PROJECT_REACT SENTRY_PROJECT_RUST; do
-            if [ -z "${!var}" ]; then
-              echo "::error::Required Sentry artifact-upload setting is missing: $var" >&2
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
+          if [ -z "$SENTRY_AUTH_TOKEN" ]; then
+            echo "::error::Required Sentry artifact-upload setting is missing: SENTRY_AUTH_TOKEN" >&2
+            exit 1
+          fi
 
       # A release nobody can update FROM is worse than no release: an installed
       # client polls `latest.json` on the newest published release forever, so a
@@ -294,7 +289,6 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         env:
-          VITE_SENTRY_DSN: ${{ vars.OPENCOMPANY_REACT_SENTRY_DSN }}
           VITE_SENTRY_ENVIRONMENT: ${{ vars.OPENCOMPANY_SENTRY_ENVIRONMENT || 'desktop' }}
           VITE_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.OPENCOMPANY_SENTRY_TRACES_SAMPLE_RATE }}
           VITE_BUILD_COMMIT: ${{ steps.release-commit.outputs.sha }}
@@ -302,9 +296,9 @@ jobs:
           # once from arm64; the Intel leg builds identical assets and would
           # otherwise race a duplicate artifact-bundle upload.
           SENTRY_AUTH_TOKEN: ${{ matrix.target == 'aarch64-apple-darwin' && secrets.SENTRY_AUTH_TOKEN || '' }}
-          SENTRY_URL: ${{ vars.SENTRY_URL }}
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT_REACT }}
+          SENTRY_URL: https://sentry.tinyhumans.ai
+          SENTRY_ORG: tinyhumans
+          SENTRY_PROJECT: opencompany-frontend
         run: npm run build
 
       # The Tauri CLI compiles the Rust shell and packages the .app + unsigned
@@ -327,9 +321,10 @@ jobs:
       - name: Upload Rust debug symbols to Sentry
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_URL: ${{ vars.SENTRY_URL }}
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT_RUST }}
+          SENTRY_URL: https://sentry.tinyhumans.ai
+          SENTRY_ORG: tinyhumans
+          # The shell reports to the desktop project, so its symbols go there.
+          SENTRY_PROJECT: opencompany-tauri
           SENTRY_CLI: ${{ github.workspace }}/frontend/node_modules/.bin/sentry-cli
           TARGET: ${{ matrix.target }}
         run: scripts/upload-sentry-symbols.sh "crates/opencompany-app/target/${TARGET}/release"
