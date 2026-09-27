@@ -106,7 +106,9 @@ pub enum Silence {
     OptedOut,
     /// Not a hosted tenant, and nobody opted in. **The default.**
     NotHosted,
-    /// Reporting was asked for, but no collector client id is configured.
+    /// Reporting was asked for by a deployment that is not a hosted tenant,
+    /// and no collector client id is configured. (A hosted tenant falls back
+    /// to [`DEFAULT_CLIENT_ID`].)
     NoClientId,
     /// A client id is configured that could not be put in an HTTP header.
     ///
@@ -122,15 +124,15 @@ pub enum Silence {
     /// The reason never quotes the value, for the same reason
     /// [`Self::UnusableEndpoint`] does not.
     UnusableCredential,
-    /// Reporting was asked for, but no collector endpoint is configured.
+    /// Reporting was asked for by a deployment that is not a hosted tenant,
+    /// and no collector endpoint is configured.
     ///
-    /// **There is deliberately no default to fall back to.** OpenPanel is
-    /// self-hosted, so its address is whatever the operator runs it at, and
-    /// there is no address this crate could pick that is not somebody else's
-    /// collector. Defaulting would send a tenant's telemetry to a third party
-    /// nobody configured — the same failure [`Self::UnusableEndpoint`] exists to
-    /// prevent, arriving from the other direction. So an absent endpoint is
-    /// silence with its own reason, and the reason names the variable to set.
+    /// A hosted tenant falls back to [`DEFAULT_ENDPOINT`], the TinyHumans
+    /// collector. Nothing else does: a self-hoster who opts in with
+    /// `OPENCOMPANY_ANALYTICS=on` has asked to report to *their* collector, and
+    /// defaulting would send their telemetry to a third party they never named
+    /// — so for them an absent endpoint is silence, and the reason names the
+    /// variable to set.
     NoEndpoint,
     /// `OPENCOMPANY_ANALYTICS` was set to something this does not recognise.
     ///
@@ -248,14 +250,14 @@ impl Decision {
 ///    when an operator explicitly sets `OPENCOMPANY_ANALYTICS=on`. Decision 1
 ///    of #1739: silence is the default and reporting is the exception, so a
 ///    self-hosted or desktop install that has said nothing sends nothing.
-/// 4. **A client id is required**, and it is the whole credential: the
-///    operator's collector runs its clients with the secret check off. Without
-///    one the reason says so — see [`Silence::NoClientId`].
-/// 5. **An endpoint is required, and there is no default.** The collector is
-///    self-hosted; its address is whatever the operator runs it at. A default
-///    would be somebody else's collector, and quietly reporting to a third
-///    party nobody configured is the accident the endpoint check below already
-///    refuses to make in the other direction.
+/// 4. **A client id**, and it is the whole credential: the collector runs its
+///    clients with the secret check off. A hosted tenant without one uses
+///    [`DEFAULT_CLIENT_ID`]; any other deployment is silent — see
+///    [`Silence::NoClientId`].
+/// 5. **An endpoint.** A hosted tenant without one uses [`DEFAULT_ENDPOINT`],
+///    the TinyHumans collector; any other deployment is silent, because a
+///    default would be somebody else's collector — see [`Silence::NoEndpoint`].
+///    Configuration always outranks both defaults.
 /// 6. And the endpoint has to be one a client could post to. A decision that
 ///    says [`Decision::Report`] is a promise the boot line then repeats out
 ///    loud, so an endpoint that cannot be sent to is silence with a reason,
@@ -322,11 +324,9 @@ pub fn resolve(deployment: Deployment, env: &dyn EnvSource) -> Decision {
     // different reasons, and an operator who mistyped their proxy URL should be
     // told the value was unreadable rather than that they never set one.
     //
-    // There is no fallback in either arm. Reporting to a default collector an
-    // operator never named is worse than reporting nothing at all: it is
-    // telemetry leaving for an address nobody chose, and no amount of reading
-    // the boot line would reveal it, because the line would name a destination
-    // that is real.
+    // The only fallback is the hosted tenant's: a self-hoster's opt-in must
+    // not leave for an address nobody chose. A set-but-malformed value is
+    // never replaced by the default — it is reported.
     let default_endpoint = || {
         if hosted {
             Some(DEFAULT_ENDPOINT.to_string())

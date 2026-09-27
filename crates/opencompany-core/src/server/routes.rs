@@ -227,9 +227,14 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
 async fn console_config() -> Response {
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
-    let endpoint = std::env::var("OPENCOMPANY_ANALYTICS_ENDPOINT").ok();
+    // Blank or unset falls back to the TinyHumans collector; the render below
+    // still requires a hosted tenant with `OPENCOMPANY_ANALYTICS=on`.
+    let endpoint = std::env::var(crate::analytics::config::ENDPOINT_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| crate::analytics::config::DEFAULT_ENDPOINT.to_string());
     let body = render_console_config(
-        endpoint.as_deref(),
+        Some(&endpoint),
         hosted_deployment(),
         browser_analytics_enabled(),
     );
