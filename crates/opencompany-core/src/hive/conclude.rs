@@ -295,7 +295,10 @@ pub async fn pick_concluder(
         OpenCompanyError::Harness(format!("desk `{}` has no seats", desk.desk_id))
     })?;
     let ask = desk.hive.desk_request(
-        routing_text(request),
+        // Clipped for the same reason the decision's state is: this request goes
+        // to the same routing model, against the same window, and a caller is
+        // free to hand it a request nobody would have read.
+        routing_text(&clipped(request, REQUEST_CHAR_BUDGET)),
         findings(rows, &desk.desk_id),
         thread_root.map(|root| tinyhivemind::Sequence(root.value())),
         desk.roster_version,

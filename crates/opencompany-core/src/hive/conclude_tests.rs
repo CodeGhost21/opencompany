@@ -431,3 +431,29 @@ fn neither_a_vast_request_nor_a_vast_finding_can_overrun_the_state() {
         "and it is still the finding, not dropped"
     );
 }
+
+/// With no watermark to trust, nothing qualifies as the summary.
+///
+/// A failed episode read leaves the closing turn unable to tell its own row from
+/// a deliberation row, so the watermark is `u64::MAX` and `closing_summary_seq`
+/// must select nothing — rather than defaulting to zero, which accepts every row
+/// and reintroduces exactly the bug the watermark exists to prevent.
+#[test]
+fn an_unreachable_watermark_selects_no_summary() {
+    let desk = "all_hands";
+    let seat = "creative_director";
+    let rows = vec![
+        reply(24, desk, seat, "a deliberation line"),
+        reply(37, desk, seat, "and another"),
+    ];
+    assert_eq!(
+        super::closing_summary_seq(&rows, desk, seat, u64::MAX),
+        None,
+        "an unknown watermark names no row at all"
+    );
+    assert_eq!(
+        super::closing_summary_seq(&rows, desk, seat, 0),
+        Some(37),
+        "and zero would have accepted one, which is why it is not the default"
+    );
+}

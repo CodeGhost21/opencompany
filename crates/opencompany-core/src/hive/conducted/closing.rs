@@ -71,10 +71,28 @@ impl HiveDispatcher {
         // should do it -- when an oracle resolves. Without one, `route_desk`
         // answers the second and the episode always concludes, which is the
         // behaviour before the decision existed.
-        let seat = match self.oracle.as_deref().zip(settled_rows.as_ref()) {
-            Some((oracle, settled_rows)) => {
+        // A read that failed leaves no evidence, so nothing here routes on it:
+        // not the oracle, whose `needed` would read "no findings" as "already
+        // assembled", and not `route_desk` either, which would spend a call to
+        // score an empty context and answer with the lead anyway. The lead
+        // concludes directly, which is what the warning above promises.
+        let Some(settled_rows) = settled_rows else {
+            return self
+                .closing_round(
+                    desk,
+                    routing,
+                    episode_id,
+                    thread_root,
+                    opened_at,
+                    &lead,
+                    u64::MAX,
+                )
+                .await;
+        };
+        let seat = match self.oracle.as_deref() {
+            Some(oracle) => {
                 let seats: Vec<String> = desk.hive.members().map(str::to_owned).collect();
-                let findings = crate::hive::conclude::findings(settled_rows, &desk.desk_id);
+                let findings = crate::hive::conclude::findings(&settled_rows, &desk.desk_id);
                 match crate::hive::conclude::decide(oracle, request, &findings, &seats, &lead).await
                 {
                     crate::hive::conclude::Decision::Conclude(seat) => seat,
@@ -94,7 +112,7 @@ impl HiveDispatcher {
                 self.router.as_deref(),
                 request,
                 thread_root,
-                settled_rows.as_deref().unwrap_or_default(),
+                &settled_rows,
             )
             .await
             {
@@ -116,12 +134,42 @@ impl HiveDispatcher {
         // `EpisodeCompleted.summary_seq` a mid-episode message and the console
         // would label it the episode's summary.
         let before = settled_rows
-            .as_deref()
-            .unwrap_or_default()
             .iter()
             .map(|stored| stored.seq.value())
             .max()
             .unwrap_or(0);
+        self.closing_round(
+            desk,
+            routing,
+            episode_id,
+            thread_root,
+            opened_at,
+            &seat,
+            before,
+        )
+        .await
+    }
+
+    /// Run the closing turn for one named seat and read its summary back.
+    ///
+    /// `above` is the sequence a qualifying reply must exceed: the settled
+    /// episode's last row normally, and `u64::MAX` when the episode could not be
+    /// read — there the closing row cannot be told from a deliberation row, so
+    /// nothing qualifies and `summary_seq` stays unset rather than naming the
+    /// wrong message.
+    #[allow(clippy::too_many_arguments)]
+    async fn closing_round(
+        &self,
+        desk: &DeskHive,
+        routing: &EffectiveRouting,
+        episode_id: &str,
+        thread_root: Option<EventSeq>,
+        opened_at: EventSeq,
+        seat: &str,
+        above: u64,
+    ) -> Option<crate::hive::conclude::Conclusion> {
+        let seat = seat.to_owned();
+        let before = above;
         let outcome = run(Episode {
             record: Arc::clone(&self.record),
             deps: Arc::clone(&self.deps),
