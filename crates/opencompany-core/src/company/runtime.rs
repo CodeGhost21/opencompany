@@ -4999,17 +4999,11 @@ impl CompanyRuntime {
         }
     }
 
-    async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
-        let conversation = self
-            .journal
-            .approval_conversation(approval_id)
-            .unwrap_or_default();
-        let thread = conversation.thread;
-        // Where the reply goes when the approval was raised in no conversation
-        // at all — a workflow node's parked tool call, a scheduler tick. Read
-        // once for the whole report: every response of one continuation answers
-        // the same approval, so they cannot land in two places.
-        let requester_dm = match self
+    /// The DM a conversation-less continuation falls back to — a workflow
+    /// node's parked tool call, a scheduler tick — read once per approval so
+    /// every response (or the failure notice) resolves to the same place.
+    async fn continuation_requester_dm(&self, approval_id: &ApprovalId) -> Option<String> {
+        match self
             .journal
             .approval_effect(approval_id)
             .and_then(|effect| effect.agent)
@@ -5023,7 +5017,16 @@ impl CompanyRuntime {
                 );
                 None
             }),
-        };
+        }
+    }
+
+    async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
+        let conversation = self
+            .journal
+            .approval_conversation(approval_id)
+            .unwrap_or_default();
+        let thread = conversation.thread;
+        let requester_dm = self.continuation_requester_dm(approval_id).await;
         let nowhere = continuation_fallback_chat_id(
             self.journal.approval_origin(approval_id).as_ref(),
             requester_dm.as_deref(),
@@ -5119,14 +5122,23 @@ impl CompanyRuntime {
             .journal
             .approval_conversation(approval_id)
             .unwrap_or_default();
-        let thread = conversation
-            .thread
-            .unwrap_or_else(|| crate::runtime::channel::OPERATOR_CHANNEL.to_string());
         // Issue #435: the bad news belongs in the same place the good news
         // would have gone. A failure notice left flat in the channel while the
         // question sits in a thread is the same lost-conclusion bug wearing a
-        // different hat — and this is the message the operator is most likely
-        // to be waiting on.
+        // different hat. When there is no thread, that "same place" is
+        // whatever `publish_continuation` would have used — the requester's
+        // DM, or the task/run the approval was parked on — not the Operator
+        // channel, which nothing journals a reply into any more.
+        let thread = match conversation.thread {
+            Some(thread) => thread,
+            None => {
+                let requester_dm = self.continuation_requester_dm(approval_id).await;
+                continuation_fallback_chat_id(
+                    self.journal.approval_origin(approval_id).as_ref(),
+                    requester_dm.as_deref(),
+                )
+            }
+        };
         let parent = self.resolvable_parent(conversation.parent, &thread).await;
         if let Err(err) = self
             .events
