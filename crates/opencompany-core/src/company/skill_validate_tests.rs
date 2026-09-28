@@ -184,3 +184,38 @@ fn every_shipped_bundle_skill_still_parses_and_validates() {
             .unwrap_or_else(|problems| panic!("`{}` fails validation: {problems:?}", doc.slug));
     }
 }
+
+/// The console counts a typed description against this limit while the operator
+/// types. A counter that disagrees with the host either stops them short of a
+/// description the host would have taken, or lets them fill a field that is
+/// refused on save with the count still reading green.
+///
+/// Read out of the console's own source rather than restated here, so the two
+/// numbers cannot drift without this failing.
+#[test]
+fn the_console_counts_against_the_same_description_limit() {
+    const CONSOLE_LIB: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../frontend/src/lib/skills.ts"
+    ));
+    let declared = format!("export const SKILL_DESCRIPTION_MAX_CHARS = {MAX_DESCRIPTION_CHARS};");
+    assert!(
+        CONSOLE_LIB.contains(&declared),
+        "frontend/src/lib/skills.ts no longer declares `{declared}` — the console's live \
+         character count has drifted from the limit this validator enforces. Change both \
+         together."
+    );
+}
+
+/// Every caller of `slugify`, not only `create_custom`, gets a slug off the
+/// reserved list.
+#[test]
+fn slugify_steps_off_every_reserved_slug() {
+    for name in ["Draft", "Upload", "Registry"] {
+        let slug = slugify(name);
+        assert!(
+            !RESERVED_SLUGS.contains(&slug.as_str()),
+            "slugify({name:?}) returned the reserved slug {slug:?}"
+        );
+    }
+}
