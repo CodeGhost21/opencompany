@@ -1,7 +1,7 @@
 import type { Step } from "react-joyride";
 
 import type { View } from "@/components/app-shell";
-import { MAIN_THREAD_ID } from "@/lib/chat";
+import { GENERAL_CHANNEL_ID } from "@/lib/chat";
 
 /**
  * One stop on the guided tour: a spotlight target plus the console view it
@@ -64,25 +64,11 @@ export const TOUR: TourStop[] = [
     body: "Four places: the Room you talk in, your Company, what it's Connected to, and the Automations it repeats. Open one and what's inside it appears underneath.",
   },
   {
-    // `sub` is not optional here, and neither composer stop below may drop it.
-    //
-    // A bare `setView("chat")` restores whichever channel the operator was last
-    // on — `app-shell`'s `lastSubByViewRef`, and `RoomView`'s own
-    // `readLastChannel` for a cold start. That can be the read-only `#Operator`
-    // feed, which renders no composer at all since PR #1984. The stop would then
-    // wait out `targetWaitTimeout` and be **skipped** — silently, because a
-    // missing anchor degrades rather than errors (see `waitForTarget`), so the
-    // tour would simply teach less and say nothing about it. The last stop below
-    // is "You're all set", so the tour would end by vanishing.
-    //
-    // `main` is the built-in company-wide channel, present in every company from
-    // first boot (issue #1743) and always writable. A blueprint that
-    // grandfathers a desk onto that line renders it under the desk's own id
-    // instead; `RoomView` folds every General spelling onto whichever channel
-    // actually holds the line (`generalChannelId`), so this address resolves
-    // either way rather than raising issue #370's unknown-channel notice.
+    // Addressed: a bare `#/chat` restores the last channel, which can be the
+    // read-only Operator feed with no composer, and the stop would be skipped.
+    // `#general` is present in every company and always writable.
     view: "chat",
-    sub: MAIN_THREAD_ID,
+    sub: GENERAL_CHANNEL_ID,
     target: '[data-tour="chat-composer"]',
     placement: "top",
     title: "Talk to your company",
@@ -120,9 +106,9 @@ export const TOUR: TourStop[] = [
     body: "Plug in the tools your company already uses — Gmail, Slack, Notion — so your agents can act for real.",
   },
   {
-    // Addressed, for the reason the first composer stop above gives at length.
+    // Addressed, for the reason the first composer stop above gives.
     view: "chat",
-    sub: MAIN_THREAD_ID,
+    sub: GENERAL_CHANNEL_ID,
     target: '[data-tour="chat-composer"]',
     placement: "top",
     title: "You're all set",

@@ -38,8 +38,9 @@ import { PageHeader } from "@/components/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   fromHistory,
-  isGeneralChannel,
+  GENERAL_CHANNEL_ID,
   makeMessage,
+  migrateLegacyGeneralId,
   markSendFailed,
   reconcileIds,
   replyVoice,
@@ -98,7 +99,6 @@ import {
   dmThreadId,
   findChannel,
   firstChannel,
-  generalChannelId,
   historyReady,
   HISTORY_UNTRACKED,
   clearTaskCardEverywhere,
@@ -132,6 +132,9 @@ import {
  */
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
+/** How long a burst of roster frames is coalesced before one re-read. */
+export const ROSTER_REFETCH_DELAY_MS = 250;
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -159,6 +162,13 @@ interface Props {
    * is the one that works with nothing configured.
    */
   routeOpen?: boolean;
+  /**
+   * Bumped by the shell on each `teammate_added` / `desk_members_changed`
+   * frame. A change re-reads the desks and the roster, coalesced over
+   * {@link ROSTER_REFETCH_DELAY_MS}, so `#general`'s members follow the roster
+   * without re-entering Room.
+   */
+  rosterRevision?: number;
   onNavigate: (channelId: string) => void;
   /**
    * Leave chat for a teammate's detail page, with `edit` opening its edit form
@@ -445,6 +455,7 @@ export function RoomView({
   company,
   sub,
   routeOpen = true,
+  rosterRevision = 0,
   onNavigate,
   onOpenAgent,
   autonomy,
@@ -934,6 +945,19 @@ export function RoomView({
     void loadDesks();
   }, [loadDesks]);
 
+  const refetchRoster = useRef<() => void>(() => {});
+  refetchRoster.current = () => {
+    void loadDesks();
+    void boot();
+  };
+  const seenRosterRevision = useRef(rosterRevision);
+  useEffect(() => {
+    if (rosterRevision === seenRosterRevision.current) return;
+    seenRosterRevision.current = rosterRevision;
+    const timer = setTimeout(() => refetchRoster.current(), ROSTER_REFETCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [rosterRevision]);
+
   /**
    * The always-present Operator feed's identity (issue #1757 rework),
    * fetched in parallel with `loadDesks` rather than derived from it — it is
@@ -1052,39 +1076,17 @@ export function RoomView({
       ? resolveDmChannelId(decodedSub, members)
       : null;
   /**
-   * A General *spelling* in the hash, mapped onto the channel that actually
-   * renders the company-wide line.
-   *
-   * The host folds four addresses into one conversation — `""`, `main`,
-   * `general` and `General`, case-insensitively (`isGeneralChannel`, mirroring
-   * `is_general_chat`) — and everything downstream of a live frame already
-   * applies that fold. Routing did not, so which of the four opened the channel
-   * depended on how the company was declared: the built-in channel is `main`,
-   * while a blueprint `[[group_chat]] id = "general"` is grandfathered onto the
-   * line and the built-in steps aside for it ({@link generalChannelId}). One
-   * spelling therefore worked and the other raised issue #370's "isn't a channel
-   * here" — for the same conversation, in the same company.
-   *
-   * Only ever a *fallback*: the exact id is asked first, so a real desk whose id
-   * happens to be a General spelling still wins its own channel, and this cannot
-   * reroute anything that already resolves. It takes precedence over
-   * `resolvedSub` for the reason `channelForThread` gives — a teammate whose id
-   * is a General spelling does not inherit the company's line.
-   *
-   * The guided tour depends on it (PR #1984): its two composer stops address
-   * `#/chat/main` explicitly so they cannot land on the read-only Operator feed,
-   * which renders no composer and would silently skip both stops.
+   * `#/chat/main` or any casing of `#/chat/general` that names no channel of
+   * its own: an address minted before `#general` had the id `general`. It
+   * resolves to `#general` here and the effect below replaces the address.
    */
   const generalSub =
-    desks && decodedSub && isGeneralChannel(decodedSub) && !findChannel(sections, decodedSub)
-      ? generalChannelId(desks)
-      : null;
-  // The experiment hides the built-in General channel from the rail, not from
-  // history. Keep an explicit legacy deep link readable without adding the row
-  // back to `sections` (and therefore without offering it as a destination).
-  const legacyGeneral =
-    desks && generalSub
-      ? findChannel(buildChannels(members, desks, transcripts, true), generalSub)
+    desks &&
+    decodedSub &&
+    decodedSub !== GENERAL_CHANNEL_ID &&
+    migrateLegacyGeneralId(decodedSub) === GENERAL_CHANNEL_ID &&
+    !findChannel(sections, decodedSub)
+      ? GENERAL_CHANNEL_ID
       : null;
   /**
    * The channel the hash names, else the first one that exists.
@@ -1098,7 +1100,6 @@ export function RoomView({
    */
   const channel = desks
     ? (findChannel(sections, generalSub ?? resolvedSub ?? decodedSub) ??
-      legacyGeneral ??
       directMessageForId(members, generalSub ?? resolvedSub ?? decodedSub) ??
       firstChannel(sections))
     : null;
@@ -1225,6 +1226,12 @@ export function RoomView({
     onNavigate(readLastChannel(scope) ?? channel.id);
   }, [routeOpen, scope, sub, channel, onNavigate]);
 
+  useEffect(() => {
+    if (!routeOpen || !generalSub) return;
+    const [, query] = window.location.hash.split("?");
+    window.location.replace(`#/chat/${GENERAL_CHANNEL_ID}${query ? `?${query}` : ""}`);
+  }, [routeOpen, generalSub]);
+
   /**
    * The hash named a channel this company doesn't have, and the first-channel
    * fallback answered instead.
@@ -1240,9 +1247,7 @@ export function RoomView({
    * whole roster. Check that resolver explicitly rather than leaning on
    * `resolvedSub`, whose legacy-id shim is meant to be deletable.
    *
-   * Nor is a General spelling the company renders under another id: `generalSub`
-   * resolved it to a real channel, so naming it unknown would put a notice over
-   * the conversation the operator actually asked for.
+   * Nor is a legacy `#general` address, which `generalSub` redirects.
    */
   const unknownChannel =
     desks &&
@@ -1922,13 +1927,12 @@ export function RoomView({
   // A local the closures below can capture as non-null: TypeScript hoists
   // function declarations, so the guard above does not narrow inside them.
   const active = channel;
-  // Whether the open channel is a real, host-backed desk — as opposed to the
-  // built-in `#general` channel, a DM, or a fallback desk (`lib/desks.ts`,
-  // used before `/desks` answers). The built-in channel is `kind: "channel"`
-  // and carries `memberIds` exactly like a desk does, so neither alone tells
-  // them apart; asking the desk list is what keeps the lead badge and the
-  // org-chart link off a channel the host does not list under `GET .../desks`.
+  // Whether the open channel is a real, host-backed desk — as opposed to a DM,
+  // the Operator feed or a fallback desk (`lib/desks.ts`, used before `/desks`
+  // answers) — and, for the membership controls, one whose membership the
+  // operator can change: `#general`'s is the roster, kept by the host.
   const activeIsDesk = active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);
+  const activeIsMutableDesk = activeIsDesk && active.mutable !== false;
   // Issue #1757: the Operator channel is a read-only "what happened" feed. Its
   // composer is disabled and the host also refuses a send to it, so this is UX,
   // not the enforcement.
@@ -2663,6 +2667,8 @@ export function RoomView({
       // The host directory is re-read so the new teammate can be @-mentioned
       // from the picker immediately, rather than after the next reload.
       void reloadDirectory();
+      // The host adds a new teammate to `#general`'s members.
+      void loadDesks();
       // A successful host add proves the write plane exists, even for a
       // company that opened on the starter roster (fromHost still false from
       // `boot`) — flip it so this and later actions target the host instead of
@@ -2687,7 +2693,7 @@ export function RoomView({
    * Put an agent already on the roster onto this channel's desk (issue
    * #2224) — not a variant of `addMember`, which creates a brand-new
    * teammate. Dropping one from the roster entirely is a Team-page action;
-   * `MembersPane` no longer offers it here. `activeIsDesk` gates
+   * `MembersPane` no longer offers it here. `activeIsMutableDesk` gates
    * `MembersPane`'s own "add existing" affordance, so `active.id` is a real
    * desk id by the time this runs; the check here is defensive, not load
    * bearing.
@@ -2703,7 +2709,7 @@ export function RoomView({
    * changed, never on a revisit — so this does not flash the pane empty.
    */
   async function addExistingMember(agentId: string) {
-    if (!activeIsDesk) return;
+    if (!activeIsMutableDesk) return;
     // Same rule `send` above follows: if the operator switches company or
     // connection while the POST is in flight, every UI-visible effect of it —
     // refresh or toast — belongs to a scope nobody is looking at anymore, so
@@ -3321,14 +3327,14 @@ export function RoomView({
                   }
                   loading={loadingTeam}
                   fromHost={fromHost}
-                  // `activeIsDesk`, not "`channelMembers` is non-null": a DM
+                  // `activeIsMutableDesk`, not "`channelMembers` is non-null": a DM
                   // has real (non-null) channel membership too — one row,
                   // itself — and is not a desk. `addDeskMember` has no
                   // meaning there, and the affordance must not appear at all
                   // (absent, never disabled — the rule `onManageDesk` below
                   // already follows for the same reason).
                   onAddExisting={
-                    activeIsDesk ? (agentId) => void addExistingMember(agentId) : undefined
+                    activeIsMutableDesk ? (agentId) => void addExistingMember(agentId) : undefined
                   }
                   onMessage={(m) => selectChannel(dmChannelId(m))}
                   /**
@@ -3347,7 +3353,7 @@ export function RoomView({
                    * only hands chat a chat-scoped navigate.
                    */
                   onManageDesk={
-                    activeIsDesk && active.memberIds
+                    activeIsMutableDesk && active.memberIds
                       ? () => {
                           window.location.hash = `/company/${active.id}`;
                         }

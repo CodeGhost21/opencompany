@@ -5,6 +5,7 @@ import type { ApprovalSummary, CognitionState, DecideApproval, TurnStep, Verdict
 import type { TaskStatus } from "@/api/tasks";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { GENERAL_CHANNEL_ID } from "@/lib/chat";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
 import { ChatLiveReceipt, type ChatReceipt } from "./ChatLiveReceipt";
@@ -594,8 +595,8 @@ function IntroMark({ channel }: { channel: Channel }) {
     );
   }
 
-  // The company's own line keeps the brand mark it has always had.
-  if (channel.id === "main") {
+  // `#general` wears the company brand mark.
+  if (channel.id === GENERAL_CHANNEL_ID) {
     return (
       <TeammateAvatar
         name={channel.voice ?? channel.name}
@@ -768,7 +769,7 @@ function LiveTurnRow({
         name={channel.voice ?? channel.name}
         tone={channel.tone}
         avatar={channel.member?.avatar}
-        company={channel.kind === "channel" && channel.id === "main"}
+        company={channel.kind === "channel" && channel.id === GENERAL_CHANNEL_ID}
         className="size-9 shrink-0"
       />
       <div className="min-w-0 flex-1 space-y-1.5">
@@ -809,7 +810,7 @@ function TypingRow({
         name={channel.voice ?? channel.name}
         tone={channel.tone}
         avatar={channel.member?.avatar}
-        company={channel.kind === "channel" && channel.id === "main"}
+        company={channel.kind === "channel" && channel.id === GENERAL_CHANNEL_ID}
         className="size-9"
       />
       <WorkingIndicator srLabel="Replying…" queued={queued} name={name} label={label} />

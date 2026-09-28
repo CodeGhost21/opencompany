@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { isGeneralChannel } from "@/lib/chat";
+import { GENERAL_CHANNEL_ID } from "@/lib/chat";
 import { TOUR } from "@/tour/steps";
 import { RoomView } from "@/views/RoomView";
 
@@ -45,9 +45,11 @@ const OPERATOR_DTO = {
 };
 
 const DESK_DTO = {
-  id: "main",
-  name: "main",
-  description: "The main channel",
+  id: "general",
+  name: "General",
+  description: "The whole company",
+  kind: "general" as const,
+  mutable: false,
   members: [] as string[],
 };
 
@@ -246,7 +248,7 @@ describe("a read-only channel renders no composer", () => {
 
 describe("a writable channel still renders the whole composer", () => {
   it("draws the input, the Send button and the controls", async () => {
-    await mount("main");
+    await mount("general");
 
     expect(composerInput()).not.toBeNull();
     expect(container.querySelector('[aria-label="Send"]')).not.toBeNull();
@@ -264,7 +266,7 @@ describe("a writable channel still renders the whole composer", () => {
   });
 
   it("still offers the empty-state cards", async () => {
-    await mount("main");
+    await mount("general");
 
     expect(container.textContent).toContain("Give the team a brief");
     expect(container.textContent).toContain("Add people");
@@ -273,7 +275,7 @@ describe("a writable channel still renders the whole composer", () => {
 
 describe("the harness-unavailable notice sits next to the composer, or without one", () => {
   it("renders the notice on a writable channel, saying all three things", async () => {
-    await mount("main", "unavailable");
+    await mount("general", "unavailable");
 
     const strip = banner();
     expect(strip).not.toBeNull();
@@ -291,7 +293,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
   });
 
   it("shares the composer's own box, so nothing can come between them", async () => {
-    await mount("main", "unavailable");
+    await mount("general", "unavailable");
 
     const strip = banner()!;
     const input = composerInput()!;
@@ -316,7 +318,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
   });
 
   it("overlaps the transcript rather than displacing it", async () => {
-    await mount("main", "unavailable");
+    await mount("general", "unavailable");
 
     const strip = banner()!;
     // The trade the float makes, stated: it covers the last line of the
@@ -334,7 +336,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     // `InflightRunBar` renders inside the same box, between the notice's anchor
     // and the composer. That used to break the adjacency assertion; now it
     // cannot, and this is the case that proves it.
-    await mount("main", "unavailable", ["Jane"], true);
+    await mount("general", "unavailable", ["Jane"], true);
 
     const strip = banner()!;
     const input = composerInput()!;
@@ -431,7 +433,7 @@ describe("a trip to the read-only feed does not eat the draft", () => {
 
   it("comes back with the text still in it", async () => {
     const client = stubClient(null);
-    await renderAt(client, "main");
+    await renderAt(client, "general");
 
     const before = composerInput() as HTMLTextAreaElement;
     expect(before).not.toBeNull();
@@ -444,60 +446,37 @@ describe("a trip to the read-only feed does not eat the draft", () => {
     expect(composerInput()).toBeNull();
     expect(container.querySelector("textarea")).toBeNull();
 
-    await renderAt(client, "main");
+    await renderAt(client, "general");
     expect((composerInput() as HTMLTextAreaElement).value).toBe("half-written thought");
   });
 });
 
 /**
- * A General *spelling* opens the company-wide line whichever way the company
- * declared it.
- *
- * The guided tour's two composer stops address `#/chat/main` outright so they
- * cannot inherit the read-only Operator feed (`tour/steps.ts`). That address
- * has to resolve in a grandfathered company too — one whose blueprint put a
- * desk on the company line, where `buildChannels` adds no built-in `#general`
- * beside it — or the tour would spotlight a composer under issue #370's
- * "isn't a channel here" notice.
+ * An address minted before `#general` had the id `general` — `#/chat/main`, or
+ * `#/chat/General` in any casing — opens `#general` and is replaced, not pushed,
+ * with `#/chat/general`.
  */
-describe("a General address resolves to whichever channel holds the line", () => {
-  function claimedClient(): OpenCompanyClient {
-    return {
-      // Two desks, and the one that claims the line is NOT the first — so
-      // "resolved to the company line" and "fell through to the first channel"
-      // are distinguishable answers. The claiming desk declares itself by NAME
-      // while carrying its own id: the case `deskClaimsGeneralChannel` exists
-      // for, and the one where neither `main` nor `general` names a channel
-      // directly.
-      listDesks: vi.fn(async () => [
-        { id: "eng", name: "Engineering", description: "Ships it", members: [] as string[] },
-        { id: "ops", name: "General", description: "The company line", members: [] as string[] },
-      ]),
-      listTeam: vi.fn(async () => []),
-      mentionables: vi.fn(async () => []),
-      getOperatorChannel: vi.fn(async () => OPERATOR_DTO),
-      capabilityStatus: vi.fn(async () => ({ cognition: null })),
-      chat: vi.fn(),
-      reactToMessage: vi.fn(),
-      getBudgetPause: vi.fn(async () => null),
-    } as unknown as OpenCompanyClient;
+describe("a legacy #general address", () => {
+  for (const legacy of ["main", "General", "GENERAL"]) {
+    it(`opens #general from #/chat/${legacy} and rewrites the address`, async () => {
+      window.history.replaceState(null, "", `#/chat/${legacy}?m=h7`);
+      const before = window.history.length;
+
+      await mount(legacy);
+
+      expect(composerInput()?.getAttribute("aria-label")).toBe("Message #general");
+      expect(container.textContent).not.toContain("isn't a channel here");
+      expect(window.location.hash).toBe("#/chat/general?m=h7");
+      expect(window.history.length).toBe(before);
+    });
   }
 
-  it("opens the desk that claimed the line, with no unknown-channel notice", async () => {
-    await renderAt(claimedClient(), "main");
+  it("leaves #/chat/general alone", async () => {
+    window.history.replaceState(null, "", "#/chat/general");
 
-    // The claiming desk, not the first channel in the rail — which is what a
-    // bare first-channel fallback would have landed on.
-    expect(composerInput()?.getAttribute("aria-label")).toBe("Message #general");
-    expect(container.textContent).not.toContain("isn't a channel here");
-    expect(container.textContent).not.toContain("There is nothing to reply to here");
-  });
+    await mount("general");
 
-  it("still opens the built-in channel in an ordinary company", async () => {
-    await mount("main");
-
-    expect(composerInput()).not.toBeNull();
-    expect(container.textContent).not.toContain("isn't a channel here");
+    expect(window.location.hash).toBe("#/chat/general");
   });
 });
 
@@ -526,10 +505,8 @@ describe("the tour's composer stops address a writable channel", () => {
     for (const stop of composerStops) {
       expect(stop.view).toBe("chat");
       expect(stop.sub).toBeTruthy();
-      // A General spelling: the company-wide line exists in every company and
-      // is writable in all of them, and `RoomView` folds every spelling of it
-      // onto whichever channel actually holds the line.
-      expect(isGeneralChannel(stop.sub!)).toBe(true);
+      // `#general` exists in every company and is writable in all of them.
+      expect(stop.sub).toBe(GENERAL_CHANNEL_ID);
     }
   });
 

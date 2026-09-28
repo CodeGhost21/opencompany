@@ -266,6 +266,17 @@ export interface DeskDto {
    */
   overlayCreated?: boolean;
   /**
+   * `"general"` for the company-wide `#general` channel, listed first; `"desk"`
+   * for every other entry. Absent on an older host, which means `"desk"`.
+   */
+  kind?: "general" | "desk";
+  /**
+   * Whether membership, order and delete writes are accepted. `false` for
+   * `#general`, whose membership the host keeps equal to the roster (writes
+   * answer 409). Absent on an older host, which means `true`.
+   */
+  mutable?: boolean;
+  /**
    * How this desk paces the episodes it opens — the numbers in force, not the
    * editable block (see {@link DeskRoutingDto}). Absent on a host predating
    * desk routing, and on a leadless or single-member desk that runs none.
