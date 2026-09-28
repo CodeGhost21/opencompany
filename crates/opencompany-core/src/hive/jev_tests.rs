@@ -301,6 +301,50 @@ async fn jev_router_reaches_a_loopback_http_proxy_with_the_env_key() {
     assert_eq!(response.usage.output_tokens, 3);
 }
 
+/// A routing key the caller supplies is the bearer on the wire, and the
+/// inference credential beside it is not sent.
+///
+/// `routing_takes_its_own_key_over_the_inference_ladder` proves a router is
+/// *configured* either way, and says outright that it cannot read the credential
+/// back. That leaves the thing worth proving unproven: which key leaves the
+/// process. A mock that only answers the expected bearer settles it — a wrong
+/// key gets no match and the call fails.
+#[tokio::test]
+async fn a_supplied_routing_key_is_the_bearer_and_the_inference_key_is_not() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("authorization", "Bearer routing-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(answer_body()))
+        // Two: one through `jev_router`, one through `jev_transport`. Both
+        // resolve the credential by the same ladder, and the closing decision
+        // takes the second -- which had no test of its own.
+        .expect(2)
+        .mount(&server)
+        .await;
+    // Both are set, and they are different: the inference ladder would resolve
+    // `inference-key` if the supplied one did not outrank it.
+    let env = MapEnv::new([
+        ("OPENCOMPANY_INFERENCE_KEY", "inference-key"),
+        (JEV_URL_ENV, server.uri().as_str()),
+    ]);
+
+    let router = jev_router(&env, Some("routing-key"))
+        .unwrap()
+        .expect("a router");
+    let response = router.transport().evaluate(&request()).await.unwrap();
+    assert_eq!(
+        response.usage.output_tokens, 3,
+        "the mock only answers `Bearer routing-key`, so reaching it is the proof"
+    );
+
+    // And the same through the transport seam the closing decision uses, which
+    // resolves its credential by the same ladder and had no test of its own.
+    let transport = jev_transport(&env, Some("routing-key"))
+        .unwrap()
+        .expect("a transport");
+    transport.evaluate(&request()).await.unwrap();
+}
+
 /// Routing takes its own key when one is set, and inherits when it is not.
 ///
 /// The two vendors are not always the same. A box with agents on OpenRouter

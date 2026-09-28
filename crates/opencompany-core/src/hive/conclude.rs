@@ -237,6 +237,41 @@ pub(crate) fn findings(rows: &[crate::ports::types::StoredEvent], desk_id: &str)
     lines
 }
 
+/// The sequence of the closing turn's own message, or `None` when it wrote
+/// none.
+///
+/// # Why a watermark and not simply "its last reply"
+///
+/// Because the concluding seat is usually one that already spoke -- the lead,
+/// most often -- so its last desk reply is an ordinary deliberation row until
+/// the closing turn adds one. `above` is the highest sequence the settled
+/// episode already held, so a row only qualifies by being newer than the whole
+/// episode that preceded the turn. A turn that recorded nothing then leaves
+/// `None`, which is what [`Conclusion::summary_seq`] documents, instead of
+/// naming a mid-episode message as the episode's answer.
+///
+/// Separated from the round it follows so it can be tested on rows rather than
+/// on a journal: the rule is the part that was wrong, and the caller only has
+/// to read the episode back and hand it over.
+#[must_use]
+pub fn closing_summary_seq(
+    rows: &[crate::ports::types::StoredEvent],
+    desk_id: &str,
+    seat: &str,
+    above: u64,
+) -> Option<u64> {
+    rows.iter()
+        .rev()
+        .take_while(|stored| stored.seq.value() > above)
+        .find(|stored| match &stored.event {
+            crate::ports::types::CompanyEvent::AgentReply {
+                chat_id, agent_id, ..
+            } => chat_id == desk_id && agent_id == seat,
+            _ => false,
+        })
+        .map(|stored| stored.seq.value())
+}
+
 /// Which seat closes the episode.
 ///
 /// Jev picks, and the desk lead is the fallback -- the same fallback

@@ -13,7 +13,7 @@ use super::{Episode, HiveDispatcher, run};
 use crate::hive::episode_store;
 use crate::hive::graph::DeskHive;
 use crate::hive::routing::EffectiveRouting;
-use crate::ports::types::{CompanyEvent, EventSeq};
+use crate::ports::types::EventSeq;
 
 impl HiveDispatcher {
     /// Run a settled episode's closing turn, and say where its message landed.
@@ -141,17 +141,9 @@ impl HiveDispatcher {
             match episode_store::episode_rows(self.events.as_ref(), &self.record.id, episode_id)
                 .await
             {
-                Ok(rows) => rows
-                    .iter()
-                    .rev()
-                    .take_while(|stored| stored.seq.value() > before)
-                    .find(|stored| match &stored.event {
-                        CompanyEvent::AgentReply {
-                            chat_id, agent_id, ..
-                        } => chat_id == &desk.desk_id && agent_id == &seat,
-                        _ => false,
-                    })
-                    .map(|stored| stored.seq.value()),
+                Ok(rows) => {
+                    crate::hive::conclude::closing_summary_seq(&rows, &desk.desk_id, &seat, before)
+                }
                 Err(error) => {
                     tracing::warn!(%error, "[hive] could not read back the closing message");
                     None

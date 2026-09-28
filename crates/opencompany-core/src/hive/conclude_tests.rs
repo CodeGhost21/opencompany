@@ -133,6 +133,29 @@ fn the_router_is_given_each_seat_s_finding() {
     );
 }
 
+/// One journaled desk reply, for the read-back rules below.
+fn reply(seq: u64, chat: &str, agent: &str, text: &str) -> crate::ports::types::StoredEvent {
+    use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, StoredEvent};
+    StoredEvent {
+        seq: EventSeq::new(seq),
+        company: CompanyId::new("c"),
+        event: CompanyEvent::AgentReply {
+            chat_id: chat.to_owned(),
+            agent_id: agent.to_owned(),
+            text: text.to_owned(),
+            steps: Vec::new(),
+            outputs: Vec::new(),
+            task_id: None,
+            parent: None,
+            mentions: Vec::new(),
+            mention_depth: 0,
+            audience: Vec::new(),
+            episode: None,
+        },
+        at_millis: seq,
+    }
+}
+
 /// A whole finding survives: the budget is on the state, not on each line.
 ///
 /// Thirteen live runs put the median finding at 1,024 characters against a
@@ -164,15 +187,12 @@ fn a_long_finding_is_kept_whole() {
         at_millis: 1,
     }];
     let line = super::findings(&rows, "all_hands").remove(0);
-    assert!(
-        !line.ends_with("..."),
-        "a finding well inside the state budget is not cut: {} chars",
-        line.chars().count()
-    );
-    assert!(
-        line.chars().count() > 1_000,
-        "and arrives whole: {}",
-        line.chars().count()
+    // Exact, not "long enough": an assertion that only demanded more than a
+    // thousand characters would pass against a cut at any length above it.
+    assert_eq!(
+        line,
+        format!("analytics_analyst: {}", "x".repeat(2_600)),
+        "the whole finding survives, prefix and all"
     );
 }
 
@@ -305,51 +325,66 @@ fn only_a_confident_yes_skips_and_everything_else_concludes() {
 /// `summary_seq` names a row the closing turn wrote, never one the seat wrote
 /// earlier in the episode.
 ///
-/// The concluder is usually a seat that already spoke — the lead, most often —
-/// so "its last reply on the desk" is an ordinary deliberation row until the
-/// closing turn adds one. A closing turn that records nothing is a case
-/// `Conclusion::summary_seq` documents as `None`; without a watermark the
-/// read-back would instead hand `EpisodeCompleted` a mid-episode message and the
-/// console would label it the episode's summary.
+/// The concluding seat is usually one that already spoke — the lead, most often
+/// — so "its last reply on the desk" is an ordinary deliberation row until the
+/// closing turn adds one. A closing turn that records nothing is the case
+/// `Conclusion::summary_seq` documents as `None`; the first version of this read
+/// scanned the whole episode and would instead have handed `EpisodeCompleted` a
+/// mid-episode message for the console to label the summary.
 ///
-/// This exercises the rule the read-back applies rather than the async round: a
-/// row qualifies only when its sequence is above the highest one the settled
-/// episode already held.
+/// This calls `closing_summary_seq` itself. An earlier version of this test
+/// re-implemented the watermark rule inline and would have passed against a
+/// regression that ignored the watermark entirely.
 #[test]
 fn a_summary_never_points_at_a_row_from_before_the_closing_turn() {
-    let rows: Vec<u64> = vec![10, 24, 31];
-    let before = rows.iter().copied().max().unwrap_or(0);
-    assert_eq!(
-        before, 31,
-        "the watermark is the settled episode's last row"
-    );
-
-    // A closing turn that wrote nothing: its own reply is absent, and the
-    // seat's earlier rows are all at or below the watermark.
-    let after_silent: Vec<u64> = rows.clone();
-    assert!(
-        after_silent
-            .iter()
-            .rev()
-            .take_while(|seq| **seq > before)
-            .count()
-            == 0,
-        "a silent closing turn qualifies no row, so the summary stays None"
-    );
-
-    // A closing turn that spoke: its row is above the watermark and is the one
-    // taken, even though the seat also spoke at 24.
-    let mut after_spoke = rows.clone();
-    after_spoke.push(37);
-    let qualifying: Vec<u64> = after_spoke
+    let desk = "all_hands";
+    let seat = "creative_director";
+    // The seat spoke at 24 during the episode proper, and another seat at 31.
+    let settled = vec![
+        reply(10, desk, "brand_strategist", "positioning"),
+        reply(24, desk, seat, "a deliberation line"),
+        reply(31, desk, "copywriter", "copy"),
+    ];
+    let before = settled
         .iter()
-        .rev()
-        .take_while(|seq| **seq > before)
-        .copied()
-        .collect();
+        .map(|stored| stored.seq.value())
+        .max()
+        .unwrap_or(0);
+
     assert_eq!(
-        qualifying,
-        vec![37],
-        "only the closing turn's own row is eligible"
+        super::closing_summary_seq(&settled, desk, seat, before),
+        None,
+        "a closing turn that recorded nothing names no row, even though the seat spoke at 24"
+    );
+
+    let mut spoke = settled.clone();
+    spoke.push(reply(37, desk, seat, "the closing synthesis"));
+    assert_eq!(
+        super::closing_summary_seq(&spoke, desk, seat, before),
+        Some(37),
+        "the closing turn's own row, not the seat's earlier one"
+    );
+
+    // A row above the watermark by another seat is not this seat's summary.
+    let mut other = settled.clone();
+    other.push(reply(37, desk, "copywriter", "something else"));
+    assert_eq!(
+        super::closing_summary_seq(&other, desk, seat, before),
+        None,
+        "only the concluding seat's own row counts"
+    );
+
+    // A row in a pair channel is not a desk row.
+    let mut aside = settled.clone();
+    aside.push(reply(
+        37,
+        "dm:copywriter+creative_director",
+        seat,
+        "in a thread",
+    ));
+    assert_eq!(
+        super::closing_summary_seq(&aside, desk, seat, before),
+        None,
+        "the summary is a desk row, not a thread row"
     );
 }
