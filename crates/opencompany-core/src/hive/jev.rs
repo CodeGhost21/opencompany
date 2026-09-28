@@ -231,7 +231,7 @@ impl SystemOneTransport for TinyHumansSystemOne {
 /// Separated from the message on purpose: see the warning in
 /// [`TinyHumansSystemOne::evaluate`] for why the message itself is not logged.
 #[must_use]
-fn transport_status(error: &Error) -> Option<u16> {
+pub(crate) fn transport_status(error: &Error) -> Option<u16> {
     match error {
         Error::Transport { status, .. } => *status,
         _ => None,
@@ -240,7 +240,7 @@ fn transport_status(error: &Error) -> Option<u16> {
 
 /// Which failure it was, as a fixed word rather than the error's own text.
 #[must_use]
-fn failure_kind(error: &Error) -> &'static str {
+pub(crate) fn failure_kind(error: &Error) -> &'static str {
     match error {
         Error::Transport { .. } => "transport",
         Error::InvalidProviderResponse { .. } => "undecodable response",

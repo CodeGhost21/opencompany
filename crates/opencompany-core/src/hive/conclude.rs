@@ -354,6 +354,64 @@ pub enum Decision {
 /// is why this reaches the transport directly instead of going through
 /// `route_desk`, which asks only the second (see
 /// [`crate::hive::jev::jev_transport`]).
+/// What the operator's own request may spend of the state budget.
+///
+/// A quarter, because the findings are the part the questions are actually
+/// judged on: `needed` reads the last one and `who` reads them all. A request
+/// long enough to reach this is one nobody would have read either.
+const REQUEST_CHAR_BUDGET: usize = STATE_CHAR_BUDGET / 4;
+
+/// What a cut says about itself, so the model is not handed a truncated request
+/// as though it were the whole one.
+const CUT_MARKER: &str = "... (cut to fit the routing call)";
+
+/// Cut `text` to `budget` characters **including** the marker, saying so when it
+/// cuts.
+///
+/// The marker's own length is reserved rather than added afterwards: appending it
+/// to a full budget's worth of text overruns the budget by the marker, which is
+/// the bug this counts out.
+fn clipped(text: &str, budget: usize) -> String {
+    if text.chars().count() <= budget {
+        return text.to_owned();
+    }
+    let keep = budget.saturating_sub(CUT_MARKER.chars().count());
+    text.chars().take(keep).collect::<String>() + CUT_MARKER
+}
+
+/// The request and findings that will fit in one call's state.
+///
+/// # Why the trimming in `findings` is not enough
+///
+/// Two ways the state could still overrun the window. `findings` stops trimming
+/// at one line, so a single reply longer than the whole budget was returned
+/// untouched -- and a seat that pastes a file into its finding is not a strange
+/// thing to happen. And `request` was never counted at all, though it sits in the
+/// same state.
+///
+/// So the last resort is a cut rather than a refusal: a decision made on a
+/// clipped state still concludes the episode, while a request the transport
+/// rejects loses the closing turn altogether. The cut says it happened, so the
+/// model is not told a truncated request is the whole one.
+#[must_use]
+fn fit_state(request: &str, findings: &[String]) -> (String, Vec<String>) {
+    let request = clipped(request, REQUEST_CHAR_BUDGET);
+    let room = STATE_CHAR_BUDGET.saturating_sub(request.chars().count());
+    let mut lines = findings.to_vec();
+    let mut total: usize = lines.iter().map(|line| line.chars().count()).sum();
+    while total > room && lines.len() > 1 {
+        total -= lines.remove(0).chars().count();
+    }
+    // One finding, still too long: the only thing left to cut is the finding
+    // itself.
+    if let Some(last) = lines.last_mut()
+        && last.chars().count() > room
+    {
+        *last = clipped(last, room);
+    }
+    (request, lines)
+}
+
 #[must_use]
 pub fn closing_questions(request: &str, findings: &[String], seats: &[String]) -> SystemOneRequest {
     let mut questions = BTreeMap::new();
@@ -393,6 +451,7 @@ pub fn closing_questions(request: &str, findings: &[String], seats: &[String]) -
                 .collect::<BTreeMap<String, Option<serde_json::Value>>>(),
         },
     );
+    let (request, findings) = fit_state(request, findings);
     SystemOneRequest {
         state: json!({ "request": request, "findings": findings }),
         model: JEV_MODEL.to_owned(),
@@ -464,8 +523,13 @@ pub async fn decide(
             decision
         }
         Err(error) => {
+            // Not `%error`, for the reason `jev::evaluate` does not print it
+            // either: `Error::Transport` displays as `status: message`, and that
+            // message is the proxy's response body -- which echoes this request,
+            // and this request carries the desk's findings.
             tracing::warn!(
-                %error,
+                status = ?crate::hive::jev::transport_status(&error),
+                kind = crate::hive::jev::failure_kind(&error),
                 "[hive] the closing decision failed; this episode concludes with its lead"
             );
             Decision::Conclude(lead.to_owned())

@@ -33,19 +33,33 @@ impl HiveDispatcher {
         opened_at: EventSeq,
         request: &str,
     ) -> Option<crate::hive::conclude::Conclusion> {
-        // What the episode produced, for the router to choose against. A read
-        // that fails is not a reason to skip the round -- an uninformed choice
-        // still beats no conclusion -- so an error here degrades to no context.
-        let settled_rows = episode_store::episode_rows(
+        // **A read that failed is not an episode with nothing in it.**
+        //
+        // These rows are both the router's evidence and the watermark below, and
+        // an empty vector is a legitimate value for each -- so swallowing the
+        // error let a storage failure look like a settled episode that produced
+        // nothing. The oracle would then judge `needed` against no findings at
+        // all, and "already assembled" is exactly what no findings reads like:
+        // a failed read could talk the desk out of concluding.
+        //
+        // So a failure keeps the round but takes the decision away from it: the
+        // lead concludes, which is the fallback every other failure here uses.
+        let settled_rows = match episode_store::episode_rows(
             self.events.as_ref(),
             &self.record.id,
             episode_id,
         )
         .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "[hive] the closing turn routes without the episode's findings");
-            Vec::new()
-        });
+        {
+            Ok(rows) => Some(rows),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "[hive] could not read the episode back; its lead concludes without a decision"
+                );
+                None
+            }
+        };
         let lead = match desk.lead() {
             Some(lead) => lead,
             None => {
@@ -57,10 +71,10 @@ impl HiveDispatcher {
         // should do it -- when an oracle resolves. Without one, `route_desk`
         // answers the second and the episode always concludes, which is the
         // behaviour before the decision existed.
-        let seat = match self.oracle.as_deref() {
-            Some(oracle) => {
+        let seat = match self.oracle.as_deref().zip(settled_rows.as_ref()) {
+            Some((oracle, settled_rows)) => {
                 let seats: Vec<String> = desk.hive.members().map(str::to_owned).collect();
-                let findings = crate::hive::conclude::findings(&settled_rows, &desk.desk_id);
+                let findings = crate::hive::conclude::findings(settled_rows, &desk.desk_id);
                 match crate::hive::conclude::decide(oracle, request, &findings, &seats, &lead).await
                 {
                     crate::hive::conclude::Decision::Conclude(seat) => seat,
@@ -80,7 +94,7 @@ impl HiveDispatcher {
                 self.router.as_deref(),
                 request,
                 thread_root,
-                &settled_rows,
+                settled_rows.as_deref().unwrap_or_default(),
             )
             .await
             {
@@ -102,6 +116,8 @@ impl HiveDispatcher {
         // `EpisodeCompleted.summary_seq` a mid-episode message and the console
         // would label it the episode's summary.
         let before = settled_rows
+            .as_deref()
+            .unwrap_or_default()
             .iter()
             .map(|stored| stored.seq.value())
             .max()

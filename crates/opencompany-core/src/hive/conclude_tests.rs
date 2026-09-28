@@ -388,3 +388,46 @@ fn a_summary_never_points_at_a_row_from_before_the_closing_turn() {
         "the summary is a desk row, not a thread row"
     );
 }
+
+/// The state is bounded whatever arrives: a request nobody would read, and a
+/// single finding larger than the whole budget.
+///
+/// `findings` stops trimming at one line, so before this a lone oversized reply
+/// went to the wire untouched — a seat that pastes a file into its finding is
+/// not a strange thing to happen. And the request sat in the same state without
+/// ever being counted.
+#[test]
+fn neither_a_vast_request_nor_a_vast_finding_can_overrun_the_state() {
+    let huge_request = "q".repeat(super::STATE_CHAR_BUDGET * 2);
+    let seats = vec!["creative_director".to_owned()];
+
+    let ask = super::closing_questions(&huge_request, &["ceo: fine".to_owned()], &seats);
+    let request = ask.state["request"].as_str().expect("a request");
+    assert!(
+        request.chars().count() <= super::REQUEST_CHAR_BUDGET,
+        "the request is cut to its share of the budget, marker included: {} chars",
+        request.chars().count()
+    );
+    assert!(
+        request.ends_with("(cut to fit the routing call)"),
+        "and says it was cut"
+    );
+
+    // One finding, bigger than everything: it is the only thing left to cut.
+    let huge_finding = format!("ceo: {}", "x".repeat(super::STATE_CHAR_BUDGET * 2));
+    let ask = super::closing_questions("relaunch pricing", &[huge_finding], &seats);
+    let findings = ask.state["findings"].as_array().expect("findings");
+    let total: usize = findings
+        .iter()
+        .map(|line| line.as_str().unwrap_or_default().chars().count())
+        .sum();
+    assert!(
+        total <= super::STATE_CHAR_BUDGET,
+        "the lone finding is cut rather than sent whole: {total} chars"
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "and it is still the finding, not dropped"
+    );
+}
