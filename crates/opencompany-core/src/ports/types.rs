@@ -917,7 +917,14 @@ pub enum CompanyEvent {
         /// before this field existed. Like `by`, `skip_serializing_if` keeps a
         /// pre-existing event byte-identical, so no stored record needs
         /// migrating.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ///
+        /// Decoded on read: every legacy spelling of `#general` loads as
+        /// `"general"`. Absent means an unaddressed post, which is #general.
+        #[serde(
+            default,
+            deserialize_with = "crate::ports::general_channel::deserialize_general_chat_opt",
+            skip_serializing_if = "Option::is_none"
+        )]
         chat: Option<String>,
         /// The message this one replies to, as that message's own sequence
         /// position (issue #364) — what makes a thread reply survive a reload.
@@ -1067,7 +1074,11 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
         /// The desk the turn answered on.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "crate::ports::general_channel::deserialize_general_chat_opt",
+            skip_serializing_if = "Option::is_none"
+        )]
         chat_id: Option<String>,
         /// The episode the seat turn ran for.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1095,7 +1106,11 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
         /// The desk the turn answered on (plan hive-desks, Phase 4).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "crate::ports::general_channel::deserialize_general_chat_opt",
+            skip_serializing_if = "Option::is_none"
+        )]
         chat_id: Option<String>,
         /// The episode the seat turn ran for.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1285,6 +1300,7 @@ pub enum CompanyEvent {
     /// alongside the operator messages that prompted them.
     AgentReply {
         /// The desk / group-chat the reply belongs to.
+        #[serde(deserialize_with = "crate::ports::general_channel::deserialize_general_chat")]
         chat_id: String,
         /// The agent that produced the reply.
         agent_id: String,
@@ -2108,7 +2124,11 @@ pub enum CompanyEvent {
         /// Additive: `#[serde(default)]` so every journal line written before
         /// this field existed still replays, and skipped when absent so a
         /// board-created card adds nothing to the log.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "crate::ports::general_channel::deserialize_general_chat_opt",
+            skip_serializing_if = "Option::is_none"
+        )]
         origin_chat_id: Option<String>,
         /// The thread within [`origin_chat_id`](Self::DeskTaskCompleted::origin_chat_id)
         /// the card was raised in (issue #1890 B) —
@@ -5067,31 +5087,15 @@ impl OverlayBlob {
 /// [`CONFINED_AGENT_ID`](crate::ports::CONFINED_AGENT_ID), unmintable by
 /// construction because slugs never emit a hyphen.
 ///
-/// [`MAIN_THREAD_ID`](tinyhivemind_core::chat::MAIN_THREAD_ID) and
-/// [`GENERAL_DESK`](tinyhivemind_core::chat::GENERAL_DESK) join them for
-/// issue #1743, and both are ordinary slugs — a teammate named "Main" or
-/// "General" mints straight onto one. That id is a chat address: `responder_for`
-/// checks roster ids before it falls back to the orchestrator, so the teammate
-/// would answer every unaddressed message on the company-wide line, and the
-/// console would render the line's transcript as that teammate's DM. Desk ids
-/// and names are already excluded a few lines below; these are the two keys
-/// that route like a desk without being one.
-///
-/// The General entry is the **identity** constant, not
-/// `server::ops::language::DEFAULT_DESK`, the operator-facing glossary word
-/// that happens to be the same literal. What is reserved here is a chat
-/// address, and this is the port layer: a port naming a server constant is the
-/// upward reach the shared crate exists to remove. The two cannot drift — a
-/// `const` assertion in [`crate::server::chat_history`] pins them together at
-/// compile time — so the reservation still covers a teammate named "General"
-/// however the host chooses to spell that word.
+/// [`GENERAL_CHANNEL_ID`] and the legacy `main` spelling join them: a teammate
+/// minted onto either would be addressed like #general.
 pub const RESERVED_AGENT_IDS: [&str; 6] = [
     crate::runtime::OPERATOR_CHANNEL,
     crate::company::workspace_scaffold::AGENTS_ROOT,
     crate::company::workspace_scaffold::DESKS_ROOT,
     crate::ports::SYSTEM_AUTHOR,
-    tinyhivemind_core::chat::MAIN_THREAD_ID,
-    tinyhivemind_core::chat::GENERAL_DESK,
+    "main",
+    GENERAL_CHANNEL_ID,
 ];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
@@ -5443,43 +5447,6 @@ impl CompanyRecord {
         if desk_id == GENERAL_CHANNEL_ID {
             return self.general_channel.members.clone();
         }
-        // **The general desk seats the whole roster, and keeps doing so.**
-        //
-        // It is a desk like any other except in one respect: who belongs to it
-        // is not a list somebody maintains, it is "everyone who works here".
-        // `POST {scope}/team` adds a teammate and touches no desk at all, so a
-        // fixed `members = [...]` would be right on the day it was written and
-        // wrong from the next hire onward — the newest teammate would be the one
-        // person unable to speak on the company's own line.
-        //
-        // Deriving it from the roster makes that unmaintainable-by-construction
-        // rather than merely maintained, and it is what `[company].general_desk`
-        // is for: the manifest names WHICH desk owns the line, and the runtime
-        // keeps its membership current.
-        if self
-            .manifest
-            .company
-            .general_desk
-            .as_deref()
-            .is_some_and(|named| named == desk_id)
-        {
-            // The same two sources `is_roster_agent` consults, manifest before
-            // overlay, so who the room seats and who the roster says works here
-            // cannot drift.
-            let mut all: Vec<String> = Vec::new();
-            for id in self
-                .manifest
-                .agents
-                .iter()
-                .map(|a| a.id.clone())
-                .chain(self.overlay_agents.iter().map(|a| a.id.clone()))
-            {
-                if !self.is_retired(&id) && !all.contains(&id) {
-                    all.push(id);
-                }
-            }
-            return all;
-        }
         let mut members: Vec<String> = self
             .manifest
             .group_chats
@@ -5593,9 +5560,6 @@ impl CompanyRecord {
     /// still routes normally under its own non-General id — this narrows one
     /// question, it does not retire a desk.
     ///
-    /// A desk the *manifest* declares is matched first and is unaffected: a
-    /// blueprint that authored the company's General desk keeps it, which is
-    /// the grandfathering this host has always honoured.
     pub fn resolve_desk_id(&self, key: &str) -> Option<String> {
         // **Exact ids win over display-name aliases, everywhere** (issue #1862
         // review). Desk creation enforces id uniqueness but not name
@@ -5611,39 +5575,11 @@ impl CompanyRecord {
         if let Some(exact) = self.manifest.group_chats.iter().find(|c| c.id == key) {
             return Some(exact.id.clone());
         }
-        // **The company's own line, pointed at a desk that owns it.**
-        //
-        // Without this, General resolves to nothing: the desk selector bails
-        // out and the message falls to a *root* agent picked off the fallback
-        // ladder — in practice whichever agent file sorts first. Observed: a
-        // delivered-order case answered by the pending-order seat, holding
-        // three write tools and no tool for the job.
-        //
-        // The target is required to exist and is required NOT to be a General
-        // spelling itself. tinyhivemind refuses an episode on a desk whose id
-        // or name is one, so resolving General onto such a desk would trade a
-        // message answered by the wrong agent for a message that fails
-        // outright. Silently declining leaves the historical behaviour, which
-        // is the same thing every other rung of this function does.
-        if tinyhivemind_core::chat::is_general_chat(Some(key))
-            && let Some(target) = self.manifest.company.general_desk.as_deref()
-            && let Some(desk) = self
-                .manifest
-                .group_chats
-                .iter()
-                .find(|c| c.id == target)
-                .filter(|c| {
-                    !tinyhivemind_core::chat::is_general_chat(Some(&c.id))
-                        && !tinyhivemind_core::chat::is_general_chat(Some(&c.name))
-                })
-        {
-            return Some(desk.id.clone());
-        }
-        if !tinyhivemind_core::chat::is_general_chat(Some(key))
+        if !crate::ports::general_channel::is_general_spelling(key)
             && let Some(exact) = self
                 .overlay_desks
                 .iter()
-                .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
+                .filter(|d| !crate::ports::general_channel::is_general_spelling(&d.id))
                 .find(|d| d.id == key)
         {
             return Some(exact.id.clone());
@@ -5655,7 +5591,7 @@ impl CompanyRecord {
             .find(|c| c.id == key || c.name.eq_ignore_ascii_case(key))
             .map(|c| c.id.clone())
             .or_else(|| {
-                if tinyhivemind_core::chat::is_general_chat(Some(key)) {
+                if crate::ports::general_channel::is_general_spelling(key) {
                     return None;
                 }
                 self.overlay_desks
@@ -5668,7 +5604,7 @@ impl CompanyRecord {
                     // that every desk mutation refuses. Its lead would answer,
                     // and the reply would be journaled under a thread the
                     // console renders no channel for.
-                    .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
+                    .filter(|d| !crate::ports::general_channel::is_general_spelling(&d.id))
                     .find(|d| d.id == key || d.name.eq_ignore_ascii_case(key))
                     .map(|d| d.id.clone())
             })
@@ -5695,11 +5631,10 @@ impl CompanyRecord {
     /// overlay tier only when the manifest has no match at all.
     pub fn desk_alias_is_ambiguous(&self, key: &str) -> bool {
         if self.manifest.group_chats.iter().any(|c| c.id == key)
-            || (!tinyhivemind_core::chat::is_general_chat(Some(key))
-                && self
-                    .overlay_desks
-                    .iter()
-                    .any(|d| d.id == key && !tinyhivemind_core::chat::is_general_chat(Some(&d.id))))
+            || (!crate::ports::general_channel::is_general_spelling(key)
+                && self.overlay_desks.iter().any(|d| {
+                    d.id == key && !crate::ports::general_channel::is_general_spelling(&d.id)
+                }))
         {
             return false;
         }
@@ -5712,12 +5647,12 @@ impl CompanyRecord {
         if manifest_matches > 0 {
             return manifest_matches > 1;
         }
-        if tinyhivemind_core::chat::is_general_chat(Some(key)) {
+        if crate::ports::general_channel::is_general_spelling(key) {
             return false;
         }
         self.overlay_desks
             .iter()
-            .filter(|d| !tinyhivemind_core::chat::is_general_chat(Some(&d.id)))
+            .filter(|d| !crate::ports::general_channel::is_general_spelling(&d.id))
             .filter(|d| d.name.eq_ignore_ascii_case(key))
             .count()
             > 1

@@ -244,13 +244,13 @@ fn a_continuation_with_no_conversation_answers_outside_every_chat() {
     // — visible to the person who approved, and never a teammate's DM.
     assert_eq!(
         super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None))),
-        "General",
+        "general",
     );
     assert_eq!(
         super::continuation_fallback_chat_id(Some(&origin(None, Some("run-9")))),
-        "General",
+        "general",
     );
-    assert_eq!(super::continuation_fallback_chat_id(None), "General");
+    assert_eq!(super::continuation_fallback_chat_id(None), "general");
 }
 
 /// Issue #1092, the property that actually matters: a workflow park's
@@ -311,7 +311,7 @@ fn a_workflow_parks_continuation_owns_no_desk_and_no_dm() {
     let unaddressed =
         super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None)));
     assert!(
-        owns("main", "General", &reply(unaddressed.clone())),
+        owns("general", "General", &reply(unaddressed.clone())),
         "`{unaddressed}` must still be read as the operator's General line",
     );
 }
@@ -365,7 +365,7 @@ async fn a_conversation_less_failure_answers_where_a_success_would_have() {
     });
     assert_eq!(
         notice.as_deref(),
-        Some(crate::server::ops::language::DEFAULT_DESK),
+        Some(crate::server::ops::language::GENERAL_CHANNEL_ID),
         "a failure notice for an unaddressed park lands where a success would have"
     );
 }

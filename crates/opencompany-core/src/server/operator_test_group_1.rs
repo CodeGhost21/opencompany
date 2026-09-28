@@ -231,8 +231,7 @@ async fn chat_addressed_to_a_desk_assigns_the_desk() {
 
 /// Everything that addresses nobody in particular opens a blank card when a
 /// workflow is asked for: no thread at all, the empty string, the console's
-/// legacy fallback desk id, and the default "General" desk this company does
-/// not have.
+/// legacy spellings of #general, and #general itself.
 ///
 /// This pins the direction of the change — *more* cards are operator-chosen,
 /// none fewer — and it is the clause that keeps the orchestrator's own queue
@@ -246,7 +245,13 @@ async fn an_unaddressed_chat_leaves_the_card_unassigned() {
     let runtime = state.registry().get(&id).unwrap();
     let app = router(state);
 
-    for thread in [None, Some(""), Some("main"), Some(DEFAULT_DESK)] {
+    for thread in [
+        None,
+        Some(""),
+        Some("main"),
+        Some("General"),
+        Some(crate::ports::general_channel::GENERAL_CHANNEL_ID),
+    ] {
         let r = app
             .clone()
             .oneshot(workflow_chat_to(CROSSED, thread))
@@ -256,7 +261,7 @@ async fn an_unaddressed_chat_leaves_the_card_unassigned() {
     }
 
     let tasks = runtime.tasks().list(&id).await.unwrap();
-    assert_eq!(tasks.len(), 4, "one card per message: {tasks:?}");
+    assert_eq!(tasks.len(), 5, "one card per message: {tasks:?}");
     for card in &tasks {
         assert_eq!(
             card.assignee, "",
@@ -627,7 +632,7 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
     assert!(text.to_lowercase().contains("card"));
     assert_eq!(
         chat_id,
-        crate::server::ops::language::DEFAULT_DESK,
+        crate::server::ops::language::GENERAL_CHANNEL_ID,
         "an unaddressed message's notice lands in General"
     );
 }

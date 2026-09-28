@@ -244,7 +244,7 @@ impl DeskHost {
         let elsewhere: Vec<(String, String)> = desks
             .iter()
             .filter(|desk| desk.id != self.desk_id)
-            .filter(|desk| !crate::server::chat_history::is_general_chat(Some(&desk.id)))
+            .filter(|desk| !crate::ports::general_channel::is_general_spelling(&desk.id))
             .filter(|desk| {
                 desks.members(&desk.id).is_ok_and(|members| {
                     members
@@ -689,7 +689,7 @@ impl Journal for DeskHost {
         desks
             .iter()
             .filter(|desk| desk.id != self.desk_id)
-            .filter(|desk| !crate::server::chat_history::is_general_chat(Some(&desk.id)))
+            .filter(|desk| !crate::ports::general_channel::is_general_spelling(&desk.id))
             .filter(|desk| {
                 desks
                     .members(&desk.id)

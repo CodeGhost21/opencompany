@@ -1405,7 +1405,7 @@ impl CompanyAgent {
     ) -> tinyhivemind_embed::ConversationRef {
         use tinyhivemind_embed::ConversationKind;
         let (id, kind) = match chat_id {
-            Some(chat) if tinyhivemind_core::chat::is_general_chat(Some(chat)) => {
+            Some(chat) if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID => {
                 (chat.to_string(), ConversationKind::General)
             }
             Some(chat) if chat.starts_with("dm:") => (chat.to_string(), ConversationKind::Direct),
@@ -4554,9 +4554,9 @@ impl HarnessPool {
             company: company.clone(),
             agent_id: confine::CONFINED_AGENT_ID.to_string(),
             route: crate::turn_stream::LiveRoute::Chat {
-                chat_id: chat_id
-                    .map(str::to_string)
-                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                chat_id: chat_id.map(str::to_string).unwrap_or_else(|| {
+                    crate::server::ops::language::GENERAL_CHANNEL_ID.to_string()
+                }),
             },
             // A copilot turn is addressed by `chat_id` alone — this entry point
             // takes no `ChatTarget` — so its frames key by thread, as every
@@ -4854,9 +4854,9 @@ impl HarnessPool {
                 // durable reply when the caller addressed no desk (e.g. an API
                 // client that omits `chat`).
                 route: crate::turn_stream::LiveRoute::Chat {
-                    chat_id: chat_id
-                        .map(str::to_string)
-                        .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                    chat_id: chat_id.map(str::to_string).unwrap_or_else(|| {
+                        crate::server::ops::language::GENERAL_CHANNEL_ID.to_string()
+                    }),
                 },
                 // The operator message this turn answers, read off the
                 // `ChatTarget` the caller already passes. Nothing new is

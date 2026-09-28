@@ -571,7 +571,7 @@ fn agent_reply_steps_are_additive_and_omitted_when_empty() {
         parent: None,
         task_id: None,
         outputs: Vec::new(),
-        chat_id: "main".to_string(),
+        chat_id: "general".to_string(),
         agent_id: "ceo".to_string(),
         text: "hi".to_string(),
         steps: Vec::new(),
@@ -588,7 +588,7 @@ fn agent_reply_steps_are_additive_and_omitted_when_empty() {
         parent: None,
         task_id: None,
         outputs: Vec::new(),
-        chat_id: "main".to_string(),
+        chat_id: "general".to_string(),
         agent_id: "ceo".to_string(),
         text: "done".to_string(),
         steps: vec![TurnStep {

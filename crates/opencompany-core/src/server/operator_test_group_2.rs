@@ -162,7 +162,7 @@ async fn only_a_person_gets_a_self_promoting_card() {
             &message,
             by.as_ref(),
             None,
-            crate::server::ops::language::DEFAULT_DESK,
+            crate::server::ops::language::GENERAL_CHANNEL_ID,
         )
         .await
         .expect("the turn is accepted");

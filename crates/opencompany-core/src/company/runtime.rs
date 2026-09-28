@@ -121,10 +121,7 @@ const RELAY_SCAN_MAX_PAGES: usize = 8;
 /// thread and has no origin conversation to review it in.
 #[cfg(feature = "openhuman")]
 fn is_review_target(card: &TaskRecord, desk: &str) -> bool {
-    card.column == crate::ports::tasks::COLUMN_IN_REVIEW
-        && card.origin_chat_id().is_some_and(|origin| {
-            crate::server::chat_history::same_conversation(Some(origin), Some(desk))
-        })
+    card.column == crate::ports::tasks::COLUMN_IN_REVIEW && card.origin_chat_id() == Some(desk)
 }
 
 /// Whether a company should come up with the emergency stop engaged, given what
@@ -4318,18 +4315,9 @@ impl CompanyRuntime {
             // sequence means the recorded parent was never a valid root.
             _ => return None,
         };
-        // Compared through the same rule the console renders by
-        // ([`same_conversation`](crate::server::chat_history::same_conversation)),
-        // never as raw strings. The General desk has four spellings — `None`
-        // from an unaddressed chat post, `""` from older events, the console's
-        // `"main"`, and `"General"` itself — and a raw compare rejects the pair
-        // it is *most* likely to be handed: an unaddressed message is journaled
-        // with `chat: None` and rendered under General, so a reply to it arrives
-        // here as `None` vs `"General"`. That mismatch dropped the parent and
-        // resumed in the channel — issue #435's own symptom, surviving inside
-        // its fix.
-        crate::server::chat_history::same_conversation(channel.as_deref(), Some(chat_id))
-            .then_some(parent)
+        let channel = channel
+            .unwrap_or_else(|| crate::ports::general_channel::GENERAL_CHANNEL_ID.to_string());
+        (channel == chat_id).then_some(parent)
     }
 
     /// Files a durable mention notification for the people `mentions` names in
@@ -4376,8 +4364,8 @@ impl CompanyRuntime {
     /// `refuse_dispatch` return no relay at all) contributes nothing here
     /// either. An **empty** `chat_id` is still a real destination, not an
     /// absent one: `origin_chat_id` preserves `Some("")` for a card spawned
-    /// from General, and `chat_history::same_conversation` treats `""` as an
-    /// alias for General — so it must be journaled, not discarded.
+    /// from a legacy General row, which decodes to #general — so it must be
+    /// journaled, not discarded.
     ///
     /// Best-effort, like `HarnessBrain::journal_task_outcome`'s own writes: a
     /// failure here is logged, never propagated. By the time this runs the
@@ -4590,7 +4578,7 @@ impl CompanyRuntime {
                 task_id: None,
                 chat_id,
                 ..
-            } if crate::server::chat_history::same_conversation(Some(&chat_id), Some(desk)) => {
+            } if chat_id == desk => {
                 let Some((pill_seq, task_id)) = self.settle_pill_before(desk, parent).await? else {
                     return Ok(None);
                 };
@@ -4645,12 +4633,7 @@ impl CompanyRuntime {
                         task_id,
                         origin_chat_id,
                         ..
-                    } if origin_chat_id.as_deref().is_some_and(|origin| {
-                        crate::server::chat_history::same_conversation(Some(origin), Some(desk))
-                    }) =>
-                    {
-                        Some((seq, task_id))
-                    }
+                    } if origin_chat_id.as_deref() == Some(desk) => Some((seq, task_id)),
                     _ => None,
                 }
             });
@@ -4739,10 +4722,7 @@ impl CompanyRuntime {
                         agent_id,
                         ..
                     } if (system_is_a_teammate || agent_id != crate::ports::SYSTEM_AUTHOR)
-                        && crate::server::chat_history::same_conversation(
-                            Some(chat_id.as_str()),
-                            Some(desk),
-                        ) =>
+                        && chat_id == desk =>
                     {
                         return Ok(seq == parent);
                     }
@@ -4837,11 +4817,7 @@ impl CompanyRuntime {
                     task_id: found_id,
                     origin_chat_id,
                     ..
-                } if found_id == task_id
-                    && origin_chat_id.as_deref().is_some_and(|origin| {
-                        crate::server::chat_history::same_conversation(Some(origin), Some(desk))
-                    }) =>
-                {
+                } if found_id == task_id && origin_chat_id.as_deref() == Some(desk) => {
                     Some(stored.seq)
                 }
                 _ => None,
@@ -6353,15 +6329,7 @@ impl CompanyRuntime {
     /// a verdict does not mean the same thing to each, so a group must never
     /// mix them. Oldest-first, the order `pending` already returns.
     ///
-    /// Matched through
-    /// [`stamped_conversation_is`](crate::server::chat_history::stamped_conversation_is)
-    /// rather than `same_conversation`, so a blocker that names **no** thread is
-    /// pending in no conversation rather than in General. `park_blocker` always
-    /// stamps the sender's DM, but `cycle_conversation` hands back a thread-less
-    /// `ApprovalConversation` for every park that came from no conversation at
-    /// all — a planning pass, a scheduler tick, an unaddressed trigger — and
-    /// through `same_conversation` each of those read as pending in `#general`,
-    /// where the next top-level message was consumed as its answer.
+    /// A blocker that names no thread is pending in no conversation.
     #[cfg(feature = "openhuman")]
     fn pending_blocker_groups(&self, desk: &str) -> Vec<PendingBlockerGroup> {
         let prefix = format!("{}.", crate::ports::blockers::BLOCKER_EFFECT_PREFIX);
@@ -7737,7 +7705,7 @@ fn continuation_fallback_chat_id(
     // unknown case too (a pre-#333 line with no recorded link): a reply in the
     // operator's own line is recoverable, while one in a teammate's DM reads as
     // a message that teammate never sent.
-    let general = || crate::server::ops::language::DEFAULT_DESK.to_string();
+    let general = || crate::server::ops::language::GENERAL_CHANNEL_ID.to_string();
     let Some(origin) = origin else {
         return general();
     };
