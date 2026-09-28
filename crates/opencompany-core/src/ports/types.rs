@@ -19,6 +19,9 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::company::{CompanyManifest, POLICY_MODES, Policy};
+pub use crate::ports::general_channel::{
+    GENERAL_CHANNEL_ID, GENERAL_CHANNEL_NAME, GeneralChannel, GeneralMembershipDelta,
+};
 use crate::ports::ids::{agent_slug, generate_id, now_millis};
 use crate::ports::workflow_runner::{
     DeliveryReport, WorkflowBlockedNode, WorkflowRunApprovalRow, WorkflowRunBoardRow,
@@ -4943,6 +4946,10 @@ pub struct OverlayBlob {
     /// [`CompanyStore::activation_gate_seen`]: crate::ports::store::CompanyStore::activation_gate_seen
     #[serde(default)]
     pub activation_gate_seen: bool,
+    /// The company-wide `#general` channel. Absent on rows written before it
+    /// was stored, which the record then defaults and the builder backfills.
+    #[serde(default)]
+    pub general_channel: Option<GeneralChannel>,
 }
 
 impl OverlayBlob {
@@ -4985,6 +4992,7 @@ impl OverlayBlob {
             activation_completed_at: record.activation_completed_at,
             created_at_millis: record.created_at_millis,
             activation_gate_seen,
+            general_channel: Some(record.general_channel.clone()),
         }
     }
 
@@ -5034,6 +5042,7 @@ impl OverlayBlob {
                     // has never been seen by activation-aware code — exactly
                     // what `false` means here.
                     activation_gate_seen: false,
+                    general_channel: None,
                 })
                 .map_err(|_| original),
         }
@@ -5326,6 +5335,10 @@ pub struct CompanyRecord {
     /// is the same backward-compat fallback the two fields above use.
     #[serde(default)]
     pub created_at_millis: Option<u64>,
+    /// The company-wide `#general` channel. Absent on records written before
+    /// it was stored; `RuntimeBuilder::build` creates it and syncs its members.
+    #[serde(default)]
+    pub general_channel: GeneralChannel,
 }
 
 /// What a teammate key an operator or a model typed resolves to on a company's
@@ -5374,7 +5387,7 @@ impl CompanyRecord {
     /// desks, budgets, policy, setup) starts absent here, exactly as it does
     /// for a company that has just been loaded from its bundle.
     pub fn from_manifest(id: CompanyId, manifest: CompanyManifest) -> Self {
-        Self {
+        let mut record = Self {
             id,
             manifest,
             ledger: Vec::new(),
@@ -5397,7 +5410,10 @@ impl CompanyRecord {
             activation_completed_at: None,
             created_at_millis: None,
             name_confirmed: false,
-        }
+            general_channel: GeneralChannel::default(),
+        };
+        record.sync_general_members();
+        record
     }
 
     /// The effective member ids of a desk: the desk's declared members first

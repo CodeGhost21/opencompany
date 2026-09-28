@@ -222,6 +222,7 @@ async fn a_private_dm_relay_is_authored_by_the_dm_agent_not_the_orchestrator() {
     // exactly as `HarnessBrain` would. Journaling never reads it; it only
     // drives `relay_speaker`.
     let record = crate::ports::types::CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

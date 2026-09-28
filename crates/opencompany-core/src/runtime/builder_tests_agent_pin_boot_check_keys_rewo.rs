@@ -385,6 +385,7 @@ async fn a_desk_added_to_the_manifest_since_the_last_boot_is_wired() {
     let id = CompanyId::new("acme");
     FsCompanyStore::new(dir.path())
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_desk_hive: Vec::new(),

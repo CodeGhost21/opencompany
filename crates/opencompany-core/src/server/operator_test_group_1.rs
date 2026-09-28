@@ -542,6 +542,7 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),

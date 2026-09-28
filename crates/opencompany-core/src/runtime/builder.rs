@@ -2761,6 +2761,24 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_desks.clone())
             .unwrap_or_default();
+        let general_channel = {
+            let mut roster = CompanyRecord::from_manifest(id.clone(), self.manifest.clone());
+            roster.overlay_agents = overlay_agents.clone();
+            roster.overlay_retired_agents = overlay_retired_agents.clone();
+            if let Some(stored) = existing.as_ref() {
+                roster.general_channel = stored.general_channel.clone();
+            }
+            let delta = roster.sync_general_members();
+            if !delta.is_empty() {
+                tracing::debug!(
+                    company = %id,
+                    added = ?delta.added,
+                    removed = ?delta.removed,
+                    "[builder] #general membership synced to the roster"
+                );
+            }
+            roster.general_channel
+        };
 
         // Desks are delivery destinations as well as inbound conversation
         // threads. Resolve both manifest and operator-created candidates
@@ -2798,6 +2816,7 @@ impl RuntimeBuilder {
             name_confirmed: false,
             activation_completed_at: None,
             created_at_millis: None,
+            general_channel: general_channel.clone(),
         };
         let mut desk_ids = Vec::new();
         let candidates = desk_record
@@ -3683,6 +3702,7 @@ impl RuntimeBuilder {
                                 name_confirmed,
                                 activation_completed_at,
                                 created_at_millis,
+                                general_channel: general_channel.clone(),
                             };
                             // The company's other declared harnesses, each on
                             // its own pool and its own provider. Empty unless
@@ -3987,6 +4007,7 @@ impl RuntimeBuilder {
                     name_confirmed,
                     activation_completed_at,
                     created_at_millis,
+                    general_channel,
                 },
                 gate_seen_to_persist,
             )
@@ -4848,6 +4869,9 @@ mod tests_core;
 #[cfg(test)]
 #[path = "builder_tests_desk_tool_carry.rs"]
 mod tests_desk_tool_carry;
+#[cfg(test)]
+#[path = "builder_tests_general_channel.rs"]
+mod tests_general_channel;
 #[cfg(test)]
 #[path = "builder_tests_part1.rs"]
 mod tests_part1;

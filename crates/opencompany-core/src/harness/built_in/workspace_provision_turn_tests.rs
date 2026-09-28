@@ -227,6 +227,7 @@ fn company() -> CompanyId {
 
 fn record(overlays: Vec<OverlayAgent>) -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),

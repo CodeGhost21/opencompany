@@ -19,6 +19,7 @@ pub mod deep_trace;
 pub mod economy;
 pub mod events;
 pub mod facts;
+pub mod general_channel;
 pub mod inbox;
 pub mod journal;
 pub mod ledgers;

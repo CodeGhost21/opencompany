@@ -38,6 +38,7 @@ fn the_setup_answers_survive_the_overlay_blob() {
         automate: "meta ads, order dispatch".into(),
     };
     let mut record = CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
