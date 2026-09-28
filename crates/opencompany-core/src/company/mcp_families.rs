@@ -73,6 +73,22 @@ fn renderable(value: &str) -> bool {
     !value.is_empty() && !value.contains(['`', '"', '\\']) && !value.chars().any(char::is_control)
 }
 
+/// The key two catalogues may be claimed to share a server by, when the address
+/// is strong enough to carry that claim.
+///
+/// [`normalize_endpoint`] drops the query and fragment, which is what the ops
+/// matcher wants and too weak to prove identity here: two tenant- or
+/// credential-bearing URLs collapse to one key. Pairing tells the model one
+/// server is reachable through the other catalogue, and a wrong claim dispatches
+/// it somewhere else entirely, so an address carrying either part is refused as
+/// evidence rather than stripped down to look like evidence.
+fn pairing_identity(endpoint: &str) -> Option<String> {
+    if endpoint.contains('?') || endpoint.contains('#') {
+        return None;
+    }
+    normalize_endpoint(endpoint)
+}
+
 /// The brief naming each server this agent can reach and the tool that reaches
 /// it, or an empty string when it can reach none.
 ///
@@ -109,10 +125,16 @@ pub(crate) fn server_family_brief(
         return String::new();
     }
 
-    let mut by_endpoint: BTreeMap<String, usize> = BTreeMap::new();
+    let mut declared_by_identity: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, decl) in declared.iter().enumerate() {
-        if let Some(key) = normalize_endpoint(&decl.endpoint) {
-            by_endpoint.entry(key).or_insert(index);
+        if let Some(key) = pairing_identity(&decl.endpoint) {
+            declared_by_identity.entry(key).or_default().push(index);
+        }
+    }
+    let mut installs_per_identity: BTreeMap<String, usize> = BTreeMap::new();
+    for row in &installed {
+        if let Some(key) = row.endpoint.as_deref().and_then(pairing_identity) {
+            *installs_per_identity.entry(key).or_insert(0) += 1;
         }
     }
 
@@ -122,8 +144,14 @@ pub(crate) fn server_family_brief(
         let paired = row
             .endpoint
             .as_deref()
-            .and_then(normalize_endpoint)
-            .and_then(|key| by_endpoint.get(&key).copied())
+            .and_then(pairing_identity)
+            .filter(|key| installs_per_identity.get(key) == Some(&1))
+            .and_then(
+                |key| match declared_by_identity.get(&key).map(Vec::as_slice) {
+                    Some([only]) => Some(*only),
+                    _ => None,
+                },
+            )
             .filter(|index| !also_installed_as.contains_key(index));
         match paired {
             Some(index) => {

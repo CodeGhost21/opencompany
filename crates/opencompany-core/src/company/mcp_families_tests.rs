@@ -329,6 +329,74 @@ fn the_brief_never_claims_to_be_every_mcp_server_an_agent_has() {
     );
 }
 
+/// A gateway can front several logical servers on one address, and
+/// `normalize_endpoint` drops the query, so two tenant-bearing URLs reduce to the
+/// same key. Claiming one server is reachable through the other catalogue would
+/// send the model somewhere else entirely, so an address carrying a query is not
+/// accepted as evidence of identity.
+#[test]
+fn a_tenant_bearing_query_is_not_evidence_that_two_rows_are_one_server() {
+    let brief = server_family_brief(
+        &[decl("gateway", "https://gw.example/mcp?tenant=alpha")],
+        &[install(
+            "exa-7f3",
+            "Exa",
+            Some("https://gw.example/mcp?tenant=beta"),
+        )],
+        &grants(&["mcp:*", "mcp_registry"]),
+    );
+    assert!(
+        !brief.contains("the same server"),
+        "the query is stripped before comparison, so it cannot carry the claim: {brief}"
+    );
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- `")).count(),
+        2,
+        "{brief}"
+    );
+}
+
+/// Two installs on one address leave no way to say which of them the declared
+/// server is, so neither is paired with it.
+#[test]
+fn an_address_claimed_by_two_installs_pairs_with_neither() {
+    let brief = server_family_brief(
+        &[decl("notion", "https://notion.example/mcp")],
+        &[
+            install("id-a", "Server A", Some("https://notion.example/mcp")),
+            install("id-b", "Server B", Some("https://notion.example/mcp")),
+        ],
+        &grants(&["mcp:*", "mcp_registry"]),
+    );
+    assert!(!brief.contains("the same server"), "{brief}");
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- `")).count(),
+        3,
+        "{brief}"
+    );
+}
+
+/// The reconciled line is still produced when the address really can carry the
+/// claim \u2014 the guard above must not have turned pairing off altogether.
+#[test]
+fn a_plain_shared_address_still_reconciles_into_one_line() {
+    let brief = server_family_brief(
+        &[decl("notion", "https://notion.example/mcp")],
+        &[install(
+            "exa-7f3",
+            "Exa",
+            Some("https://notion.example/mcp/"),
+        )],
+        &grants(&["mcp:*", "mcp_registry"]),
+    );
+    assert!(brief.contains("the same server"), "{brief}");
+    assert_eq!(
+        brief.lines().filter(|l| l.starts_with("- `")).count(),
+        1,
+        "{brief}"
+    );
+}
+
 /// A quote closes the JSON-shaped argument the key sits inside, so the printed key
 /// stops matching the value the model must send.
 #[test]
