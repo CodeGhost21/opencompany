@@ -524,12 +524,20 @@ const FETCH_VERBS: &[&str] = &[
 ];
 
 /// Forms that execute a string the skill constructed.
+///
+/// `eval $` rather than `eval $(` and `iex $` beside `iex(`, because the
+/// argument does not have to be a substitution written in place: two statements
+/// (`irm … ; iex $payload`, `x=$(curl …); eval $x`) execute fetched bytes just
+/// as surely and matched none of the narrower forms — no pipe, so no sink
+/// either. `eval $(` is a subset of `eval $` and is dropped rather than kept
+/// beside it.
 const EVAL_FORMS: &[&str] = &[
-    "eval $(",
+    "eval $",
     "eval `",
     "invoke-expression",
     "iex(",
     "iex (",
+    "iex $",
 ];
 
 /// Paths that only a credential read would name.

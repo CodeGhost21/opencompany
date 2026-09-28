@@ -93,10 +93,7 @@ fn the_summary_names_the_store_and_the_knob() {
         .join("openhuman")
         .join("workspace")
         .join("tinyagents_store");
-    assert!(
-        summary.contains(&store.display().to_string()),
-        "{summary}"
-    );
+    assert!(summary.contains(&store.display().to_string()), "{summary}");
     assert!(summary.contains("OPENCOMPANY_DATA_DIR"));
 
     let env_summary = resolve(Some("/srv/oh"), Path::new("/data")).summary();
