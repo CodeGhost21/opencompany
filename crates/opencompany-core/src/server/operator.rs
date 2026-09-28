@@ -3699,12 +3699,11 @@ async fn chat_and_emit(
     mut message: ChatMessage,
     by: Option<Actor>,
 ) -> Result<ChatOk, ApiError> {
-    message.chat = crate::ports::general_channel::decode_general_chat_opt(message.chat.take());
-    let desk = message
-        .chat
-        .clone()
-        .unwrap_or_else(|| GENERAL_CHANNEL_ID.to_string());
+    let desk = crate::ports::general_channel::decode_general_chat_id(
+        message.chat.take().unwrap_or_default(),
+    );
     tracing::debug!(company = %id, chat = %desk, "[chat] accepted chat address");
+    message.chat = Some(desk.clone());
     // Issue #1757: the Operator channel is a **read-only** aggregation surface —
     // a "what happened" feed of workflow reports, not a conversation. Refuse a
     // send addressed to it rather than journaling an `OperatorMessage` under the

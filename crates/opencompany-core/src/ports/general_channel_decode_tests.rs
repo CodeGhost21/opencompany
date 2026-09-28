@@ -75,3 +75,37 @@ fn an_absent_optional_chat_stays_absent() {
         GENERAL_CHANNEL_ID
     );
 }
+
+#[test]
+fn a_legacy_teammate_called_main_keeps_its_dm_apart_from_general() {
+    let record = crate::ports::types::CompanyRecord::from_manifest(
+        crate::ports::types::CompanyId::new("acme"),
+        toml::from_str(
+            "[company]\nname = \"Acme\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\n\
+             [[agent]]\nid = \"main\"\nrole = \"Legacy\"\n",
+        )
+        .expect("manifest"),
+    );
+    let (id, name) = crate::server::chat_history::desk_aliases(&record, Some("dm:main"));
+    assert_eq!(id, "dm:main");
+
+    let dm = decode(r#"{"kind":"AgentReply","chat_id":"dm:main","agent_id":"main","text":"hi"}"#);
+    assert!(owns(&id, &name, &dm));
+    assert!(!owns(GENERAL_CHANNEL_ID, GENERAL_CHANNEL_NAME, &dm));
+
+    let general =
+        decode(r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"all"}"#);
+    assert!(
+        !owns(&id, &name, &general),
+        "#general is not the teammate's DM"
+    );
+
+    assert_eq!(
+        crate::runtime::delegation_tools::chat_responder(&record, "dm:main").as_deref(),
+        Some("main")
+    );
+    assert_eq!(
+        crate::runtime::delegation_tools::chat_responder(&record, GENERAL_CHANNEL_ID),
+        None
+    );
+}

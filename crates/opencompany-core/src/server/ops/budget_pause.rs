@@ -246,7 +246,9 @@ async fn redeem_budget_pause(
     let event = CompanyEvent::OperatorMessage {
         text: marker.message.clone(),
         by: company.actor.clone(),
-        chat: crate::ports::general_channel::decode_general_chat_opt(marker.chat_id.clone()),
+        chat: Some(crate::ports::general_channel::decode_general_chat_id(
+            marker.chat_id.clone().unwrap_or_default(),
+        )),
         parent: marker.parent,
         deliverable: marker.deliverable,
         mentions: marker.mentions.clone(),

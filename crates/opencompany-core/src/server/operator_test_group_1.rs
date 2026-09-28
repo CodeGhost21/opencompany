@@ -300,7 +300,7 @@ async fn an_unknown_addressee_leaves_the_card_unassigned() {
 /// `origin_chat_id` is the field issue #151 added for exactly this, and the
 /// console already renders the marker in whatever channel it names — the
 /// route was simply never filling it in. An unaddressed message opens a card
-/// with no origin.
+/// whose origin is #general.
 #[tokio::test]
 async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
     let home_dir = home();
@@ -333,24 +333,14 @@ async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
         .iter()
         .find(|c| c.title == "Draft the investor update")
         .expect("the second card");
-    // No desk, therefore no conversation and no thread inside one. Before
-    // #1890 step 5 this card carried a thread root beside no desk — the
-    // drifted pair — and the root was inert: `relay_reply` posts back
-    // through the desk, so a root with nothing to post into named nothing.
-    // `TaskOrigin` cannot hold that state, so it is simply absent now.
-    //
-    // Restoring a real origin here means stamping the General desk the
-    // route already folds this message into, which is a behaviour change
-    // and not this one.
     assert_eq!(
         unaddressed.origin_chat_id(),
-        None,
-        "an unaddressed message has no conversation to answer in"
+        Some("general"),
+        "an unaddressed message is a #general conversation"
     );
-    assert_eq!(
-        unaddressed.origin_parent(),
-        None,
-        "and therefore no thread inside one either"
+    assert!(
+        unaddressed.origin_parent().is_some(),
+        "rooted on the message that opened it"
     );
 
     // The addressed card, found by title rather than by index: the two are
@@ -635,4 +625,32 @@ async fn a_card_open_failure_is_reported_in_the_channel_not_swallowed() {
         crate::server::ops::language::GENERAL_CHANNEL_ID,
         "an unaddressed message's notice lands in General"
     );
+}
+
+#[tokio::test]
+async fn an_unaddressed_chat_is_stored_on_general() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_roster(&home).await;
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).unwrap();
+    let app = router(state);
+
+    let r = app
+        .oneshot(workflow_chat_to("draft the investor update", None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let chats: Vec<Option<String>> = runtime
+        .events()
+        .read_from(&id, EventSeq::new(0), 500)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|stored| match stored.event {
+            crate::ports::types::CompanyEvent::OperatorMessage { chat, .. } => Some(chat),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chats, vec![Some("general".to_string())]);
 }
