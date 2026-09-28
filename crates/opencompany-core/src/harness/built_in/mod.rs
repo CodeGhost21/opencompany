@@ -749,9 +749,10 @@ pub struct CompanyAgent {
     /// telemetry cells. Held here so `meter_turn_costs` reads the SAME
     /// instance the turn ran through.
     chat_model: Arc<dyn HarnessModel>,
-    /// The tools this agent's belt wired when it was built. Kept so a roster
-    /// rebuild can tell whether the catalogue moved — see
-    /// [`Self::catalogue_brief_stale`].
+    /// Always empty for an embedded agent: there is no `opencompany` MCP
+    /// catalogue left to brief it about, so [`Self::catalogue_brief_stale`]'s
+    /// comparison can never find this field to have moved. Kept as the type
+    /// the rebuild-comparison plumbing expects.
     served_catalogue: Vec<String>,
     /// Whether the session this agent resumes may still carry an OLDER brief
     /// than [`Self::served_catalogue`].
@@ -1251,19 +1252,6 @@ impl CompanyAgent {
             .iter()
             .map(|tool| tool.name().to_string())
             .collect();
-        // **The catalogue a rebuild compares is the belt, not the MCP list.**
-        //
-        // It used to be `allow_tools`, which was every served tool back when
-        // this crate's tools reached the model over the `opencompany` server.
-        // They are native now, so `allow_tools` is a constant — the four
-        // speech verbs — and a catalogue that cannot move can never be found
-        // stale. A console grant that wires `workspace.write` changed the
-        // agent's tools and owed the live session a brief, and nothing said
-        // so.
-        //
-        // The belt is what actually changed, and it is what the pinned
-        // definition scopes, so it is what a rebuild has to compare.
-        let served_catalogue = belt_names.clone();
         let gate = Arc::clone(&blueprint.policy);
         let mut shared_belt = crate::hive::tools::share_belt(
             std::mem::take(&mut blueprint.tools)
