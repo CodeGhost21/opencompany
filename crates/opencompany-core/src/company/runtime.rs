@@ -4926,15 +4926,17 @@ impl CompanyRuntime {
             .journal
             .approval_conversation(approval_id)
             .unwrap_or_default();
-        let thread = conversation.thread;
-        // Where the reply goes when the approval was raised in no conversation
-        // at all — a workflow node's parked tool call, a scheduler tick. Read
-        // once for the whole report: every response of one continuation answers
-        // the same approval, so they cannot land in two places.
-        let nowhere =
-            continuation_fallback_chat_id(self.journal.approval_origin(approval_id).as_ref());
+        let chat_id = continuation_chat_id(
+            conversation.thread,
+            self.journal.approval_origin(approval_id).as_ref(),
+        );
+        tracing::debug!(
+            company = %self.id,
+            approval_id = %approval_id,
+            chat = %chat_id,
+            "[approval] continuation answers here"
+        );
         for response in &mut report.responses {
-            let chat_id = thread.clone().unwrap_or_else(|| nowhere.clone());
             // Checked against the channel actually being answered into, not
             // against the recorded thread: when `thread` is absent the reply
             // goes to the run or card the work belongs to, and a root belonging
@@ -5024,11 +5026,10 @@ impl CompanyRuntime {
             .journal
             .approval_conversation(approval_id)
             .unwrap_or_default();
-        // The failure notice lands where `publish_continuation` would have put
-        // the answer.
-        let thread = conversation.thread.unwrap_or_else(|| {
-            continuation_fallback_chat_id(self.journal.approval_origin(approval_id).as_ref())
-        });
+        let thread = continuation_chat_id(
+            conversation.thread,
+            self.journal.approval_origin(approval_id).as_ref(),
+        );
         let parent = self.resolvable_parent(conversation.parent, &thread).await;
         if let Err(err) = self
             .events
@@ -7669,6 +7670,30 @@ fn ask_which_prompt(groups: &[PendingBlockerGroup]) -> String {
     format!(
         "A few different things are blocked in this chat. Which one do you mean?\n{items}\n\nReply naming it and what you'd like done."
     )
+}
+
+/// Where a continuation's reply is journaled: a workflow run's park answers on
+/// its run whatever conversation started the run, and any other park answers in
+/// the conversation it was raised in, falling back to its origin.
+fn continuation_chat_id(
+    thread: Option<String>,
+    origin: Option<&crate::runtime::journal::ApprovalOrigin>,
+) -> String {
+    if let Some(run) = origin.and_then(workflow_run_of_origin) {
+        return run;
+    }
+    thread.unwrap_or_else(|| continuation_fallback_chat_id(origin))
+}
+
+/// The workflow run a park's origin belongs to: an explicitly unlinked park
+/// that carries a run id.
+fn workflow_run_of_origin(origin: &crate::runtime::journal::ApprovalOrigin) -> Option<String> {
+    matches!(
+        origin.task,
+        Some(crate::runtime::journal::TaskLink::Unlinked)
+    )
+    .then(|| origin.run_id.clone())
+    .flatten()
 }
 
 /// Where a continuation's reply is journaled when the approval it resumes was

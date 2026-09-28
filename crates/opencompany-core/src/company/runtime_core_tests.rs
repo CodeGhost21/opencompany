@@ -198,6 +198,64 @@ fn only_an_unlinked_park_with_a_run_id_names_a_workflow_run() {
     assert_eq!(super::workflow_run_of(&parked(None, Some("run-1"))), None);
 }
 
+/// A workflow run's park answers on its run even when the message that
+/// started the run was a #general conversation; a chat turn's park answers in
+/// the conversation it was raised in.
+#[test]
+fn a_workflow_continuation_answers_on_its_run_not_in_general() {
+    use crate::runtime::journal::{ApprovalOrigin, TaskLink};
+
+    let origin = |task: Option<TaskLink>, run_id: Option<&str>| ApprovalOrigin {
+        at_millis: 1,
+        kind: "web_fetch".to_string(),
+        task,
+        run_id: run_id.map(str::to_string),
+        thread: None,
+        parent: None,
+        cycle: None,
+    };
+    let general = Some("general".to_string());
+
+    assert_eq!(
+        super::continuation_chat_id(
+            general.clone(),
+            Some(&origin(Some(TaskLink::Unlinked), Some("run-9")))
+        ),
+        "run-9",
+    );
+    assert_eq!(
+        super::continuation_chat_id(
+            general.clone(),
+            Some(&origin(Some(TaskLink::Unlinked), None))
+        ),
+        "general",
+    );
+    assert_eq!(
+        super::continuation_chat_id(
+            Some("engineering".to_string()),
+            Some(&origin(
+                Some(TaskLink::Task {
+                    id: "card-3".to_string()
+                }),
+                Some("attempt-4")
+            ))
+        ),
+        "engineering",
+    );
+    assert_eq!(
+        super::continuation_chat_id(
+            None,
+            Some(&origin(
+                Some(TaskLink::Task {
+                    id: "card-3".to_string()
+                }),
+                Some("attempt-4")
+            ))
+        ),
+        "card-3",
+    );
+}
+
 /// Issue #1092: a continuation whose approval was raised in no conversation
 /// must never be journaled into the answering teammate's DM.
 ///
