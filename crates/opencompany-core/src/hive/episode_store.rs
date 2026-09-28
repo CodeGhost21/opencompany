@@ -364,6 +364,7 @@ impl PersistedEpisode {
     }
 
     /// This checkpoint as the row the journal stores.
+    #[cfg(any(feature = "openhuman", test))]
     pub(crate) fn to_event(&self) -> CompanyEvent {
         CompanyEvent::EpisodeStateSaved {
             episode_id: self.episode_id.clone(),
