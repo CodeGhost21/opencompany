@@ -2322,8 +2322,7 @@ impl CompanyRuntime {
                 .is_some_and(|record| record.resolve_desk_id(desk).is_some());
             if !has_real_recipient {
                 return Err(OpenCompanyError::InvalidRequest(
-                    "the Operator channel is a read-only feed of workflow reports and \
-                     notifications — it cannot be posted to"
+                    "the Operator channel is a read-only system channel — it cannot be posted to"
                         .to_string(),
                 ));
             }
@@ -2341,8 +2340,7 @@ impl CompanyRuntime {
                 });
             if !has_real_operator_recipient {
                 return Err(OpenCompanyError::InvalidRequest(
-                    "the Operator channel is a read-only feed of workflow reports and \
-                     notifications — it cannot be posted to"
+                    "the Operator channel is a read-only system channel — it cannot be posted to"
                         .to_string(),
                 ));
             }
