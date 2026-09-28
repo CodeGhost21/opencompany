@@ -174,9 +174,15 @@ fn a_windows_rooted_or_prefixed_prompt_file_path_is_refused() {
     // TOML literal strings (single-quoted): a double-quoted "C:\outside" would
     // read \o as an escape and fail to parse before the guard is reached.
     for escape in [
+        // `RootDir`: rooted but with no prefix, which is the form `is_absolute`
+        // answers `false` to on Windows.
         r"\etc\passwd",
+        // `Prefix(Disk)`.
         r"C:\outside\secrets.md",
-        r"\server\share\secrets.md",
+        // `Prefix(UNC)` — **two** leading backslashes. One would be another
+        // `RootDir` case wearing a UNC costume, which is what this line said
+        // before and why the UNC arm was not actually covered.
+        r"\\server\share\secrets.md",
     ] {
         let dir = bundle(&[(
             "copywriter.toml",
