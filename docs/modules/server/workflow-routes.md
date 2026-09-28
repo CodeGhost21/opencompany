@@ -204,8 +204,8 @@ are refused with a `400` when the workflow is written, not only when it runs:
 
 The `operator` destination above is a delivery-plane fact only — it is unrelated
 to how the console *lists* anything. `GET {scope}/desks` carries zero operator
-logic: it is the company's real desks (manifest `[[group_chat]]`s plus
-operator-created overlay desks) and nothing else. There is no separate Operator
+logic: it is `#general` followed by the company's real desks (manifest
+`[[group_chat]]`s plus operator-created overlay desks), and nothing else. There is no separate Operator
 feed to list: delivering to `operator` files a notification and posts the
 report in the DM of the agent responsible for the workflow, and the console
 offers no other surface for it.
