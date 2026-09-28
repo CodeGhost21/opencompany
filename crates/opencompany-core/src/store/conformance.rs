@@ -314,6 +314,7 @@ fn sample_agent_overrides() -> Vec<crate::ports::types::AgentOverride> {
 /// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
+        general_channel: sample_general_channel(),
         overlay_desk_hive: Vec::new(),
         overlay_agent_edits: sample_agent_overrides(),
         // Non-empty so a backend that drops the field is caught: without the
@@ -362,6 +363,15 @@ fn record(id: &CompanyId) -> CompanyRecord {
         name_confirmed: false,
         activation_completed_at: None,
         created_at_millis: None,
+    }
+}
+
+/// A stored `#general` with members, so a backend that drops the field fails.
+fn sample_general_channel() -> crate::ports::types::GeneralChannel {
+    crate::ports::types::GeneralChannel {
+        id: crate::ports::types::GENERAL_CHANNEL_ID.to_string(),
+        name: crate::ports::types::GENERAL_CHANNEL_NAME.to_string(),
+        members: vec!["ceo".to_string(), "writer".to_string()],
     }
 }
 
@@ -590,6 +600,11 @@ pub async fn assert_isolation_by_company(
         loaded.overlay_retired_agents,
         vec!["eng".to_string()],
         "overlay_retired_agents did not survive save/load"
+    );
+    assert_eq!(
+        loaded.general_channel,
+        sample_general_channel(),
+        "general_channel did not survive save/load"
     );
     assert!(
         loaded
@@ -1330,6 +1345,11 @@ pub async fn assert_export_totality(
         vec!["eng".to_string()],
         "overlay_retired_agents did not round-trip through the store — a removed \
          teammate would come back on the next load"
+    );
+    assert_eq!(
+        loaded.general_channel,
+        sample_general_channel(),
+        "general_channel did not round-trip through the store"
     );
     // Issue #562: the console-set tier round-trips on every backend, for the
     // same reason — an approval gate that forgets across a restart is not a gate.

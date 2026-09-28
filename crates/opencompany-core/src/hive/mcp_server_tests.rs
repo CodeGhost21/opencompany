@@ -219,6 +219,9 @@ async fn initialize_and_list_tools_serve_speech_and_custom_tools() {
             // conductor and is served because the vocabulary is derived from
             // the library rather than mirrored here.
             "ask",
+            // `ask_teammates` opens the same conversation naming several
+            // seats at once.
+            "ask_teammates",
             "complete_episode",
             "read",
             "who_am_i"
@@ -422,7 +425,7 @@ async fn the_belt_read_answers_what_the_served_read_answers() {
     let read = crate::hive::tools::ConversationReadTool::new(
         Arc::clone(host.in_flight()),
         Arc::clone(&bound),
-        journal(),
+        Some(journal()),
     );
     assert_eq!(read.name(), crate::hive::tools::READ_TOOL);
     assert_eq!(
@@ -581,7 +584,7 @@ async fn mount_serves_the_same_route_on_a_caller_router() {
     })
     .build()
     .unwrap();
-    assert_eq!(client.list_tools().await.unwrap().len(), 7);
+    assert_eq!(client.list_tools().await.unwrap().len(), 8);
 }
 
 #[test]

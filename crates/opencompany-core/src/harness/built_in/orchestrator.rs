@@ -4118,7 +4118,7 @@ impl Tool for AddAgentTool {
             model: None,
             harness: None,
         };
-        record.overlay_agents.push(agent);
+        let general_delta = record.hire_overlay_agent(agent);
         self.store.save(&record).await?;
 
         // The audit row for one agent creating another.
@@ -4146,6 +4146,12 @@ impl Tool for AddAgentTool {
                 .await
         {
             tracing::warn!(error = %err, "teammate-added audit row could not be journaled");
+        }
+        if let Some(events) = &self.events
+            && let Some(event) = general_delta.into_event(None)
+            && let Err(err) = events.append(&self.company, event).await
+        {
+            tracing::warn!(error = %err, "#general membership change could not be journaled");
         }
 
         // Issue #619: the mint is observable — the minter, the teammate, and

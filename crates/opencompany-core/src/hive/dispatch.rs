@@ -48,7 +48,7 @@ pub fn surface_of(
     let Some(chat) = chat else {
         return Surface::Single;
     };
-    if crate::server::chat_history::is_general_chat(Some(chat)) {
+    if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID {
         return Surface::Single;
     }
     // An operator DM, when one runs a hive.

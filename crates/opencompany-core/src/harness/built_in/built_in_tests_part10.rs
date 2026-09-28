@@ -289,7 +289,7 @@ async fn a_pooled_teammate_reads_its_conversation_by_name_on_its_own_belt() {
 }
 
 #[tokio::test]
-async fn a_pooled_teammate_has_no_read_tool_without_an_events_log() {
+async fn a_pooled_teammate_without_an_events_log_keeps_a_refusing_read() {
     let dir = tempfile::tempdir().unwrap();
     let context = Arc::new(MockContext::default());
     let rec = capped_record();
@@ -297,12 +297,18 @@ async fn a_pooled_teammate_has_no_read_tool_without_an_events_log() {
     let pool = HarnessPool::new();
     pool.ensure(&rec, &deps).await.expect("ensure");
     let agent = pool.agent(&rec.id, "ceo").await.expect("ceo");
+    let read = agent
+        .tools()
+        .iter()
+        .find(|tool| tool.name() == crate::hive::tools::READ_TOOL)
+        .cloned()
+        .expect("`read` stays on the belt");
+    let refused = read.execute(serde_json::json!({})).await.unwrap();
+    assert!(refused.is_error);
     assert!(
-        !agent
-            .tools()
-            .iter()
-            .any(|tool| tool.name() == crate::hive::tools::READ_TOOL),
-        "no events log means `read` has nowhere to read from"
+        refused.output().contains("no conversation journal"),
+        "{}",
+        refused.output()
     );
 }
 

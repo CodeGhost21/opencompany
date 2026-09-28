@@ -618,12 +618,16 @@ pub const READ_TOOL: &str = "read";
 /// `read` on a pooled agent's own belt: the conversation its in-flight turn
 /// answers in, read through [`read_conversation`].
 ///
+/// Always on the belt, even for an agent built without an event log: a
+/// resumed session keeps every tool declaration it was once sent, so `read`
+/// must stay executable. Without a log it refuses.
+///
 /// Built before the runtime settles the agent's id, so the id is bound
 /// afterwards through the shared cell handed to [`new`](Self::new).
 pub struct ConversationReadTool {
     in_flight: Arc<InFlightRegistry>,
     runtime_agent_id: Arc<std::sync::OnceLock<String>>,
-    events: Arc<dyn EventLog>,
+    events: Option<Arc<dyn EventLog>>,
     schema: Value,
 }
 
@@ -637,12 +641,12 @@ impl fmt::Debug for ConversationReadTool {
 
 impl ConversationReadTool {
     /// A `read` over `in_flight`, for the agent whose runtime id lands in
-    /// `runtime_agent_id`, served from `events`.
+    /// `runtime_agent_id`, served from `events`; `None` refuses every call.
     #[must_use]
     pub fn new(
         in_flight: Arc<InFlightRegistry>,
         runtime_agent_id: Arc<std::sync::OnceLock<String>>,
-        events: Arc<dyn EventLog>,
+        events: Option<Arc<dyn EventLog>>,
     ) -> Self {
         let schema = speech::tool_specs()
             .iter()
@@ -675,6 +679,12 @@ impl Tool for ConversationReadTool {
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let limit = speech::read_limit(args.get("limit").and_then(Value::as_u64));
+        let Some(events) = self.events.as_ref() else {
+            tracing::debug!("[hive::tools] `read` called on an agent with no event log");
+            return Ok(ToolResult::error(
+                "refused: this agent has no conversation journal to read",
+            ));
+        };
         let turn = self
             .runtime_agent_id
             .get()
@@ -692,7 +702,7 @@ impl Tool for ConversationReadTool {
             "[hive::tools] native `read`"
         );
         let read = read_conversation(
-            Arc::clone(&self.events),
+            Arc::clone(events),
             &turn.company,
             &turn.agent_id,
             &turn.surface,

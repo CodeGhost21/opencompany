@@ -1224,7 +1224,7 @@ impl CompanyAgent {
     /// attributed there; the spec itself carries no `opencompany` server, and
     /// every tool of this crate's reaches the model on the belt by its own
     /// name. `events` is the journal the belt's `read` is served from — `None`
-    /// leaves `read` off the belt.
+    /// keeps `read` on the belt, refusing every call.
     pub(crate) fn register(
         runtime: &openhuman_embed::Runtime,
         company: &CompanyId,
@@ -1259,13 +1259,11 @@ impl CompanyAgent {
                 .filter(|tool| !build::OPENHUMAN_NATIVE_TOOLS.contains(&tool.name()))
                 .collect(),
         );
-        if let Some(events) = events.as_ref() {
-            shared_belt.push(Arc::new(crate::hive::tools::ConversationReadTool::new(
-                Arc::clone(mcp.in_flight()),
-                Arc::clone(&read_binding),
-                Arc::clone(events),
-            )));
-        }
+        shared_belt.push(Arc::new(crate::hive::tools::ConversationReadTool::new(
+            Arc::clone(mcp.in_flight()),
+            Arc::clone(&read_binding),
+            events.clone(),
+        )));
         let native_belt: Arc<Vec<Arc<dyn tinytools::Tool>>> = Arc::new(shared_belt);
         // Created before the agent, because the belt factory closes over it at
         // registration and an episode writes to it long afterwards.
@@ -1390,7 +1388,7 @@ impl CompanyAgent {
     ) -> tinyhivemind_embed::ConversationRef {
         use tinyhivemind_embed::ConversationKind;
         let (id, kind) = match chat_id {
-            Some(chat) if tinyhivemind_core::chat::is_general_chat(Some(chat)) => {
+            Some(chat) if chat == crate::ports::general_channel::GENERAL_CHANNEL_ID => {
                 (chat.to_string(), ConversationKind::General)
             }
             Some(chat) if chat.starts_with("dm:") => (chat.to_string(), ConversationKind::Direct),
@@ -3210,17 +3208,13 @@ impl HarnessPool {
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
         let mut fresh_company = company.clone();
-        fresh_company.overlay_agents = overlay.agents;
+        fresh_company.install_roster_overlay(overlay.agents, overlay.retired);
         // And the operator's edits of the manifest teammates, for exactly the
         // reason the budget overrides below are installed: `build_roster`
         // resolves every manifest row through `fresh_company.effective_agent`,
         // so the live edit set has to be the one it reads — otherwise a console
         // rename would reach the roster only after a restart.
         fresh_company.overlay_agent_edits = overlay.agent_edits;
-        // And the tombstones, for the same reason: `build_roster` filters the
-        // manifest roster through `fresh_company.effective_agents`, so the live
-        // removal set has to be the one it reads.
-        fresh_company.overlay_retired_agents = overlay.retired;
         // Same treatment for the budget overrides (issue #343): `build_roster`
         // resolves every agent's cap through `fresh_company.effective_budget`,
         // so installing the live set here is what carries a console budget edit
@@ -4543,9 +4537,9 @@ impl HarnessPool {
             company: company.clone(),
             agent_id: confine::CONFINED_AGENT_ID.to_string(),
             route: crate::turn_stream::LiveRoute::Chat {
-                chat_id: chat_id
-                    .map(str::to_string)
-                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                chat_id: chat_id.map(str::to_string).unwrap_or_else(|| {
+                    crate::server::ops::language::GENERAL_CHANNEL_ID.to_string()
+                }),
             },
             // A copilot turn is addressed by `chat_id` alone — this entry point
             // takes no `ChatTarget` — so its frames key by thread, as every
@@ -4843,9 +4837,9 @@ impl HarnessPool {
                 // durable reply when the caller addressed no desk (e.g. an API
                 // client that omits `chat`).
                 route: crate::turn_stream::LiveRoute::Chat {
-                    chat_id: chat_id
-                        .map(str::to_string)
-                        .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+                    chat_id: chat_id.map(str::to_string).unwrap_or_else(|| {
+                        crate::server::ops::language::GENERAL_CHANNEL_ID.to_string()
+                    }),
                 },
                 // The operator message this turn answers, read off the
                 // `ChatTarget` the caller already passes. Nothing new is
@@ -6346,6 +6340,9 @@ pub(crate) fn workflow_wiring_deps(
 #[cfg(test)]
 #[path = "built_in_catalogue_brief_tests.rs"]
 mod built_in_catalogue_brief_tests;
+#[cfg(test)]
+#[path = "built_in_read_retention_tests.rs"]
+mod built_in_read_retention_tests;
 /// Issue #1840: chat-turn history seeding, first half.
 /// `routed_context` fingerprint/resolution coverage.
 #[cfg(test)]
