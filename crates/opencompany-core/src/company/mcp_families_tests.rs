@@ -351,3 +351,19 @@ fn a_quote_or_backslash_in_directory_metadata_is_not_rendered() {
     assert!(!brief.contains("Slashed"), "{brief}");
     assert!(brief.contains("…and 2 more"), "{brief}");
 }
+
+/// When every reachable server carries metadata the brief cannot name, the count
+/// must survive anyway. Returning nothing would drop both the mapping and the
+/// pointer at live enumeration, leaving the agent told nothing at all about
+/// servers it really can reach.
+#[test]
+fn a_reachable_server_nobody_can_name_still_reports_an_overflow() {
+    let brief = server_family_brief(
+        &[decl("bad\u{0007}name", "https://bad.example/mcp")],
+        &[],
+        &grants(&["mcp:*"]),
+    );
+    assert!(!brief.is_empty(), "the count must not vanish with the name");
+    assert!(brief.contains("…and 1 more"), "{brief}");
+    assert!(!brief.contains("badname"), "{brief}");
+}

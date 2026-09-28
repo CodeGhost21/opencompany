@@ -105,7 +105,7 @@ pub(crate) fn server_family_brief(
         .filter(|row| renderable(&row.server_id) && renderable(&row.display_name))
         .collect();
 
-    if declared.is_empty() && installed.is_empty() {
+    if reachable_decls.is_empty() && reachable_installs.is_empty() {
         return String::new();
     }
 
