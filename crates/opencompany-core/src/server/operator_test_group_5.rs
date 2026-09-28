@@ -75,7 +75,10 @@ async fn desks_route_returns_the_company_desks() {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let desks = value.as_array().unwrap();
-    assert!(desks.is_empty(), "{desks:?}");
+    assert_eq!(desks.len(), 1, "only #general: {desks:?}");
+    assert_eq!(desks[0]["id"], "general");
+    assert_eq!(desks[0]["kind"], "general");
+    assert_eq!(desks[0]["mutable"], false);
 }
 
 /// The Operator feed's identity route is gone, and `list_desks` carries
