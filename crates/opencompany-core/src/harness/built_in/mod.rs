@@ -749,10 +749,9 @@ pub struct CompanyAgent {
     /// telemetry cells. Held here so `meter_turn_costs` reads the SAME
     /// instance the turn ran through.
     chat_model: Arc<dyn HarnessModel>,
-    /// The catalogue the `opencompany` MCP brief in this agent's system prompt
-    /// names (`build::agent_spec_for`'s `allow_tools`): the speech tools plus
-    /// every served tool. Kept so a roster rebuild can tell whether the
-    /// catalogue moved — see [`Self::catalogue_brief_stale`].
+    /// The tools this agent's belt wired when it was built. Kept so a roster
+    /// rebuild can tell whether the catalogue moved — see
+    /// [`Self::catalogue_brief_stale`].
     served_catalogue: Vec<String>,
     /// Whether the session this agent resumes may still carry an OLDER brief
     /// than [`Self::served_catalogue`].
@@ -1127,7 +1126,7 @@ pub struct TurnOutcome {
     /// `Some` exactly when [`classify_turn`](CompanyAgent) recognised the
     /// model provider's `Err` as the same budget-exhausted wire shape the
     /// delegated sub-agent path already halts gracefully on
-    /// (`oh::api::classify::is_budget_exhausted_message`). `None` on
+    /// (`oh::backend::classify::is_budget_exhausted_message`). `None` on
     /// every other path, including a turn that failed for an unrelated
     /// reason — those still propagate as `Err`, never as this field.
     ///
@@ -1252,6 +1251,19 @@ impl CompanyAgent {
             .iter()
             .map(|tool| tool.name().to_string())
             .collect();
+        // **The catalogue a rebuild compares is the belt, not the MCP list.**
+        //
+        // It used to be `allow_tools`, which was every served tool back when
+        // this crate's tools reached the model over the `opencompany` server.
+        // They are native now, so `allow_tools` is a constant — the four
+        // speech verbs — and a catalogue that cannot move can never be found
+        // stale. A console grant that wires `workspace.write` changed the
+        // agent's tools and owed the live session a brief, and nothing said
+        // so.
+        //
+        // The belt is what actually changed, and it is what the pinned
+        // definition scopes, so it is what a rebuild has to compare.
+        let served_catalogue = belt_names.clone();
         let gate = Arc::clone(&blueprint.policy);
         let mut shared_belt = crate::hive::tools::share_belt(
             std::mem::take(&mut blueprint.tools)
@@ -1842,13 +1854,7 @@ impl CompanyAgent {
                 }
             }
         }
-        let hit_iteration_cap = progress_pump::hit_iteration_cap(&events);
-        if hit_iteration_cap {
-            tracing::info!(
-                agent = %self.agent_id,
-                "[turn] paused at the tool-iteration cap; the reply is a resumable checkpoint, not a finished answer"
-            );
-        }
+        let raw_iteration_cap = progress_pump::hit_iteration_cap(&events);
         let halted_for_spend = spend_brake.and_then(|(cap_usd, halted)| {
             halted
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -1858,6 +1864,37 @@ impl CompanyAgent {
                     cap_usd,
                 })
         });
+        // #988: a spend halt reads `hit_iteration_cap == false`.
+        //
+        // `brain.rs` emits the step-pause notice and the spend notice from
+        // separate `if`s, on the stated grounds that one operator message can
+        // run several turns and both facts may be owed — but that the two
+        // "cannot both come from ONE turn" *because* this invariant holds.
+        // The predicate itself cannot see the halt: it reads only the progress
+        // stream, and a hook-driven halt is not in it. While the stream never
+        // reported a cap at all the invariant held for free; now that it does,
+        // it has to be stated here, where both facts are in hand, rather than
+        // re-checked at each notice site.
+        //
+        // The halt wins because it is the more specific account of why the
+        // turn stopped, and the two notices are not interchangeable: a step
+        // pause invites "continue", which on a spent budget would invite the
+        // operator to burn a cap that has already run out.
+        let hit_iteration_cap =
+            progress_pump::reportable_iteration_cap(raw_iteration_cap, halted_for_spend.is_some());
+        if hit_iteration_cap {
+            tracing::info!(
+                agent = %self.agent_id,
+                "[turn] paused at the tool-iteration cap; the reply is a resumable checkpoint, not a finished answer"
+            );
+        }
+        if raw_iteration_cap && !hit_iteration_cap {
+            tracing::info!(
+                agent = %self.agent_id,
+                "[turn] the iteration cap was reached on a turn already halted for spend; \
+                 reporting the halt, which is why it stopped"
+            );
+        }
         if let Some(halt) = &halted_for_spend {
             tracing::info!(
                 agent = %self.agent_id,
@@ -2030,13 +2067,13 @@ impl CompanyAgent {
 /// account for), matches the single existing budget-exhausted wire-shape
 /// classifier.
 ///
-/// Deliberately reuses `oh::api::classify::is_budget_exhausted_message`
+/// Deliberately reuses `oh::backend::classify::is_budget_exhausted_message`
 /// rather than forking a second copy of the phrase list — the whole point of
 /// this fix is to close the asymmetry, not add a second place for the two to
 /// drift apart. See `budget_wire_shapes_all_classify_as_budget_paused` for the
 /// drift-coupling test that fails CI if the two ever disagree.
 fn is_top_level_budget_exhausted(err: &anyhow::Error) -> bool {
-    oh::api::classify::is_budget_exhausted_message(&format!("{err:#}"))
+    oh::backend::classify::is_budget_exhausted_message(&format!("{err:#}"))
 }
 
 /// UTF-8-safe truncation to at most `max` chars, appending a truncation marker

@@ -635,7 +635,7 @@ mcp = ["openhuman", "openhuman_core/mcp", "openhuman-embed/mcp", "dep:uuid", "de
 # `media` domain; the default build links none of it. Real money moves through
 # these tools, so they are wired only when a company explicitly grants `media`
 # (never via the `*` wildcard) AND a managed credential is configured.
-media = ["openhuman", "openhuman_core/media"]
+media = ["openhuman", "openhuman_core/media", "tinyagents-harness/media"]
 # Per-tenant Composio tools (issue #110, epic #26 Cell D). Bridges OpenHuman's
 # backend-mode Composio surface (Gmail / Slack / GitHub via
 # `composio_list_toolkits`, `composio_list_connections`, `composio_list_tools`,
