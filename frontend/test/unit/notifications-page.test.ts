@@ -245,6 +245,45 @@ describe("where a row sends you", () => {
     ).toBe(`#/chat/${dm}?m=h9`);
   });
 
+  it("opens an ordinary workflow row on the workflows list", () => {
+    expect(
+      notificationHref(
+        row({ kind: "workflow_failed", subjectKind: "workflow", subjectId: "wf1", context: "desk-ops" }),
+      ),
+    ).toBe("#/workflows");
+    expect(
+      notificationHref(
+        row({ kind: "workflow_report", subjectKind: "workflow", subjectId: "wf1", context: undefined }),
+      ),
+    ).toBe("#/workflows");
+  });
+
+  it("opens a workflow report on the DM it was journaled into", () => {
+    expect(
+      notificationHref(
+        row({
+          kind: "workflow_report",
+          subjectKind: "workflow",
+          subjectId: "wf1",
+          context: "dm:product_manager",
+        }),
+      ),
+    ).toBe("#/chat/dm:product_manager");
+  });
+
+  it("opens a workflow report named by the bare teammate id on that teammate's DM", () => {
+    expect(
+      notificationHref(
+        row({
+          kind: "workflow_report",
+          subjectKind: "workflow",
+          subjectId: "wf1",
+          context: "product_manager",
+        }),
+      ),
+    ).toBe("#/chat/dm:product_manager");
+  });
+
   it("opens #general for a mention in #general", () => {
     expect(notificationHref(row({ context: "general", subjectId: "7" }))).toBe(
       "#/chat/general?m=h7",

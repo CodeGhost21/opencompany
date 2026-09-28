@@ -27,6 +27,10 @@ import { renderedChannelIdForContext } from "@/lib/mention-badge";
  * ("so a badge lands without the transcript being loaded"), and it is resolved
  * through [`renderedChannelIdForContext`], the same resolution the mention
  * badge and the shell's thread re-read share.
+ *
+ * A `workflow` row opens the workflows list unless its `context` is a DM: a
+ * `workflow_report` is journaled into the responsible agent's DM and names it
+ * there, as `dm:<id>` or as the bare teammate id, and the row opens that DM.
  */
 export function notificationHref(notification: NotificationDto): string | null {
   const id = notification.subjectId;
@@ -45,7 +49,7 @@ export function notificationHref(notification: NotificationDto): string | null {
       // which would be a lie about the row that sent you there.
       return "#/approvals";
     case "workflow":
-      return "#/workflows";
+      return workflowReportDm(notification) ?? "#/workflows";
     case "message": {
       const channel = renderedChannelIdForContext(notification.context);
       if (!channel) return null;
@@ -72,6 +76,14 @@ export function notificationHref(notification: NotificationDto): string | null {
     default:
       return null;
   }
+}
+
+function workflowReportDm(notification: NotificationDto): string | null {
+  const context = notification.context?.trim();
+  if (!context) return null;
+  if (context.startsWith("dm:")) return `#/chat/${context}`;
+  if (notification.kind === "workflow_report") return `#/chat/dm:${context}`;
+  return null;
 }
 
 /** Newest first, the order the host documents its own feed in. */
