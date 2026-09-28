@@ -60,6 +60,22 @@ use crate::error::{OpenCompanyError, Result};
 pub const DEFAULT_JEV_URL: &str =
     "https://api.tinyhumans.ai/agent-integrations/openrouter/systemone";
 
+/// The environment variable that gives routing its **own** credential.
+///
+/// Without it Jev inherits whatever the managed-inference ladder resolved,
+/// which is right on a deployment where inference and routing are the same
+/// vendor and wrong everywhere else: point the agents at OpenRouter and the
+/// router is handed an OpenRouter key addressed to a System One endpoint,
+/// which 401s on every round and falls back to lead-and-mention while looking
+/// configured. A live box did exactly that -- `router=Fallback` on every desk
+/// episode, and no "no key" line to say why, because a key *was* resolved, it
+/// was simply the wrong one.
+///
+/// Paired with [`JEV_URL_ENV`]: the two together are what let routing run on
+/// its own vendor (`https://api.typesafe.ai/v1/systemone` with a TypeSafe
+/// key) while inference stays where it is.
+pub const JEV_KEY_ENV: &str = "OPENCOMPANY_JEV_KEY";
+
 /// The environment variable that moves the proxy: `https`, or `http` to a
 /// loopback host. Anything else is refused at construction, not at first use.
 pub const JEV_URL_ENV: &str = "OPENCOMPANY_JEV_URL";
@@ -164,7 +180,18 @@ impl TinyHumansSystemOne {
 impl SystemOneTransport for TinyHumansSystemOne {
     fn evaluate<'a>(&'a self, request: &'a SystemOneRequest) -> SystemOneTransportFuture<'a> {
         Box::pin(async move {
-            match self.attempt(request).await {
+            // **Every outcome is logged, including the silent ones.**
+            //
+            // Before this, the only line here was the retry `debug!`, which
+            // fires for a 429/529/5xx and for nothing else. A timeout or a
+            // `4xx` fails at once, so the common failures wrote nothing at
+            // all -- and `BroadcastRouted.router` is a constant, so the
+            // journal could not break the tie either. A live run left a
+            // broadcast unplaced and there was no way to tell whether Jev had
+            // answered "nobody" or never answered: the round routes without
+            // Jev either way, and the difference is exactly what an operator
+            // debugging a quiet desk needs.
+            let outcome = match self.attempt(request).await {
                 Err(Error::Transport {
                     status: Some(status),
                     message,
@@ -173,7 +200,20 @@ impl SystemOneTransport for TinyHumansSystemOne {
                     self.attempt(request).await
                 }
                 outcome => outcome,
+            };
+            match &outcome {
+                Ok(answer) => tracing::debug!(
+                    model = %answer.model,
+                    answers = answer.answers.len(),
+                    "[hive] jev answered"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    url = %self.url,
+                    "[hive] the jev call failed; this round routes by lead and mention"
+                ),
             }
+            outcome
         })
     }
 }
@@ -212,6 +252,46 @@ pub fn jev_router(
     }
     let transport = TinyHumansSystemOne::new(url, credential)?;
     Ok(Some(JevRouter::new(transport)))
+}
+
+/// The same resolution as [`jev_router`], handing back the transport itself.
+///
+/// # Why the transport and not the router
+///
+/// [`JevRouter`] answers exactly one question -- who should take a message --
+/// and [`crate::hive::conclude`] needs two, evaluated together: whether a
+/// settled episode still needs assembling, and which seat should do it. A
+/// `SystemOneRequest` carries a *map* of independently evaluated questions, so
+/// both fit in one call; but `JevRouter` builds that map itself and does not
+/// expose it, and an `Arc<dyn Router>` cannot hand the transport back. So the
+/// closing decision reaches System One through this seam instead, and pays one
+/// round trip rather than two.
+///
+/// `None` for the same reason [`jev_router`] returns it: no credential
+/// resolves, and the caller falls back to the desk lead.
+///
+/// # Errors
+///
+/// A URL the credential may not cross, or an HTTP client that will not build.
+pub fn jev_transport(
+    env: &dyn EnvSource,
+    key: Option<&str>,
+) -> Result<Option<TinyHumansSystemOne>> {
+    let url = env
+        .get(JEV_URL_ENV)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_JEV_URL.to_string());
+    let credential = match key.map(str::trim).filter(|key| !key.is_empty()) {
+        Some(key) => Credential::from_value(key),
+        None => crate::harness::built_in::provider::hosted_endpoint_from_env_at(env, None)
+            .map(|(credential, _url)| credential)
+            .unwrap_or_default(),
+    };
+    if !credential.configured() {
+        return Ok(None);
+    }
+    Ok(Some(TinyHumansSystemOne::new(url, credential)?))
 }
 
 /// Whether a failed status earns the one retry: TypeSafe's documented
