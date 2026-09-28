@@ -425,7 +425,7 @@ async fn the_belt_read_answers_what_the_served_read_answers() {
     let read = crate::hive::tools::ConversationReadTool::new(
         Arc::clone(host.in_flight()),
         Arc::clone(&bound),
-        journal(),
+        Some(journal()),
     );
     assert_eq!(read.name(), crate::hive::tools::READ_TOOL);
     assert_eq!(

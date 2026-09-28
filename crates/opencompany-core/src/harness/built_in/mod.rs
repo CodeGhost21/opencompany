@@ -1224,7 +1224,7 @@ impl CompanyAgent {
     /// attributed there; the spec itself carries no `opencompany` server, and
     /// every tool of this crate's reaches the model on the belt by its own
     /// name. `events` is the journal the belt's `read` is served from — `None`
-    /// leaves `read` off the belt.
+    /// keeps `read` on the belt, refusing every call.
     pub(crate) fn register(
         runtime: &openhuman_embed::Runtime,
         company: &CompanyId,
@@ -1259,13 +1259,11 @@ impl CompanyAgent {
                 .filter(|tool| !build::OPENHUMAN_NATIVE_TOOLS.contains(&tool.name()))
                 .collect(),
         );
-        if let Some(events) = events.as_ref() {
-            shared_belt.push(Arc::new(crate::hive::tools::ConversationReadTool::new(
-                Arc::clone(mcp.in_flight()),
-                Arc::clone(&read_binding),
-                Arc::clone(events),
-            )));
-        }
+        shared_belt.push(Arc::new(crate::hive::tools::ConversationReadTool::new(
+            Arc::clone(mcp.in_flight()),
+            Arc::clone(&read_binding),
+            events.clone(),
+        )));
         let native_belt: Arc<Vec<Arc<dyn tinytools::Tool>>> = Arc::new(shared_belt);
         // Created before the agent, because the belt factory closes over it at
         // registration and an episode writes to it long afterwards.
@@ -6342,6 +6340,9 @@ pub(crate) fn workflow_wiring_deps(
 #[cfg(test)]
 #[path = "built_in_catalogue_brief_tests.rs"]
 mod built_in_catalogue_brief_tests;
+#[cfg(test)]
+#[path = "built_in_read_retention_tests.rs"]
+mod built_in_read_retention_tests;
 /// Issue #1840: chat-turn history seeding, first half.
 /// `routed_context` fingerprint/resolution coverage.
 #[cfg(test)]
