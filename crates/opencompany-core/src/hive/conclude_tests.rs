@@ -133,14 +133,18 @@ fn the_router_is_given_each_seat_s_finding() {
     );
 }
 
-/// A finding is truncated, because the router needs to know which seat holds
-/// what and not to read the episode -- the seat that takes the closing turn
-/// reads it properly, from its own brief.
+/// A whole finding survives: the budget is on the state, not on each line.
+///
+/// Thirteen live runs put the median finding at 1,024 characters against a
+/// documented 32k-token window that a whole worst-case episode fills to about an
+/// eighth. An earlier per-finding cap of 600 truncated 78% of findings and 48.5%
+/// of every character -- including the last one, which is the message the
+/// `needed` question is judged on.
 #[test]
-fn a_long_finding_is_cut_to_the_budget() {
+fn a_long_finding_is_kept_whole() {
     use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, StoredEvent};
 
-    let long = "x".repeat(super::FINDING_BUDGET * 2);
+    let long = "x".repeat(2_600);
     let rows = vec![StoredEvent {
         seq: EventSeq::new(1),
         company: CompanyId::new("c"),
@@ -160,11 +164,15 @@ fn a_long_finding_is_cut_to_the_budget() {
         at_millis: 1,
     }];
     let line = super::findings(&rows, "all_hands").remove(0);
-    assert!(line.ends_with("..."), "a cut line says so");
-    assert_eq!(
-        line.chars().count(),
-        super::FINDING_BUDGET + 3,
-        "the budget counts characters, not bytes"
+    assert!(
+        !line.ends_with("..."),
+        "a finding well inside the state budget is not cut: {} chars",
+        line.chars().count()
+    );
+    assert!(
+        line.chars().count() > 1_000,
+        "and arrives whole: {}",
+        line.chars().count()
     );
 }
 

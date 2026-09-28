@@ -162,38 +162,79 @@ pub fn routing_text(request: &str) -> String {
 
 /// One line per seat that finished, for the router to choose against.
 ///
-/// `desk_request`'s `thread_context` is the only way a routing call learns
-/// what has already happened, and at **opening** time there is nothing to put
-/// in it -- which is why `conducted::opening` passes an empty vector and why
-/// this function must not. Choosing who should assemble an episode from seat
+/// `desk_request`'s `thread_context` is the only way a routing call learns what
+/// has already happened, and at **opening** time there is nothing to put in it
+/// -- which is why `conducted::opening` passes an empty vector and why this
+/// function must not. Choosing who should assemble an episode from seat
 /// descriptions alone is choosing blind: a live run where the strategist wrote
 /// five lanes and the copywriter one looks, to a router given no context,
 /// exactly like a run where the work was spread evenly.
 ///
-/// Each finding is truncated because a router needs to know which seat holds
-/// what, not to read the episode. The seat that takes the closing turn reads
-/// it properly -- it is seated on this desk and its brief carries the rows.
-const FINDING_BUDGET: usize = 600;
+/// # The budget, and why it is not per finding
+///
+/// `jev-1.13` documents 32k tokens for the state plus the longest question, and
+/// that is the binding constraint. Against it, thirteen measured live runs put
+/// 88 findings at a median of 1,024 characters and a worst whole-episode total
+/// of 16,731 -- roughly 4,200 tokens, about an eighth of the window.
+///
+/// This used to cap each finding at 600 characters, which truncated 78% of them
+/// and dropped 48.5% of every character the episode produced, to stay inside a
+/// budget nothing was close to spending. Worse, it cut the **last** finding, and
+/// the `needed` question asks whether that last message already answers the
+/// request as one whole piece -- so the decision was judged on a message cut in
+/// half.
+///
+/// So the cap is on the whole state, sized from the documented window, and the
+/// last finding is never touched. `usage.input_tokens` on the response is the
+/// authoritative number and `decide` logs it: if these characters convert worse
+/// than assumed, that log says so rather than a guess here.
+/// `jev-1.13`'s context window: the tokens a request may spend on its state
+/// plus its longest question, which is the limit that binds this call.
+///
+/// (There is a second, looser 64k limit covering the state and *every* question
+/// together; it only binds when the questions themselves are large, and ours are
+/// two short paragraphs.)
+const JEV_CONTEXT_TOKENS: usize = 32_000;
+
+/// Characters per token, for turning that window into something countable
+/// without a tokenizer.
+///
+/// Three rather than the usual four for English prose, so the conversion
+/// under-estimates how much text fits rather than over-estimates it.
+const CHARS_PER_TOKEN: usize = 3;
+
+/// What the whole findings list may spend: half the window.
+///
+/// Half rather than all of it, because the findings are not the only thing in the
+/// request -- the operator's own words, both questions and the JSON around them
+/// share the same budget -- and because `CHARS_PER_TOKEN` is an estimate rather
+/// than a count. Thirteen measured live runs never came close either way: the
+/// worst whole episode was 16,731 characters, an eighth of this.
+const STATE_CHAR_BUDGET: usize = (JEV_CONTEXT_TOKENS / 2) * CHARS_PER_TOKEN;
 
 #[must_use]
 pub(crate) fn findings(rows: &[crate::ports::types::StoredEvent], desk_id: &str) -> Vec<String> {
-    rows.iter()
+    let mut lines: Vec<String> = rows
+        .iter()
         .filter_map(|stored| match &stored.event {
             crate::ports::types::CompanyEvent::AgentReply {
                 chat_id,
                 agent_id,
                 text,
                 ..
-            } if chat_id == desk_id => {
-                let mut line = format!("{agent_id}: {}", text.trim());
-                if line.chars().count() > FINDING_BUDGET {
-                    line = line.chars().take(FINDING_BUDGET).collect::<String>() + "...";
-                }
-                Some(line)
-            }
+            } if chat_id == desk_id => Some(format!("{agent_id}: {}", text.trim())),
             _ => None,
         })
-        .collect()
+        .collect();
+    // Oldest first when the budget is short, because the newest findings are
+    // what both questions turn on -- and the last one especially, which is the
+    // message `needed` judges. A roster large enough to reach this has bigger
+    // problems than a lost early line.
+    let mut total: usize = lines.iter().map(|line| line.chars().count()).sum();
+    while total > STATE_CHAR_BUDGET && lines.len() > 1 {
+        total -= lines.remove(0).chars().count();
+    }
+    lines
 }
 
 /// Which seat closes the episode.
@@ -374,9 +415,14 @@ pub async fn decide(
     match transport.evaluate(&ask).await {
         Ok(response) => {
             let decision = read_decision(&response, seats, lead);
+            // `input_tokens` is the only authoritative measure of what this
+            // call actually costs against `jev-1.13`'s 32k window; the character
+            // budget in `findings` is a proxy for it. Logged so the proxy can be
+            // checked against the real number instead of trusted.
             tracing::debug!(
                 model = %response.model,
                 answers = response.answers.len(),
+                input_tokens = response.usage.input_tokens,
                 ?decision,
                 "[hive] the closing decision came back"
             );
