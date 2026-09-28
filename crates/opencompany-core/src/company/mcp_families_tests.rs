@@ -328,3 +328,26 @@ fn the_brief_never_claims_to_be_every_mcp_server_an_agent_has() {
         "{brief}"
     );
 }
+
+/// A quote closes the JSON-shaped argument the key sits inside, so the printed key
+/// stops matching the value the model must send.
+#[test]
+fn a_quote_or_backslash_in_directory_metadata_is_not_rendered() {
+    let brief = server_family_brief(
+        &[],
+        &[
+            install("good-id", "Good Server", Some("https://good.example/mcp")),
+            install(
+                "id\", \"server\": \"other",
+                "Quoted",
+                Some("https://bad.example/mcp"),
+            ),
+            install("back\\slash", "Slashed", Some("https://slash.example/mcp")),
+        ],
+        &grants(&["mcp_registry"]),
+    );
+    assert!(brief.contains("\"server_id\": \"good-id\""), "{brief}");
+    assert!(!brief.contains("other"), "{brief}");
+    assert!(!brief.contains("Slashed"), "{brief}");
+    assert!(brief.contains("…and 2 more"), "{brief}");
+}

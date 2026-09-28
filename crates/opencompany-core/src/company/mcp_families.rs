@@ -57,19 +57,20 @@ pub(crate) struct RegistryServerRow {
 
 /// Whether `value` can appear in the brief exactly as an agent must pass it back.
 ///
-/// Each value is rendered inside a code span *and* quoted as the key the model
-/// sends, so it has to be both safe to render and exact. A control character
-/// breaks the line out of its list item and a backtick closes the span early;
-/// either way the appended text stops reading as a list of servers. A declared
-/// name is only checked for emptiness, and an install's `server_id` and
-/// `display_name` arrive from the directory unchanged, so none can be assumed
-/// clean.
+/// Each value is rendered inside a code span *and* quoted inside a JSON-shaped
+/// argument, so it has to be safe in both contexts and exact in neither's favour.
+/// A control character breaks the line out of its list item, a backtick closes the
+/// code span early, and a quote or backslash closes or escapes its way out of the
+/// JSON-shaped argument — each one stops the appended text reading as a list of
+/// servers. A declared name is only checked for emptiness, and an install's
+/// `server_id` and `display_name` arrive from the directory unchanged, so none can
+/// be assumed clean.
 ///
 /// A value that fails this cannot be named faithfully — mangling it would print a
 /// key that gets refused — so its server joins the overflow count and is left to
 /// live enumeration.
 fn renderable(value: &str) -> bool {
-    !value.is_empty() && !value.contains('`') && !value.chars().any(char::is_control)
+    !value.is_empty() && !value.contains(['`', '"', '\\']) && !value.chars().any(char::is_control)
 }
 
 /// The brief naming each server this agent can reach and the tool that reaches
