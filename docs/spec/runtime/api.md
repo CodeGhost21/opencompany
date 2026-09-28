@@ -125,14 +125,15 @@ lists it first too, with `kind: "general"`.
 **Addressing.** `POST …/chat` with no `chat` is a post to `#general`, and
 `GET …/chat/history` with no `desk` reads it. Nothing rewrites the journal.
 Instead, every stored chat id is decoded on read, so rows written as `""`,
-`main` or `General` (in any case) load as `general`. A post addressed with one
-of those spellings is stored as `general`. An unaddressed post keeps no chat id,
-so it still starts no conversation of its own.
+`main` or `General` (in any case) load as `general`, and a legacy row with no
+chat id reads as #general. Every new post, addressed or not, is stored with
+`chat: "general"` when it names #general. A continuation of an approval parked by
+a workflow run answers on that run, not in the conversation that started it.
 
 **Who answers a message that mentions nobody:** the orchestrator, in one turn.
-An `@`-mention overrides that, just as it does in a desk channel. A teammate
-whose id is `general` does not take over the channel. It keeps its DM under
-`dm:<id>`. `general` and `main` are reserved agent ids.
+An `@`-mention overrides that, just as it does in a desk channel. `general` and
+`main` are reserved agent ids. A legacy teammate that already has one does not
+take over the channel: the console addresses its DM as `dm:<id>`.
 
 **Every desk write aimed at it is refused with a reason.** Each write below
 returns `409` and a sentence (never a bare `404`):
