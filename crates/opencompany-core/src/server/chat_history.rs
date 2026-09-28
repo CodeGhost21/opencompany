@@ -1861,10 +1861,13 @@ async fn attach_agent_conversations(
                     author_id: agent_id.clone(),
                     // Empty for the seat that asked, exactly as a crossing
                     // leaves it: the row this folds onto already names them.
+                    // The replying seat itself rather than the row's single
+                    // `askee`: identical for a pair, and right for a group
+                    // ask, where any of several seats may answer.
                     author_label: if *agent_id == asker {
                         String::new()
                     } else {
-                        askee.clone()
+                        agent_id.clone()
                     },
                     text: text.clone(),
                     outbound: *agent_id == asker,
