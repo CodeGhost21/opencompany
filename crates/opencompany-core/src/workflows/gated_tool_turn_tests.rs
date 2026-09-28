@@ -265,7 +265,6 @@ pub(crate) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
             users: Arc::new(FsOps::new(dir)),
             bootstrap_admin: None,
             channels: Vec::new(),
-            notifications: None,
             parking: Some(DeliveryParking {
                 approvals: gate,
                 journal: journal.clone(),

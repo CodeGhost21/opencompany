@@ -3524,9 +3524,10 @@ impl HarnessBrain {
                     // `run_with_steer`'s `if let Some(incoming) = turn_chat_id`
                     // guard and concluded an unaddressed threaded message loses
                     // its root; it does not. `turn_chat_id` comes from the
-                    // turn-stream route, which falls back to the answering
-                    // agent's DM (see `LiveRoute::Chat`'s construction), so an
-                    // unaddressed chat turn binds there and keeps its thread.
+                    // turn-stream route, which already falls back to
+                    // `DEFAULT_DESK` (see `LiveRoute::Chat`'s construction), so
+                    // an unaddressed chat turn binds to General and keeps its
+                    // thread like any other.
                     //
                     // Normalizing here would be actively wrong: this same
                     // `chat_id` reaches card creation, a card's

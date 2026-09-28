@@ -33,8 +33,9 @@ interface Props {
    * Whether this conversation can be shown as the agent's raw turns.
    *
    * A DM has exactly one teammate on the other end, so "the raw turns" names
-   * something. A `#channel` has several, so the control is absent there
-   * rather than present and ambiguous.
+   * something. A `#channel` has several and a system feed has none, so the
+   * control is absent there rather than present and ambiguous — the same rule
+   * the member pane follows for the Operator feed.
    */
   rawAvailable?: boolean;
   /** Whether the raw view is the one currently on screen. */
@@ -151,7 +152,8 @@ export function ChatHeader({
         </Button>
       )}
 
-      {/* A read-only archive offers no agent pane. */}
+      {/* Issue #1757: the Operator system channel is a read-only report feed
+          with no members, so it offers no agent pane. */}
       {!channel.system && (
         <Button
           variant="ghost"

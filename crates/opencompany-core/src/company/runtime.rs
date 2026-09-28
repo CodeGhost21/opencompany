@@ -2322,7 +2322,8 @@ impl CompanyRuntime {
                 .is_some_and(|record| record.resolve_desk_id(desk).is_some());
             if !has_real_recipient {
                 return Err(OpenCompanyError::InvalidRequest(
-                    "the Operator channel is a read-only system channel — it cannot be posted to"
+                    "the Operator channel is a read-only feed of workflow reports and \
+                     notifications — it cannot be posted to"
                         .to_string(),
                 ));
             }
@@ -2340,24 +2341,13 @@ impl CompanyRuntime {
                 });
             if !has_real_operator_recipient {
                 return Err(OpenCompanyError::InvalidRequest(
-                    "the Operator channel is a read-only system channel — it cannot be posted to"
+                    "the Operator channel is a read-only feed of workflow reports and \
+                     notifications — it cannot be posted to"
                         .to_string(),
                 ));
             }
         }
         Ok(())
-    }
-
-    /// The DM channel of this company's default agent — where anything that
-    /// names no conversation lands. `None` on an empty roster or an unstored
-    /// company; see [`crate::runtime::assignee::default_agent_dm`].
-    pub(crate) async fn default_agent_dm(&self) -> Result<Option<String>> {
-        Ok(self
-            .store()
-            .load(&self.id)
-            .await?
-            .as_ref()
-            .and_then(crate::runtime::assignee::default_agent_dm))
     }
 
     /// Runs one cycle over a batch of events, returning what happened.
@@ -4999,38 +4989,18 @@ impl CompanyRuntime {
         }
     }
 
-    /// The DM a conversation-less continuation falls back to — a workflow
-    /// node's parked tool call, a scheduler tick — read once per approval so
-    /// every response (or the failure notice) resolves to the same place.
-    async fn continuation_requester_dm(&self, approval_id: &ApprovalId) -> Option<String> {
-        match self
-            .journal
-            .approval_effect(approval_id)
-            .and_then(|effect| effect.agent)
-        {
-            Some(agent) => Some(crate::runtime::assignee::dm_channel(&agent)),
-            None => self.default_agent_dm().await.unwrap_or_else(|err| {
-                tracing::warn!(
-                    company = %self.id,
-                    error = %err,
-                    "could not read the roster for a continuation's default DM"
-                );
-                None
-            }),
-        }
-    }
-
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
         let conversation = self
             .journal
             .approval_conversation(approval_id)
             .unwrap_or_default();
         let thread = conversation.thread;
-        let requester_dm = self.continuation_requester_dm(approval_id).await;
-        let nowhere = continuation_fallback_chat_id(
-            self.journal.approval_origin(approval_id).as_ref(),
-            requester_dm.as_deref(),
-        );
+        // Where the reply goes when the approval was raised in no conversation
+        // at all — a workflow node's parked tool call, a scheduler tick. Read
+        // once for the whole report: every response of one continuation answers
+        // the same approval, so they cannot land in two places.
+        let nowhere =
+            continuation_fallback_chat_id(self.journal.approval_origin(approval_id).as_ref());
         for response in &mut report.responses {
             let chat_id = thread.clone().unwrap_or_else(|| nowhere.clone());
             // Checked against the channel actually being answered into, not
@@ -5122,23 +5092,14 @@ impl CompanyRuntime {
             .journal
             .approval_conversation(approval_id)
             .unwrap_or_default();
+        let thread = conversation
+            .thread
+            .unwrap_or_else(|| crate::runtime::channel::OPERATOR_CHANNEL.to_string());
         // Issue #435: the bad news belongs in the same place the good news
         // would have gone. A failure notice left flat in the channel while the
         // question sits in a thread is the same lost-conclusion bug wearing a
-        // different hat. When there is no thread, that "same place" is
-        // whatever `publish_continuation` would have used — the requester's
-        // DM, or the task/run the approval was parked on — not the Operator
-        // channel, which nothing journals a reply into any more.
-        let thread = match conversation.thread {
-            Some(thread) => thread,
-            None => {
-                let requester_dm = self.continuation_requester_dm(approval_id).await;
-                continuation_fallback_chat_id(
-                    self.journal.approval_origin(approval_id).as_ref(),
-                    requester_dm.as_deref(),
-                )
-            }
-        };
+        // different hat — and this is the message the operator is most likely
+        // to be waiting on.
         let parent = self.resolvable_parent(conversation.parent, &thread).await;
         if let Err(err) = self
             .events
@@ -7811,33 +7772,33 @@ fn ask_which_prompt(groups: &[PendingBlockerGroup]) -> String {
 /// [`workflow_run_of`]'s discrimination rather than restating it:
 /// `Effect::run_id` carries two id spaces, and only an explicitly `Unlinked`
 /// park with a run id on it is a workflow run. A park with neither a card nor a
-/// run came from an unaddressed conversation, and answers in `requester_dm` —
-/// the DM of the agent that asked for the approval — as does a park with no
-/// recorded link. Only a company with no one to answer as falls back to
-/// General.
+/// run came from an unaddressed conversation, so it answers in General — the
+/// same reading `chat_history::owns` gives a message journaled with no chat.
 fn continuation_fallback_chat_id(
     origin: Option<&crate::runtime::journal::ApprovalOrigin>,
-    requester_dm: Option<&str>,
 ) -> String {
-    let unaddressed = || {
-        requester_dm
-            .map(str::to_string)
-            .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string())
-    };
+    // An unaddressed operator message is journaled with no chat on it, and
+    // `chat_history::owns` reads that absence as the General desk — so a park
+    // that carries no run and no card came from a conversation after all, and
+    // General is where its answer is read. It is the destination for the
+    // unknown case too (a pre-#333 line with no recorded link): a reply in the
+    // operator's own line is recoverable, while one in a teammate's DM reads as
+    // a message that teammate never sent.
+    let general = || crate::server::ops::language::DEFAULT_DESK.to_string();
     let Some(origin) = origin else {
-        return unaddressed();
+        return general();
     };
     match &origin.task {
         // A board task's dispatch cycle parked this: the card owns the work,
         // and its timeline is where the answer is already read.
         Some(crate::runtime::journal::TaskLink::Task { id }) => id.clone(),
-        // Explicitly unlinked *and* carrying a run id is a workflow park. The
-        // run id matches no desk, so the answer stays on the run rather than
-        // arriving as a teammate's DM.
+        // Explicitly unlinked *and* carrying a run id is a workflow park — the
+        // case this issue exists for. The run id matches no desk, so the answer
+        // stays on the run rather than arriving as a teammate's DM.
         Some(crate::runtime::journal::TaskLink::Unlinked) => {
-            origin.run_id.clone().unwrap_or_else(unaddressed)
+            origin.run_id.clone().unwrap_or_else(general)
         }
-        None => unaddressed(),
+        None => general(),
     }
 }
 

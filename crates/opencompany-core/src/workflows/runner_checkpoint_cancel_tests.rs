@@ -406,7 +406,6 @@ async fn a_cancelled_checkpointed_initial_run_that_finishes_inside_grace_does_no
         users: Arc::new(FsOps::new(dir.path())),
         bootstrap_admin: None,
         channels: vec![Arc::new(channel.clone())],
-        notifications: None,
         parking: None,
         events: Arc::new(crate::store::FsEventLog::new(dir.path())),
     });

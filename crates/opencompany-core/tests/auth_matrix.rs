@@ -1249,6 +1249,19 @@ const OPERATOR_AUTHORITY_ROUTES: &[Route] = &[
     },
     Route {
         method: Verb::Get,
+        path: "/operator-channel",
+        address: Address::Dual,
+        source: Source::Operator,
+        access: Access::Scoped,
+        features: &["openhuman"],
+        blast: Blast::Ordinary,
+        probe: Probe::Empty,
+        note: "",
+        wait: Wait::None,
+        red_cells: RedCells::None,
+    },
+    Route {
+        method: Verb::Get,
         path: "/events",
         address: Address::Dual,
         source: Source::Operator,
@@ -1815,13 +1828,13 @@ fn table_counts_and_intentional_widenings_are_explicit() {
     );
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 4);
     assert_eq!(OVERLAPPING_EXTERNAL_ROUTES.len(), 1);
-    assert_eq!(OPERATOR_AUTHORITY_ROUTES.len(), 16);
+    assert_eq!(OPERATOR_AUTHORITY_ROUTES.len(), 17);
     assert_eq!(OPERATOR_DIRECT_ROUTES.len(), 13);
     assert_eq!(
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        485,
+        487,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1829,10 +1842,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        380,
+        382,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 3_395);
+    assert_eq!(render_snapshot().lines().count(), 3_409);
     assert_eq!(
         all_routes()
             .map(|route| {

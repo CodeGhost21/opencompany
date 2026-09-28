@@ -64,17 +64,6 @@ async function openThread(page: Page, channelId: string) {
   await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
 
-/** The orchestrator's roster id, read off the host's own roster rule. */
-async function orchestratorId(request: APIRequestContext): Promise<string> {
-  const response = await request.get("/api/v1/company/team");
-  expect(response.ok(), await response.text()).toBeTruthy();
-  const body = await response.json();
-  const members = (body.members ?? body.team ?? body) as { id: string; isOrchestrator?: boolean }[];
-  const orchestrator = members.find((member) => member.isOrchestrator);
-  expect(orchestrator, "the company has no orchestrator").toBeTruthy();
-  return orchestrator!.id;
-}
-
 type Task = {
   id: string;
   title: string;
@@ -249,8 +238,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   // the skip is per-test rather than per-file.
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
-  const orchestrator = await orchestratorId(request);
-  await openThread(page, `dm:${orchestrator}`);
+  await openThread(page, "general");
 
   // `SPAWNONE` is the scripted backend's cue to call `spawn_task` once.
   const before = await request.get("/api/v1/company/tasks");
@@ -264,7 +252,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   const card = await taskMatching(
     request,
     (task) =>
-      task.originChatId === orchestrator &&
+      task.originChatId === "main" &&
       task.title.includes(marker) &&
       !previousIds.has(task.id),
   );
@@ -278,31 +266,27 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   // After a reload the transcript is rehydrated from `chat/history`, so a chip
   // that only existed on the live POST response would vanish here.
   await page.reload();
-  await openThread(page, `dm:${orchestrator}`);
+  await openThread(page, "general");
   const rehydrated = page.locator(`a[href="${href}"]`, { hasText: "Card opened" });
   await expect(rehydrated).toBeVisible({ timeout: 30_000 });
   await expect(rehydrated).toHaveAttribute("href", href);
 });
 
-test("a persisted chat card is rendered and rehydrated on the default lane", async ({
-  page,
-  request,
-}) => {
+test("a persisted chat card is rendered and rehydrated on the default lane", async ({ page }) => {
   test.skip(LIVE_BRAIN, "the live-brain lane covers the real spawn_task flow above");
 
   const taskId = `default-lane-card-${Date.now()}`;
   const href = `#/company/tasks/${taskId}`;
-  const orchestrator = await orchestratorId(request);
   await page.route("**/chat/history?*", async (route) => {
     const desk = new URL(route.request().url()).searchParams.get("desk");
-    if (desk !== orchestrator) return route.continue();
+    if (desk !== "main") return route.continue();
     return route.fulfill({
       status: 200,
       headers: { "content-type": "application/json" },
       body: JSON.stringify([
         {
           id: "default-lane-card-message",
-          channel: orchestrator,
+          channel: "main",
           author: "orchestrator",
           text: "I opened a card for this request.",
           atMillis: Date.now(),
@@ -313,7 +297,7 @@ test("a persisted chat card is rendered and rehydrated on the default lane", asy
     });
   });
 
-  await openThread(page, `dm:${orchestrator}`);
+  await openThread(page, "general");
   const chip = page.locator(`a[href="${href}"]`, { hasText: "Card opened" });
   await expect(chip).toBeVisible({ timeout: 30_000 });
   await expect(chip).toHaveAttribute("href", href);

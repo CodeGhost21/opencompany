@@ -222,50 +222,35 @@ fn a_continuation_with_no_conversation_answers_outside_every_chat() {
     // The run id is the destination — the timeline the operator was already
     // watching, and a value no desk answers to.
     assert_eq!(
-        super::continuation_fallback_chat_id(
-            Some(&origin(Some(TaskLink::Unlinked), Some("run-9"))),
-            Some("dm:copywriter"),
-        ),
+        super::continuation_fallback_chat_id(Some(&origin(
+            Some(TaskLink::Unlinked),
+            Some("run-9")
+        ))),
         "run-9",
     );
     // A board card's dispatch: the card owns the work, exactly as
     // `journal_task_outcome` already records it.
     assert_eq!(
-        super::continuation_fallback_chat_id(
-            Some(&origin(
-                Some(TaskLink::Task {
-                    id: "card-3".to_string()
-                }),
-                Some("attempt-4"),
-            )),
-            Some("dm:copywriter"),
-        ),
+        super::continuation_fallback_chat_id(Some(&origin(
+            Some(TaskLink::Task {
+                id: "card-3".to_string()
+            }),
+            Some("attempt-4"),
+        ))),
         "card-3",
     );
     // Unlinked with nothing stamped is an unaddressed operator turn, and a
-    // pre-#333 line with no link at all is unknown. Both answer in the DM of
-    // the agent that asked for the approval.
-    let requester = Some("dm:copywriter");
+    // pre-#333 line with no link at all is unknown. Both answer in General
+    // — visible to the person who approved, and never a teammate's DM.
     assert_eq!(
-        super::continuation_fallback_chat_id(
-            Some(&origin(Some(TaskLink::Unlinked), None)),
-            requester
-        ),
-        "dm:copywriter",
-    );
-    assert_eq!(
-        super::continuation_fallback_chat_id(Some(&origin(None, Some("run-9"))), requester),
-        "dm:copywriter",
-    );
-    assert_eq!(
-        super::continuation_fallback_chat_id(None, requester),
-        "dm:copywriter"
-    );
-    assert_eq!(
-        super::continuation_fallback_chat_id(None, None),
+        super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None))),
         "General",
-        "only a company with nobody to answer as has nowhere else"
     );
+    assert_eq!(
+        super::continuation_fallback_chat_id(Some(&origin(None, Some("run-9")))),
+        "General",
+    );
+    assert_eq!(super::continuation_fallback_chat_id(None), "General");
 }
 
 /// Issue #1092, the property that actually matters: a workflow park's
@@ -307,10 +292,10 @@ fn a_workflow_parks_continuation_owns_no_desk_and_no_dm() {
     };
 
     // The leak: a workflow node's park, answered into the copywriter's DM.
-    let workflow = super::continuation_fallback_chat_id(
-        Some(&origin(Some(TaskLink::Unlinked), Some("run-9"))),
-        Some("dm:copywriter"),
-    );
+    let workflow = super::continuation_fallback_chat_id(Some(&origin(
+        Some(TaskLink::Unlinked),
+        Some("run-9"),
+    )));
     for (desk_id, desk_name) in [
         ("copywriter", "Copywriter"),
         ("creative", "Creative studio"),
@@ -321,75 +306,13 @@ fn a_workflow_parks_continuation_owns_no_desk_and_no_dm() {
         );
     }
 
-    // And the other direction: an unaddressed operator turn answers in the
-    // requesting agent's DM, where the person who approved is looking.
-    let unaddressed = super::continuation_fallback_chat_id(
-        Some(&origin(Some(TaskLink::Unlinked), None)),
-        Some("dm:copywriter"),
-    );
+    // And the other direction: an unaddressed operator turn still answers
+    // somewhere the person who approved is looking.
+    let unaddressed =
+        super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None)));
     assert!(
-        owns("dm:copywriter", "copywriter", &reply(unaddressed.clone())),
-        "`{unaddressed}` must be read as the requesting agent's DM",
-    );
-    assert!(
-        !owns("main", "General", &reply(unaddressed.clone())),
-        "`{unaddressed}` must not land in General",
-    );
-}
-
-/// A conversation-less continuation that fails must report into the same
-/// place a success would have — the requester's DM here, since the park
-/// named neither a task nor a workflow run — not the retired Operator feed.
-#[cfg(feature = "openhuman")]
-#[tokio::test]
-async fn a_conversation_less_failure_answers_where_a_success_would_have() {
-    use crate::ports::types::{ApprovalId, CompanyEvent, Effect, EffectGroup};
-    use crate::runtime::journal::{ApprovalConversation, TaskLink};
-
-    let (runtime, _record, _home) = runtime_and_record().await;
-    let approval_id = ApprovalId::new("appr-1");
-    let effect = Effect {
-        kind: "publish_artifact".to_string(),
-        group: EffectGroup::Other,
-        amount_usd: None,
-        established_thread: false,
-        first_time_counterparty: false,
-        payload: serde_json::json!({}),
-        agent: Some("ceo".to_string()),
-        run_id: None,
-    };
-    runtime
-        .journal
-        .record_parked(
-            &approval_id,
-            &effect,
-            1,
-            TaskLink::Unlinked,
-            ApprovalConversation {
-                thread: None,
-                parent: None,
-            },
-            None,
-        )
-        .await
-        .expect("record_parked");
-
-    runtime.announce_continuation_failure(&approval_id).await;
-
-    let events = runtime
-        .events
-        .read_from(runtime.id(), crate::ports::types::EventSeq::new(0), 500)
-        .await
-        .expect("events");
-    let notice = events.into_iter().find_map(|stored| match stored.event {
-        CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id),
-        _ => None,
-    });
-    assert_eq!(
-        notice.as_deref(),
-        Some(crate::runtime::assignee::dm_channel("ceo").as_str()),
-        "a failure notice for an unaddressed park must land in the requester's \
-         DM, the same place `publish_continuation` would have put a success"
+        owns("main", "General", &reply(unaddressed.clone())),
+        "`{unaddressed}` must still be read as the operator's General line",
     );
 }
 

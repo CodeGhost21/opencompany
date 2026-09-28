@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { writeLastChannel } from "@/lib/last-channel";
+import { isGeneralChannel } from "@/lib/chat";
 import { TOUR } from "@/tour/steps";
 import { RoomView } from "@/views/RoomView";
 
@@ -21,7 +21,7 @@ import { RoomView } from "@/views/RoomView";
  * Both facts are about what is *on screen*, and both were previously "true"
  * in a form that read as fixed and was not. The composer was `disabled`, which
  * is still a claim that the action exists: under a notice reading "There is
- * nothing to reply to here", a read-only channel drew a text input, three intent
+ * nothing to reply to here", `#Operator` drew a text input, three intent
  * chips, a mention button, a paperclip, a formatting toggle, a Send button and
  * an "Enter to send" hint. And the notice explaining that replies come from
  * the offline echo brain sat above the transcript, at the far end of the page
@@ -38,23 +38,25 @@ import { RoomView } from "@/views/RoomView";
  * mount that silently renders nothing fails rather than passing twice.
  */
 
-const DESK_DTO = {
-  id: "front-desk",
-  name: "Front desk",
-  description: "Where requests come in",
-  members: [] as string[],
+const OPERATOR_DTO = {
+  id: "operator",
+  name: "Operator",
+  description: "Automation reports and notifications",
 };
 
-/** The writable desk channel, and the read-only `#general` archive. */
-const WRITABLE = "front-desk";
-const ARCHIVE = "main";
-const READ_ONLY_NOTICE = "nothing can be posted here";
+const DESK_DTO = {
+  id: "main",
+  name: "main",
+  description: "The main channel",
+  members: [] as string[],
+};
 
 function stubClient(cognition: string | null): OpenCompanyClient {
   return {
     listDesks: vi.fn(async () => [DESK_DTO]),
     listTeam: vi.fn(async () => []),
     mentionables: vi.fn(async () => []),
+    getOperatorChannel: vi.fn(async () => OPERATOR_DTO),
     capabilityStatus: vi.fn(async () => ({ cognition })),
     chat: vi.fn(),
     reactToMessage: vi.fn(),
@@ -64,7 +66,6 @@ function stubClient(cognition: string | null): OpenCompanyClient {
 
 let container: HTMLDivElement;
 let root: Root;
-let onNavigate: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -84,8 +85,6 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  onNavigate = vi.fn();
-  window.localStorage.clear();
 });
 
 afterEach(() => {
@@ -122,7 +121,7 @@ function tree(
     client,
     company: "acme",
     sub,
-    onNavigate,
+    onNavigate: vi.fn(),
     transcripts: {},
     setTranscripts: vi.fn(),
     // Who the shell says is at a keyboard in this channel. Empty by default;
@@ -163,7 +162,7 @@ async function renderAt(
   await act(async () => {
     root.render(tree(client, sub, typing, inflight));
   });
-  // Let the desks / capability reads settle.
+  // Let the desks / operator / capability reads settle.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -196,7 +195,7 @@ function banner() {
 
 describe("a read-only channel renders no composer", () => {
   it("draws neither the composer nor its placeholder", async () => {
-    await mount(ARCHIVE);
+    await mount("operator");
 
     expect(composerInput()).toBeNull();
     expect(readOnlyComposerInput()).toBeNull();
@@ -204,7 +203,7 @@ describe("a read-only channel renders no composer", () => {
   });
 
   it("draws no Send button and no intent chips", async () => {
-    await mount(ARCHIVE);
+    await mount("operator");
 
     expect(container.querySelector('[aria-label="Send"]')).toBeNull();
     expect(container.querySelector('[aria-label="What this message is for"]')).toBeNull();
@@ -214,7 +213,7 @@ describe("a read-only channel renders no composer", () => {
   });
 
   it("draws none of the mention, attach or formatting controls", async () => {
-    await mount(ARCHIVE);
+    await mount("operator");
 
     for (const label of ["Mention someone", "Attach a file", "Formatting"]) {
       expect(container.querySelector(`[aria-label="${label}"]`)).toBeNull();
@@ -222,20 +221,20 @@ describe("a read-only channel renders no composer", () => {
   });
 
   it("drops the keyboard hint, which describes a send that cannot happen", async () => {
-    await mount(ARCHIVE);
+    await mount("operator");
 
     expect(container.textContent).not.toContain("to send");
     expect(container.textContent).not.toContain("for a new line");
   });
 
   it("keeps the notice that explains why", async () => {
-    await mount(ARCHIVE);
+    await mount("operator");
 
-    expect(container.textContent).toContain(READ_ONLY_NOTICE);
+    expect(container.textContent).toContain("There is nothing to reply to here");
   });
 
   it("offers neither empty-state card, since neither action exists here", async () => {
-    await mount(ARCHIVE);
+    await mount("operator");
 
     // "Give the team a brief" prefills a composer this channel does not
     // render; "Add people" opens a members pane `RoomView` gates off on the
@@ -247,7 +246,7 @@ describe("a read-only channel renders no composer", () => {
 
 describe("a writable channel still renders the whole composer", () => {
   it("draws the input, the Send button and the controls", async () => {
-    await mount(WRITABLE);
+    await mount("main");
 
     expect(composerInput()).not.toBeNull();
     expect(container.querySelector('[aria-label="Send"]')).not.toBeNull();
@@ -261,11 +260,11 @@ describe("a writable channel still renders the whole composer", () => {
       expect(container.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
     }
     expect(container.textContent).toContain("to send");
-    expect(container.textContent).not.toContain(READ_ONLY_NOTICE);
+    expect(container.textContent).not.toContain("There is nothing to reply to here");
   });
 
   it("still offers the empty-state cards", async () => {
-    await mount(WRITABLE);
+    await mount("main");
 
     expect(container.textContent).toContain("Give the team a brief");
     expect(container.textContent).toContain("Add people");
@@ -274,7 +273,7 @@ describe("a writable channel still renders the whole composer", () => {
 
 describe("the harness-unavailable notice sits next to the composer, or without one", () => {
   it("renders the notice on a writable channel, saying all three things", async () => {
-    await mount(WRITABLE, "unavailable");
+    await mount("main", "unavailable");
 
     const strip = banner();
     expect(strip).not.toBeNull();
@@ -292,7 +291,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
   });
 
   it("shares the composer's own box, so nothing can come between them", async () => {
-    await mount(WRITABLE, "unavailable");
+    await mount("main", "unavailable");
 
     const strip = banner()!;
     const input = composerInput()!;
@@ -317,7 +316,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
   });
 
   it("overlaps the transcript rather than displacing it", async () => {
-    await mount(WRITABLE, "unavailable");
+    await mount("main", "unavailable");
 
     const strip = banner()!;
     // The trade the float makes, stated: it covers the last line of the
@@ -335,7 +334,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     // `InflightRunBar` renders inside the same box, between the notice's anchor
     // and the composer. That used to break the adjacency assertion; now it
     // cannot, and this is the case that proves it.
-    await mount(WRITABLE, "unavailable", ["Jane"], true);
+    await mount("main", "unavailable", ["Jane"], true);
 
     const strip = banner()!;
     const input = composerInput()!;
@@ -349,11 +348,20 @@ describe("the harness-unavailable notice sits next to the composer, or without o
   });
 
   /**
-   * The read-only archive keeps it: the notice is about the replies already on
-   * screen, not about sending.
+   * The read-only feed keeps it, and that is the case it matters most in.
+   *
+   * `#Operator` renders the company's own workflow reports under the reserved
+   * authors `workflow-report` / `owner-fallback-report` — titleized into
+   * "Workflow Report" and "Owner Fallback Report", names belonging to no
+   * person. In an echo state nobody wrote those words, and the only thing on
+   * the row that says so is `EchoPlaceholder`, a non-focusable `<span>`
+   * carrying its reason in a `title`, which reaches neither keyboard, touch nor
+   * screen reader. Suppressing the strip here left the reader with a status
+   * report, a "Placeholder" pill against a name that is not a colleague, and no
+   * way to ask anything — the feed takes no replies.
    */
-  it("stays on the read-only archive, which takes no replies", async () => {
-    await mount(ARCHIVE, "unavailable");
+  it("stays on the read-only feed, which the reader cannot interrogate", async () => {
+    await mount("operator", "unavailable");
 
     const strip = banner();
     expect(strip).not.toBeNull();
@@ -368,14 +376,14 @@ describe("the harness-unavailable notice sits next to the composer, or without o
 
     // Restoring the notice restores nothing else: the channel is still
     // read-only, still says so, and still draws no composer.
-    expect(container.textContent).toContain(READ_ONLY_NOTICE);
+    expect(container.textContent).toContain("There is nothing to reply to here");
     expect(composerInput()).toBeNull();
     expect(readOnlyComposerInput()).toBeNull();
     expect(container.querySelector("textarea")).toBeNull();
   });
 
   it("sits after the read-only notice, with no composer between them", async () => {
-    await mount(ARCHIVE, "unavailable");
+    await mount("operator", "unavailable");
 
     const strip = banner()!;
     // One level deeper than it used to be: the notice's parent is now the
@@ -384,7 +392,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
     const box = strip.parentElement!;
     const column = box.parentElement!;
     const kids = Array.from(column.children);
-    const notice = kids.find((el) => el.textContent?.includes(READ_ONLY_NOTICE));
+    const notice = kids.find((el) => el.textContent?.includes("There is nothing to reply to here"));
 
     expect(notice).not.toBeUndefined();
     expect(kids.indexOf(notice!)).toBeLessThan(kids.indexOf(box));
@@ -398,7 +406,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
 });
 
 /**
- * The draft an operator has half-written outlives a look at a read-only channel.
+ * The draft an operator has half-written outlives a look at `#Operator`.
  *
  * This is the regression the read-only change nearly shipped (codex review on
  * PR #1984). `MessageComposer` holds the draft, the staged attachment, the
@@ -408,7 +416,7 @@ describe("the harness-unavailable notice sits next to the composer, or without o
  * Gating the element on `!readOnly` unmounted it, and the operator came back
  * to an empty box. The fix keeps the element and renders nothing from it.
  */
-describe("a trip to the read-only archive does not eat the draft", () => {
+describe("a trip to the read-only feed does not eat the draft", () => {
   /** Type into a controlled textarea the way a keystroke would. */
   function type(el: HTMLTextAreaElement, text: string) {
     const setter = Object.getOwnPropertyDescriptor(
@@ -423,28 +431,34 @@ describe("a trip to the read-only archive does not eat the draft", () => {
 
   it("comes back with the text still in it", async () => {
     const client = stubClient(null);
-    await renderAt(client, WRITABLE);
+    await renderAt(client, "main");
 
     const before = composerInput() as HTMLTextAreaElement;
     expect(before).not.toBeNull();
     type(before, "half-written thought");
     expect((composerInput() as HTMLTextAreaElement).value).toBe("half-written thought");
 
-    await renderAt(client, ARCHIVE);
+    await renderAt(client, "operator");
     // Still nothing on screen: the point is that it is unrendered, not that it
     // came back.
     expect(composerInput()).toBeNull();
     expect(container.querySelector("textarea")).toBeNull();
 
-    await renderAt(client, WRITABLE);
+    await renderAt(client, "main");
     expect((composerInput() as HTMLTextAreaElement).value).toBe("half-written thought");
   });
 });
 
 /**
- * A General *spelling* opens whatever holds the legacy line: a blueprint desk
- * that claims it, else the read-only archive — never issue #370's "isn't a
- * channel here" notice.
+ * A General *spelling* opens the company-wide line whichever way the company
+ * declared it.
+ *
+ * The guided tour's two composer stops address `#/chat/main` outright so they
+ * cannot inherit the read-only Operator feed (`tour/steps.ts`). That address
+ * has to resolve in a grandfathered company too — one whose blueprint put a
+ * desk on the company line, where `buildChannels` adds no built-in `#general`
+ * beside it — or the tour would spotlight a composer under issue #370's
+ * "isn't a channel here" notice.
  */
 describe("a General address resolves to whichever channel holds the line", () => {
   function claimedClient(): OpenCompanyClient {
@@ -461,6 +475,7 @@ describe("a General address resolves to whichever channel holds the line", () =>
       ]),
       listTeam: vi.fn(async () => []),
       mentionables: vi.fn(async () => []),
+      getOperatorChannel: vi.fn(async () => OPERATOR_DTO),
       capabilityStatus: vi.fn(async () => ({ cognition: null })),
       chat: vi.fn(),
       reactToMessage: vi.fn(),
@@ -475,14 +490,13 @@ describe("a General address resolves to whichever channel holds the line", () =>
     // bare first-channel fallback would have landed on.
     expect(composerInput()?.getAttribute("aria-label")).toBe("Message #general");
     expect(container.textContent).not.toContain("isn't a channel here");
-    expect(container.textContent).not.toContain(READ_ONLY_NOTICE);
+    expect(container.textContent).not.toContain("There is nothing to reply to here");
   });
 
-  it("opens the read-only archive in an ordinary company", async () => {
-    await mount(ARCHIVE);
+  it("still opens the built-in channel in an ordinary company", async () => {
+    await mount("main");
 
-    expect(composerInput()).toBeNull();
-    expect(container.textContent).toContain(READ_ONLY_NOTICE);
+    expect(composerInput()).not.toBeNull();
     expect(container.textContent).not.toContain("isn't a channel here");
   });
 });
@@ -490,13 +504,17 @@ describe("a General address resolves to whichever channel holds the line", () =>
 /**
  * The guided tour's composer stops land somewhere that has a composer.
  *
- * Two stops spotlight `[data-tour="chat-composer"]`, and one of them is the
- * closing "You're all set". They name no channel, so they open whatever a bare
- * `#/chat` restores. A missing anchor is skipped in silence, so both halves
- * are pinned: a bare entry renders a composer, and it does not restore onto
- * the read-only archive.
+ * Two of the eight stops spotlight `[data-tour="chat-composer"]`, and one of
+ * them is the closing "You're all set". A stop that names only `view: "chat"`
+ * inherits whichever channel was last open there — `app-shell`'s remembered
+ * sub-segment, or `RoomView`'s remembered channel on a cold start — which can
+ * be the read-only Operator feed. Since PR #1984 that feed renders no composer,
+ * so the anchor never mounts, `waitForTarget` times out, and the stop is
+ * **skipped in silence**: a missing anchor degrades rather than errors, so the
+ * tour teaches less and nothing reports it. Neither half of that is visible
+ * from a passing suite, which is why both halves are pinned here.
  */
-describe("the tour's composer stops open a writable channel", () => {
+describe("the tour's composer stops address a writable channel", () => {
   const composerStops = TOUR.filter((s) => s.target === '[data-tour="chat-composer"]');
 
   it("finds the two stops that spotlight the composer", () => {
@@ -504,37 +522,29 @@ describe("the tour's composer stops open a writable channel", () => {
     expect(composerStops.map((s) => s.title)).toEqual(["Talk to your company", "You're all set"]);
   });
 
-  it("names no channel, so a bare #/chat decides", () => {
+  it("names a channel outright rather than inheriting the last one", () => {
     for (const stop of composerStops) {
       expect(stop.view).toBe("chat");
-      expect(stop.sub).toBeUndefined();
+      expect(stop.sub).toBeTruthy();
+      // A General spelling: the company-wide line exists in every company and
+      // is writable in all of them, and `RoomView` folds every spelling of it
+      // onto whichever channel actually holds the line.
+      expect(isGeneralChannel(stop.sub!)).toBe(true);
     }
   });
 
-  it("mounts the spotlight anchor on a bare #/chat", async () => {
-    await mount("");
-
-    expect(container.querySelector('[data-tour="chat-composer"]')).not.toBeNull();
-    expect(onNavigate).toHaveBeenCalledWith(WRITABLE);
+  it("mounts the spotlight anchor at that address, with an Operator feed present", async () => {
+    for (const stop of composerStops) {
+      await renderAt(stubClient(null), stop.sub!);
+      expect(container.querySelector('[data-tour="chat-composer"]')).not.toBeNull();
+    }
   });
 
-  it("does not restore a bare #/chat onto a remembered archive", async () => {
-    writeLastChannel({ connection: "local", company: "acme" }, ARCHIVE);
-    await mount("");
-
-    expect(onNavigate).toHaveBeenCalledWith(WRITABLE);
-    expect(onNavigate).not.toHaveBeenCalledWith(ARCHIVE);
-  });
-
-  it("still restores a remembered writable channel", async () => {
-    writeLastChannel({ connection: "local", company: "acme" }, "dm:ada");
-    await mount("");
-
-    expect(onNavigate).toHaveBeenCalledWith("dm:ada");
-  });
-
-  it("mounts no anchor on the archive", async () => {
-    await mount(ARCHIVE);
+  it("mounts no anchor on the feed those stops must not inherit", async () => {
+    // The other half of the claim: the address matters because the remembered
+    // one would have failed. Without this the test above passes on a console
+    // where every channel renders a composer.
+    await mount("operator");
 
     expect(container.querySelector('[data-tour="chat-composer"]')).toBeNull();
   });

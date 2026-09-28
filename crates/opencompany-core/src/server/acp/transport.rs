@@ -127,7 +127,7 @@ fn owner(auth: &GqlAuth) -> String {
     }
 }
 
-fn target(params: &Value) -> Result<(&str, Option<String>, Option<String>), String> {
+fn target(params: &Value) -> Result<(&str, String, Option<String>), String> {
     let meta = params
         .get("_meta")
         .and_then(|m| m.get("opencompany"))
@@ -141,7 +141,8 @@ fn target(params: &Value) -> Result<(&str, Option<String>, Option<String>), Stri
         .get("chat")
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty())
-        .map(str::to_string);
+        .unwrap_or(crate::server::ops::language::DEFAULT_DESK)
+        .to_string();
     let agent = meta
         .get("agentId")
         .and_then(Value::as_str)
@@ -192,14 +193,6 @@ async fn open_session(state: &AppState, auth: &GqlAuth, params: &Value) -> Resul
             return Err(format!("`agentId` `{id}` is not a roster member"));
         }
     }
-    let requested_chat = match requested_chat {
-        Some(chat) => chat,
-        None => runtime
-            .default_agent_dm()
-            .await
-            .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
-    };
     let id = uuid::Uuid::new_v4().to_string();
     let session = state
         .acp_sessions()
