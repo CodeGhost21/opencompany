@@ -207,14 +207,45 @@ impl SystemOneTransport for TinyHumansSystemOne {
                     answers = answer.answers.len(),
                     "[hive] jev answered"
                 ),
+                // **The error's own text is not logged.**
+                //
+                // `Error::Transport` displays as `status: message`, and that
+                // message is the proxy's response body -- which can echo the
+                // request, and the request carries the desk's findings. A status
+                // and a variant name say which failure this was without writing
+                // somebody's episode into the log.
                 Err(error) => tracing::warn!(
-                    %error,
+                    status = ?transport_status(error),
+                    kind = failure_kind(error),
                     url = %self.url,
                     "[hive] the jev call failed; this round routes by lead and mention"
                 ),
             }
             outcome
         })
+    }
+}
+
+/// The HTTP-like status a failure carries, when it has one.
+///
+/// Separated from the message on purpose: see the warning in
+/// [`TinyHumansSystemOne::evaluate`] for why the message itself is not logged.
+#[must_use]
+fn transport_status(error: &Error) -> Option<u16> {
+    match error {
+        Error::Transport { status, .. } => *status,
+        _ => None,
+    }
+}
+
+/// Which failure it was, as a fixed word rather than the error's own text.
+#[must_use]
+fn failure_kind(error: &Error) -> &'static str {
+    match error {
+        Error::Transport { .. } => "transport",
+        Error::InvalidProviderResponse { .. } => "undecodable response",
+        Error::SerializeState { .. } => "state would not serialize",
+        _ => "refused the request",
     }
 }
 

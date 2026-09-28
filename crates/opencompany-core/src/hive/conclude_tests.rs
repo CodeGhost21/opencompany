@@ -301,3 +301,55 @@ fn only_a_confident_yes_skips_and_everything_else_concludes() {
         "the threshold itself skips"
     );
 }
+
+/// `summary_seq` names a row the closing turn wrote, never one the seat wrote
+/// earlier in the episode.
+///
+/// The concluder is usually a seat that already spoke — the lead, most often —
+/// so "its last reply on the desk" is an ordinary deliberation row until the
+/// closing turn adds one. A closing turn that records nothing is a case
+/// `Conclusion::summary_seq` documents as `None`; without a watermark the
+/// read-back would instead hand `EpisodeCompleted` a mid-episode message and the
+/// console would label it the episode's summary.
+///
+/// This exercises the rule the read-back applies rather than the async round: a
+/// row qualifies only when its sequence is above the highest one the settled
+/// episode already held.
+#[test]
+fn a_summary_never_points_at_a_row_from_before_the_closing_turn() {
+    let rows: Vec<u64> = vec![10, 24, 31];
+    let before = rows.iter().copied().max().unwrap_or(0);
+    assert_eq!(
+        before, 31,
+        "the watermark is the settled episode's last row"
+    );
+
+    // A closing turn that wrote nothing: its own reply is absent, and the
+    // seat's earlier rows are all at or below the watermark.
+    let after_silent: Vec<u64> = rows.clone();
+    assert!(
+        after_silent
+            .iter()
+            .rev()
+            .take_while(|seq| **seq > before)
+            .count()
+            == 0,
+        "a silent closing turn qualifies no row, so the summary stays None"
+    );
+
+    // A closing turn that spoke: its row is above the watermark and is the one
+    // taken, even though the seat also spoke at 24.
+    let mut after_spoke = rows.clone();
+    after_spoke.push(37);
+    let qualifying: Vec<u64> = after_spoke
+        .iter()
+        .rev()
+        .take_while(|seq| **seq > before)
+        .copied()
+        .collect();
+    assert_eq!(
+        qualifying,
+        vec![37],
+        "only the closing turn's own row is eligible"
+    );
+}

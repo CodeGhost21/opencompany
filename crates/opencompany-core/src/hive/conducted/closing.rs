@@ -91,6 +91,21 @@ impl HiveDispatcher {
                 }
             },
         };
+        // **The line the closing turn must write above.**
+        //
+        // Taken before the round runs, because the read-back below cannot
+        // otherwise tell the closing message from anything this seat said during
+        // the episode proper. The concluder is usually a seat that already spoke
+        // -- the lead, most often -- so "its last reply on the desk" is an
+        // ordinary deliberation row until the closing turn adds one. Without
+        // this, a closing turn that recorded nothing would hand
+        // `EpisodeCompleted.summary_seq` a mid-episode message and the console
+        // would label it the episode's summary.
+        let before = settled_rows
+            .iter()
+            .map(|stored| stored.seq.value())
+            .max()
+            .unwrap_or(0);
         let outcome = run(Episode {
             record: Arc::clone(&self.record),
             deps: Arc::clone(&self.deps),
@@ -118,8 +133,10 @@ impl HiveDispatcher {
             }
         };
         // Where the message landed, read back rather than tracked: the seat
-        // journals through the host like any other turn, and the last row it
-        // wrote to the desk in this episode is its answer.
+        // journals through the host like any other turn, so its answer is a row
+        // the closing turn added -- which is what `before` distinguishes. A turn
+        // that recorded nothing leaves `None`, as `Conclusion::summary_seq`
+        // documents, rather than pointing at something the seat said earlier.
         let summary_seq =
             match episode_store::episode_rows(self.events.as_ref(), &self.record.id, episode_id)
                 .await
@@ -127,6 +144,7 @@ impl HiveDispatcher {
                 Ok(rows) => rows
                     .iter()
                     .rev()
+                    .take_while(|stored| stored.seq.value() > before)
                     .find(|stored| match &stored.event {
                         CompanyEvent::AgentReply {
                             chat_id, agent_id, ..
