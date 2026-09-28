@@ -5090,14 +5090,11 @@ impl CompanyRuntime {
             .journal
             .approval_conversation(approval_id)
             .unwrap_or_default();
-        let thread = conversation
-            .thread
-            .unwrap_or_else(|| crate::runtime::channel::OPERATOR_CHANNEL.to_string());
-        // Issue #435: the bad news belongs in the same place the good news
-        // would have gone. A failure notice left flat in the channel while the
-        // question sits in a thread is the same lost-conclusion bug wearing a
-        // different hat — and this is the message the operator is most likely
-        // to be waiting on.
+        // The failure notice lands where `publish_continuation` would have put
+        // the answer.
+        let thread = conversation.thread.unwrap_or_else(|| {
+            continuation_fallback_chat_id(self.journal.approval_origin(approval_id).as_ref())
+        });
         let parent = self.resolvable_parent(conversation.parent, &thread).await;
         if let Err(err) = self
             .events
