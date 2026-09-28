@@ -588,6 +588,12 @@ impl CompanyManifest {
             }
         }
 
+        if enforce_reserved_agent_ids && self.company.general_desk.is_some() {
+            problems.push(
+                "`[company].general_desk` is no longer supported — #general is built in and every teammate is in it. Remove the key; the desk it named stays an ordinary desk.".into(),
+            );
+        }
+
         // Group chats: ids snake_case + unique; every member is a real agent.
         let mut chat_ids = std::collections::HashSet::new();
         for (index, chat) in self.group_chats.iter().enumerate() {
@@ -643,6 +649,13 @@ impl CompanyManifest {
                 // the same way (issue #1781 review, Codex P1 follow-up).
                 problems.push(format!(
                     "{label} is named \"Operator\", which is reserved for the built-in Operator channel — choose a different name."
+                ));
+            } else if enforce_reserved_agent_ids
+                && (crate::ports::general_channel::is_general_spelling(&chat.id)
+                    || crate::ports::general_channel::is_general_spelling(&chat.name))
+            {
+                problems.push(format!(
+                    "{label} uses the id or name of #general, the built-in company-wide channel — choose a different id and name."
                 ));
             } else if !chat_ids.insert(chat.id.as_str()) {
                 problems.push(format!(
@@ -1463,6 +1476,9 @@ fn join_backticked(values: &[&str]) -> String {
         .join(", ")
 }
 
+#[cfg(test)]
+#[path = "manifest_tests_general.rs"]
+mod tests_general;
 #[cfg(test)]
 #[path = "manifest_tests_grants.rs"]
 mod tests_grants;
