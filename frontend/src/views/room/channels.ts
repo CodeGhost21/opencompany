@@ -15,6 +15,7 @@ import type { DeskDto } from "@/api/types";
 import {
   generalAwareChannel,
   isGeneralChannel,
+  migrateLegacyGeneralId,
   type ChatMessage,
 } from "@/lib/chat";
 import { isGeneralDesk, type Desk } from "@/lib/desks";
@@ -264,14 +265,17 @@ export function dmChannelId(member: TeamMember): string {
  * The **host thread** a teammate's DM is addressed on — not always the same
  * string as {@link dmChannelId}, which is its console-local channel id.
  *
- * The bare teammate id, except for a teammate whose id is `general`: the bare
- * key addresses the company-wide channel, so that one DM is addressed prefixed,
- * which `chat_responder` unwraps. Every seam that turns a roster member into a
- * thread id has to ask this — the sender, the live thread → channel map, the
- * rehydration targets and the Approvals page's link back to the conversation.
+ * The bare teammate id, except for a teammate whose id is `general` or a
+ * legacy spelling of it (`main`, any casing): the host reads those bare keys as
+ * #general, so that DM is addressed prefixed, which `chat_responder` unwraps.
+ * Every seam that turns a roster member into a thread id has to ask this — the
+ * sender, the live thread → channel map, the rehydration targets and the
+ * Approvals page's link back to the conversation.
  */
 export function dmThreadId(member: TeamMember): string {
-  return isGeneralChannel(member.id) ? dmChannelId(member) : member.id;
+  return isGeneralChannel(migrateLegacyGeneralId(member.id))
+    ? dmChannelId(member)
+    : member.id;
 }
 
 /** The teammate a thread addresses, whether it is bare or `dm:`-prefixed. */

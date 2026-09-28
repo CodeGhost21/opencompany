@@ -148,6 +148,12 @@ describe("addressing #general by id", () => {
     expect(dmThreadId(ROSTER[0])).toBe("ceo");
     expect(channelIdForThread("dm:general", desks, [...ROSTER, namesake])).toBe("dm:general");
   });
+
+  it("addresses a legacy teammate called `main` on its prefixed DM thread", () => {
+    for (const id of ["main", "Main", "General"]) {
+      expect(dmThreadId(member({ id, name: "Legacy" }))).toBe(`dm:${id}`);
+    }
+  });
 });
 
 describe("migrating stored #general ids", () => {
