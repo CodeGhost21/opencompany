@@ -1,7 +1,7 @@
-//! The company-wide `#general` channel: its identity and its stored
-//! membership.
+//! The company-wide `#general` channel: its identity, its stored membership,
+//! and the read-time decode that maps legacy spellings of it onto its id.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ports::types::{Actor, CompanyEvent, CompanyRecord, OverlayAgent};
 
@@ -132,6 +132,50 @@ impl CompanyRecord {
     }
 }
 
+/// Whether `chat` is a legacy or current spelling of `#general`: its id, its
+/// display name, `main`, or the empty string, in any case.
+pub fn is_general_spelling(chat: &str) -> bool {
+    chat.is_empty()
+        || chat.eq_ignore_ascii_case(GENERAL_CHANNEL_ID)
+        || chat.eq_ignore_ascii_case("main")
+}
+
+/// Maps any spelling of `#general` onto [`GENERAL_CHANNEL_ID`], leaving every
+/// other chat id as written.
+pub fn decode_general_chat_id(chat: String) -> String {
+    if is_general_spelling(&chat) {
+        GENERAL_CHANNEL_ID.to_string()
+    } else {
+        chat
+    }
+}
+
+/// [`decode_general_chat_id`] over an optional id. `None` stays `None`.
+pub fn decode_general_chat_opt(chat: Option<String>) -> Option<String> {
+    chat.map(decode_general_chat_id)
+}
+
+/// Serde `deserialize_with` for a required chat id.
+pub fn deserialize_general_chat<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(decode_general_chat_id)
+}
+
+/// Serde `deserialize_with` for an optional chat id where `None` means "no
+/// conversation" and must stay `None`.
+pub fn deserialize_general_chat_opt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(decode_general_chat_opt)
+}
+
 #[cfg(test)]
 #[path = "general_channel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "general_channel_decode_tests.rs"]
+mod decode_tests;
