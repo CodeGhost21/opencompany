@@ -994,24 +994,12 @@ async fn create_desk(
     // straight through. Fixed (issue #1781 review, Codex P1 follow-up):
     // `ensure_desk_writable` now resolves the raw selector through
     // `resolve_desk_id` first, so it agrees with the read path on which desk
-    // a caller meant. The fallback address
-    // (`OPERATOR_CHANNEL_COLLISION_FALLBACK`, "operator-feed")
-    // is reserved by name for the identical reason `316bc9229` reserved it on
-    // the manifest side — `resolve_desk` folds a `?desk=` selector against it
-    // the same way — but not by id: `is_valid_desk_id` above already rejects
-    // any hyphen, so no `id` can ever equal the hyphenated fallback constant.
+    // a caller meant.
     if id == crate::runtime::OPERATOR_CHANNEL
         || name.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL)
     {
         return Err(ApiError(OpenCompanyError::Conflict(
             "the id \"operator\" is reserved for the built-in Operator channel — choose a different id"
-                .to_string(),
-        )));
-    }
-    if name.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
-        return Err(ApiError(OpenCompanyError::Conflict(
-            "the name \"operator-feed\" is reserved for the built-in Operator channel's \
-             fallback feed — choose a different name"
                 .to_string(),
         )));
     }
@@ -1130,18 +1118,6 @@ async fn delete_desk(
         return Err(ApiError(OpenCompanyError::Conflict(
             language::MANIFEST_DESK_DELETE.to_string(),
         )));
-    }
-    // Tombstone the operator-feed divert before it can be lost (issue #1781
-    // review, Codex P2): `operator_feed_channel` currently diverts only while
-    // *something* live holds the id or display name `operator`, and the desk
-    // this call is about to remove may be that something. Recorded here,
-    // before the removal, while the live check can still see it — see
-    // `CompanyRecord::divert_operator_feed_permanently`'s doc for why this
-    // has to survive the desk being gone.
-    if record.operator_feed_channel()
-        == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
-    {
-        record.divert_operator_feed_permanently();
     }
     let before = record.overlay_desks.len();
     record.overlay_desks.retain(|d| d.id != desk_id);

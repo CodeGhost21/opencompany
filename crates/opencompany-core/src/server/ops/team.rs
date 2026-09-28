@@ -860,23 +860,6 @@ async fn remove_member(
         )));
     }
 
-    // Tombstone the operator-feed divert before it can be lost (issue #1781
-    // review, Codex P2 follow-up to the desk-deletion fix): a manifest
-    // teammate at the literal id `operator` is already covered below —
-    // `retire_agent` tombstones it under the same key
-    // `operator_feed_channel`'s own `is_retired` check reads — but an
-    // *overlay* teammate is deleted outright with no tombstone at all. If
-    // this removal is what's currently holding the divert (id or, via
-    // `is_roster_agent`, nothing else does for a teammate — desks are the
-    // only case matched by display name), the fallback address must stay
-    // fixed after the removal exactly as `delete_desk` already keeps it
-    // fixed after a colliding desk's removal — see
-    // `CompanyRecord::divert_operator_feed_permanently`'s doc.
-    if record.operator_feed_channel()
-        == crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK
-    {
-        record.divert_operator_feed_permanently();
-    }
     let is_manifest = record.manifest.agents.iter().any(|a| a.id == agent_id);
     // A manifest teammate is tombstoned rather than edited out of
     // `company.toml`, which is re-read on every rebuild.

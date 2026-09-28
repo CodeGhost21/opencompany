@@ -67,20 +67,6 @@ pub const OWNER_FALLBACK_REPORT_AUTHOR: &str = "owner-fallback-report";
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
 
-/// Where the durable Operator system feed journals when [`OPERATOR_CHANNEL`]
-/// is already claimed by a grandfathered roster **teammate** with no desk of
-/// the same id — see
-/// [`CompanyRecord::operator_feed_channel`](crate::ports::types::CompanyRecord::operator_feed_channel)
-/// for the full account (issue #1781 review: CodeRabbit Major + Codex P2).
-///
-/// Hyphenated, so — like [`WORKFLOW_REPLY_AUTHOR`] — no desk id
-/// (`is_valid_desk_id`, manifest `is_snake_case`) or roster agent id
-/// (`agent_slug`, manifest `is_snake_case`) can ever equal it, minted or
-/// declared before this constant existed or after. The collision the system
-/// feed diverts to avoid can therefore never re-open by a company later
-/// minting or declaring something at this address.
-pub const OPERATOR_CHANNEL_COLLISION_FALLBACK: &str = "operator-feed";
-
 /// The operator-readable sentence for a `channel` destination that names
 /// something outside the deliverable set, built from the set that is live right
 /// now so the fix is legible without a second lookup.

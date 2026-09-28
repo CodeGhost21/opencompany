@@ -644,24 +644,6 @@ impl CompanyManifest {
                 problems.push(format!(
                     "{label} is named \"Operator\", which is reserved for the built-in Operator channel — choose a different name."
                 ));
-            } else if enforce_reserved_agent_ids
-                && chat.name.eq_ignore_ascii_case(
-                    crate::runtime::channel::OPERATOR_CHANNEL_COLLISION_FALLBACK,
-                )
-            {
-                // Issue #1781 review (Codex/CodeRabbit P2 follow-up): the
-                // name reservation above only blocks "Operator", but a
-                // grandfathered collision diverts the durable feed to
-                // `OPERATOR_CHANNEL_COLLISION_FALLBACK` ("operator-feed")
-                // instead, and `server::operator::resolve_desk` folds a
-                // `?desk=` selector against a desk's name exactly the same
-                // way it folds it against "operator" — so a desk named
-                // "operator-feed" would shadow the fallback feed precisely
-                // as a desk named "Operator" would shadow the primary one.
-                // Reserved for the same reason, gated the same way.
-                problems.push(format!(
-                    "{label} is named \"operator-feed\", which is reserved for the built-in Operator channel's fallback feed — choose a different name."
-                ));
             } else if !chat_ids.insert(chat.id.as_str()) {
                 problems.push(format!(
                     "group chat `id` `{}` is used more than once — ids must be unique.",

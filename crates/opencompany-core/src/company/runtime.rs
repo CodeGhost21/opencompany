@@ -2271,9 +2271,8 @@ impl CompanyRuntime {
     /// `is_roster_agent` is checked alongside it, the same carve-out applied
     /// to the other namespace `RESERVED_AGENT_IDS` reserves — and a desk
     /// grandfathered by **name** rather than id (issue #1781 review, Codex
-    /// P1 follow-up): `{ id = "legacy_ops", name = "Operator" }` is exactly
-    /// the collision `operator_feed_channel` diverts the system feed off of,
-    /// but `desk_exists("operator")` only ever matches on id, so a chat or
+    /// P1 follow-up): `{ id = "legacy_ops", name = "Operator" }` — and
+    /// `desk_exists("operator")` only ever matches on id, so a chat or
     /// ACP send addressed through the desk's own supported case-insensitive
     /// `Operator` alias — which every *read* already resolves via
     /// `resolve_desk_id` — was refused here as if it named the fake system
@@ -2281,52 +2280,11 @@ impl CompanyRuntime {
     /// through `resolve_desk_id` first is what makes this guard agree with
     /// the read path on which desk a caller meant.
     ///
-    /// `OPERATOR_CHANNEL_COLLISION_FALLBACK` is the id `list_desks` hands the
-    /// synthetic system desk when a roster teammate is the one grandfathered
-    /// onto `operator` (see `CompanyRecord::operator_feed_channel`), and its
-    /// **id** is unmintable by any real desk or agent (see the constant's
-    /// doc). Its display **name** is not id-validated at all, though (issue
-    /// #1781 review, Codex P2 follow-up): a pre-#1757 manifest desk such as
-    /// `{ id = "ops", name = "operator-feed" }` predates every id-charset
-    /// rule this reasoning leans on, `from_path_for_reload` never
-    /// re-validates a stored manifest, and this can be true even without a
-    /// *primary* `operator` collision at all. So this branch resolves the
-    /// alias first too, the same as the literal `operator` case below — only
-    /// refusing once nothing real actually claims it.
-    ///
     /// The store load's `?` propagates a real store failure as itself, rather
     /// than collapsing it into "no real desk" — that would misreport a
     /// transient store error as the ordinary read-only refusal, for every
     /// company, and journal the failure nowhere.
     pub(crate) async fn ensure_desk_writable(&self, desk: &str) -> Result<()> {
-        if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL_COLLISION_FALLBACK) {
-            // `resolve_desk_id(desk)` — not an unconditional refusal — for the
-            // identical reason the `OPERATOR_CHANNEL` branch below resolves
-            // its alias first (issue #1781 review, Codex P2 follow-up):
-            // `OPERATOR_CHANNEL_COLLISION_FALLBACK`'s id is unmintable by any
-            // *new* desk (`is_valid_desk_id` rejects the hyphen), but its
-            // display **name** is not id-validated at all, and
-            // `from_path_for_reload` deliberately never re-validates a stored
-            // manifest — so a pre-#1757 desk such as
-            // `{ id = "ops", name = "operator-feed" }` can already exist,
-            // stay listed and readable, and (unlike the id case) be true even
-            // when there is no *primary* `operator` collision at all. Without
-            // this, a send addressed through that desk's own supported
-            // case-insensitive alias — the one every read already resolves
-            // via `resolve_desk_id` — was refused here as if it named the
-            // synthetic read-only system desk instead.
-            let has_real_recipient = self
-                .store()
-                .load(&self.id)
-                .await?
-                .is_some_and(|record| record.resolve_desk_id(desk).is_some());
-            if !has_real_recipient {
-                return Err(OpenCompanyError::InvalidRequest(
-                    "the Operator channel is a read-only system channel — it cannot be posted to"
-                        .to_string(),
-                ));
-            }
-        }
         if desk.eq_ignore_ascii_case(crate::runtime::OPERATOR_CHANNEL) {
             let has_real_operator_recipient =
                 self.store().load(&self.id).await?.is_some_and(|record| {
