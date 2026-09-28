@@ -559,6 +559,37 @@ const CREDENTIAL_PATHS: &[&str] = &[
     "appdata/roaming/microsoft/credentials",
 ];
 
+/// Whether `c` can sit inside a command name.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// `haystack.contains(needle)` with a word boundary on the needle's left.
+///
+/// Checked only when the needle itself begins with a word character, so a sink
+/// like `| sh` is unaffected.
+///
+/// This exists because `irm` — PowerShell's alias for `Invoke-RestMethod` — is a
+/// substring of `firm`, `confirm` and `affirm`. A bare `contains("irm ")`
+/// therefore matched the prose of four shipped company bundles
+/// (`companies/accounting_firm/README.md` and its siblings), which also carry a
+/// `| Sh…` Markdown table cell that the sink list matches. Two innocent halves
+/// made one false "pipeline executed by a shell", and it only showed up in the
+/// gated lane, which is the one that scans shipped bundles.
+///
+/// The left boundary only, deliberately. A right boundary would stop `| python`
+/// matching `| python3 …`, which is a sink and must keep firing.
+fn contains_verb(haystack: &str, needle: &str) -> bool {
+    let bounded = needle.chars().next().is_some_and(is_word_char);
+    haystack.match_indices(needle).any(|(at, _)| {
+        !bounded
+            || haystack[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_word_char(c))
+    })
+}
+
 fn shell_exfiltration(text: &str) -> Option<String> {
     // `\` folds to `/` so one pattern covers both spellings of a path. Without
     // it every `CREDENTIAL_PATHS` entry was POSIX-only in practice: a
@@ -568,14 +599,16 @@ fn shell_exfiltration(text: &str) -> Option<String> {
     let lowered = text.to_ascii_lowercase().replace('\\', "/");
     let piped_to_shell = SHELL_SINKS.iter().any(|sink| lowered.contains(sink));
     if piped_to_shell
-        && let Some(fetch) = FETCH_VERBS.iter().find(|fetch| lowered.contains(**fetch))
+        && let Some(fetch) = FETCH_VERBS
+            .iter()
+            .find(|fetch| contains_verb(&lowered, fetch))
     {
         return Some(format!(
             "a `{}…` pipeline executed by a shell",
             fetch.trim()
         ));
     }
-    if let Some(form) = EVAL_FORMS.iter().find(|form| lowered.contains(**form)) {
+    if let Some(form) = EVAL_FORMS.iter().find(|form| contains_verb(&lowered, form)) {
         return Some(format!(
             "a shell `{}` of a constructed command",
             form.trim_end_matches([' ', '(', '$', '`'])
@@ -583,7 +616,7 @@ fn shell_exfiltration(text: &str) -> Option<String> {
     }
     if let Some(path) = CREDENTIAL_PATHS
         .iter()
-        .find(|path| lowered.contains(**path))
+        .find(|path| contains_verb(&lowered, path))
     {
         return Some(format!("a read of the credential path `{path}`"));
     }
