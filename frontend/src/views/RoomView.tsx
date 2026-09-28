@@ -19,7 +19,6 @@ import { deleteTask, type InflightRun, type MessageIntent, type TaskStatus } fro
 import { turnStateKey } from "@/lib/live-reply";
 import { uploadChatAttachment } from "@/api/chat";
 import { deleteNode, fetchBlobUrl } from "@/api/workspace";
-import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import {
   ApiError,
   type ApprovalSummary,
@@ -27,7 +26,6 @@ import {
   type CognitionState,
   type DecideApproval,
   type AgentSessionMessageDto,
-  type OperatorChannelDto,
   type TeamMemberDto,
   type Verdict,
   isDetachedChat,
@@ -105,11 +103,9 @@ import {
   directMessageChannels,
   directMessageForId,
   inlineReplyIds,
-  isOperatorChannelDto,
   latestBudgetPauseMessageIdByAgent,
   mergeBudgetPauseMarkerRead,
   offersDeliverableChoice,
-  operatorSection,
   repliesInThread,
   resolveDmChannelId,
   reviewAnchorsForThread,
@@ -600,15 +596,6 @@ export function RoomView({
   const [desks, setDesks] = useState<Desk[] | null>(null);
   /** Set when `/desks` failed for a reason that isn't "this host has none". */
   const [desksError, setDesksError] = useState<string | null>(null);
-  /**
-   * The identity of the always-present Operator feed (issue #1757 rework) —
-   * fetched separately from `desks`, since it is its own surface now rather
-   * than an entry `list_desks` returns. `null` until `/operator-channel` has
-   * answered; a fetch failure leaves it `null` rather than surfacing an
-   * error, since the pinned row degrading to absent is a much smaller loss
-   * than blocking the rest of Chat on it.
-   */
-  const [operator, setOperator] = useState<OperatorChannelDto | null>(null);
   const [sending, setSending] = useState(false);
   const [composerPrefill, setComposerPrefill] = useState<{
     text: string;
@@ -958,46 +945,6 @@ export function RoomView({
     return () => clearTimeout(timer);
   }, [rosterRevision]);
 
-  /**
-   * The always-present Operator feed's identity (issue #1757 rework),
-   * fetched in parallel with `loadDesks` rather than derived from it — it is
-   * its own surface now, not an entry `list_desks` returns. A failure is
-   * swallowed rather than surfacing `desksError`: losing the pinned row is a
-   * much smaller degradation than blocking the whole channel list on it, and
-   * the fetch is retried on every company switch same as desks are.
-   *
-   * One bounded retry (issue #1781 review, Codex P2), the same
-   * `fetchWithOneRetry` wrapper `app-shell.tsx`'s independent hydration pass
-   * already uses for this identity: without it, a single dropped request
-   * here — while the shell's own, retried lookup succeeds — left `operator`
-   * `null` even though history kept hydrating, so the pinned row stayed
-   * absent until the client/company changed or the page reloaded. See
-   * `fetchWithOneRetry`'s doc for why the retry itself lives there rather
-   * than inline.
-   *
-   * `fetchWithOneRetry` already collapses a genuine fetch failure to `null`
-   * (issue #1781 review, tinysweeper): that and a 2xx response that simply
-   * is not `OperatorChannelDto`-shaped both degrade to no pinned row here,
-   * on purpose — see `isOperatorChannelDto`'s doc comment. But a non-`null`
-   * value that still fails the shape check is a schema drift the fetch
-   * itself did not report as an error, so it is logged (not surfaced —
-   * still the same silent degrade) to keep that distinct from an ordinary
-   * offline/older-host miss.
-   */
-  const operatorRun = useRef(0);
-  useEffect(() => {
-    const run = ++operatorRun.current;
-    setOperator(null);
-    void fetchWithOneRetry(() => client.getOperatorChannel(company)).then((dto) => {
-      if (run !== operatorRun.current) return;
-      if (isOperatorChannelDto(dto)) {
-        setOperator(dto);
-      } else if (dto !== null) {
-        console.debug("[RoomView] getOperatorChannel returned an unexpected shape", dto);
-      }
-    });
-  }, [client, company, roomVisits]);
-
   /** One attempt per bare-hash entry; see the effect below `channel`, which
    * is the single owner of what a bare `#/chat` resolves to. */
   const restoredFor = useRef<string | null | undefined>(undefined);
@@ -1049,13 +996,10 @@ export function RoomView({
   // keeps updating its ref on every connection/company change, mounted or not,
   // so the comparison in `send` stays honest after Chat is gone (codex P1).
 
-  // The pinned Operator row is appended *last* (issue #1757 rework) — after
-  // every desk/DM section `buildChannels` produces — so `firstChannel` below
-  // still defaults to a writable desk rather than the read-only feed.
-  const sections = useMemo(() => {
-    const base = desks ? buildChannels(members, desks, transcripts) : [];
-    return operator ? [...base, operatorSection(operator)] : base;
-  }, [members, desks, transcripts, operator]);
+  const sections = useMemo(
+    () => (desks ? buildChannels(members, desks, transcripts) : []),
+    [members, desks, transcripts],
+  );
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
   // it matched nothing once a company's real desks loaded and matched the same
@@ -1108,8 +1052,7 @@ export function RoomView({
    * The teammate whose raw turns this conversation can show, if any.
    *
    * A DM has exactly one agent on the other end, so "the raw turns" names
-   * something. A `#channel` has several and the Operator feed has none, so
-   * there is no such control there — a toggle that has to pick one of four
+   * something. A `#channel` has several, so there is no such control there — a toggle that has to pick one of four
    * agents for you is worse than no toggle.
    */
   const rawAgentId = channel?.kind === "dm" ? (channel.member?.id ?? null) : null;
@@ -1160,7 +1103,7 @@ export function RoomView({
    * console on `#/chat` with no second segment, `useHashView` canonicalises the
    * *view* and knows nothing about chat's channels, and nothing else wrote one —
    * so `channel` above stayed the value of an expression over `members`,
-   * `desks`, `transcripts` and `operator`, every one of which lands
+   * `desks` and `transcripts`, every one of which lands
    * asynchronously and can re-order what `firstChannel` answers. The second is
    * that the composer is deliberately ONE instance shared by every channel, and
    * its draft deliberately survives a channel change (see `MessageComposer`'s
@@ -1460,7 +1403,7 @@ export function RoomView({
    * which seats a round opened with, which is still working. See
    * `lib/episodes.ts`.
    *
-   * `[]` for every DM, `#general`, the Operator feed and every desk that
+   * `[]` for every DM, `#general` and every desk that
    * answered with one ordinary turn — the fold looks for rows carrying
    * `episode` and frames naming this desk, and finds neither. Nothing here
    * consults the channel's kind, which is what keeps the surface unchanged
@@ -1927,16 +1870,12 @@ export function RoomView({
   // A local the closures below can capture as non-null: TypeScript hoists
   // function declarations, so the guard above does not narrow inside them.
   const active = channel;
-  // Whether the open channel is a real, host-backed desk — as opposed to a DM,
-  // the Operator feed or a fallback desk (`lib/desks.ts`, used before `/desks`
+  // Whether the open channel is a real, host-backed desk — as opposed to a DM
+  // or a fallback desk (`lib/desks.ts`, used before `/desks`
   // answers) — and, for the membership controls, one whose membership the
   // operator can change: `#general`'s is the roster, kept by the host.
   const activeIsDesk = active.kind === "channel" && (desks ?? []).some((d) => d.id === active.id);
   const activeIsMutableDesk = activeIsDesk && active.mutable !== false;
-  // Issue #1757: the Operator channel is a read-only "what happened" feed. Its
-  // composer is disabled and the host also refuses a send to it, so this is UX,
-  // not the enforcement.
-  const readOnly = Boolean(channel?.system);
   // The host thread this channel is addressed on. A real desk channel's id
   // doubles as its thread id (`deskFromDto`), so addressing by it routes to
   // that desk's lead. A DM's id is console-local (`dmChannelId`), not a host
@@ -1944,9 +1883,8 @@ export function RoomView({
   // (`responder_for` in `src/harness/brain.rs`), which is exactly what a DM's
   // `member.id` is, so a DM addresses that teammate the same way a desk
   // addresses its lead. It is also the id every live turn frame carries.
-  const activeThreadId = active.system
-    ? undefined
-    : active.kind === "channel"
+  const activeThreadId =
+    active.kind === "channel"
       ? active.id
       : active.member
         ? dmThreadId(active.member)
@@ -2985,19 +2923,6 @@ export function RoomView({
                     </span>
                   </p>
                 )}
-                {readOnly && (
-                  <p
-                    role="status"
-                    className="flex shrink-0 items-center gap-1.5 border-t bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
-                  >
-                    <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-                    <span className="min-w-0">
-                      The <span className="font-medium text-foreground">Operator</span> channel is a
-                      read-only feed of automation reports and notifications — a scannable “what
-                      happened” view. There is nothing to reply to here.
-                    </span>
-                  </p>
-                )}
                 <TypingLine names={resolveTypingNames?.(active.id) ?? []} />
                 {/* Issues #1734 / #1735, repositioned. Directly above the composer,
                     not above the transcript: what the notice warns about — a reply
@@ -3006,7 +2931,7 @@ export function RoomView({
                     other end of the page from the control it qualifies is one the
                     operator reads before it means anything and has forgotten by the
                     time it does. It stays OUTSIDE the scroller (a sibling strip,
-                    `shrink-0`) like the read-only and budget strips above it, because
+                    `shrink-0`) like the budget strip above it, because
                     it is a standing fact about the company rather than a row in the
                     transcript.
 
@@ -3018,31 +2943,6 @@ export function RoomView({
                     sibling-order test pins this WITH a typing line present, because
                     the order read correct with nobody typing and wrong with someone
                     typing.
-
-                    Kept on a read-only channel, where there is no composer at all.
-                    The suppression this replaced argued that nothing can be sent
-                    there, so a caveat about what sending produces has nothing left to
-                    qualify. But the sentence is not about sending — every state below
-                    says the replies in this conversation come from the echo brain
-                    rather than the agent they appear under, which is a claim about
-                    the messages already on screen. `readOnly` is
-                    `Boolean(channel?.system)`, i.e. the `#Operator` feed.
-
-                    Its rows are NOT under a roster agent, and the difference
-                    matters (codex review on #2159). `DurableOperatorChannel` journals
-                    them under the reserved authors `automation-report` and
-                    `owner-fallback-report` (`runtime/channel.rs`), which `senderOf`
-                    titleizes into "Automation Report" and "Owner Fallback Report" —
-                    author lines naming no person at all. That makes the case for the
-                    strip stronger, not weaker: `MessageRow` still marks every one of
-                    those rows, because `project` sets `by_person: false` on an
-                    `AgentReply` whichever brain produced it, and the marker they get
-                    is `EchoPlaceholder` — a non-focusable `<span>` whose entire
-                    explanation is a `title`, reaching neither keyboard, touch nor
-                    screen reader, and reading "Automation Report did not write this".
-                    Without this strip the operator is left with a "Placeholder" pill
-                    against a name that is not a person, on a feed that takes no
-                    replies, and nothing anywhere saying what did write it.
 
                     All four states below say "the replies in this conversation", not
                     "the replies below". They said "below" while this strip sat above
@@ -3163,33 +3063,6 @@ export function RoomView({
                     </span>
                   </p>
                 )}
-                {/* No composer at all on a read-only channel, rather than a disabled
-                    one. A disabled control is still a claim that the action exists:
-                    the strip above says "there is nothing to reply to here", and a
-                    greyed-out reply box with a Send button and an "Enter to send"
-                    hint under it says the opposite in the same breath. The notice is
-                    what should occupy this space.
-
-                    `disabled` therefore no longer carries `readOnly` — nothing can be
-                    read-only and rendered here at the same time. The server's
-                    read-only guard and `ThreadPanel`'s no-op `onSend` (issue #1757)
-                    are untouched: this removes the affordance, not the belt.
-
-                    `suppressed`, not `{!readOnly && …}`. The element stays in the
-                    tree so React keeps the instance — and with it the draft, the
-                    staged attachment, the resolved mentions and the selected intent,
-                    all of which are state inside `MessageComposer`. Gating the
-                    element itself unmounted it, so an operator who opened `#Operator`
-                    for a moment with an unsent message in `#general` came back to an
-                    empty box (codex review on PR #1984): the disabled composer this
-                    PR removed was accidentally holding the draft across channel
-                    navigation. `suppressed` renders `null` after its hooks, so the
-                    DOM gets nothing — no textarea, no Send, no `data-tour` anchor —
-                    while the draft survives. See that prop's doc for why a
-                    `display:none` wrapper is not the same thing. */}
-                {/* Above the composer, and outside the read-only branch: a channel
-                    nobody may post in is still a place the company's runs are
-                    visible, and stopping one is not posting. */}
                 {inflightRuns !== undefined && onInflightSteered !== undefined && (
                   <InflightRunBar
                     client={client}
@@ -3203,7 +3076,6 @@ export function RoomView({
                   // note on `MessageComposer`. This view learns nothing about
                   // policy; it only knows where the control goes.
                   autonomy={autonomy}
-                  suppressed={readOnly}
                   placeholder={`Message ${channelTitle(channel)}`}
                   disabled={sending}
                   prefill={composerPrefill ?? undefined}
@@ -3259,7 +3131,6 @@ export function RoomView({
                   sending={sending}
                   mentionables={mentionables}
                   channelMemberIds={inChannel?.map((m) => m.id)}
-                  readOnly={readOnly}
                   reviewing={threadReviewing}
                   reviewTaskId={threadReviewAnchor?.taskId}
                   onReviewCard={(taskId, decision) => void reviewCard(taskId, decision)}
@@ -3272,10 +3143,6 @@ export function RoomView({
                   youAvatar={youAvatar}
                   resolveAttachmentUrl={resolveAttachmentUrl}
                   onSend={(text, _intent, _attachments, mentions) => {
-                    // Belt to `ThreadPanel`'s own `readOnly` brace: never mutate
-                    // state or call `client.chat` for a channel the server's
-                    // read-only guard will refuse anyway (issue #1757).
-                    if (readOnly) return;
                     void send(text, undefined, threadReviewAnchor?.anchorId ?? parent.id, undefined, mentions);
                   }}
                   onClose={() => setOpenThreadId(null)}
@@ -3312,7 +3179,7 @@ export function RoomView({
                 />
               )}
 
-              {membersOpen && !readOnly && (
+              {membersOpen && (
                 <MembersPane
                   channelMembers={inChannel}
                   others={outsideChannel}

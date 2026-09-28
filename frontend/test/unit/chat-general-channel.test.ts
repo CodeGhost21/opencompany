@@ -254,11 +254,6 @@ describe("RoomView offers no membership control on #general", () => {
         { id: "eng", name: "Blake", role: "Engineer" },
       ]),
       mentionables: vi.fn(async () => []),
-      getOperatorChannel: vi.fn(async () => ({
-        id: "operator",
-        name: "Operator",
-        description: "Automation reports",
-      })),
       capabilityStatus: vi.fn(async () => ({ cognition: null })),
       chat: vi.fn(),
       reactToMessage: vi.fn(),

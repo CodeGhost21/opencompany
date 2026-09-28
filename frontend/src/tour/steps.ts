@@ -16,11 +16,7 @@ import { GENERAL_CHANNEL_ID } from "@/lib/chat";
  * A content anchor has to be **addressed**, not just navigated to: a stop that
  * names only its view inherits whatever sub-page was last open there, and a
  * content anchor the remembered sub-page does not render is skipped in silence.
- * Both chat composer stops therefore carry an explicit `sub`. That matters more
- * since #1984, which stopped rendering a composer at all on the read-only
- * Operator feed — with Room remembering the last channel, an operator whose last
- * visit was `#Operator` would otherwise have had BOTH composer stops skip, and
- * a seven-stop tour would have silently taught five.
+ * Both chat composer stops therefore carry an explicit `sub`.
  *
  * Each nav stop therefore has to name a row that EXISTS. The anchor is
  * `nav-<view>`, not `nav-<label>`, because the two are deliberately allowed to
@@ -64,9 +60,8 @@ export const TOUR: TourStop[] = [
     body: "Four places: the Room you talk in, your Company, what it's Connected to, and the Automations it repeats. Open one and what's inside it appears underneath.",
   },
   {
-    // Addressed: a bare `#/chat` restores the last channel, which can be the
-    // read-only Operator feed with no composer, and the stop would be skipped.
-    // `#general` is present in every company and always writable.
+    // Addressed rather than inheriting the last channel: `#general` is present
+    // in every company and always writable.
     view: "chat",
     sub: GENERAL_CHANNEL_ID,
     target: '[data-tour="chat-composer"]',

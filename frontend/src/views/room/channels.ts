@@ -1,5 +1,5 @@
-// What a channel is: the desks (`#general` among them), the direct messages, the
-// Operator feed, and the id grammar that keeps them apart.
+// What a channel is: the desks (`#general` among them), the direct messages,
+// and the id grammar that keeps them apart.
 //
 // Split out of the old `model.ts` (issue: room store / P2). Pure — the view owns
 // the state.
@@ -11,7 +11,7 @@
 // The chat workspace's data model: channels, direct messages, and the grouping
 // rules the timeline reads. Everything here is pure — the view owns the state.
 
-import type { DeskDto, OperatorChannelDto } from "@/api/types";
+import type { DeskDto } from "@/api/types";
 import {
   generalAwareChannel,
   isGeneralChannel,
@@ -85,12 +85,6 @@ export interface Channel {
    */
   memberIds?: string[];
   /**
-   * Whether this is the built-in **Operator** system channel (issue #1757) — a
-   * read-only aggregation feed of workflow reports. The composer is disabled for
-   * it and it offers no membership editing.
-   */
-  system?: boolean;
-  /**
    * Whether this channel has **no lead** (issue #1835): an `auto` desk, whose
    * answerer is picked per message. `memberIds[0]` carries no rank here, so a
    * consumer must not badge it — the host's own `desk_lead` is `None` for such
@@ -99,7 +93,7 @@ export interface Channel {
   leadless?: boolean;
   /**
    * Whether the channel is a desk whose membership, order and existence the
-   * operator can change. `false` for `#general`; absent for DMs and system feeds.
+   * operator can change. `false` for `#general`; absent for DMs.
    */
   mutable?: boolean;
 }
@@ -208,67 +202,6 @@ export function buildChannels(
     { id: "channels", label: "Channels", channels },
     { id: "dms", label: "Direct messages", channels: dms },
   ];
-}
-
-/**
- * Shape `GET {scope}/operator-channel`'s response into the console's
- * `Channel` (issue #1757 rework). A read-only system channel — the composer
- * is disabled for it and it offers no membership editing — distinct from
- * every desk-backed channel `buildChannels` produces.
- */
-export function operatorChannelFrom(dto: OperatorChannelDto): Channel {
-  return {
-    id: dto.id,
-    name: dto.name,
-    kind: "channel",
-    purpose: dto.description,
-    system: true,
-  };
-}
-
-/**
- * Whether `value` actually has the `OperatorChannelDto` shape — a runtime
- * check, not just a type assertion. Callers hold this at the network
- * boundary: a client stub/proxy that resolves every unlisted method to `[]`
- * (a common test fixture pattern in this codebase) would otherwise satisfy
- * TypeScript at the call site and only fail once `operatorChannelFrom` reads
- * `dto.description` off an array and hands `channelSubtitle` an `undefined`
- * `purpose` to `.trim()`. Treated the same as a fetch failure by callers:
- * degrade to no pinned row rather than crash the view.
- */
-export function isOperatorChannelDto(
-  value: unknown,
-): value is OperatorChannelDto {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    return false;
-  const dto = value as Partial<OperatorChannelDto>;
-  return (
-    typeof dto.id === "string" &&
-    typeof dto.name === "string" &&
-    typeof dto.description === "string"
-  );
-}
-
-/**
- * The pinned Operator row as its own {@link ChannelSection}, meant to be
- * appended *after* every other section (issue #1757 rework) so the first
- * writable desk still wins the "open by default" pick — see `buildChannels`'s
- * `channels` section, which a caller composes ahead of this one.
- *
- * Callers at the network boundary MUST validate with {@link isOperatorChannelDto}
- * before reaching here — this function does not re-check, and `operatorChannelFrom`
- * reading `dto.description` off a shape that only satisfied the type assertion
- * (never the runtime one) is exactly the crash `isOperatorChannelDto`'s own doc
- * warns about. `RoomView`'s only production call site holds this invariant by
- * construction: its `operator` state is set from `isOperatorChannelDto(dto) ?
- * dto : null` and this function is only ever called on the non-null branch.
- */
-export function operatorSection(dto: OperatorChannelDto): ChannelSection {
-  return {
-    id: "operator",
-    label: "Operator",
-    channels: [operatorChannelFrom(dto)],
-  };
 }
 
 /** Every roster teammate as a DM target, including conversations not yet started. */

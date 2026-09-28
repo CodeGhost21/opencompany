@@ -130,7 +130,6 @@ import { ConsoleProvider } from "@/lib/console-context";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
 import { drainReReadQueue, type PendingReRead } from "@/lib/re-read-queue";
-import { fetchWithOneRetry } from "@/lib/fetch-with-retry";
 import { Overview } from "@/views/Overview";
 import { CompanyView } from "@/views/company/CompanyView";
 import { ManageListsView } from "@/views/company/ManageListsView";
@@ -148,7 +147,6 @@ import {
   runningCrossingRows,
   HISTORY_UNSTARTED,
   firstChannel,
-  isOperatorChannelDto,
   type DecidedApproval,
   type HistoryStatus,
 } from "@/views/room/model";
@@ -1281,31 +1279,10 @@ export function AppShell({
       );
     };
 
-    Promise.all([
-      client.listDesks(company).catch(() => null),
-      // The always-present Operator feed's identity (issue #1757 rework) —
-      // fetched alongside desks, not derived from them, since it is its own
-      // surface now. `null` on any failure (offline, or a host that predates
-      // the route) rather than sinking the whole pass: a company can still
-      // rehydrate its real desks/DMs without the pinned Operator row.
-      //
-      // One retry (issue #1781 review, Codex P2): `RoomView` fetches this
-      // same identity independently for rendering the pinned row, so a
-      // single dropped request here — while `RoomView`'s own, later call
-      // succeeds — used to render the row but permanently omit its id from
-      // this pass's rehydration targets and five-second polling, since this
-      // pass had already given up. A bounded retry closes the common
-      // transient case without turning the fetch into an open-ended one; see
-      // `fetchWithOneRetry`'s doc for why it is extracted rather than inline.
-      fetchWithOneRetry(() => client.getOperatorChannel(company)),
-    ])
-      .then(async ([desks, operatorChannelRaw]) => {
-        // See `isOperatorChannelDto`'s doc comment — a client stub that
-        // resolves every unlisted method to `[]` would otherwise satisfy the
-        // `Promise.all` type and reach the field reads below.
-        const operatorChannel = isOperatorChannelDto(operatorChannelRaw)
-          ? operatorChannelRaw
-          : null;
+    client
+      .listDesks(company)
+      .catch(() => null)
+      .then(async (desks) => {
         if (cancelled || requestCompany !== company) return;
         // Issue #151 §3.3: desks first, then one DM thread per roster teammate.
         // The roster is fetched separately and tolerated as optional — a host
@@ -1332,35 +1309,11 @@ export function AppShell({
         // no extra request and is scoped to the company the effect ran for.
         setAgentNames(Object.fromEntries(roster.map((m) => [m.id, m.name])));
         // Keep the addressing this loop resolves, not just its side effect.
-        //
-        // The Operator feed's id is folded in here too (issue #1781 review,
-        // Codex P2): `channelMap` only knows desks and roster teammates, so
-        // without this the map a **live** SSE frame is resolved through
-        // (`channelForThread(chatChannelByThread, event.chatId)`, a few
-        // hundred lines below) missed the Operator channel entirely and
-        // dropped the frame — `renderAgentReply` returns on the very next
-        // line when the lookup misses. The five-second history poll still
-        // recovered it eventually, because the `channels` rehydration-target
-        // list a little further down already carries this same id→id pair;
-        // this closes the live-event gap the poll was quietly papering over.
-        setChatChannelByThread({
-          ...channelMap(chatDesks, roster),
-          ...(operatorChannel ? { [operatorChannel.id]: operatorChannel.id } : {}),
-        });
+        setChatChannelByThread(channelMap(chatDesks, roster));
         // Unaddressed system lines go to the channel a bare Room route opens:
         // `#general` when the host lists it, since it is pinned first.
         setFirstDeskChannelId(firstChannel(buildChannels(roster, chatDesks))?.id ?? null);
-        // Fold the Operator feed's id into the same rehydration pass, keyed on
-        // its own id both as channel and thread (its channel id *is* its
-        // thread id — `chat/history?desk=<id>` reads it through the ordinary
-        // path). Without this, `RoomView`'s pinned row would sit on a channel
-        // id `historyReady` never sees a status for until `discovered` alone
-        // resolves it, and `transcripts[operatorChannel.id]` would never fill
-        // in — the spinner-forever failure mode this pass exists to avoid.
-        const threadIds = [
-          ...resolved.map((t) => t.id),
-          ...(operatorChannel ? [operatorChannel.id] : []),
-        ];
+        const threadIds = resolved.map((t) => t.id);
         const channels = [
           ...chatDesks.map((d) => ({ channelId: d.id, threadId: d.id })),
           // A DM's history is read under `dmThreadId`, which is not always the
@@ -1369,9 +1322,6 @@ export function AppShell({
             channelId: channelIdForThread(dmThreadId(m), chatDesks, roster) ?? dmChannelId(m),
             threadId: dmThreadId(m),
           })),
-          ...(operatorChannel
-            ? [{ channelId: operatorChannel.id, threadId: operatorChannel.id }]
-            : []),
         ];
         const rehydrateAll = () => rehydrateTargets(threadIds, channels);
         // SSE remains the fast path. This catches a persisted channel message
@@ -1384,8 +1334,8 @@ export function AppShell({
         setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
-        // Last-resort safety net: `listDesks`/`getOperatorChannel` already
-        // degrade to `null` on their own failure above, so this only fires on
+        // Last-resort safety net: `listDesks` already degrades to `null` on
+        // its own failure above, so this only fires on
         // something unexpected inside the `.then` (e.g. a state setter
         // throwing) — keep the static default threads so the console still
         // renders something rather than getting stuck.

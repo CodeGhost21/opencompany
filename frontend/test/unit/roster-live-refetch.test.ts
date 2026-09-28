@@ -84,7 +84,6 @@ describe("RoomView re-reads desks and roster when rosterRevision moves", () => {
       listDesks,
       listTeam,
       mentionables: vi.fn(async () => []),
-      getOperatorChannel: vi.fn(async () => null),
       capabilityStatus: vi.fn(async () => ({ cognition: null })),
       chat: vi.fn(),
       reactToMessage: vi.fn(),
