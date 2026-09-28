@@ -360,7 +360,8 @@ async fn list_skills(
 /// 2. **Slug absent from a non-empty registry** → `404`. This is a typo or a
 ///    stale client; silently persisting a stub is what produced content-less
 ///    installs in the first place.
-/// 3. **Empty registry** → fall back to the client's metadata, as before. An
+/// 3. **Empty registry** → fall back to the client's metadata, recorded as
+///    [`SkillSource::Custom`] since no library supplied the document. An
 ///    empty registry means this host serves no shared library at all
 ///    (platform-provisioned mode, no `skills_root`), so there is nothing to
 ///    resolve against and refusing every install would break hosted tenants
@@ -384,8 +385,8 @@ async fn install(
     let lock = write_lock(company.id());
     let _guard = lock.lock().await;
     let registry = state.shared_skill_registry()?;
-    let doc = match registry.iter().find(|doc| doc.slug == slug) {
-        Some(doc) => render_skill_md(doc),
+    let (doc, source) = match registry.iter().find(|doc| doc.slug == slug) {
+        Some(doc) => (render_skill_md(doc), SkillSource::Registry),
         None if !registry.is_empty() => {
             return Err(ApiError(OpenCompanyError::NotFound(
                 language::SKILL_NOT_IN_REGISTRY.to_string(),
@@ -406,7 +407,10 @@ async fn install(
                 .description
                 .filter(|description| !description.trim().is_empty())
                 .unwrap_or_else(|| name.clone());
-            skill_md(&name, &description, meta.category.as_deref(), &description)
+            (
+                skill_md(&name, &description, meta.category.as_deref(), &description),
+                SkillSource::Custom,
+            )
         }
     };
     check_skill_doc_size(&doc)?;
@@ -414,7 +418,7 @@ async fn install(
     let delta = SkillState {
         slug,
         enabled: true,
-        source: SkillSource::Registry,
+        source,
         custom_doc: Some(doc),
     };
     company.runtime.skills().set(company.id(), &delta).await?;
