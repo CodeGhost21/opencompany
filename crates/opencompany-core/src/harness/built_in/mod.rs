@@ -749,9 +749,10 @@ pub struct CompanyAgent {
     /// telemetry cells. Held here so `meter_turn_costs` reads the SAME
     /// instance the turn ran through.
     chat_model: Arc<dyn HarnessModel>,
-    /// The tools this agent's belt wired when it was built. Kept so a roster
-    /// rebuild can tell whether the catalogue moved — see
-    /// [`Self::catalogue_brief_stale`].
+    /// Always empty for an embedded agent: there is no `opencompany` MCP
+    /// catalogue left to brief it about, so [`Self::catalogue_brief_stale`]'s
+    /// comparison can never find this field to have moved. Kept as the type
+    /// the rebuild-comparison plumbing expects.
     served_catalogue: Vec<String>,
     /// Whether the session this agent resumes may still carry an OLDER brief
     /// than [`Self::served_catalogue`].
@@ -1219,10 +1220,11 @@ impl CompanyAgent {
     ///
     /// The agent is also registered on the process-wide `opencompany` MCP
     /// host (plan hive-desks Phase 3) under the same runtime id, with a fresh
-    /// bearer, its non-native belt as the catalogue and its
-    /// [`ApprovalPolicy`] as the gate; when the host's listener is up, the
-    /// spec carries the matching `McpServer`. `events` is the journal `read`
-    /// is served from — `None` leaves that one tool refusing.
+    /// bearer and its [`ApprovalPolicy`] as the gate, so its turns are
+    /// attributed there; the spec itself carries no `opencompany` server, and
+    /// every tool of this crate's reaches the model on the belt by its own
+    /// name. `events` is the journal the belt's `read` is served from — `None`
+    /// leaves `read` off the belt.
     pub(crate) fn register(
         runtime: &openhuman_embed::Runtime,
         company: &CompanyId,
@@ -1238,12 +1240,8 @@ impl CompanyAgent {
         )?;
         let mcp = crate::hive::mcp_server::global();
         let mcp_bearer = crate::hive::mcp_server::McpAgent::mint_bearer();
-        // The speech tools stay on the MCP server; this crate's own tools do
-        // not, so they leave the served catalogue with them.
-        let allow_tools: Vec<String> = crate::hive::tools::served_speech_tool_names()
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
+        let served_catalogue: Vec<String> = Vec::new();
+        let read_binding = Arc::new(std::sync::OnceLock::new());
         // Shared once, here, and handed to the spec as a factory that mints
         // owned handles per turn. OpenHuman's own tools are filtered out: it
         // runs those itself, and handing them back would register each twice.
@@ -1254,27 +1252,21 @@ impl CompanyAgent {
             .iter()
             .map(|tool| tool.name().to_string())
             .collect();
-        // **The catalogue a rebuild compares is the belt, not the MCP list.**
-        //
-        // It used to be `allow_tools`, which was every served tool back when
-        // this crate's tools reached the model over the `opencompany` server.
-        // They are native now, so `allow_tools` is a constant — the four
-        // speech verbs — and a catalogue that cannot move can never be found
-        // stale. A console grant that wires `workspace.write` changed the
-        // agent's tools and owed the live session a brief, and nothing said
-        // so.
-        //
-        // The belt is what actually changed, and it is what the pinned
-        // definition scopes, so it is what a rebuild has to compare.
-        let served_catalogue = belt_names.clone();
         let gate = Arc::clone(&blueprint.policy);
-        let native_belt: Arc<Vec<Arc<dyn tinytools::Tool>>> =
-            Arc::new(crate::hive::tools::share_belt(
-                std::mem::take(&mut blueprint.tools)
-                    .into_iter()
-                    .filter(|tool| !build::OPENHUMAN_NATIVE_TOOLS.contains(&tool.name()))
-                    .collect(),
-            ));
+        let mut shared_belt = crate::hive::tools::share_belt(
+            std::mem::take(&mut blueprint.tools)
+                .into_iter()
+                .filter(|tool| !build::OPENHUMAN_NATIVE_TOOLS.contains(&tool.name()))
+                .collect(),
+        );
+        if let Some(events) = events.as_ref() {
+            shared_belt.push(Arc::new(crate::hive::tools::ConversationReadTool::new(
+                Arc::clone(mcp.in_flight()),
+                Arc::clone(&read_binding),
+                Arc::clone(events),
+            )));
+        }
+        let native_belt: Arc<Vec<Arc<dyn tinytools::Tool>>> = Arc::new(shared_belt);
         // Created before the agent, because the belt factory closes over it at
         // registration and an episode writes to it long afterwards.
         let seating = crate::hive::seating::EpisodeBelts::default();
@@ -1282,18 +1274,11 @@ impl CompanyAgent {
         let mut runtime_id = base_id.clone();
         let mut attempt = 0u32;
         let agent = loop {
-            let attach = mcp.endpoint_for(company, &runtime_id).map(|endpoint| {
-                crate::hive::mcp_server::McpAttach {
-                    endpoint,
-                    bearer: mcp_bearer.clone(),
-                    allow_tools: allow_tools.clone(),
-                }
-            });
             let spec = build::agent_spec_for(
                 &blueprint,
                 &runtime_id,
                 bridge.provider(),
-                attach.as_ref(),
+                None,
                 Some(&native_belt),
                 Some(&gate),
                 Some(&seating),
@@ -1324,14 +1309,14 @@ impl CompanyAgent {
                 "[harness] runtime id was taken; registered under a numbered suffix"
             );
         }
+        let _ = read_binding.set(runtime_id.clone());
         let build::AgentBlueprint {
             workspace,
             chat_model,
             ..
         } = blueprint;
-        // No `.tools(..)`: the belt is the agent's own now. The server still
-        // serves the speech tools, and still holds the policy and workspace
-        // those calls are admitted and sandboxed against.
+        // No `.tools(..)`: the belt is the agent's own now. The entry keeps
+        // the bearer, policy and workspace a turn is attributed under.
         let mut entry = crate::hive::mcp_server::McpAgent::new(
             company.clone(),
             agent_id,
