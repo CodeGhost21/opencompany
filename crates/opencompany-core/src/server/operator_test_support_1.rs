@@ -179,12 +179,15 @@ impl SometimesFailingCompanyStore {
 #[async_trait::async_trait]
 impl crate::ports::CompanyStore for SometimesFailingCompanyStore {
     async fn load(&self, id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
-        let remaining = self
+        let consumed = self
             .remaining_load_failures
-            .load(std::sync::atomic::Ordering::SeqCst);
-        if remaining > 0 {
-            self.remaining_load_failures
-                .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok();
+        if consumed {
             return Err(OpenCompanyError::InvalidRequest(
                 "company store offline".to_string(),
             ));
