@@ -14,6 +14,7 @@
 
 /// One completion episode on `tinyhivemind`'s own loop.
 #[cfg(feature = "openhuman")]
+pub mod conclude;
 pub mod conducted;
 /// The chat body of the brain's cycle: which surface a message is on, and
 /// the episode it opens on a desk with a room (Phase 5).

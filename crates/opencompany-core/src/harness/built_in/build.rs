@@ -1707,13 +1707,16 @@ pub fn agent_spec_for(
                     && tool.name() != crate::hive::tools::READ_TOOL
             });
             let episode = loan.source.belt();
-            // **`broadcast` is withheld in an operator's direct line.**
+            // **`broadcast` is withheld in two places.**
             //
-            // There is no room to broadcast to: the roster is bound so `ask`
-            // has targets, not so a message can be addressed to it. See
-            // `seating::broadcast_withheld_in` for what two live runs cost.
+            // In an operator's direct line there is no room to broadcast to:
+            // the roster is bound so `ask` has targets, not so a message can
+            // be addressed to it. On the closing turn of a settled episode the
+            // seat is assembling what the others produced, and a hand-off
+            // would reopen the room instead of closing it. See
+            // `seating::broadcast_withheld_in` for what live runs cost in both.
             let withheld = crate::hive::seating::broadcast_withheld_in(
-                loan.dm,
+                loan.dm || loan.concluding,
                 crate::hive::host::TOOL_PREFIX,
             );
             let kept = |name: &str| withheld.as_deref() != Some(name);

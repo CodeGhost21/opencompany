@@ -137,7 +137,14 @@ pub fn hives_for(
 /// The Jev router this host routes with, if a TinyHumans key resolves.
 #[must_use]
 pub fn host_router() -> Option<Arc<dyn Router>> {
-    match crate::hive::jev::jev_router(&crate::app::config::ProcessEnv, None) {
+    // `OPENCOMPANY_JEV_KEY` first, because routing and inference are not
+    // always the same vendor -- see `jev::JEV_KEY_ENV`. `None` keeps the
+    // inherited ladder, which is the right answer when they are.
+    let key = crate::app::config::EnvSource::get(
+        &crate::app::config::ProcessEnv,
+        crate::hive::jev::JEV_KEY_ENV,
+    );
+    match crate::hive::jev::jev_router(&crate::app::config::ProcessEnv, key.as_deref()) {
         Ok(Some(router)) => Some(Arc::new(router)),
         Ok(None) => {
             tracing::info!("[hive] no TinyHumans key: desks route by lead and mention");
@@ -145,6 +152,28 @@ pub fn host_router() -> Option<Arc<dyn Router>> {
         }
         Err(error) => {
             tracing::warn!(%error, "[hive] the Jev router is misconfigured; routing by lead and mention");
+            None
+        }
+    }
+}
+
+/// The System One transport the closing decision asks, or `None`.
+///
+/// Resolved exactly as [`host_router`] resolves the router, and silent in the
+/// same way: an instance with no credential concludes every settled episode and
+/// picks the desk lead, which is the behaviour before
+/// [`crate::hive::conclude::decide`] existed.
+#[must_use]
+pub fn host_oracle() -> Option<Arc<crate::hive::jev::TinyHumansSystemOne>> {
+    let key = crate::app::config::EnvSource::get(
+        &crate::app::config::ProcessEnv,
+        crate::hive::jev::JEV_KEY_ENV,
+    );
+    match crate::hive::jev::jev_transport(&crate::app::config::ProcessEnv, key.as_deref()) {
+        Ok(Some(transport)) => Some(Arc::new(transport)),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "[hive] no closing oracle; every settled desk episode concludes");
             None
         }
     }
@@ -207,6 +236,7 @@ pub fn dispatcher(
         events,
         hives,
         router: host_router(),
+        oracle: host_oracle(),
         deps,
         pool,
         mentions,
