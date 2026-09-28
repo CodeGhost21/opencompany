@@ -37,8 +37,7 @@ fn a_new_record_has_general_with_the_whole_roster() {
 fn sync_orders_manifest_before_overlay_and_drops_the_retired() {
     let mut record = record();
     record.overlay_agents.push(overlay("analyst"));
-    record.retire_agent("ceo");
-    let delta = record.sync_general_members();
+    let delta = record.retire_agent("ceo");
     assert_eq!(record.general_channel.members, ["writer", "analyst"]);
     assert_eq!(delta.added, ["analyst"]);
     assert_eq!(delta.removed, ["ceo"]);

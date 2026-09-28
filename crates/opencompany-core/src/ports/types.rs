@@ -5107,8 +5107,12 @@ pub struct CompanyRecord {
     /// Lifecycle state, e.g. `running`, `paused`, `archived`.
     pub lifecycle: String,
     /// Operator-added teammates not present in the manifest (the team overlay).
+    ///
+    /// Written only through [`Self::hire_overlay_agent`],
+    /// [`Self::remove_overlay_agent`] and [`Self::install_roster_overlay`],
+    /// which keep `#general`'s membership in step.
     #[serde(default)]
-    pub overlay_agents: Vec<OverlayAgent>,
+    pub(crate) overlay_agents: Vec<OverlayAgent>,
     /// Operator-added desk memberships not present in the manifest (the desk
     /// overlay). Merged into a desk's effective membership at read time.
     #[serde(default)]
@@ -5187,8 +5191,11 @@ pub struct CompanyRecord {
     /// An id listed here that names nobody is inert, which is what makes the
     /// tombstone safe to keep across a redeploy that removes the teammate from
     /// the blueprint too.
+    ///
+    /// Written only through [`Self::retire_agent`] and
+    /// [`Self::install_roster_overlay`], which keep `#general` in step.
     #[serde(default)]
-    pub overlay_retired_agents: Vec<String>,
+    pub(crate) overlay_retired_agents: Vec<String>,
     /// The operator's `[policy]` override, if one is set (issue #562).
     ///
     /// `None` — the manifest's `[policy]` applies, exactly as before this
@@ -5433,6 +5440,9 @@ impl CompanyRecord {
     /// them. With no order override the base order is returned unchanged, so the
     /// first declared member stays the lead by default.
     pub fn effective_desk_members(&self, desk_id: &str) -> Vec<String> {
+        if desk_id == GENERAL_CHANNEL_ID {
+            return self.general_channel.members.clone();
+        }
         // **The general desk seats the whole roster, and keeps doing so.**
         //
         // It is a desk like any other except in one respect: who belongs to it
@@ -6259,10 +6269,13 @@ impl CompanyRecord {
     /// a second tombstone for one teammate changes nothing about the roster but
     /// does move the harness's overlay fingerprint, which would drop every live
     /// agent session for a delete that had already happened.
-    pub fn retire_agent(&mut self, agent_id: &str) {
+    ///
+    /// Takes the teammate out of `#general` in the same step.
+    pub fn retire_agent(&mut self, agent_id: &str) -> GeneralMembershipDelta {
         if !self.is_retired(agent_id) {
             self.overlay_retired_agents.push(agent_id.to_string());
         }
+        self.sync_general_members()
     }
 
     /// Whether [`operator_feed_channel`](Self::operator_feed_channel) has ever

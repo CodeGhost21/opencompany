@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ports::types::CompanyRecord;
+use crate::ports::types::{Actor, CompanyEvent, CompanyRecord, OverlayAgent};
 
 /// The id of the company-wide channel, stamped on every message written to it.
 pub const GENERAL_CHANNEL_ID: &str = "general";
@@ -51,6 +51,16 @@ impl GeneralMembershipDelta {
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty()
     }
+
+    /// The journal row announcing this change, or `None` when nothing moved.
+    pub fn into_event(self, by: Option<Actor>) -> Option<CompanyEvent> {
+        (!self.is_empty()).then(|| CompanyEvent::DeskMembersChanged {
+            desk_id: GENERAL_CHANNEL_ID.to_string(),
+            added: self.added,
+            removed: self.removed,
+            by,
+        })
+    }
 }
 
 impl CompanyRecord {
@@ -86,6 +96,39 @@ impl CompanyRecord {
         self.general_channel.name = GENERAL_CHANNEL_NAME.to_string();
         self.general_channel.members = roster;
         delta
+    }
+
+    /// Adds an operator teammate to the roster and seats it in `#general`.
+    pub fn hire_overlay_agent(&mut self, agent: OverlayAgent) -> GeneralMembershipDelta {
+        self.overlay_agents.push(agent);
+        self.sync_general_members()
+    }
+
+    /// Removes an operator teammate from the roster and from `#general`,
+    /// returning its row when one existed.
+    pub fn remove_overlay_agent(
+        &mut self,
+        agent_id: &str,
+    ) -> (Option<OverlayAgent>, GeneralMembershipDelta) {
+        let removed = self
+            .overlay_agents
+            .iter()
+            .position(|agent| agent.id == agent_id)
+            .map(|index| self.overlay_agents.remove(index));
+        self.overlay_agents.retain(|agent| agent.id != agent_id);
+        (removed, self.sync_general_members())
+    }
+
+    /// Replaces the operator teammates and the removal tombstones wholesale,
+    /// as a reload from the store does, and resyncs `#general`.
+    pub fn install_roster_overlay(
+        &mut self,
+        agents: Vec<OverlayAgent>,
+        retired: Vec<String>,
+    ) -> GeneralMembershipDelta {
+        self.overlay_agents = agents;
+        self.overlay_retired_agents = retired;
+        self.sync_general_members()
     }
 }
 

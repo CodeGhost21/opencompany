@@ -2762,7 +2762,9 @@ impl RuntimeBuilder {
             .map(|r| r.overlay_desks.clone())
             .unwrap_or_default();
         let general_channel = {
-            let mut roster = CompanyRecord::from_manifest(id.clone(), self.manifest.clone());
+            let mut manifest = self.manifest.clone();
+            manifest.apply_globals();
+            let mut roster = CompanyRecord::from_manifest(id.clone(), manifest);
             roster.overlay_agents = overlay_agents.clone();
             roster.overlay_retired_agents = overlay_retired_agents.clone();
             if let Some(stored) = existing.as_ref() {

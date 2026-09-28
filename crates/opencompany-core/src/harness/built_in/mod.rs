@@ -3225,17 +3225,13 @@ impl HarnessPool {
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
         let mut fresh_company = company.clone();
-        fresh_company.overlay_agents = overlay.agents;
+        fresh_company.install_roster_overlay(overlay.agents, overlay.retired);
         // And the operator's edits of the manifest teammates, for exactly the
         // reason the budget overrides below are installed: `build_roster`
         // resolves every manifest row through `fresh_company.effective_agent`,
         // so the live edit set has to be the one it reads — otherwise a console
         // rename would reach the roster only after a restart.
         fresh_company.overlay_agent_edits = overlay.agent_edits;
-        // And the tombstones, for the same reason: `build_roster` filters the
-        // manifest roster through `fresh_company.effective_agents`, so the live
-        // removal set has to be the one it reads.
-        fresh_company.overlay_retired_agents = overlay.retired;
         // Same treatment for the budget overrides (issue #343): `build_roster`
         // resolves every agent's cap through `fresh_company.effective_budget`,
         // so installing the live set here is what carries a console budget edit
