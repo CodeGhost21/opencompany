@@ -256,12 +256,56 @@ fn an_agent_granted_a_company_server_is_never_scoped_to_list_servers() {
     assert!(
         blueprint
             .system_prompt
-            .contains("Your connected MCP servers: `notes`."),
-        "the brief names the granted server"
+            .contains("- `notes` — `mcp_call_tool` with `\"server\": \"notes\"`"),
+        "the family brief must reach the prompt naming the server, the tool that \
+         dispatches to it and the key it is addressed by: {}",
+        blueprint.system_prompt
+    );
+    assert!(
+        blueprint.system_prompt.contains("mcp_list_tools"),
+        "a declared server is inspected by name, so the brief has to say so"
     );
     assert!(!blueprint.system_prompt.contains("mcp_list_servers"));
     assert!(!blueprint.system_prompt.contains("mcp.example.test"));
     assert!(!blueprint.system_prompt.contains("sk-notes-secret"));
+}
+
+/// The wiring gate, from the prompt's side: an agent granted no MCP server must
+/// not be handed a section naming servers, nor told to enumerate through tools it
+/// does not hold. Asserted on the built prompt rather than on the renderer, so a
+/// call site that appended the brief unconditionally would fail here even with
+/// every renderer test green.
+#[test]
+fn an_agent_granted_no_mcp_server_gets_no_server_family_section() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let deps = pin_deps(dir.path().to_path_buf());
+    let policy = ApprovalPolicy::new(&Policy::default(), None);
+    let blueprint = build_agent(
+        &CompanyId::new("acme"),
+        "Acme",
+        &manifest_agent("Desk Lead", None),
+        std::sync::Arc::new(policy),
+        &deps,
+        &["file_read".to_string()],
+        &[],
+        &[],
+        None,
+        false,
+    )
+    .expect("agent builds");
+
+    assert!(
+        !blueprint
+            .system_prompt
+            .contains("MCP servers connected to this company"),
+        "{}",
+        blueprint.system_prompt
+    );
+    assert!(
+        !blueprint.system_prompt.contains("mcp_call_tool"),
+        "{}",
+        blueprint.system_prompt
+    );
 }
 
 #[test]
