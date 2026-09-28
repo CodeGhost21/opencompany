@@ -47,6 +47,34 @@ pub fn pair_conversation(one: &str, two: &str) -> String {
     format!("dm:{first}+{second}")
 }
 
+/// The conversation an `ask` opens: the asker and every seat it asked, in one
+/// channel (`dm:<a>+<b>[+<c>…]`, ids sorted and de-duplicated).
+///
+/// An ask may name a group since tinyhivemind's "ask a group" change, and one
+/// conversation then holds all of them. With a single askee this is exactly
+/// [`pair_conversation`], so every pair channel written before keeps its key.
+#[must_use]
+pub fn conversation_channel(asker: &str, askees: &[String]) -> String {
+    let mut members: Vec<&str> = std::iter::once(asker)
+        .chain(askees.iter().map(String::as_str))
+        .collect();
+    members.sort_unstable();
+    members.dedup();
+    format!("dm:{}", members.join("+"))
+}
+
+/// Every seat a conversation channel names — two for a pair, more for a
+/// group ask — or `None` for any other key.
+///
+/// The inverse of [`conversation_channel`]. The same caution as
+/// [`pair_seats`] applies: the key alone is not authority to read it.
+#[must_use]
+pub fn conversation_seats(chat: &str) -> Option<Vec<&str>> {
+    let rest = chat.strip_prefix("dm:")?;
+    let seats: Vec<&str> = rest.split('+').collect();
+    (seats.len() >= 2 && seats.iter().all(|seat| !seat.is_empty())).then_some(seats)
+}
+
 /// The two seats a pair channel names, or `None` for any other key.
 ///
 /// The inverse of [`pair_conversation`]. A caller deciding whether a stored
