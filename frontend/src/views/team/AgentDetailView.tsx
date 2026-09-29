@@ -215,9 +215,7 @@ const AGENT_TABS = [
   { id: "tools", label: "Tools", hint: "What it is allowed to call" },
   // Tools is the grant — which servers this teammate may reach. Permissions is
   // what that resolves to once each server's own tool modes and this teammate's
-  // own narrowing are composed, which is the question an operator actually
-  // arrives with and which no surface could answer: a glob cannot say what
-  // happens when a tool is called.
+  // own narrowing are composed.
   {
     id: "permissions",
     label: "Permissions",

@@ -20,19 +20,14 @@ import {
 } from "@/views/mcp/tool-policy-rows";
 
 /**
- * What one teammate can actually call — the question no surface could answer.
+ * What one teammate can actually call.
  *
  * A teammate is granted a **server**: `mcp:<name>` names a server and there is
  * no per-tool grant form. The server's tool modes are the baseline every
  * teammate reaching it gets, and a per-teammate layer may then narrow any tool
- * further. Nothing in the console composed the two, so the Tools tab's list of
- * globs was the whole answer, and a glob cannot say what happens when a tool is
- * called.
+ * further.
  *
- * Every **configured** server is listed, reached or not. A page that hides what
- * a teammate cannot reach cannot answer the question it exists for — and three
- * servers answering, carrying permissions, reaching nobody is exactly the silent
- * failure this breaks.
+ * Every configured server is listed, reached or not.
  */
 
 type State =
@@ -73,9 +68,8 @@ export function AgentMcpPermissions({
         if (live) setState({ kind: "ready", picture });
       } catch (err) {
         if (!live) return;
-        // A host with no such route answers 404. That is a fact about the build,
-        // not a failure, and it must not read as "this teammate can call
-        // nothing".
+        // A host with no such route answers 404: a fact about the build, not a
+        // failure.
         const status = (err as { status?: number }).status;
         setState(
           status === 404
@@ -286,9 +280,7 @@ export function AgentMcpPermissions({
 /**
  * One server, as it stands for this teammate.
  *
- * Its own block, so one damaged document degrades this server and nothing else:
- * a page that fell over on the first unreadable policy would answer nothing
- * about the other five.
+ * Its own block, so one damaged document degrades this server and nothing else.
  */
 function ServerBlock({
   block,
@@ -303,9 +295,8 @@ function ServerBlock({
   row?: McpServer;
   onOpenServer?: (name: string) => void;
 }) {
-  // The lens is the agent's, so every row names which rule won. The floors are
-  // the server's own modes, which this read does not carry — the rows are drawn
-  // rather than edited here, so nothing needs them.
+  // The lens is the agent's, so every row names which rule won. The rows are
+  // drawn, not edited, so no server-mode floors are needed.
   const lens: PolicyLens = {
     kind: "agent",
     name: agentName,
@@ -411,8 +402,8 @@ function ServerBlock({
                     key={`${agentId}-${block.server}-${tier}`}
                     tier={tier}
                     rows={rows}
-                    // Read-only here, so the tier's bulk default — which is never
-                    // per-teammate — is not rendered and this value is not used.
+                    // Read-only here: the tier's bulk default is not rendered
+                    // and this value is not used.
                     bulk={{ mode: "needs_approval", stored: false }}
                     lens={lens}
                     canManage={false}

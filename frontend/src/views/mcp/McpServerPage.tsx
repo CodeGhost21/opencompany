@@ -273,12 +273,8 @@ export function McpServerPage({
 /**
  * What this server is for, and the field that sets it.
  *
- * The add route has always accepted a description and no form ever asked for
- * one, so every server added by URL has been permanently nameless — a list row
- * that reads `deepwiki · https://mcp.deepwiki.com/mcp` tells an operator nothing
- * the name did not. What the server calls itself is offered as the starting
- * point rather than written over a declaration: the two are different claims,
- * and only one of them is the operator's.
+ * What the server calls itself is offered as the starting point, never written
+ * over a declaration.
  */
 function McpDescription({
   client,
@@ -294,8 +290,8 @@ function McpDescription({
   const declared = server.description?.trim() ?? "";
   const probed = server.probedDescription?.trim() ?? "";
   // Only a console-added server: a manifest declaration is re-read from
-  // `company.toml` on every boot, so a description saved over one here would
-  // disappear on the next restart with nothing on screen saying why.
+  // `company.toml` on every boot, so a description saved over one would not
+  // survive a restart.
   const editable = canManage && server.source === "runtime";
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(declared || probed);
