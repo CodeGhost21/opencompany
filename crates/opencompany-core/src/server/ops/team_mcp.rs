@@ -80,6 +80,9 @@ pub struct AgentMcpPermissionsDto {
     pub shared_tool_names: Vec<SharedToolNameDto>,
     /// Whether approval parking is live on this host. `false` means a
     /// `needs_approval` mode behaves as allow.
+    ///
+    /// Read from [`crate::policy::approvals_park`], which asks the policy the
+    /// roster is actually built from.
     pub approvals_park: bool,
 }
 
@@ -168,6 +171,7 @@ async fn read_permissions(
     }
 
     let shared_tool_names = shared_names(&servers);
+    let approvals_park = crate::policy::approvals_park(&runtime.approval_gate.policy());
 
     Json(AgentMcpPermissionsDto {
         requested: super::team_agent::requested_grants(&record, &agent_id),
@@ -175,8 +179,7 @@ async fn read_permissions(
         effective_grants: grants,
         servers,
         shared_tool_names,
-        // `build_roster` disables policy HITL on every teammate, so parking is off.
-        approvals_park: false,
+        approvals_park,
     })
     .into_response()
 }
