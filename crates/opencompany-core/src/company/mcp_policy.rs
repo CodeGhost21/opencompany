@@ -10,8 +10,7 @@
 //!    by [`resolve_policy`]. This is what the gate enforces company-wide.
 //! 3. One **teammate's** own narrowing of that answer, in the same document's
 //!    `agents` map and resolved by [`resolve_policy_for_agent`]. It may only
-//!    restrict — see the [`agent`] submodule for why, and for the clamp that
-//!    makes it a property of the type.
+//!    restrict; see the [`agent`] submodule.
 //!
 //! A server's own `readOnlyHint`/`destructiveHint` annotations are not a source
 //! here. They are self-reported by whoever runs the remote server, and a
@@ -92,12 +91,9 @@ impl ApprovalMode {
         }
     }
 
-    /// The more restrictive of two modes.
-    ///
-    /// The only way a per-agent decision reaches a resolved mode (see
-    /// [`resolve_policy_for_agent`]), which is what makes "a teammate's own rule
-    /// may narrow but never widen" a property of this type rather than a rule
-    /// every call site has to remember.
+    /// The more restrictive of two modes. The only way a per-agent decision
+    /// reaches a resolved mode (see [`resolve_policy_for_agent`]), so a
+    /// teammate's own rule can narrow but never widen.
     pub fn max_restrictive(self, other: Self) -> Self {
         if other.restriction() > self.restriction() {
             other
@@ -141,17 +137,12 @@ pub struct McpToolPolicies {
     pub tier_defaults: HashMap<ToolTier, ApprovalMode>,
     #[serde(default)]
     pub overrides: HashMap<String, ToolPolicy>,
-    /// Per-teammate narrowing, keyed by agent id. Absent in every document
-    /// written before this layer existed, which is what makes the upgrade a
-    /// no-op: an empty map resolves to the company answer for every agent.
+    /// Per-teammate narrowing, keyed by agent id. An absent or empty map
+    /// resolves to the company answer for every agent, and is skipped on write
+    /// so no `agents` key is left behind.
     ///
-    /// Keyed by id rather than name so renaming a teammate does not move its
-    /// permissions, and a `BTreeMap` so the document is byte-stable and the
-    /// fingerprint over it is canonical.
-    ///
-    /// Skipped when empty, so a company that has written no per-agent rule
-    /// stores the same bytes it stored before this layer existed and a reset
-    /// leaves no `agents` key behind.
+    /// A `BTreeMap` so the document is byte-stable and the fingerprint over it
+    /// canonical.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agents: BTreeMap<String, AgentToolPolicies>,
 }
@@ -159,12 +150,9 @@ pub struct McpToolPolicies {
 impl McpToolPolicies {
     /// Drops entries that decide nothing, so an empty override is never stored.
     ///
-    /// Two levels on the per-agent side, in order: a row that decides nothing,
-    /// then a teammate left with no rows. Residue like
-    /// `{"agents":{"writer":{"overrides":{}}}}` resolves identically to no entry
-    /// at all but hashes differently, so leaving it behind would move the
-    /// effective-MCP fingerprint on a write that changed nothing and rebuild
-    /// every roster.
+    /// Two levels on the per-agent side: a row that decides nothing, then a
+    /// teammate left with no rows. Residue resolves identically but hashes
+    /// differently, so it would move the effective-MCP fingerprint.
     pub fn prune(&mut self) {
         self.overrides.retain(|_, policy| !policy.is_empty());
         for entry in self.agents.values_mut() {
@@ -364,8 +352,8 @@ pub fn effective_policies(read_only_tools: &[String], stored: StoredPolicies) ->
         entry.tier = policy.tier.or(entry.tier);
         entry.mode = policy.mode.or(entry.mode);
     }
-    // Carried verbatim: `read_only_tools` is a company-wide manifest
-    // affordance, so the per-agent map has no baseline to layer over.
+    // Carried verbatim: the per-agent map has no company-wide baseline to layer
+    // over.
     out.agents = stored.agents;
     out
 }
@@ -465,9 +453,8 @@ pub async fn clear_tool_policies(
 ///
 /// The company-wide answer. A teammate's gate reads
 /// [`mcp_allow_set_for_agent`] instead, which narrows this by that teammate's own
-/// modes and by the servers its grants reach; this one stays as the oracle that
-/// narrowing is diffed against, the role the test-only `mcp_read_set` already
-/// plays for it. All three produce the same shape.
+/// modes and by the servers its grants reach. The test-only `mcp_read_set`
+/// produces the same shape.
 ///
 /// Enumerates the union of the policy document's own entries and the tools
 /// discovery last saw. Both halves are needed: an entry names a tool the
@@ -527,10 +514,8 @@ pub fn blocks_tool(policies: &McpToolPolicies, inventory: &McpToolInventory, too
 /// allow set answers a question the approval gate asks *before* a call; this
 /// answers one the bridge tool asks at the point it would dial.
 ///
-/// Carries the agent it was built for so [`Self::is_blocked`] cannot be asked
-/// the wrong question: a set built for one teammate has no answer for another,
-/// and passing an agent id at each call would make forgetting to do so
-/// representable.
+/// Carries the agent it was built for: a set built for one teammate has no
+/// answer for another.
 #[derive(Clone, Debug, Default)]
 pub struct McpToolPolicySet {
     agent: String,
