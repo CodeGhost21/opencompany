@@ -19,12 +19,9 @@ interface Props {
   label: string;
   disabled: boolean;
   /**
-   * Modes this control may show but not set, each with the reason.
-   *
-   * Disabled rather than absent: a per-teammate rule may only narrow, and an
-   * option that has been removed cannot say why it is not there. The reason is
+   * Modes this control may show but not set, each with the reason. The reason is
    * the option's `title`, so it is reachable by pointer and by accessible
-   * description rather than only in prose somewhere above.
+   * description.
    */
   disabledModes?: Partial<Record<ApprovalMode, string>>;
   onChange: (mode: ApprovalMode) => void;
@@ -47,9 +44,7 @@ export function ModeChoice({
     const focused = radios.current.indexOf(event.target as HTMLButtonElement);
     if (focused === -1) return;
     event.preventDefault();
-    // Arrow keys walk past a mode this scope may not set. Landing on one would
-    // move focus to a control whose press is refused, which reads as the
-    // keyboard being broken rather than the option being unavailable.
+    // Arrow keys walk past a mode this scope may not set.
     let next = focused;
     for (let hop = 0; hop < MODES.length; hop += 1) {
       next = (next + step + MODES.length) % MODES.length;

@@ -22,20 +22,9 @@ import { MODE_LABELS, ModeChoice } from "@/views/mcp/McpToolPermissionsControl";
 /**
  * One tier section and one tool row, for both surfaces that draw them: a
  * server's own permissions panel and a teammate's Permissions tab.
- *
- * Shared rather than written twice because the two answer one question from two
- * ends. A second copy would drift on the words for a source or on which options
- * a narrow-only rule may offer, and an operator would get two answers to "what
- * happens when this tool is called".
  */
 
-/**
- * The value the tier control carries when nothing is stored for that tier.
- *
- * A sentinel rather than an absent value: the control has to be able to say
- * "nothing is set here" and to be set back to it, and a `Select` with no value
- * can do neither.
- */
+/** The value the tier control carries when nothing is stored for that tier. */
 export const UNSET = "unset";
 
 /** The tier control's own vocabulary: the three modes, plus "nothing set". */
@@ -81,10 +70,8 @@ export const SECTION_TITLES: Record<ToolTier, string> = {
 export const VISIBLE_CAP = 8;
 
 /**
- * How restrictive a mode is, as a number the clamp can compare.
- *
- * A per-teammate rule may only make a tool stricter, so the control has to know
- * which of its own options the host would refuse before offering them.
+ * How restrictive a mode is, as a number the clamp can compare. A per-teammate
+ * rule may only make a tool stricter.
  */
 const RESTRICTION: Record<ApprovalMode, number> = {
   always_allow: 0,
@@ -98,12 +85,8 @@ export function widens(mode: ApprovalMode, floor: ApprovalMode): boolean {
 }
 
 /**
- * Whose permissions a row is showing.
- *
- * The company lens is the back-compatible reading: what every teammate reaching
- * this server gets. An agent lens resolves one teammate's narrowing on top of
- * it, and carries the server's own mode per tool as the `floor` a stricter-only
- * rule is measured against.
+ * Whose permissions a row is showing: what every teammate reaching this server
+ * gets, or one teammate's narrowing resolved on top of it.
  */
 export type PolicyLens =
   | { kind: "company" }
@@ -116,10 +99,8 @@ export type PolicyLens =
     };
 
 /**
- * Which rule decided a row's mode, in the words an auditor needs.
- *
- * `agent_clamped` names a setting the host **discarded** rather than one it
- * honoured, which is why it reads as a loss and not as a decision.
+ * Which rule decided a row's mode. `agent_clamped` names a setting the host
+ * discarded rather than one it honoured.
  */
 export function sourceLabel(
   row: ToolPolicyRow,
@@ -141,7 +122,7 @@ export function sourceLabel(
   }
 }
 
-/** The badge tone a source reads in. A discarded setting is not a neutral fact. */
+/** The badge tone a source reads in. */
 function sourceTone(source: PolicySource): "outline" | "destructive" {
   return source === "agent_clamped" ? "destructive" : "outline";
 }
@@ -155,8 +136,7 @@ export type ToolGate = Pick<
 /**
  * Why a tool the panel lists is unreachable regardless of what its row says.
  *
- * `allowedTools` / `disallowedTools` are a separate gate, enforced where the
- * server is attached to an agent rather than at the approval ladder — so a row
+ * `allowedTools` / `disallowedTools` are a separate gate at attachment, so a row
  * can read "Needs approval" while the transport refuses the call outright.
  */
 export function exclusion(
@@ -174,9 +154,8 @@ export function exclusion(
 /**
  * The patch a choice in the tier control means on the wire.
  *
- * The sentinel and the absence it stands for are two vocabularies: a tier
- * cleared back to unset has to arrive as `null`, because the host reads a
- * missing key as "leave it alone".
+ * A tier cleared back to unset arrives as `null`; the host reads a missing key
+ * as "leave it alone".
  */
 export function tierPatch(tier: ToolTier, value: string): ToolPolicyPatch {
   return {
@@ -185,12 +164,9 @@ export function tierPatch(tier: ToolTier, value: string): ToolPolicyPatch {
 }
 
 /**
- * Which rows a section shows.
- *
- * The cap is applied to the unremarkable rows only. A row an operator decided,
- * or one the transport will never send, is shown whatever the cap says —
- * otherwise blocking the twelfth read-only tool hides that decision behind
- * "8 more" and the section reads as though it was never made.
+ * Which rows a section shows. The cap applies to the unremarkable rows only: a
+ * row an operator decided, or one the transport will never send, is always
+ * shown.
  */
 export function visibleRows(
   gate: ToolGate | undefined,
@@ -224,13 +200,7 @@ export function TierSection({
   onToggleShowAll,
   apply,
   onClearRow,
-  /**
-   * Draw what happens instead of the controls that decide it.
-   *
-   * A teammate's own page resolves and links; the modes are edited on the
-   * server, so a control there would be a second write path for one document —
-   * and a tier default that is never per-teammate has nothing to offer at all.
-   */
+  /** Draw what happens instead of the controls that decide it. */
   controls = true,
 }: {
   tier: ToolTier;
@@ -250,8 +220,7 @@ export function TierSection({
 }) {
   const bodyId = `tier-body-${tier}`;
   const { shown, hidden } = visibleRows(gate, rows, showAll);
-  // Tiers are never per-teammate: the host refuses a scoped tier write, and a
-  // control that accepted one would collect a decision the wire discards.
+  // Tiers are never per-teammate: the host refuses a scoped tier write.
   const perAgent = lens.kind === "agent";
 
   return (
@@ -364,12 +333,7 @@ export function ToolRow({
   busy,
   apply,
   onClearRow,
-  /**
-   * Draw what happens instead of the controls that decide it.
-   *
-   * A teammate's own page resolves and links; the modes are edited on the
-   * server, so a control there would be a second write path for one document.
-   */
+  /** Draw what happens instead of the controls that decide it. */
   controls = true,
 }: {
   row: ToolPolicyRow;
@@ -429,9 +393,8 @@ export function ToolRow({
             value={row.mode}
             label={`What happens when ${row.tool} is called`}
             disabled={!canManage}
-            // A per-teammate rule may only narrow, so an option the host would
-            // discard is offered disabled with the reason rather than removed:
-            // an absent control cannot explain itself.
+            // A per-teammate rule may only narrow; an option the host would
+            // discard is offered disabled.
             disabledModes={
               floor === null
                 ? undefined
@@ -504,11 +467,8 @@ export function ToolRow({
 }
 
 /**
- * Whether this row has a decision to undo in this lens.
- *
- * In an agent lens that is the teammate's own stored mode, present even when the
- * clamp discarded it — clearing a discarded setting is what stops it re-appearing
- * the next time the server's mode moves.
+ * Whether this row has a decision to undo in this lens. In an agent lens that is
+ * the teammate's own stored mode, present even when the clamp discarded it.
  */
 function clearable(row: ToolPolicyRow, lens: PolicyLens): boolean {
   return lens.kind === "agent" ? row.agentMode !== undefined : row.isOverride;

@@ -53,17 +53,12 @@ interface Props {
   reloadKey?: number;
   /** Scroll this into view once it has something to show. */
   focus?: boolean;
-  /**
-   * The teammates the scope lens may show. An empty list renders no lens at all
-   * rather than one holding a single choice.
-   */
+  /** The teammates the scope lens may show. An empty list renders no lens. */
   agents?: RosterAgent[];
   /**
-   * Whether approval parking is live on this host.
-   *
-   * `false` means a `needs_approval` mode behaves as allow and the panel says
-   * so. `undefined` is "this surface has no read that answers it", which is not
-   * the same as "approvals work" — so nothing is claimed either way.
+   * Whether approval parking is live on this host. `false` means a
+   * `needs_approval` mode behaves as allow; `undefined` means no read answers it,
+   * and nothing is claimed either way.
    */
   approvalsPark?: boolean;
 }
@@ -114,22 +109,16 @@ export function McpToolPermissions({
     {},
   );
   // Which teammate the panel is resolved for, or `EVERYONE` for the company
-  // document.
-  //
-  // In the address, the way every other "which of the N is on screen" decision
-  // in this console is: "the notion page showing what Engineer can call" is a
-  // link somebody sends, Back undoes the switch, and the answer on screen is
-  // never a piece of private state the address disagrees with.
+  // document. Kept in the address, so the lens is linkable and Back undoes a
+  // switch.
   const [showing, setShowing] = useHashParam("showing");
   const lensValue = showing ?? EVERYONE;
   /**
    * The company's own mode per tool, which a per-teammate rule may narrow but
    * never loosen.
    *
-   * Read alongside the agent document rather than inferred from it: for a row
-   * the teammate has pinned, the resolved mode is the teammate's and the
-   * server's is not recoverable from it — and without the server's, the control
-   * would refuse to move a pin back towards what the server itself allows.
+   * Read alongside the agent document: for a row the teammate has pinned, the
+   * server's mode is not recoverable from the resolved one.
    */
   const [floors, setFloors] = useState<Record<string, ApprovalMode>>({});
   const root = useRef<HTMLDivElement | null>(null);
@@ -154,10 +143,8 @@ export function McpToolPermissions({
     : null;
   // Read by `apply`/`reset` after their await resolves, so a write started
   // against one server never lands on another's panel if the selection moves to
-  // a different server while the request is in flight — and, since the lens
-  // moved this panel from one document to several, so a write or a read for one
-  // scope cannot paint another's answer. A fast lens switch is exactly as able
-  // to land out of order as a server switch is.
+  // a different server while the request is in flight, and a write or a read for
+  // one scope cannot paint another's answer.
   const scopeKey = `${targetKey ?? ""}|${scope ?? ""}`;
   const scopeKeyRef = useRef(scopeKey);
   scopeKeyRef.current = scopeKey;
@@ -257,8 +244,7 @@ export function McpToolPermissions({
   );
 
   // One teammate's row, cleared without touching the company document. The
-  // per-tool reset in the agent lens is a patch naming neither field, which is
-  // how the wire spells "this tool has no rule of its own here".
+  // per-tool reset in the agent lens is a patch naming neither field.
   const clearRow = useCallback(
     (tool: string) => {
       void apply({ tools: [{ tool }] });
@@ -491,5 +477,5 @@ export function McpToolPermissions({
   );
 }
 
-/** What a resolved mode does, re-exported so a caller need not know two modules. */
+/** What a resolved mode does. */
 export { EFFECT_WORDS };
