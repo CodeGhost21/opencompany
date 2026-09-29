@@ -483,9 +483,69 @@ fn instruction_shaped(text: &str) -> Option<String> {
 }
 
 /// Pipelines that hand fetched bytes to a shell.
-const SHELL_SINKS: &[&str] = &["| sh", "|sh", "| bash", "|bash", "| zsh", "| python"];
+///
+/// The Windows half matters as much as the POSIX half: a skill bundle is text,
+/// and a payload aimed at a Windows operator reads the same way with
+/// `powershell` where a POSIX one says `sh`. `iex` is PowerShell's own alias for
+/// `Invoke-Expression` and is the idiomatic tail of a download-and-run one-liner.
+const SHELL_SINKS: &[&str] = &[
+    "| sh",
+    "|sh",
+    "| bash",
+    "|bash",
+    "| zsh",
+    "| python",
+    "| powershell",
+    "|powershell",
+    "| pwsh",
+    "|pwsh",
+    "| cmd",
+    "|cmd",
+    "| iex",
+    "|iex",
+];
+
+/// Verbs that fetch remote bytes.
+///
+/// `certutil` and `bitsadmin` are here because both are ordinary Windows
+/// binaries with a download side-effect, which is exactly why a payload reaches
+/// for them instead of naming a fetch tool outright.
+const FETCH_VERBS: &[&str] = &[
+    "curl ",
+    "wget ",
+    "base64 -d",
+    "base64 --decode",
+    "invoke-webrequest",
+    "invoke-restmethod",
+    "iwr ",
+    "irm ",
+    "certutil ",
+    "bitsadmin ",
+];
+
+/// Forms that execute a string the skill constructed.
+///
+/// `eval $` rather than `eval $(` and `iex $` beside `iex(`, because the
+/// argument does not have to be a substitution written in place: two statements
+/// (`irm … ; iex $payload`, `x=$(curl …); eval $x`) execute fetched bytes just
+/// as surely and matched none of the narrower forms — no pipe, so no sink
+/// either. `eval $(` is a subset of `eval $` and is dropped rather than kept
+/// beside it.
+const EVAL_FORMS: &[&str] = &[
+    "eval $",
+    "eval `",
+    "invoke-expression",
+    "iex(",
+    "iex (",
+    "iex $",
+];
 
 /// Paths that only a credential read would name.
+///
+/// Spelled with forward slashes only. [`shell_exfiltration`] folds `\` to `/`
+/// before matching, so a Windows-style `~\.ssh\id_rsa` is caught by the same
+/// entry rather than needing a duplicate — every entry added here covers both
+/// spellings for free.
 const CREDENTIAL_PATHS: &[&str] = &[
     ".ssh/id_rsa",
     ".ssh/id_ed25519",
@@ -495,27 +555,68 @@ const CREDENTIAL_PATHS: &[&str] = &[
     "/etc/shadow",
     "/etc/passwd",
     ".config/gh/hosts.yml",
+    "/windows/system32/config/sam",
+    "appdata/roaming/microsoft/credentials",
 ];
 
+/// Whether `c` can sit inside a command name.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// `haystack.contains(needle)` with a word boundary on the needle's left.
+///
+/// Checked only when the needle itself begins with a word character, so a sink
+/// like `| sh` is unaffected.
+///
+/// This exists because `irm` — PowerShell's alias for `Invoke-RestMethod` — is a
+/// substring of `firm`, `confirm` and `affirm`. A bare `contains("irm ")`
+/// therefore matched the prose of four shipped company bundles
+/// (`companies/accounting_firm/README.md` and its siblings), which also carry a
+/// `| Sh…` Markdown table cell that the sink list matches. Two innocent halves
+/// made one false "pipeline executed by a shell", and it only showed up in the
+/// gated lane, which is the one that scans shipped bundles.
+///
+/// The left boundary only, deliberately. A right boundary would stop `| python`
+/// matching `| python3 …`, which is a sink and must keep firing.
+fn contains_verb(haystack: &str, needle: &str) -> bool {
+    let bounded = needle.chars().next().is_some_and(is_word_char);
+    haystack.match_indices(needle).any(|(at, _)| {
+        !bounded
+            || haystack[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_word_char(c))
+    })
+}
+
 fn shell_exfiltration(text: &str) -> Option<String> {
-    let lowered = text.to_ascii_lowercase();
+    // `\` folds to `/` so one pattern covers both spellings of a path. Without
+    // it every `CREDENTIAL_PATHS` entry was POSIX-only in practice: a
+    // `contains(".ssh/id_rsa")` never matches text that writes `.ssh\id_rsa`,
+    // so naming the same file the way a Windows operator would defeated the
+    // check entirely.
+    let lowered = text.to_ascii_lowercase().replace('\\', "/");
     let piped_to_shell = SHELL_SINKS.iter().any(|sink| lowered.contains(sink));
     if piped_to_shell
-        && let Some(fetch) = ["curl ", "wget ", "base64 -d", "base64 --decode"]
+        && let Some(fetch) = FETCH_VERBS
             .iter()
-            .find(|fetch| lowered.contains(**fetch))
+            .find(|fetch| contains_verb(&lowered, fetch))
     {
         return Some(format!(
             "a `{}…` pipeline executed by a shell",
             fetch.trim()
         ));
     }
-    if lowered.contains("eval $(") || lowered.contains("eval `") {
-        return Some("a shell `eval` of a constructed command".to_string());
+    if let Some(form) = EVAL_FORMS.iter().find(|form| contains_verb(&lowered, form)) {
+        return Some(format!(
+            "a shell `{}` of a constructed command",
+            form.trim_end_matches([' ', '(', '$', '`'])
+        ));
     }
     if let Some(path) = CREDENTIAL_PATHS
         .iter()
-        .find(|path| lowered.contains(**path))
+        .find(|path| contains_verb(&lowered, path))
     {
         return Some(format!("a read of the credential path `{path}`"));
     }
