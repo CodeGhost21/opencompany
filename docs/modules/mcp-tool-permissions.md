@@ -68,7 +68,15 @@ it. Only `blocked` is denied this way; a tool that merely parks stays reachable,
 because parking is what the approval gate is for.
 
 That is resolved when the agent is built, so a block reaches the native path on
-the next build. A **directory install** is the other shape: it is addressed by a
+the next roster build — and the stored document is a term of the fingerprint
+`HarnessPool::ensure` compares, so writing one *is* what triggers that build.
+Without the term the deny list would be resolved once and a tool set to `blocked`
+would stay callable until the host restarted; the write and reset responses carry
+`NEXT_TURN_NOTE` because the invalidation is what makes the promise true. The
+fold is canonical (tiers read totally, overrides through a `BTreeMap`) so an
+unchanged document does not rebuild the roster on every turn.
+
+A **directory install** is the other shape: it is addressed by a
 `server_id` argument at call time rather than by the grant its tool was wired
 under, so there is no build-time snapshot to attach a policy to. Its scoping
 decorator reads the install's document when the call arrives — the grant answers

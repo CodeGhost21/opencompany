@@ -357,6 +357,37 @@ store", true of neither half of it.
 - **What a disconnect reaches**: the tool belt on the next turn, and nothing at
   the server's own end. A manifest server says it cannot be removed at all.
 
+## What a server says about itself
+
+`initialize` carries a `serverInfo` block the protocol leaves open-ended, and a
+server may put a `title`, a `description`, a `websiteUrl` and an `icons` array in
+it. The probe reads it off the transport's cached handshake — the listing already
+performed one, so this costs no extra round trip — and keeps it at
+`mcp/{name}/server_info`, beside the health record. Coverage is patchy in
+practice (Context7 answers with all four, DeepWiki with none), so every field is
+optional and absent stays absent: a placeholder would be this host asserting
+something the server never said. A failed probe leaves the previous record
+standing, as it does the inventory.
+
+The read carries them as `probedTitle`, `probedDescription`, `websiteUrl` and
+`iconUrl`. `probedDescription` is separate from `description`, which is what the
+operator or the bundle declared — the console offers the server's own words as
+the default for that field rather than overwriting a declaration with them.
+
+**An icon is fetched by the host, never linked.** The URL is chosen by whoever
+runs the remote server, and in an `src=` it is a beacon that fires for every
+operator who opens the Connections page and reports to that host who looked and
+when. So the bytes are fetched during the probe behind the outbound SSRF guard
+with redirects off, capped by reading the body rather than trusting a declared
+length, typed from their own signature rather than the claimed `Content-Type`
+(which is how an SVG — a document that can carry script — is refused whatever it
+was labelled), held to the avatar decompression-bomb check, and stored inline as
+a `data:` URI. Rendering one therefore reaches nothing. A fetch that fails leaves
+`iconUrl` absent and the console draws its letter tile. The stored value is
+re-checked on read, so a tampered store cannot turn the field back into a remote
+request. Same reasoning as the avatar grammar in
+[`src/company/avatar.rs`](../../src/company/avatar.rs).
+
 ## When a config change reaches an agent
 
 An agent materializes its MCP registry when the
