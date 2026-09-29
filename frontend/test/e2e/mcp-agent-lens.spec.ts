@@ -169,14 +169,15 @@ test("the teammate lens says what the narrowing costs", async ({ page }) => {
   });
 
   // The tier default belongs to the tool, never to the teammate — the host
-  // refuses a scoped tier write — so refusing it here has to read as a boundary
-  // rather than as a gap where a control used to be.
+  // refuses a scoped tier write — so this lens shows its VALUE and no control.
+  // A disabled select here read as a live one at a glance, and three of them
+  // buried the per-tool controls that are the point of the lens.
   await expect(
     page.getByTestId("mcp-permissions-tier-default-read_only"),
-  ).toBeDisabled();
-  await expect(
-    page.getByTestId("mcp-tier-company-only-read_only"),
-  ).toBeVisible();
+  ).toHaveCount(0);
+  const companyOnly = page.getByTestId("mcp-tier-company-only-read_only");
+  await expect(companyOnly).toBeVisible();
+  await expect(companyOnly).toContainText("for everyone");
 });
 
 test("the inert-approval notice is a function of the host, not a constant", async ({

@@ -225,6 +225,7 @@ export function TierSection({
   const { shown, hidden } = visibleRows(gate, rows, showAll);
   // Tiers are never per-teammate: the host refuses a scoped tier write.
   const perAgent = lens.kind === "agent";
+  const lensName = lens.kind === "agent" ? lens.name : "";
 
   return (
     <section
@@ -253,7 +254,19 @@ export function TierSection({
             ({rows.length})
           </span>
         </button>
-        {controls && (
+        {controls && perAgent && (
+          // A teammate lens gets the value, not a control that cannot be used:
+          // the tier default is the company's, and three disabled selects
+          // repeating that made the one live control harder to find.
+          <span
+            className="text-xs text-muted-foreground"
+            data-testid={`mcp-tier-company-only-${tier}`}
+            title={`A tier default applies to every teammate, so it is set on the Everyone view. ${lensName} can still be narrowed tool by tool below.`}
+          >
+            {TIER_DEFAULT_LABELS[bulk.stored ? bulk.mode : UNSET]} · for everyone
+          </span>
+        )}
+        {controls && !perAgent && (
           <Select
             value={bulk.stored ? bulk.mode : UNSET}
             onValueChange={(v) => v && apply(tierPatch(tier, v))}
@@ -279,15 +292,6 @@ export function TierSection({
           </Select>
         )}
       </div>
-
-      {controls && perAgent && (
-        <p
-          className="text-3xs text-muted-foreground"
-          data-testid={`mcp-tier-company-only-${tier}`}
-        >
-          Tier defaults are set for everyone, so this stays on the company view.
-        </p>
-      )}
 
       {open && (
         <div id={bodyId} className="space-y-2">
