@@ -24,23 +24,28 @@ let animate: ReturnType<typeof vi.fn>;
 let cancel: ReturnType<typeof vi.fn>;
 let reduced = false;
 
-function Harness({ keys, options }: { keys: string[]; options?: FlipListOptions }) {
+/**
+ * `shift` moves the whole list down, as collapsing a section above it does: the
+ * list's own `offsetTop` and every row's (measured from the same positioned
+ * ancestor, which jsdom leaves null) grow by the same amount.
+ */
+function Harness({ keys, options, shift = 0 }: { keys: string[]; options?: FlipListOptions; shift?: number }) {
   const rowRef = useFlipList(keys, options);
   return createElement(
     "ul",
-    null,
+    { "data-top": String(shift) },
     keys.map((key, index) =>
       createElement(
         "li",
-        { key, ref: rowRef(key), "data-top": String(index * ROW) },
+        { key, ref: rowRef(key), "data-top": String(shift + index * ROW) },
         createElement("button", { type: "button", "data-testid": `row-${key}` }, key),
       ),
     ),
   );
 }
 
-function render(keys: string[], options?: FlipListOptions) {
-  act(() => root.render(createElement(Harness, { keys, options })));
+function render(keys: string[], options?: FlipListOptions, shift = 0) {
+  act(() => root.render(createElement(Harness, { keys, options, shift })));
 }
 
 beforeEach(() => {
@@ -133,6 +138,26 @@ describe("useFlipList", () => {
     render(["a", "b", "c"], enabled);
     render(["a", "b", "c"], enabled);
     expect(animate).not.toHaveBeenCalled();
+  });
+
+  it("does not animate when something above the list moves every row equally", () => {
+    // Collapsing the Channels section above the DM list: nothing re-sorted.
+    render(["a", "b", "c"], enabled);
+    render(["a", "b", "c"], enabled);
+    render(["a", "b", "c"], enabled, -120);
+    render(["a", "b", "c"], enabled, 40);
+    expect(animate).not.toHaveBeenCalled();
+  });
+
+  it("still slides a real reorder that lands while the list has moved", () => {
+    render(["a", "b", "c"], enabled);
+    render(["a", "b", "c"], enabled);
+    render(["c", "a", "b"], enabled, -120);
+    const deltas = animate.mock.calls.map(
+      ([frames]) => (frames as { transform: string }[])[0].transform,
+    );
+    expect(deltas).toHaveLength(3);
+    expect(deltas).toContain("translateY(60px)");
   });
 
   it("cancels a running animation before starting the next one", () => {

@@ -21,8 +21,9 @@ export interface FlipListOptions {
  *
  * Rows are keyed, so React moves the DOM node rather than remounting it: focus
  * and hover survive a reorder, and the node is still the same element we
- * measured. On every commit we compare each row's `offsetTop` with what it was
- * after the previous commit and, when it moved, play a Web Animations API
+ * measured. On every commit we compare each row's `offsetTop` within its list
+ * (see `slotTop`) with what it was after the previous commit and, when it
+ * moved, play a Web Animations API
  * `translateY` from the old spot to the new one. `offsetTop` is used rather
  * than `getBoundingClientRect` because it ignores both transforms (a mid-flight
  * animation does not corrupt the measurement) and scroll (scrolling the sidebar
@@ -80,7 +81,7 @@ export function useFlipList<K extends string | number>(
     for (const key of keys) {
       const el = nodes.current.get(key);
       if (!el) continue;
-      const top = el.offsetTop;
+      const top = slotTop(el);
       next.set(key, top);
       const before = tops.current.get(key);
       if (!animate || before === undefined || typeof el.animate !== "function") continue;
@@ -111,6 +112,23 @@ export function useFlipList<K extends string | number>(
   });
 
   return ref;
+}
+
+/**
+ * The row's top within its own list, not within the page.
+ *
+ * `offsetTop` is measured from the nearest positioned ancestor, which for a rail
+ * section is far above the list: collapsing the Channels section, or a banner
+ * appearing, moves every DM row by the same amount without reordering anything,
+ * and read raw that played a slide on every row. Subtracting the list's own
+ * `offsetTop` (both are measured from the same ancestor) leaves only the slot,
+ * so a reorder is the one thing that moves it. When the list is itself the
+ * positioned ancestor, `offsetTop` is already relative to it.
+ */
+function slotTop(el: HTMLElement): number {
+  const list = el.parentElement;
+  if (!list || list === el.offsetParent) return el.offsetTop;
+  return el.offsetTop - list.offsetTop;
 }
 
 /** The row's current `translateY` in px, 0 when it has no transform (or no DOMMatrix). */
