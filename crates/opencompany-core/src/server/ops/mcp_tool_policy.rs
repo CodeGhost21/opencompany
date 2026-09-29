@@ -39,19 +39,14 @@ pub struct ToolPolicyRowDto {
     /// Whether an operator decided anything about this row, as opposed to it
     /// inheriting. Derived here; never stored.
     pub is_override: bool,
-    /// Which rule decided [`Self::mode`]. Host-resolved, because predicting it
-    /// in the console would be a second implementation of a rule this crate
-    /// owns — and one of its four values names a *discarded* per-agent setting,
-    /// which no client can derive from the mode alone.
+    /// Which rule decided [`Self::mode`]. Host-resolved — one of its values names
+    /// a discarded per-agent setting, which no client can derive from the mode.
     pub source: crate::company::mcp_policy::PolicySource,
     /// In an agent-scoped read, this teammate's stored mode — present even when
-    /// the narrow-only clamp discarded it, so the console can say what was set
-    /// instead of rendering a value nothing honours.
+    /// the narrow-only clamp discarded it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_mode: Option<crate::company::mcp_policy::ApprovalMode>,
-    /// The teammates whose resolved mode for this tool differs from the
-    /// company's. Without it the company-wide view lies by omission: it is true
-    /// about the document and silent about its exceptions.
+    /// The teammates whose resolved mode for this tool differs from the company's.
     pub differing_agents: Vec<String>,
 }
 
@@ -75,8 +70,7 @@ pub struct TierDefaultDto {
 #[serde(rename_all = "camelCase")]
 pub struct ToolPolicyDto {
     pub server: String,
-    /// The teammate this read is scoped to, echoed so a response cannot be
-    /// mistaken for the company document.
+    /// The teammate this read is scoped to, or absent for the company document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     /// Every tier's bulk default — **total**, so the console never ships its own
@@ -85,9 +79,7 @@ pub struct ToolPolicyDto {
     pub tools: Vec<ToolPolicyRowDto>,
     /// When discovery last succeeded, if ever. `0` reads as never.
     pub discovered_at_millis: u64,
-    /// The rebuild reminder, on a mutating response only — the stored policy is
-    /// a term of the effective MCP set's fingerprint, so an edit reaches agents
-    /// on the company's next turn. Absent on a read, which changes nothing.
+    /// The rebuild reminder, on a mutating response only. Absent on a read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -103,8 +95,7 @@ impl ToolPolicyDto {
 /// Renders a resolved policy document for one server, company-wide or as it
 /// stands for one teammate.
 ///
-/// One renderer for both scopes, so the two cannot come to disagree about a
-/// tool. The tier grouping is identical in either — tiers are never per-agent —
+/// The tier grouping is identical in either scope — tiers are never per-agent —
 /// and only the mode, the source and the stored per-agent value change.
 pub fn tool_policy_dto(
     server: &str,
@@ -130,8 +121,7 @@ pub fn tool_policy_dto(
         .collect();
 
     // An agent-scoped read enumerates the wider set: a teammate can hold a rule
-    // about a tool no probe reached and no company override names, and a row the
-    // operator can see is the only way to clear it.
+    // about a tool no probe reached and no company override names.
     let names: Vec<String> = match agent {
         Some(agent) => agent_policy_tool_names(policies, inventory, agent).collect(),
         None => policy_tool_names(policies, inventory).collect(),
@@ -184,11 +174,6 @@ pub fn tool_policy_dto(
 }
 
 /// The `?agent=` lens a policy read or write is scoped to.
-///
-/// A query parameter rather than a third level of nesting in the patch body:
-/// `apply_tool_policy_patch`'s two-level partial-merge contract stays intact, and
-/// refusing a per-agent tier becomes one check on a shape that cannot express it
-/// twice.
 #[derive(Debug, Default, Deserialize)]
 pub struct AgentScope {
     #[serde(default)]
@@ -249,10 +234,8 @@ pub struct PutToolPolicyEntry {
 /// operator-facing reason it cannot be applied.
 ///
 /// `agent` picks which half of the document the `tools` entries land in. In an
-/// agent scope the merge is one level shallower — a teammate has modes, not tiers
-/// — and the two shapes a per-agent tier could take are both refused rather than
-/// silently dropped, because a body the host half-applies is worse than one it
-/// rejects.
+/// agent scope the merge is one level shallower — a teammate has modes, not
+/// tiers — and a per-agent tier is refused in either shape it could take.
 pub fn apply_tool_policy_patch(
     mut stored: crate::company::mcp_policy::McpToolPolicies,
     patch: PutToolPolicy,
@@ -452,9 +435,6 @@ async fn read_policy(
         &decl.read_only_tools,
         mcp_policy::StoredPolicies::Stored(stored),
     );
-    // Readable to any member, in either scope: "what can this teammate actually
-    // call" is the question the lens exists to answer, and answering it changes
-    // nothing. Writing stays admin-only.
     Json(tool_policy_dto(
         &name,
         &policies,
@@ -524,9 +504,8 @@ async fn reset_policy(
         Err(response) => return *response,
     };
     // An agent-scoped reset clears one teammate's rules and leaves the company
-    // document alone, so the two scopes cannot undo each other. It has to read
-    // first, which means an unreadable document is a `409` here — the
-    // company-scoped reset stays the repair for that.
+    // document alone. It has to read first, so an unreadable document is a `409`
+    // here; the company-scoped reset stays the repair for that.
     let merged = match scope.agent() {
         Some(agent) => {
             let mut stored = match stored_strict(runtime, &name).await {

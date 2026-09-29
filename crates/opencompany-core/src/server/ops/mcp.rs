@@ -111,10 +111,8 @@ pub(super) struct McpServerDto {
     /// The server's icon: what it reported about itself on its last successful
     /// probe, else — on a row backed by a directory install — the directory's.
     ///
-    /// A probed icon is an inline `data:` image the host fetched itself, so
-    /// rendering one reaches nothing; see
-    /// [`mcp_server_info`](crate::company::mcp_server_info) for why an icon URL
-    /// a remote server chose must never reach an operator's browser.
+    /// A probed icon is an inline `data:` image the host fetched itself; an icon
+    /// URL a remote server chose must never reach an operator's browser.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) icon_url: Option<String>,
     /// The display name the server reported for itself, when it reported one.
@@ -123,8 +121,7 @@ pub(super) struct McpServerDto {
     /// The server's own description of what it does, when it reported one.
     ///
     /// Distinct from [`description`](Self::description), which is what the
-    /// operator (or the bundle) declared: the console offers this as the default
-    /// for that field rather than overwriting a declaration with it.
+    /// operator or the bundle declared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) probed_description: Option<String>,
     /// The server's home page, when it reported one. An `http(s)` URL, rendered
