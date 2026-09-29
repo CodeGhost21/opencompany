@@ -55,6 +55,11 @@ export function AgentMcpPermissions({
   agentId: string;
   agentName: string;
   servers?: McpServer[];
+  /**
+   * Opens that server's own page with this teammate's lens already applied, so
+   * one click lands on the rows being read here rather than on the company
+   * document they are resolved against.
+   */
   onOpenServer?: (name: string) => void;
 }) {
   const [state, setState] = useState<State>({ kind: "loading" });
@@ -309,7 +314,8 @@ function ServerBlock({
         <div className="flex flex-wrap items-center gap-2">
           {/* The mark is the way back to the server. The two pages describe one
               relation from two ends, and navigating it should not mean returning
-              to a list in between. */}
+              to a list in between. An icon alone carries no promise about where
+              it goes, so the labelled link below names the same destination. */}
           {onOpenServer ? (
             <button
               type="button"
@@ -342,6 +348,16 @@ function ServerBlock({
             </Badge>
           )}
           {!block.enabled && <Badge variant="outline">off</Badge>}
+          {onOpenServer && (
+            <button
+              type="button"
+              onClick={() => onOpenServer(block.server)}
+              className="ml-auto rounded-sm text-xs font-medium text-muted-foreground underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              data-testid="agent-mcp-edit-on-server"
+            >
+              Edit on the {block.server} page →
+            </button>
+          )}
         </div>
 
         {!block.reached && (
@@ -414,6 +430,7 @@ function ServerBlock({
                     onToggleShowAll={() => {}}
                     apply={() => {}}
                     controls={false}
+                    elsewhere={`the ${block.server} page`}
                   />
                 );
               })}

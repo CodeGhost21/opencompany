@@ -202,6 +202,7 @@ export function TierSection({
   onClearRow,
   /** Draw what happens instead of the controls that decide it. */
   controls = true,
+  elsewhere,
 }: {
   tier: ToolTier;
   gate?: ToolGate;
@@ -217,6 +218,8 @@ export function TierSection({
   apply: (patch: ToolPolicyPatch) => void;
   onClearRow?: (tool: string) => void;
   controls?: boolean;
+  /** Where a row without controls is decided, named so the row can say it. */
+  elsewhere?: string;
 }) {
   const bodyId = `tier-body-${tier}`;
   const { shown, hidden } = visibleRows(gate, rows, showAll);
@@ -261,6 +264,7 @@ export function TierSection({
               id={`tier-${tier}`}
               aria-label={`Default for ${SECTION_TITLES[tier].toLowerCase()}`}
               className="w-40"
+              data-testid={`mcp-permissions-tier-default-${tier}`}
             >
               <SelectValue />
             </SelectTrigger>
@@ -305,6 +309,7 @@ export function TierSection({
                   apply={apply}
                   onClearRow={onClearRow}
                   controls={controls}
+                  elsewhere={elsewhere}
                 />
               ))}
             </ul>
@@ -335,6 +340,7 @@ export function ToolRow({
   onClearRow,
   /** Draw what happens instead of the controls that decide it. */
   controls = true,
+  elsewhere,
 }: {
   row: ToolPolicyRow;
   gate?: ToolGate;
@@ -344,14 +350,17 @@ export function ToolRow({
   apply: (patch: ToolPolicyPatch) => void;
   onClearRow?: (tool: string) => void;
   controls?: boolean;
+  /** Where this row is decided, when it is not decided here. */
+  elsewhere?: string;
 }) {
   const note = exclusion(gate, row.tool);
   const source = sourceLabel(row, lens);
   const floor =
     lens.kind === "agent" ? (lens.floors[row.tool] ?? row.mode) : null;
+  const setOn = `Set on ${elsewhere ?? "this server's own page"}.`;
 
   return (
-    <li className="space-y-1" data-testid="mcp-permission-row">
+    <li className="space-y-1" data-testid="mcp-permission-row" data-tool={row.tool}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-xs">{row.tool}</span>
         {row.suggestedTier && (
@@ -455,12 +464,34 @@ export function ToolRow({
           )}
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground" data-testid="mcp-permission-effect">
-          <span className="font-medium text-foreground">
-            {EFFECT_WORDS[row.mode]}
+        // Disabled rather than drawn as prose, for the reason a mode a
+        // per-teammate rule may not loosen is offered disabled rather than
+        // hidden: a control that is present and refused says where the boundary
+        // is, while a sentence in its place reads as a row that was never
+        // configured.
+        <div
+          className="flex flex-wrap items-center gap-2"
+          data-testid="mcp-permission-effect"
+        >
+          <ModeChoice
+            value={row.mode}
+            label={`What happens when ${row.tool} is called`}
+            disabled
+            disabledModes={Object.fromEntries(
+              (Object.keys(MODE_LABELS) as ApprovalMode[]).map((mode) => [
+                mode,
+                setOn,
+              ]),
+            )}
+            onChange={() => {}}
+          />
+          <span className="text-3xs text-muted-foreground">
+            <span className="font-medium text-foreground">
+              {EFFECT_WORDS[row.mode]}
+            </span>
+            {source ? ` — ${source}` : null} · {setOn}
           </span>
-          {source ? ` — ${source}` : null}
-        </p>
+        </div>
       )}
     </li>
   );

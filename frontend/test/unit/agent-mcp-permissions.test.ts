@@ -92,7 +92,7 @@ function all(selector: string): HTMLElement[] {
  * not moved — so a test comparing two host answers has to start again rather than
  * silently assert against the first one.
  */
-async function mount() {
+async function mount(over: { onOpenServer?: (name: string) => void } = {}) {
   act(() => root.unmount());
   root = createRoot(container);
   await act(async () => {
@@ -102,6 +102,7 @@ async function mount() {
         company: "acme",
         agentId: "engineer",
         agentName: "Engineer",
+        ...over,
       }),
     );
   });
@@ -320,7 +321,7 @@ describe("a tool two granted servers both offer", () => {
 });
 
 describe("a row on this page", () => {
-  it("says what happens and where it came from, and offers no control", async () => {
+  it("says what happens and where it came from, and refuses the control in place", async () => {
     api.readAgentMcpPermissions.mockResolvedValue(
       picture({
         servers: [
@@ -341,11 +342,51 @@ describe("a row on this page", () => {
 
     await mount();
 
-    expect(el("mcp-permission-effect")?.textContent).toBe(
+    expect(el("mcp-permission-effect")?.textContent).toContain(
       "refused — pinned on this server",
     );
-    // Modes are edited on the server, so there is one write path per document.
-    expect(el("mcp-mode-blocked")).toBeNull();
+
+    // Modes are edited on the server, so there is one write path per document —
+    // but the control stays on screen, refused and reasoned, because a row whose
+    // control is missing reads as a row nobody has configured. Same rule the
+    // clamp already applies to a mode a teammate's own layer may not loosen.
+    const chosen = el("mcp-mode-blocked") as HTMLButtonElement | null;
+    expect(chosen).not.toBeNull();
+    expect(chosen?.disabled).toBe(true);
+    expect(chosen?.getAttribute("aria-checked")).toBe("true");
+    expect(chosen?.title).toBe("Set on the notion page.");
+    expect((el("mcp-mode-always_allow") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+
+  it("links to the page the mode is set on, labelled and not only as a mark", async () => {
+    api.readAgentMcpPermissions.mockResolvedValue(
+      picture({ servers: [block({ server: "notion" })] }),
+    );
+
+    const opened: string[] = [];
+    await mount({ onOpenServer: (name: string) => opened.push(name) });
+
+    // An icon carries no promise about where it goes. Both affordances name the
+    // same server, so the labelled one is a second route to it rather than a
+    // second destination.
+    expect(el("agent-mcp-open-server")).not.toBeNull();
+    const link = el("agent-mcp-edit-on-server");
+    expect(link?.textContent).toBe("Edit on the notion page →");
+    link?.click();
+    expect(opened).toEqual(["notion"]);
+  });
+
+  it("offers neither affordance when nothing can be opened", async () => {
+    api.readAgentMcpPermissions.mockResolvedValue(
+      picture({ servers: [block({ server: "notion" })] }),
+    );
+
+    await mount();
+
+    expect(el("agent-mcp-open-server")).toBeNull();
+    expect(el("agent-mcp-edit-on-server")).toBeNull();
   });
 
   it("is loud when the teammate reaches a server and can call nothing on it", async () => {

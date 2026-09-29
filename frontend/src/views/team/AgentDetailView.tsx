@@ -1187,7 +1187,12 @@ export function AgentDetailView({
               agentId={agent.id}
               agentName={agent.name?.trim() || agent.role}
               onOpenServer={(name) => {
-                window.location.hash = `#/connections/mcp?server=${encodeURIComponent(name)}`;
+                // `showing` is the permissions panel's own lens parameter, so the
+                // click lands on this teammate's rows rather than on the company
+                // document they are resolved against.
+                window.location.hash =
+                  `#/connections/mcp?server=${encodeURIComponent(name)}` +
+                  `&showing=${encodeURIComponent(agent.id)}`;
               }}
             />
             </PageTabPanel>
