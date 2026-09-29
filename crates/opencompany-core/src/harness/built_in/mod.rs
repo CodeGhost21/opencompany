@@ -5827,6 +5827,28 @@ pub(crate) fn agent_mcp_reads(
     crate::company::mcp_policy::mcp_allow_set_for_agent(&deps.mcp_servers, agent, grants)
 }
 
+/// The approval policy every roster teammate starts from, before the per-agent
+/// wiring [`agent_policy_for`] chains onto it.
+///
+/// One construction, because two surfaces need the same answer: the roster that
+/// enforces the policy, and the read that reports whether a `needs_approval`
+/// tool mode parks ([`roster_approvals_park`]). A second copy of the chain would
+/// let the console describe a roster this host does not build.
+pub(crate) fn roster_policy_base(policy: &Policy, effective_budget: Option<f64>) -> ApprovalPolicy {
+    ApprovalPolicy::new(policy, effective_budget).with_policy_hitl_disabled()
+}
+
+/// Whether a tool set to `needs_approval` parks a call for this company's
+/// teammates, or is allowed through as if it were set to allow.
+///
+/// Derived from [`roster_policy_base`] rather than stated, so the day a roster
+/// parks again the console says so without a second edit. The budget is left out
+/// because nothing below it reaches the spend arm — the question is the HITL
+/// bypass alone.
+pub fn roster_approvals_park(policy: &Policy) -> bool {
+    roster_policy_base(policy, None).policy_hitl_enabled()
+}
+
 /// The approval policy one teammate is built with.
 ///
 /// Extracted from [`build_roster`] so an episode seat is gated exactly as
@@ -5842,8 +5864,7 @@ pub(crate) fn agent_policy_for(
     // Resolved here, not passed in: the gate and the toolbelt must be built from
     // the same grant list.
     let grants = grants_for_policy(company, &company.manifest.tools.allow, manifest_agent);
-    let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
-        .with_policy_hitl_disabled()
+    let mut agent_policy = roster_policy_base(policy, effective_budget)
         .with_requests(deps.approval_requests.clone())
         // Issue #243: stamp who the parked effect belongs to, so approving it
         // can hand the grant back to this agent rather than to nobody.
