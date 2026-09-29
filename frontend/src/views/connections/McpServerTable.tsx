@@ -226,6 +226,19 @@ function Expander({
   );
 }
 
+const ROW_CONTROLS =
+  "button, a, input, select, textarea, label, [role='menuitem'], [role='checkbox']";
+
+/** Ignores clicks on controls inside the row, and repeat clicks of a double-click. */
+function toggleFromRow(
+  event: React.MouseEvent<HTMLTableRowElement>,
+  setOpen: React.Dispatch<React.SetStateAction<boolean>>,
+) {
+  if (event.detail > 1) return;
+  if ((event.target as HTMLElement | null)?.closest(ROW_CONTROLS)) return;
+  setOpen((was) => !was);
+}
+
 function Detail({
   children,
 }: {
@@ -235,7 +248,7 @@ function Detail({
     <tr data-testid="mcp-row-detail">
       <td />
       <td colSpan={5} className="border-b border-border px-3 pb-3">
-        <div className="grid gap-x-8 gap-y-4 rounded-md border border-border bg-muted/30 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(13rem,16rem)]">
+        <div className="grid gap-x-8 gap-y-4 rounded-md border border-border bg-muted/30 p-4 select-text sm:grid-cols-[minmax(0,1fr)_minmax(13rem,16rem)]">
           {children}
         </div>
       </td>
@@ -329,14 +342,6 @@ export function McpServerRow({
                   : "mcp-add-token",
             };
 
-  // Anywhere that is not itself a control, and not the end of a drag-select.
-  function onRowClick(event: React.MouseEvent<HTMLTableRowElement>) {
-    const hit = event.target as HTMLElement | null;
-    if (hit?.closest("button, a, input, select, label, [role='menuitem']")) return;
-    if ((window.getSelection()?.toString().length ?? 0) > 0) return;
-    setOpen((was) => !was);
-  }
-
   function runPrimary() {
     if (primary === null) return;
     if (primary.kind === "sign_in") actions.onSignIn(server);
@@ -349,8 +354,8 @@ export function McpServerRow({
     <>
       <tr
         data-testid="mcp-server-row"
-        onClick={onRowClick}
-        className="cursor-pointer transition-colors hover:bg-muted/40"
+        onClick={(event) => toggleFromRow(event, setOpen)}
+        className="cursor-pointer transition-colors select-none hover:bg-muted/40"
       >
         <Expander
           open={open}
@@ -642,7 +647,8 @@ export function McpDirectoryRow({
     <>
       <tr
         data-testid="mcp-directory-row"
-        className="transition-colors hover:bg-muted/40"
+        onClick={(event) => toggleFromRow(event, setOpen)}
+        className="cursor-pointer transition-colors select-none hover:bg-muted/40"
       >
         <Expander
           open={open}

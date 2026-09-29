@@ -153,3 +153,60 @@ test("the page states what this build can do with these servers", async ({
   // rather than reading identically to a host that honours these servers.
   await expect(page.getByTestId("mcp-bridge-absent")).toBeVisible();
 });
+
+test("a double-click settles the row open and highlights nothing", async ({
+  page,
+}) => {
+  await openMcp(page);
+  const deepwiki = row(page, "deepwiki");
+  const expander = deepwiki.getByTestId("mcp-row-expander");
+
+  await deepwiki.getByTestId("mcp-source-badge").dblclick();
+
+  await expect(expander).toHaveAttribute("aria-expanded", "true");
+  expect(await page.evaluate(() => window.getSelection()?.toString() ?? "")).toEqual(
+    "",
+  );
+});
+
+test("dragging across a row opens it and selects nothing", async ({ page }) => {
+  await openMcp(page);
+  const deepwiki = row(page, "deepwiki");
+  const badge = deepwiki.getByTestId("mcp-source-badge");
+
+  // `hover` first: the box must be measured with the pointer already on the row.
+  await badge.hover();
+  const box = await badge.boundingBox();
+  if (box === null) throw new Error("the source badge has no box to drag across");
+  await page.mouse.down();
+  for (const dx of [-18, -6, 6, 18]) {
+    await page.mouse.move(box.x + box.width / 2 + dx, box.y + box.height / 2);
+  }
+  await page.mouse.up();
+
+  expect(await page.evaluate(() => window.getSelection()?.toString() ?? "")).toEqual(
+    "",
+  );
+  await expect(deepwiki.getByTestId("mcp-row-expander")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+});
+
+test("the endpoint in the open detail can still be selected and copied", async ({
+  page,
+}) => {
+  await openMcp(page);
+  const deepwiki = row(page, "deepwiki");
+  await deepwiki.getByTestId("mcp-row-expander").click();
+
+  const endpoint = page
+    .getByTestId("mcp-row-detail")
+    .getByText("https://mcp.deepwiki.com/mcp");
+  await expect(endpoint).toBeVisible();
+
+  await endpoint.dblclick();
+  expect(
+    (await page.evaluate(() => window.getSelection()?.toString() ?? "")).length,
+  ).toBeGreaterThan(0);
+});
