@@ -1,25 +1,11 @@
 //! What one teammate can actually call on this company's MCP servers.
 //!
 //! `GET {scope}/team/{agent_id}/mcp/permissions` — one host-resolved read
-//! covering every configured server rather than one read per server.
+//! covering every configured server.
 //!
-//! Two reasons it is one route and not N. The **host** resolves
-//! [`PolicySource`](crate::company::mcp_policy::PolicySource), for the reason the
-//! write route already gives for its echoed document: every field the console
-//! renders is host-resolved, and predicting it there would be a second
-//! implementation of a rule this crate owns. And reached-or-not, plus *which
-//! grant* is missing, can only be answered cheaply for every server at once.
-//!
-//! Read-only and member-open ([`ScopedCompany`], not
-//! [`AdminScopedCompany`](super::AdminScopedCompany)): "what can this teammate
-//! call" is the question this exists to answer, and answering it changes nothing.
-//! Writes still go to the per-server policy route with `?agent=`, so there stays
-//! one write path per document.
-//!
-//! Covers **declared** servers — the set the harness attaches and the approval
-//! gate reads. A directory install is addressed by a `server_id` at call time and
-//! carries its policy under its own key; its per-agent rules are authored and
-//! read through the registry route.
+//! Covers declared servers only. A directory install carries its policy under
+//! its own key; its per-agent rules are authored and read through the registry
+//! route. Writes go to the per-server policy route with `?agent=`.
 
 use axum::extract::Path;
 use axum::http::StatusCode;
@@ -50,10 +36,7 @@ pub struct AgentPath {
 #[serde(rename_all = "camelCase")]
 pub struct AgentServerPermissionsDto {
     pub server: String,
-    /// Whether this teammate's grants reach the server at all. Mode is only
-    /// consulted after reach, so a rule on a server this is `false` for is inert
-    /// — and a page that hid such a server could not answer the question it
-    /// exists for.
+    /// Whether this teammate's grants reach the server at all.
     pub reached: bool,
     /// The grant that would make it reachable, when it is not.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,12 +48,10 @@ pub struct AgentServerPermissionsDto {
     /// When discovery last succeeded, if ever. `0` reads as never.
     pub discovered_at_millis: u64,
     /// Whether every tool this server is *known* to offer is refused this
-    /// teammate — the state per-agent policy creates and nothing else does. A
-    /// server no probe has reached is never this, because "nothing callable" and
-    /// "nothing known" are different facts.
+    /// teammate. Never true for a server no probe has reached.
     pub fully_refused: bool,
-    /// Whether this server's stored document could not be read. Degrades **this
-    /// block only**: one damaged document must not take the whole page down.
+    /// Whether this server's stored document could not be read. Degrades this
+    /// block only.
     pub unreadable: bool,
 }
 
@@ -87,23 +68,18 @@ pub struct SharedToolNameDto {
 #[serde(rename_all = "camelCase")]
 pub struct AgentMcpPermissionsDto {
     pub agent: String,
-    /// The grant this teammate asks for, in its three representable states:
-    /// `null` inherits the company's standard grant, `[]` is a deliberate
-    /// no-tools grant, `[globs]` narrows. Load-bearing and invisible in a glob
-    /// field.
+    /// The grant this teammate asks for: `null` inherits the company's standard
+    /// grant, `[]` is a no-tools grant, `[globs]` narrows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested: Option<Vec<String>>,
     /// The grants this teammate is actually built with.
     pub effective_grants: Vec<String>,
     pub servers: Vec<AgentServerPermissionsDto>,
     /// Tool names reachable on more than one server this teammate holds.
-    /// Matching is on the **name**, not the capability, so this flags a hazard
-    /// rather than claiming two servers offer the same thing: blocking
-    /// `delete_page` on one server does not block it on the other.
+    /// Matching is on the name, not the capability.
     pub shared_tool_names: Vec<SharedToolNameDto>,
     /// Whether approval parking is live on this host. `false` means a
-    /// `needs_approval` mode behaves as allow, and the console must say so
-    /// rather than presenting it as a gate.
+    /// `needs_approval` mode behaves as allow.
     pub approvals_park: bool,
 }
 
@@ -156,11 +132,8 @@ async fn read_permissions(
 
     let mut servers = Vec::with_capacity(decls.len());
     for decl in &decls {
-        // Reach, exactly as `registry_for_agent` decides it: a disabled server
-        // reaches nobody whatever the grants say.
+        // Reach, exactly as `registry_for_agent` decides it.
         let reached = decl.enabled && grants_cover_server(&grants, &decl.name);
-        // Read strictly, per server, so a damaged document degrades its own block
-        // and names itself rather than emptying the page.
         let stored = mcp_policy::load_tool_policies_strict(
             runtime.id(),
             runtime.secrets().as_ref(),
@@ -202,9 +175,7 @@ async fn read_permissions(
         effective_grants: grants,
         servers,
         shared_tool_names,
-        // `build_roster` disables policy HITL on every teammate, so parking is
-        // off on this build. Reported rather than assumed, so the console's
-        // notice disappears on its own when approvals return.
+        // `build_roster` disables policy HITL on every teammate, so parking is off.
         approvals_park: false,
     })
     .into_response()

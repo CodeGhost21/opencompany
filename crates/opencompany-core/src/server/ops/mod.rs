@@ -163,7 +163,7 @@ mod tests_mcp_default_server_can;
 #[path = "write_mcp_manifest_tests.rs"]
 mod tests_mcp_manifest;
 /// Probed MCP identity. Gated on `mcp` as well as `test`: without the feature no
-/// probe runs, so there is nothing for these to observe.
+/// probe runs.
 #[cfg(all(test, feature = "mcp"))]
 #[path = "write_mcp_probed_identity_tests.rs"]
 mod tests_mcp_probed_identity;
