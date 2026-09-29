@@ -3314,7 +3314,7 @@ export function AppShell({
           you are in, and who you are signed in as. Both used to sit in the
           sidebar column — the switcher at its head under a reserved strip for
           the traffic lights, the profile row in its footer — which put them at
-          opposite ends of a 13.5rem column and left the lights overlapping a
+          opposite ends of a 15rem column and left the lights overlapping a
           narrow column instead of insetting a bar. See `window-title-bar.tsx`,
           which owns the geometry including the traffic-light inset. */}
       <WindowTitleBar

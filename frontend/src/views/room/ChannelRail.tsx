@@ -452,7 +452,7 @@ function ChannelRow({
       // `""` — is what suppresses the native bubble.
       title={channelSubtitle(channel) ?? undefined}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-base transition-colors",
         active
           ? onPage
             ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
@@ -493,7 +493,7 @@ function ChannelIcon({ channel }: { channel: Channel }) {
   if (channel.kind === "dm") {
     const face = dmFace(channel);
     return face ? (
-      <TeammateAvatar {...face} className="size-5 text-3xs" />
+      <TeammateAvatar {...face} className="size-6 text-2xs" />
     ) : (
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );

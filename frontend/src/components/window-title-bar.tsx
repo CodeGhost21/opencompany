@@ -5,7 +5,7 @@
 // The switcher and the profile control used to live in the sidebar column — the
 // switcher at its head, under a reserved strip for the traffic lights, and the
 // profile row in its footer. That put the two facts that are *about the console
-// rather than about the page* at opposite ends of a 13.5rem column, and it put
+// rather than about the page* at opposite ends of a 15rem column, and it put
 // the macOS traffic lights on top of a narrow column instead of across a bar,
 // so the lights overlapped the switcher and the window had no title row to
 // speak of.

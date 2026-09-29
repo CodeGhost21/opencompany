@@ -17,7 +17,7 @@ needs and had been spelling as arbitrary values.
 | `text-2xs` | 11px | 16px | +0.005em | Captions, timestamps, key/value rows, sidebar section headers |
 | `text-xs` | 12px | 16px | — | Dense body — the console's workhorse |
 | `text-sm` | 14px | 20px | — | Default body, form labels, buttons |
-| `text-base` | 16px | 24px | — | Long-form prose, empty-state copy |
+| `text-base` | 16px | 24px | — | Long-form prose, empty-state copy, sidebar channel and DM rows |
 | `text-lg` | 18px | 28px | — | Card titles |
 | `text-xl` | 20px | 28px | — | Section headings |
 | `text-2xl` | 24px | 32px | — | View titles |
