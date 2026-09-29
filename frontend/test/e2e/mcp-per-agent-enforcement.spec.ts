@@ -256,6 +256,9 @@ test("a teammate refused every tool is told so, not left guessing", async ({
   // sees an empty tool list and cannot tell it from a server being down.
   await expect(page.getByTestId("mcp-permissions-fully-refused")).toBeVisible();
 
-  await page.getByTestId("mcp-permissions-clear-agent").click();
+  // The way out is offered where the state is announced. The other reset sits
+  // below every tier group, which on a server with tools is off-screen — so the
+  // page named a dead end and put the exit somewhere the operator had to hunt.
+  await page.getByTestId("mcp-permissions-fully-refused-clear").click();
   await expect(page.getByTestId("mcp-permissions-fully-refused")).toHaveCount(0);
 });

@@ -435,7 +435,20 @@ export function McpToolPermissions({
             >
               <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
               <span>
-                {agent.name} reaches this server but can call nothing on it.
+                {agent.name} reaches this server but can call nothing on it.{" "}
+                {canManage && (
+                  // The way out, stated where the state is announced: the same
+                  // reset otherwise sits below every tier group, off-screen.
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void reset(agent.id)}
+                    data-testid="mcp-permissions-fully-refused-clear"
+                    className="font-medium underline underline-offset-2 disabled:opacity-60"
+                  >
+                    Clear every rule set for {agent.name}
+                  </button>
+                )}
               </span>
             </p>
           )}
