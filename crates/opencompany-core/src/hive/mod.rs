@@ -12,6 +12,11 @@
 //! surface, which the server does not need, and gating on it would leave the
 //! harness lane's turns without their tools.)
 
+/// The closing turn a settled desk episode routes to one seat: whether it is
+/// needed, which seat takes it, and the summary its message becomes. Needs the
+/// harness whose seats it seats and whose routing credential it asks.
+#[cfg(feature = "openhuman")]
+pub mod conclude;
 /// One completion episode on `tinyhivemind`'s own loop.
 #[cfg(feature = "openhuman")]
 pub mod conducted;
