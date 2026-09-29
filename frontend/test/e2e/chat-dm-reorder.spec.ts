@@ -86,6 +86,30 @@ for (const scheme of ["light", "dark"] as const) {
       expect(box!.height).toBeLessThan(48);
     });
 
+    test("collapsing Channels above does not slide the DM rows; a re-sort still does", async ({ page }) => {
+      const sse = await mockCompany(page);
+      await open(page);
+      await page.mouse.move(700, 400);
+      const started = await countRailAnimations(page);
+      const channels = page
+        .getByTestId("room-rail-slot")
+        .getByRole("button", { name: "Channels", exact: true });
+      const before = (await dmRow(page, LAST.name).boundingBox())!.y;
+      await channels.click();
+      await expect(channels).toHaveAttribute("aria-expanded", "false");
+      await page.mouse.move(700, 400);
+      // The whole list moved up, and moving is all it did: nothing re-sorted.
+      await expect
+        .poll(async () => (await dmRow(page, LAST.name).boundingBox())!.y)
+        .toBeLessThan(before);
+      expect(await started()).toBe(0);
+      await page.screenshot({ path: test.info().outputPath(`rail-15-channels-collapsed-${scheme}.png`) });
+
+      sse.push(reply(LAST, 1));
+      await expect.poll(() => firstRowName(page)).toBe(LAST.name);
+      expect(await started()).toBeGreaterThan(0);
+    });
+
     test("holds the order while the pointer is in the rail, then reconciles", async ({ page }) => {
       const sse = await mockCompany(page);
       await open(page);

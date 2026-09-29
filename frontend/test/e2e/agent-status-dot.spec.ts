@@ -129,6 +129,21 @@ for (const scheme of ["light", "dark"] as const) {
       await expect(dotOf(page, RAE.name)).toHaveCount(0);
     });
 
+    test("the @ picker wears the dot on an agent's face, with the state after the name", async ({ page }) => {
+      const sse = await mockCompany(page);
+      await open(page);
+      sse.push({ type: "thinking", seq: 1, agentId: RAE.id, chatId: RAE.id });
+      await expect(dotOf(page, RAE.name)).toHaveAttribute("data-state", "thinking");
+      await page.getByPlaceholder(/^Message /).fill("@");
+      const picker = page.getByTestId("mention-picker");
+      await expect(picker).toBeVisible();
+      const option = picker.getByRole("option").filter({ hasText: RAE.name });
+      await expect(option.getByTestId("agent-status-dot")).toHaveAttribute("data-state", "thinking");
+      await expect(option.getByTestId("agent-status-dot")).toHaveAttribute("aria-hidden", "true");
+      await expect(option).toHaveAccessibleName(new RegExp(`${RAE.name}.*, Thinking$`));
+      await page.screenshot({ path: test.info().outputPath(`dot-mention-picker-${scheme}.png`) });
+    });
+
     test("typing has no expiry: it holds past the person-typing window", async ({ page }) => {
       const sse = await mockCompany(page);
       await open(page);
