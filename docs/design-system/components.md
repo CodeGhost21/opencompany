@@ -194,7 +194,20 @@ Never nest a modal inside a modal.
   so validation cannot be bypassed.
 - **Sidebar** — the console shell's navigation primitive. `SidebarProvider`
   owns expanded/collapsed state and the Cmd/Ctrl+B shortcut. The desktop shell
-  is transparent over `bg-chrome`; the mobile sidebar is a `Sheet` overlay.
+  is transparent over `bg-chrome`; the mobile sidebar is a `Sheet` overlay. It
+  is 15rem wide, and its docked channel rail sets DM rows in `text-base` with a
+  24px avatar.
+- **AgentStatusDot** (`components/agent-status-dot.tsx`) — a teammate's live
+  state as a badge on its avatar: waiting for approval, working, typing,
+  thinking, or queued; nothing at all when inactive. `PresenceDot` stays a
+  person's online/away dot and is never drawn for a teammate. It uses the
+  existing `status-*` tokens, adds no new ones, and never relies on colour
+  alone: working, typing and thinking share `status-running` and differ by shape
+  (spinner arc, three dots, pulsing ring), each of which survives reduced
+  motion. Wrap an avatar in `AgentFace` to opt a surface in; the `surface` prop
+  picks the cut-out ring (`chrome` in the app sidebar, `card` on cards,
+  `background` on the page or a sheet). Historical message avatars deliberately
+  do not wear it.
 
 ---
 

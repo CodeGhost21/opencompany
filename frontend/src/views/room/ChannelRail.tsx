@@ -11,12 +11,13 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { AgentFace } from "@/components/agent-face";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { useFlipList } from "@/hooks/use-flip-list";
 import { useStableList } from "@/hooks/use-stable-list";
 import { cn } from "@/lib/utils";
 import { NewMessageDialog } from "./NewMessageDialog";
-import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
+import { channelSubtitle, dmFace, dmThreadId, type Channel, type ChannelSection } from "./model";
 
 /**
  * What an unread badge actually claims (issue #364).
@@ -498,7 +499,7 @@ function ChannelRow({
         hasUnread && "font-semibold text-foreground",
       )}
     >
-      <ChannelIcon channel={channel} />
+      <ChannelIcon channel={channel} withStatus />
       <span className="min-w-0 flex-1 truncate">{channel.name}</span>
       {hasMentions && (
         <span
@@ -526,11 +527,21 @@ function ChannelRow({
   );
 }
 
-function ChannelIcon({ channel }: { channel: Channel }) {
+function ChannelIcon({ channel, withStatus = false }: { channel: Channel; withStatus?: boolean }) {
   if (channel.kind === "dm") {
     const face = dmFace(channel);
     return face ? (
-      <TeammateAvatar {...face} className="size-6 text-2xs" />
+      // The live state badge rides the expanded row only: the compact rail's
+      // 36px tiles are measured to fit its 48px width and stay as they were.
+      // Scoped to this DM's own thread, so a teammate busy in a channel does
+      // not light every row that names them.
+      <AgentFace
+        agentId={withStatus ? channel.member?.id : undefined}
+        chatId={channel.member ? dmThreadId(channel.member) : undefined}
+        surface="chrome"
+      >
+        <TeammateAvatar {...face} className="size-6 text-2xs" />
+      </AgentFace>
     ) : (
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );

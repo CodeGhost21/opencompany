@@ -1,0 +1,46 @@
+import type { ReactNode } from "react";
+
+import { AgentStatusDot, type AgentStatusSurface } from "@/components/agent-status-dot";
+import { cn } from "@/lib/utils";
+import { useAgentPresence } from "@/room/store";
+
+/**
+ * An agent's avatar with its live state badge, where a surface opts in.
+ *
+ * The dot is opt-in per surface rather than baked into the avatar: a teammate's
+ * face is also drawn on every historical message in a transcript, and a pulsing
+ * dot on each of those would be noise about a moment that is long over. A
+ * surface that is about the agent *now* (the DM row, the header, the members
+ * pane, the profile) wraps its avatar in this and names the agent.
+ *
+ * `chatId` scopes the state to one conversation, for a surface that is about
+ * that conversation (a DM row): an agent busy elsewhere does not light it.
+ * Omit it for an agent-wide surface.
+ *
+ * The wrapper is `relative` and shrink-proof, so it drops into a flex row where
+ * the bare avatar was, without changing the layout.
+ */
+export function AgentFace({
+  agentId,
+  chatId,
+  size = "sm",
+  surface = "chrome",
+  className,
+  children,
+}: {
+  agentId?: string | null;
+  chatId?: string | null;
+  size?: "sm" | "md";
+  surface?: AgentStatusSurface;
+  className?: string;
+  /** The avatar to draw. */
+  children: ReactNode;
+}) {
+  const state = useAgentPresence(agentId, chatId);
+  return (
+    <span className={cn("relative inline-flex shrink-0", className)}>
+      {children}
+      {agentId && <AgentStatusDot state={state} size={size} surface={surface} />}
+    </span>
+  );
+}

@@ -132,7 +132,11 @@ content-rail rows now, where they keep their labels at every width.
 **portalled** into a slot the sidebar owns (`components/room-rail.tsx`), so
 every behaviour it already had comes with it: collapsible sections, per-kind row
 icons, unread and mention badges, the compact collapsed variant, and the "New
-message" door.
+message" door. The expanded DM rows carry each teammate's live-state badge
+(`AgentStatusDot`, read from `useAgentPresence`), and their order follows the
+latest message: the list holds still while the pointer or focus is inside the
+rail (a row must not slide under a click) and slides to the new order on
+release, unless reduced motion is asked for.
 
 A portal rather than a state lift, deliberately. `ChatView` stays the one owner
 of the chat model, the rail renders from that state on the same pass, and the
