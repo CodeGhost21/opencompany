@@ -371,9 +371,9 @@ describe("a teammate's lens", () => {
     const bulk = container.querySelector<HTMLElement>(
       '[aria-label="Default for read-only tools"]',
     );
-    expect(bulk?.hasAttribute("disabled")).toBe(true);
+    expect(bulk).toBeNull();
     expect(el("mcp-tier-company-only-read_only")?.textContent).toContain(
-      "set for everyone",
+      "for everyone",
     );
   });
 
@@ -468,16 +468,18 @@ describe("a teammate lens", () => {
     );
   });
 
-  it("offers the tier default disabled rather than removing it", async () => {
-    // The host refuses a scoped tier write. Disabling it reads as a boundary;
-    // hiding it would read as a page that is arbitrarily different under one
-    // lens, which is the same reason a mode the clamp would discard is shown.
+  it("states the tier default's value rather than offering a dead control", async () => {
+    // This lens used to render the select disabled, on the reasoning that a
+    // boundary teaches better than an absence. Watching it used settled the
+    // question the other way: at 50% opacity a disabled select reads as live,
+    // clicking it said nothing, and three of them pushed the per-tool controls
+    // — the only editable thing here — under the fold.
     await mount("engineer");
 
-    expect(
-      (el("mcp-permissions-tier-default-read_only") as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
+    expect(el("mcp-permissions-tier-default-read_only")).toBeNull();
+    expect(el("mcp-tier-company-only-read_only")?.textContent).toContain(
+      "for everyone",
+    );
   });
 });
 
