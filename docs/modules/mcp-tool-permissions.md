@@ -37,6 +37,52 @@ reasoning is why a server's own `readOnlyHint`/`destructiveHint` annotations are
 not a source: they are self-reported by whoever runs the server, and a directory
 install can come from anyone.
 
+## One teammate at a time
+
+The same document carries an `agents` map, keyed by agent id, holding one
+teammate's own per-tool modes. It resolves *after* the company answer and may
+only **narrow** it, along `always_allow < needs_approval < blocked`.
+
+```json
+{"tierDefaults": {"read_only": "always_allow"},
+ "overrides": {"delete_page": {"mode": "blocked"}},
+ "agents": {"writer": {"overrides": {"search_pages": {"mode": "blocked"}}}}}
+```
+
+Narrow-only for three reasons, in ascending order of how badly the alternative
+fails. Every other per-agent layer in the crate is an intersection, so a
+widening one would be the single exception to the operator's model. The
+enforcement seam can only express restriction — the attached server carries a
+deny list and the transport consults deny before allow — so a widening rule would
+be silently ignored, which is worse than refusing to express it. And
+`resolve_policy` already refuses to let a mere suggestion reach `always_allow`; a
+per-agent widening would be a second route to it, invisible on the server's own
+page.
+
+It is a property of the type rather than a rule to remember:
+`ApprovalMode::max_restrictive` is the only way a per-agent mode reaches a
+resolved mode. A stored setting the clamp discards is **reported**, not dropped —
+`PolicySource::AgentClamped` — so a console can name a setting nothing honours
+instead of rendering a control whose value the host throws away.
+
+**No per-agent tier defaults.** A tier classifies the tool, not the teammate.
+Per-agent tiers would give the tier a second source as well as the mode, doubling
+the audit problem for no product requirement: "the writer gets only
+`write_page`" is a statement about modes.
+
+`allowed_tools` / `disallowed_tools` stay company-wide membership, because
+per-agent restriction is already fully expressible as `mode: blocked` — one field
+feeds the transport's deny list instead of four sources per row.
+
+**No migration.** A document with no `agents` key gives an empty map, so
+`agents.get(agent)` is `None` and the clamp never runs: every agent id, including
+one nobody has written a rule for, resolves to exactly what the company document
+resolved to before, and the attachment's deny list is identical in contents and
+in order. A reset prunes per-tool rows and then the emptied teammate, and the
+`agents` key is skipped when the map is empty — residue would resolve identically
+but hash differently, moving the fingerprint on a write that changed nothing and
+rebuilding every roster.
+
 ## The legacy declaration is still live
 
 A server's `read_only_tools` list is the baseline the stored document layers

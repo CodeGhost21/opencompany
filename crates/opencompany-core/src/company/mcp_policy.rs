@@ -1,24 +1,37 @@
 //! Per-tool approval policy for MCP servers: the tier vocabulary, the operator's
 //! stored overrides, and the resolution ladder the approval gate reads.
 //!
-//! Two layers, deliberately separate:
+//! Three layers, deliberately separate:
 //!
 //! 1. A **suggested** tier, computed from a tool's own name and description by
 //!    [`suggest_tool_tier`]. Non-authoritative — it is a starting point a
 //!    console renders, never something the gate trusts on its own.
 //! 2. The **operator's** decision, persisted as [`McpToolPolicies`] and resolved
-//!    by [`resolve_policy`]. This is what the gate enforces.
+//!    by [`resolve_policy`]. This is what the gate enforces company-wide.
+//! 3. One **teammate's** own narrowing of that answer, in the same document's
+//!    `agents` map and resolved by [`resolve_policy_for_agent`]. It may only
+//!    restrict — see the [`agent`] submodule for why, and for the clamp that
+//!    makes it a property of the type.
 //!
 //! A server's own `readOnlyHint`/`destructiveHint` annotations are not a source
 //! here. They are self-reported by whoever runs the remote server, and a
 //! directory install can come from an unvetted publisher, so keying an approval
 //! *bypass* off them would put the trust boundary in the wrong place.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use super::mcp::McpServerDecl;
+
+mod agent;
+
+pub use agent::{
+    AgentToolPolicies, PolicySource, ResolvedPolicyForAgent, agent_policy_tool_names,
+    blocked_tool_names_for_agent, blocks_tool_for_agent, differing_agents,
+    every_known_tool_refused, mcp_allow_set_for_agent, refuses_tool_for_agent,
+    resolve_policy_for_agent,
+};
 
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -68,6 +81,32 @@ pub enum ApprovalMode {
     Blocked,
 }
 
+impl ApprovalMode {
+    /// Where this mode sits on the restriction order
+    /// `AlwaysAllow < NeedsApproval < Blocked`.
+    fn restriction(self) -> u8 {
+        match self {
+            ApprovalMode::AlwaysAllow => 0,
+            ApprovalMode::NeedsApproval => 1,
+            ApprovalMode::Blocked => 2,
+        }
+    }
+
+    /// The more restrictive of two modes.
+    ///
+    /// The only way a per-agent decision reaches a resolved mode (see
+    /// [`resolve_policy_for_agent`]), which is what makes "a teammate's own rule
+    /// may narrow but never widen" a property of this type rather than a rule
+    /// every call site has to remember.
+    pub fn max_restrictive(self, other: Self) -> Self {
+        if other.restriction() > self.restriction() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
 /// One tool's stored policy. Both fields are absent-by-default: an absent field
 /// inherits, and an entry with neither is indistinguishable from no entry at
 /// all, which is what makes "reset this row" expressible on the wire.
@@ -76,7 +115,7 @@ pub enum ApprovalMode {
 /// *suggestion*. A row the operator only changed the mode on keeps tracking an
 /// improved heuristic instead of pinning whatever the heuristic said the day it
 /// was written.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,8 +132,8 @@ impl ToolPolicy {
     }
 }
 
-/// One server's whole tool policy: per-tier bulk defaults plus per-tool
-/// overrides that win over them.
+/// One server's whole tool policy: per-tier bulk defaults, per-tool overrides
+/// that win over them, and each teammate's own narrowing of the result.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolPolicies {
@@ -102,12 +141,36 @@ pub struct McpToolPolicies {
     pub tier_defaults: HashMap<ToolTier, ApprovalMode>,
     #[serde(default)]
     pub overrides: HashMap<String, ToolPolicy>,
+    /// Per-teammate narrowing, keyed by agent id. Absent in every document
+    /// written before this layer existed, which is what makes the upgrade a
+    /// no-op: an empty map resolves to the company answer for every agent.
+    ///
+    /// Keyed by id rather than name so renaming a teammate does not move its
+    /// permissions, and a `BTreeMap` so the document is byte-stable and the
+    /// fingerprint over it is canonical.
+    ///
+    /// Skipped when empty, so a company that has written no per-agent rule
+    /// stores the same bytes it stored before this layer existed and a reset
+    /// leaves no `agents` key behind.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agents: BTreeMap<String, AgentToolPolicies>,
 }
 
 impl McpToolPolicies {
     /// Drops entries that decide nothing, so an empty override is never stored.
+    ///
+    /// Two levels on the per-agent side, in order: a row that decides nothing,
+    /// then a teammate left with no rows. Residue like
+    /// `{"agents":{"writer":{"overrides":{}}}}` resolves identically to no entry
+    /// at all but hashes differently, so leaving it behind would move the
+    /// effective-MCP fingerprint on a write that changed nothing and rebuild
+    /// every roster.
     pub fn prune(&mut self) {
         self.overrides.retain(|_, policy| !policy.is_empty());
+        for entry in self.agents.values_mut() {
+            entry.prune();
+        }
+        self.agents.retain(|_, entry| !entry.is_empty());
     }
 }
 
@@ -301,6 +364,9 @@ pub fn effective_policies(read_only_tools: &[String], stored: StoredPolicies) ->
         entry.tier = policy.tier.or(entry.tier);
         entry.mode = policy.mode.or(entry.mode);
     }
+    // Carried verbatim: `read_only_tools` is a company-wide manifest
+    // affordance, so the per-agent map has no baseline to layer over.
+    out.agents = stored.agents;
     out
 }
 
