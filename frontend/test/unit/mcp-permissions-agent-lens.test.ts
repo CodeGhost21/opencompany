@@ -440,6 +440,47 @@ describe("a member reading a teammate's lens", () => {
   });
 });
 
+describe("a teammate lens", () => {
+  beforeEach(() => {
+    api.readToolPolicy.mockResolvedValue(
+      doc({ tools: [tool({ tool: "get_page" })] }),
+    );
+  });
+
+  it("claims no scope while the company document is showing", async () => {
+    await mount(null);
+
+    expect(el("mcp-permissions-scope-notice")).toBeNull();
+    // A tier belongs to the tool, and on the company view it is the operator's.
+    expect(
+      (el("mcp-permissions-tier-default-read_only") as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  });
+
+  it("names whose permissions a click changes, and says the default is untouched", async () => {
+    await mount("engineer");
+
+    const notice = el("mcp-permissions-scope-notice");
+    expect(notice?.textContent).toContain("Engineer");
+    expect(notice?.textContent).toContain(
+      "leaves the company default as it is",
+    );
+  });
+
+  it("offers the tier default disabled rather than removing it", async () => {
+    // The host refuses a scoped tier write. Disabling it reads as a boundary;
+    // hiding it would read as a page that is arbitrarily different under one
+    // lens, which is the same reason a mode the clamp would discard is shown.
+    await mount("engineer");
+
+    expect(
+      (el("mcp-permissions-tier-default-read_only") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+});
+
 describe("the approvals notice", () => {
   const modes: ApprovalMode[] = ["always_allow"];
   const sources: PolicySource[] = ["server_inherited"];

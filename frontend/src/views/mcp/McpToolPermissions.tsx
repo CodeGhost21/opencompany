@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, Info, Loader2 } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import {
@@ -306,6 +306,28 @@ export function McpToolPermissions({
           </div>
         )}
       </div>
+
+      {/* Selecting a teammate makes every control on this page write to that
+          teammate's document instead of the company's. That is the one change
+          here whose cost is paid by someone the operator is not looking at, so
+          it is stated rather than left to the value in the lens. */}
+      {agent !== null && (
+        <p
+          className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground"
+          data-testid="mcp-permissions-scope-notice"
+        >
+          <Info className="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            Scoped to{" "}
+            <strong className="font-medium text-foreground">
+              {agent.name}
+            </strong>
+            : a change on this page applies to {agent.name} alone and leaves the
+            company default as it is. Switch back to Everyone to edit what every
+            teammate gets.
+          </span>
+        </p>
+      )}
 
       {/* A function of the host's own flag, never a constant: when approvals
           park again this disappears on its own rather than needing a release to
