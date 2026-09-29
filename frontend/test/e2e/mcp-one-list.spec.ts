@@ -78,14 +78,45 @@ test("a row opens its detail from the arrow, and never from a hover", async ({
   );
 });
 
+test("clicking the row opens its detail, anywhere but a control", async ({
+  page,
+}) => {
+  await openMcp(page);
+  const deepwiki = row(page, "deepwiki");
+  const expander = deepwiki.getByTestId("mcp-row-expander");
+
+  await deepwiki.getByTestId("mcp-source-badge").click();
+  await expect(expander).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("mcp-row-detail")).toBeVisible();
+
+  await deepwiki.getByTestId("mcp-source-badge").click();
+  await expect(expander).toHaveAttribute("aria-expanded", "false");
+});
+
 test("the name is the link, so no row carries a View button", async ({ page }) => {
   await openMcp(page);
   const deepwiki = row(page, "deepwiki");
 
   await expect(deepwiki.getByRole("button", { name: "View" })).toHaveCount(0);
 
+  // The name navigates and does NOT also toggle the row underneath it: the row
+  // is a click target now, so every control on it has to stop being one.
   await deepwiki.getByTestId("mcp-server-open").click();
   await expect(page.getByTestId("mcp-server-page")).toBeVisible();
+  await expect(page.getByTestId("mcp-row-detail")).toHaveCount(0);
+});
+
+test("a control on the row does its own job and nothing else", async ({
+  page,
+}) => {
+  await openMcp(page);
+  const deepwiki = row(page, "deepwiki");
+
+  // The overflow opens its menu without also disclosing the detail — the
+  // failure being prevented is a menu that appears over a row that just grew.
+  await deepwiki.getByTestId("mcp-row-overflow").click();
+  await expect(page.getByTestId("mcp-toggle")).toBeVisible();
+  await expect(page.getByTestId("mcp-row-detail")).toHaveCount(0);
 });
 
 test("a row keeps its secondary controls behind the overflow", async ({ page }) => {

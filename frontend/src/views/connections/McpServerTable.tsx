@@ -150,15 +150,15 @@ export function McpServerTable({
   children: React.ReactNode;
 }) {
   return (
-    <div className="-mx-2 overflow-x-auto px-2">
+    <div className="overflow-x-auto rounded-lg border border-border">
       <table className="w-full min-w-[46rem] border-collapse text-sm">
         <thead>
           <tr>
-            <th className="w-6 border-b border-border pb-1.5" />
+            <th className="w-10 border-b border-border py-2.5 pl-4" />
             {HEADERS.map((head, i) => (
               <th
                 key={head || `spacer-${i}`}
-                className="border-b border-border pr-3 pb-1.5 text-left text-3xs font-medium tracking-wide text-muted-foreground uppercase"
+                className="border-b border-border px-3 py-2.5 text-left text-3xs font-medium tracking-wide text-muted-foreground uppercase last:pr-4"
               >
                 {head}
               </th>
@@ -181,7 +181,7 @@ export function McpGroupRow({
 }) {
   return (
     <tr data-testid="mcp-group-row">
-      <td colSpan={6} className="border-b border-border pt-3 pb-1">
+      <td colSpan={6} className="border-b border-border px-4 pt-5 pb-2">
         <div className="flex items-center gap-2">
           <span className="text-3xs font-medium tracking-wide text-muted-foreground uppercase">
             {label}
@@ -198,7 +198,8 @@ export function McpGroupRow({
 /**
  * The caret at the leading edge of a row.
  *
- * The only disclosure. Hover only tints the row; it never reveals the detail.
+ * The keyboard's way in, and what carries `aria-expanded`; clicking the row
+ * anywhere but a control does the same. Hover only tints the row.
  */
 function Expander({
   open,
@@ -210,7 +211,7 @@ function Expander({
   onToggle: () => void;
 }) {
   return (
-    <td className="border-b border-border py-2 align-top">
+    <td className="border-b border-border py-3 pl-4 align-middle">
       <button
         type="button"
         onClick={onToggle}
@@ -233,8 +234,8 @@ function Detail({
   return (
     <tr data-testid="mcp-row-detail">
       <td />
-      <td colSpan={5} className="border-b border-border pr-3 pb-3">
-        <div className="grid gap-x-6 gap-y-3 rounded-md border border-border bg-muted/30 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(11rem,13rem)]">
+      <td colSpan={5} className="border-b border-border px-3 pb-3">
+        <div className="grid gap-x-8 gap-y-4 rounded-md border border-border bg-muted/30 p-4 sm:grid-cols-[minmax(0,1fr)_minmax(13rem,16rem)]">
           {children}
         </div>
       </td>
@@ -328,6 +329,14 @@ export function McpServerRow({
                   : "mcp-add-token",
             };
 
+  // Anywhere that is not itself a control, and not the end of a drag-select.
+  function onRowClick(event: React.MouseEvent<HTMLTableRowElement>) {
+    const hit = event.target as HTMLElement | null;
+    if (hit?.closest("button, a, input, select, label, [role='menuitem']")) return;
+    if ((window.getSelection()?.toString().length ?? 0) > 0) return;
+    setOpen((was) => !was);
+  }
+
   function runPrimary() {
     if (primary === null) return;
     if (primary.kind === "sign_in") actions.onSignIn(server);
@@ -340,14 +349,15 @@ export function McpServerRow({
     <>
       <tr
         data-testid="mcp-server-row"
-        className="transition-colors hover:bg-muted/40"
+        onClick={onRowClick}
+        className="cursor-pointer transition-colors hover:bg-muted/40"
       >
         <Expander
           open={open}
           label={`Show what ${server.name} is`}
           onToggle={() => setOpen((was) => !was)}
         />
-        <td className="border-b border-border py-2 pr-3 align-top">
+        <td className="border-b border-border px-3 py-3 align-middle">
           <div className="flex min-w-0 items-center gap-2">
             <McpServerIcon iconUrl={server.iconUrl} name={server.name} />
             <div className="min-w-0">
@@ -363,7 +373,7 @@ export function McpServerRow({
                 {server.name}
               </button>
               <span
-                className={`block max-w-[22rem] truncate text-xs ${description.muted ? "text-muted-foreground/70" : "text-muted-foreground"}`}
+                className={`block max-w-[34rem] truncate text-xs ${description.muted ? "text-muted-foreground/70" : "text-muted-foreground"}`}
               >
                 {description.muted && "no description — "}
                 {description.text}
@@ -371,12 +381,12 @@ export function McpServerRow({
             </div>
           </div>
         </td>
-        <td className="border-b border-border py-2 pr-3 align-top">
+        <td className="border-b border-border px-3 py-3 align-middle">
           <Badge variant={badge.variant} data-testid="mcp-source-badge">
             {badge.label}
           </Badge>
         </td>
-        <td className="border-b border-border py-2 pr-3 align-top">
+        <td className="border-b border-border px-3 py-3 align-middle">
           <div className="flex flex-col gap-0.5">
             <HealthBadge
               health={health}
@@ -401,7 +411,7 @@ export function McpServerRow({
             )}
           </div>
         </td>
-        <td className="border-b border-border py-2 pr-3 align-top">
+        <td className="border-b border-border px-3 py-3 align-middle">
           {/* The column carries the deployment fact into every row: with no
               bridge the banner above says no agent receives these tools, and a
               reach of three names underneath it would contradict that. */}
@@ -419,7 +429,7 @@ export function McpServerRow({
             />
           )}
         </td>
-        <td className="border-b border-border py-2 align-top">
+        <td className="border-b border-border py-3 pr-4 align-middle">
           <div className="flex items-center justify-end gap-1">
             {primaryLabel && canManage && (
               <Button
@@ -639,7 +649,7 @@ export function McpDirectoryRow({
           label={`Show what ${entry.displayName} is`}
           onToggle={() => setOpen((was) => !was)}
         />
-        <td className="border-b border-border py-2 pr-3 align-top">
+        <td className="border-b border-border px-3 py-3 align-middle">
           <div className="flex min-w-0 items-center gap-2">
             <McpServerIcon
               iconUrl={entry.iconUrl}
@@ -649,16 +659,16 @@ export function McpDirectoryRow({
               <span className="block truncate text-sm font-medium">
                 {entry.displayName}
               </span>
-              <span className="block max-w-[22rem] truncate text-xs text-muted-foreground">
+              <span className="block max-w-[34rem] truncate text-xs text-muted-foreground">
                 {entry.description ?? entry.qualifiedName}
               </span>
             </div>
           </div>
         </td>
-        <td className="border-b border-border py-2 pr-3 align-top">
+        <td className="border-b border-border px-3 py-3 align-middle">
           <Badge variant="outline">directory</Badge>
         </td>
-        <td className="border-b border-border py-2 pr-3 align-top">
+        <td className="border-b border-border px-3 py-3 align-middle">
           {/* There is nothing to probe yet, so this column carries the
               directory's claim about the publisher instead — which is never a
               claim about what the server does. */}
@@ -672,12 +682,12 @@ export function McpDirectoryRow({
             </span>
           )}
         </td>
-        <td className="border-b border-border py-2 pr-3 align-top">
+        <td className="border-b border-border px-3 py-3 align-middle">
           <span className="text-xs text-muted-foreground">
             {installed ? "already yours" : "—"}
           </span>
         </td>
-        <td className="border-b border-border py-2 align-top">
+        <td className="border-b border-border py-3 pr-4 align-middle">
           <div className="flex items-center justify-end">
             {installed ? (
               <span
