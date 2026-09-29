@@ -1,0 +1,124 @@
+import { expect, test } from "@playwright/test";
+
+/**
+ * The MCP module's front door is one searchable list.
+ *
+ * Runs on the default-feature host the rest of this directory drives. Every
+ * assertion is about rendering and navigation, which that host can answer. Tool
+ * inventory reports `not_wired` without the `openhuman` feature, so nothing
+ * about tool permissions belongs here: a spec asserting that a forbidden row is
+ * absent would pass against a page that renders no rows at all.
+ */
+
+type Page = import("@playwright/test").Page;
+
+async function openMcp(page: Page) {
+  await page.goto("/#/connections/mcp");
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await skip
+    .waitFor({ state: "visible", timeout: 10_000 })
+    .then(() => skip.click())
+    .catch(() => {
+      /* already seen in this context */
+    });
+  await expect(page.getByTestId("mcp-search")).toBeVisible({ timeout: 30_000 });
+}
+
+/** The row for `name` in the one list. */
+function row(page: Page, name: string) {
+  return page.getByTestId("mcp-server-row").filter({ hasText: name });
+}
+
+test("the list carries the manifest server and where it came from", async ({
+  page,
+}) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  await openMcp(page);
+
+  const deepwiki = row(page, "deepwiki");
+  await expect(deepwiki).toBeVisible();
+  await expect(deepwiki.getByTestId("mcp-source-badge")).toHaveText("manifest");
+
+  expect(pageErrors).toEqual([]);
+});
+
+test("search narrows this company's own servers", async ({ page }) => {
+  await openMcp(page);
+  await expect(row(page, "deepwiki")).toBeVisible();
+
+  await page.getByTestId("mcp-search").fill("no-such-server-anywhere");
+  await expect(row(page, "deepwiki")).toHaveCount(0);
+
+  await page.getByTestId("mcp-search").fill("deep");
+  await expect(row(page, "deepwiki")).toBeVisible();
+});
+
+test("a row opens its detail from the arrow, and never from a hover", async ({
+  page,
+}) => {
+  await openMcp(page);
+  const deepwiki = row(page, "deepwiki");
+  const expander = deepwiki.getByTestId("mcp-row-expander");
+
+  await expect(expander).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByTestId("mcp-row-detail")).toHaveCount(0);
+
+  // The earlier draft revealed on hover too, which made the table move under
+  // the pointer on the way to anything else and was unreachable by touch.
+  await deepwiki.hover();
+  await expect(expander).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByTestId("mcp-row-detail")).toHaveCount(0);
+
+  await expander.click();
+  await expect(expander).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("mcp-row-detail")).toContainText(
+    "https://mcp.deepwiki.com/mcp",
+  );
+});
+
+test("the name is the link, so no row carries a View button", async ({ page }) => {
+  await openMcp(page);
+  const deepwiki = row(page, "deepwiki");
+
+  await expect(deepwiki.getByRole("button", { name: "View" })).toHaveCount(0);
+
+  await deepwiki.getByTestId("mcp-server-open").click();
+  await expect(page.getByTestId("mcp-server-page")).toBeVisible();
+});
+
+test("a row keeps its secondary controls behind the overflow", async ({ page }) => {
+  await openMcp(page);
+  const deepwiki = row(page, "deepwiki");
+
+  // The failure being prevented: the old row carried up to seven icon-only
+  // controls, remove among them, distinguished only by aria-label — so a
+  // destructive action sat one mis-click from a scan.
+  //
+  // Counted at page level, not inside the row: the menu content is portaled out
+  // of it, so a row-scoped absence check would also pass with the menu open and
+  // would therefore be a check that cannot fail.
+  for (const hidden of ["mcp-toggle", "mcp-test", "mcp-tools", "mcp-permissions"]) {
+    await expect(page.getByTestId(hidden)).toHaveCount(0);
+  }
+
+  await deepwiki.getByTestId("mcp-row-overflow").click();
+  const menu = page.getByRole("menu");
+  await expect(menu.getByTestId("mcp-toggle")).toBeVisible();
+  await expect(menu.getByTestId("mcp-permissions")).toBeVisible();
+
+  // A manifest declaration cannot be removed from the console at all, so the
+  // destructive item is absent rather than present and refused.
+  await expect(menu.getByTestId("mcp-remove")).toHaveCount(0);
+});
+
+test("the page states what this build can do with these servers", async ({
+  page,
+}) => {
+  await openMcp(page);
+
+  // The default-feature host compiles no `mcp` bridge, so the page must say so
+  // rather than reading identically to a host that honours these servers.
+  await expect(page.getByTestId("mcp-bridge-absent")).toBeVisible();
+});
