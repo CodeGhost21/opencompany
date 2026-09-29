@@ -38,8 +38,18 @@ test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
 test.describe.configure({ mode: "serial" });
 
-/** The refusal `blocked_refusal` writes, matched on its stable opening. */
-const REFUSAL = /is blocked by this company's tool permissions/;
+/**
+ * A refusal, in either of the two wordings a blocked call can carry.
+ *
+ * A block on a declared server is folded into the attachment's `deny_tools`, so
+ * the vendored transport refuses it before the call reaches OpenCompany's own
+ * wrapper — `tool `x` is not permitted on server `y``. `blocked_refusal` is what
+ * the wrapper writes, and it is the one a registry-installed server produces.
+ * Both are the same verdict, and pinning only one made this spec pass or fail on
+ * which server the fixture happened to be.
+ */
+const REFUSAL =
+  /is blocked by this company's tool permissions|is not permitted on server/;
 
 /** The tool `mcp-server.mjs` answers by quoting its `text` argument back. */
 const TOOL = "echo";
@@ -182,6 +192,17 @@ test("a block set for one teammate refuses that teammate's next turn", async ({
   await expect(bubbles(page).filter({ hasText: `echo: ${marker}` })).toHaveCount(
     0,
   );
+
+  // The blocked tool is gone from what this teammate can even see. Asserted
+  // because a deny that only refuses the dispatch still shows the model a tool
+  // it will be punished for choosing, and the turn is then spent discovering
+  // that rather than doing the work.
+  await expect(
+    bubbles(page).filter({ hasText: /"name":\s*"describe"/ }).last(),
+  ).toBeVisible({ timeout: 120_000 });
+  await expect(
+    bubbles(page).filter({ hasText: new RegExp(`"name":\\s*"${TOOL}"`) }),
+  ).toHaveCount(0);
 });
 
 test("the same tool stays callable for a teammate the rule does not name", async ({
