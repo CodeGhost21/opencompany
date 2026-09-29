@@ -70,6 +70,18 @@ describe("AgentStatusDot", () => {
     expect(shapes.size).toBe(3);
   });
 
+  it("gives working a solid centre so it is not a ring like thinking when nothing spins", () => {
+    // Under reduced motion the spin and the pulse both stop, so the still glyphs
+    // must differ by more than the arc's gap: working has a filled centre,
+    // thinking is hollow.
+    const filled = (state: AgentPresenceState) => {
+      act(() => root.render(createElement(AgentStatusDot, { state })));
+      return dot()!.querySelectorAll(".bg-status-running").length;
+    };
+    expect(filled("working")).toBe(1);
+    expect(filled("thinking")).toBe(0);
+  });
+
   it("hides a decorative dot from assistive tech but keeps its hover title", () => {
     act(() => root.render(createElement(AgentStatusDot, { state: "thinking", decorative: true })));
     const el = dot()!;

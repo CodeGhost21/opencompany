@@ -49,10 +49,15 @@ const SIZE = { sm: "size-2", md: "size-2.5" } as const;
  * | state    | colour           | shape                          |
  * | -------- | ---------------- | ------------------------------ |
  * | approval | status-blocked   | filled, with an exclamation bar |
- * | working  | status-running   | ring with a gap (spinner arc)  |
+ * | working  | status-running   | arc with a solid centre dot    |
  * | typing   | status-running   | wide pill of three dots        |
  * | thinking | status-running   | closed ring, pulsing           |
  * | queued   | status-idle      | plain filled dot               |
+ *
+ * Working and thinking were first both a ring, told apart by the arc's gap
+ * alone, which at 8px under reduced motion is a pixel or two. Working now
+ * carries a solid centre dot, so the still shapes read as a hollow ring
+ * (thinking) against a target (working), not a ring against a nearly-ring.
  *
  * `decorative` hides it from assistive tech (no role, no label) for a surface
  * that announces the state in its own words after the agent's name.
@@ -104,7 +109,10 @@ export function AgentStatusDot({
         </span>
       )}
       {state === "working" && (
-        <span className="size-full animate-spin rounded-full border-2 border-status-running border-t-transparent" />
+        <span className="relative size-full">
+          <span className="absolute inset-0 animate-spin rounded-full border-2 border-status-running border-t-transparent" />
+          <span className="absolute inset-0 m-auto size-[35%] rounded-full bg-status-running" />
+        </span>
       )}
       {state === "thinking" && (
         <span className="size-full animate-pulse rounded-full border-2 border-status-running" />
