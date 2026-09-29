@@ -20,12 +20,11 @@ export type ApprovalMode = "always_allow" | "needs_approval" | "blocked";
 export type ToolTier = "read_only" | "interactive" | "write_delete";
 
 /**
- * Which rule decided a row's mode. Host-resolved and snake_case on the wire.
+ * Which rule decided a row's mode. Host-resolved, snake_case on the wire.
  *
- * `agent_clamped` names a **discarded** per-teammate setting: the stored value
- * was less restrictive than the server's, so the server's mode stands and
- * `agentMode` carries what was set. Nothing in the console could derive that
- * from the mode alone, which is why it arrives rather than being computed.
+ * `agent_clamped` names a discarded per-teammate setting: the stored value was
+ * less restrictive than the server's, so the server's mode stands and
+ * `agentMode` carries what was set.
  */
 export type PolicySource =
   | "server_inherited"
@@ -54,11 +53,7 @@ export interface ToolPolicyRow {
    * the narrow-only clamp discarded it.
    */
   agentMode?: ApprovalMode;
-  /**
-   * The teammates whose resolved mode for this tool differs from the company's.
-   * Without it the company-wide view is true about the document and silent
-   * about its exceptions.
-   */
+  /** The teammates whose resolved mode for this tool differs from the company's. */
   differingAgents: string[];
 }
 
@@ -86,10 +81,7 @@ export interface TierDefault {
  */
 export interface ToolPolicyDocument {
   server: string;
-  /**
-   * The teammate this document is scoped to, echoed by the host so a response
-   * cannot be mistaken for the company document.
-   */
+  /** The teammate this document is scoped to, or absent for the company's. */
   agent?: string;
   tierDefaults: Record<ToolTier, TierDefault>;
   tools: ToolPolicyRow[];
@@ -126,9 +118,8 @@ function registryPath(client: OpenCompanyClient, company: string | null, serverI
 /**
  * Whose document a call is about: one teammate, or `null` for the company's.
  *
- * `null` is a scope, not an absence — the company document is what a blank
- * `?agent=` addresses, so the parameter is appended unconditionally and there is
- * no second code path that can forget it.
+ * `?agent=` is appended unconditionally; a blank value addresses the company
+ * document.
  */
 export type PolicyScope = string | null;
 
@@ -188,9 +179,8 @@ export function writeToolPolicy(
 /**
  * Drop the stored document for this scope.
  *
- * An agent-scoped delete clears that teammate's layer only. It answers 409 on an
- * unreadable document — a damaged document has no layer to remove — and only the
- * company-scoped reset repairs that.
+ * An agent-scoped delete clears that teammate's layer only, and answers 409 on
+ * an unreadable document; only the company-scoped reset repairs that.
  */
 export function resetToolPolicy(
   client: OpenCompanyClient,
