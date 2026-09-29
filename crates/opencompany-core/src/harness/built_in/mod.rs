@@ -5836,7 +5836,6 @@ pub(crate) fn agent_policy_for(
     manifest_agent: &ManifestAgent,
     policy: &Policy,
     effective_budget: Option<f64>,
-    #[cfg_attr(not(feature = "composio"), allow(unused_variables))] grants: &[String],
 ) -> ApprovalPolicy {
     let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
         .with_policy_hitl_disabled()
@@ -5868,7 +5867,6 @@ pub(crate) fn seat_policy(
     company: &CompanyRecord,
     deps: &HarnessDeps,
     manifest_agent: &ManifestAgent,
-    grants: &[String],
 ) -> ApprovalPolicy {
     agent_policy_for(
         company,
@@ -5876,7 +5874,6 @@ pub(crate) fn seat_policy(
         manifest_agent,
         &company.effective_policy(),
         company.effective_budget(&manifest_agent.id),
-        grants,
     )
 }
 
@@ -5907,7 +5904,7 @@ pub(crate) fn seat_persona(
             ))
         })?;
     let grants = grants_for_policy(company, &company.manifest.tools.allow, manifest_agent);
-    let policy = seat_policy(company, deps, manifest_agent, &grants);
+    let policy = seat_policy(company, deps, manifest_agent);
     let instructions = company.effective_instructions(&manifest_agent.id);
     let blueprint = build::build_agent_with_model(
         &company.id,
@@ -6089,22 +6086,14 @@ pub(crate) fn build_roster(
         // reaches the system prompt this agent is built with — and it wins over
         // the blueprint without cloning the borrowed `&ManifestAgent`.
         let effective_instructions = company.effective_instructions(&manifest_agent.id);
-        let grants = grants_for_policy(company, allow, manifest_agent);
         // `mut` for the Composio arm below, which is the only thing that
         // reassigns it -- and is feature-gated, so a build without that
-        // feature would see the binding as needlessly mutable. Same
-        // `cfg_attr` the `grants` parameter above carries, for the same
-        // reason: one feature owns the mutation and every other build must
-        // compile clean under `-D warnings`.
+        // feature would see the binding as needlessly mutable: one feature owns
+        // the mutation and every other build must compile clean under
+        // `-D warnings`.
         #[cfg_attr(not(feature = "composio"), allow(unused_mut))]
-        let mut agent_policy = agent_policy_for(
-            company,
-            deps,
-            manifest_agent,
-            policy,
-            effective_budget,
-            &grants,
-        );
+        let mut agent_policy =
+            agent_policy_for(company, deps, manifest_agent, policy, effective_budget);
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
         // Three-level narrowing: company → the desks this teammate sits on →
         // the teammate itself. `agent_desk_tools` resolves through the record's
@@ -6196,14 +6185,8 @@ pub(crate) fn build_roster(
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
         let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
         #[cfg_attr(not(feature = "composio"), allow(unused_mut))]
-        let mut agent_policy = agent_policy_for(
-            company,
-            deps,
-            &manifest_agent,
-            policy,
-            effective_budget,
-            &grants,
-        );
+        let mut agent_policy =
+            agent_policy_for(company, deps, &manifest_agent, policy, effective_budget);
         // Issue #1759 (S2): same Composio deflection wiring as the manifest loop
         // — an overlay teammate that holds the Composio grant is guarded on the
         // same terms, including the `composio_capability_admits` check (PR
