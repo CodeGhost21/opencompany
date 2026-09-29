@@ -332,6 +332,16 @@ fn the_per_agent_layer_never_widens() {
     assert_eq!(pairs, 9, "the sweep must be total");
 }
 
+/// One row of the resolution table: a label, the shape the server document is
+/// put in, the mode this teammate stored, and what the two must resolve to.
+type Row = (
+    &'static str,
+    Box<dyn Fn(&mut McpToolPolicies)>,
+    Option<ApprovalMode>,
+    ApprovalMode,
+    PolicySource,
+);
+
 /// The resolution ladder, row by row, as the design states it.
 #[test]
 fn the_resolution_table_holds_row_by_row() {
@@ -344,14 +354,7 @@ fn the_resolution_table_holds_row_by_row() {
             .insert(ToolTier::ReadOnly, AlwaysAllow);
     };
 
-    // (label, server-document shape, per-agent mode, expected, expected source)
-    let rows: Vec<(
-        &str,
-        Box<dyn Fn(&mut McpToolPolicies)>,
-        Option<ApprovalMode>,
-        ApprovalMode,
-        PolicySource,
-    )> = vec![
+    let rows: Vec<Row> = vec![
         (
             "nothing stored anywhere",
             Box::new(|_| {}),

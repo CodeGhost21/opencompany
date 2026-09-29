@@ -370,9 +370,11 @@ fn both_lenses_report_the_same_tier_defaults() {
             .collect::<Vec<_>>()
     };
     assert_eq!(tiers(&company), tiers(&writer));
-    for tool in ["search_pages"] {
-        let a = company.tools.iter().find(|r| r.tool == tool).expect("row");
-        let b = writer.tools.iter().find(|r| r.tool == tool).expect("row");
-        assert_eq!(a.effective_tier, b.effective_tier);
-    }
+    let grouped = |dto: &ToolPolicyDto| {
+        dto.tools
+            .iter()
+            .map(|row| (row.tool.clone(), row.effective_tier))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(grouped(&company), grouped(&writer));
 }
