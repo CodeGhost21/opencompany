@@ -252,8 +252,14 @@ export function WindowTitleBar({
           one place. `shrink-0` because the elastic member of this row is the
           drag spacer beside it; without it a crowded row would take the width
           back out of here and undo the alignment. The name inside still
-          truncates, which is what makes a fixed box safe for a long one. */}
-      <div className="w-[calc(var(--sidebar-width)-(--spacing(6)))] min-w-0 shrink-0">
+          truncates, which is what makes a fixed box safe for a long one.
+
+          Below `md` there is no sidebar column to line up with (it is a sheet),
+          and the 15rem width left the trailing controls under the shell's
+          `overflow-hidden` at 480px and off screen at 390px. So there the
+          switcher takes a fixed 8rem instead (6rem below `sm`, so the search
+          keeps room for its glyph), and the row fits a phone. */}
+      <div className="w-[calc(var(--sidebar-width)-(--spacing(6)))] min-w-0 shrink-0 max-md:w-32 max-sm:w-24">
         {switcher}
       </div>
       {/* Show/hide the column, beside the company whose column it acts on.
