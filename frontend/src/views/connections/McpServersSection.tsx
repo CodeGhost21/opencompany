@@ -873,7 +873,7 @@ export function McpServersSection({
   }
 
   return (
-    <section className="space-y-3">
+    <section className="space-y-4">
       {/* `h2` in both chromes, and it lands one level under the page's `h1`
           either way (issue #1392). `test/unit/page-section-heading-level.test.ts`
           pins that pairing: heading at `h3` under that `h1` would read to a
