@@ -132,6 +132,83 @@ fn the_policy_fold_is_independent_of_map_iteration_order() {
     );
 }
 
+/// The per-agent half is a term, and canonically so — it is a `BTreeMap`, which is
+/// most of the reason the layer lives inside this document.
+///
+/// Three claims. A per-agent rule moves the hash, one document hashes the same on
+/// every read, and residue an unpruned write would leave behind hashes
+/// differently from no entry at all — which is why `prune` dropping the emptied
+/// teammate is a requirement of the cache axis rather than tidiness.
+#[test]
+fn the_per_agent_half_is_a_canonical_fingerprint_term() {
+    use crate::company::mcp_policy::{
+        AgentToolPolicies, ApprovalMode, McpToolInventory, McpToolPolicies, ToolPolicy,
+    };
+
+    let inventory = McpToolInventory::default();
+    let blank = McpToolPolicies::default();
+
+    let rule = |mode: ApprovalMode| AgentToolPolicies {
+        overrides: [(
+            "search_pages".to_string(),
+            ToolPolicy {
+                tier: None,
+                mode: Some(mode),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+
+    let mut writer_blocked = McpToolPolicies::default();
+    writer_blocked
+        .agents
+        .insert("writer".to_string(), rule(ApprovalMode::Blocked));
+
+    assert_ne!(
+        mcp_fingerprint(&[decl_with(blank.clone(), inventory.clone())]),
+        mcp_fingerprint(&[decl_with(writer_blocked.clone(), inventory.clone())]),
+        "a per-agent rule must move the fingerprint"
+    );
+
+    let decls = [decl_with(writer_blocked.clone(), inventory.clone())];
+    assert_eq!(
+        mcp_fingerprint(&decls),
+        mcp_fingerprint(&decls),
+        "one unchanged per-agent document must fingerprint the same on every read"
+    );
+
+    // The same rule written for a different teammate is a different document.
+    let mut engineer_blocked = McpToolPolicies::default();
+    engineer_blocked
+        .agents
+        .insert("engineer".to_string(), rule(ApprovalMode::Blocked));
+    assert_ne!(
+        mcp_fingerprint(&[decl_with(writer_blocked.clone(), inventory.clone())]),
+        mcp_fingerprint(&[decl_with(engineer_blocked, inventory.clone())]),
+        "whose rule it is must be a term"
+    );
+
+    // Residue: an entry that decides nothing resolves identically and hashes
+    // differently, so a reset that left it behind would rebuild every roster.
+    let mut residue = McpToolPolicies::default();
+    residue
+        .agents
+        .insert("writer".to_string(), AgentToolPolicies::default());
+    assert_ne!(
+        mcp_fingerprint(&[decl_with(blank.clone(), inventory.clone())]),
+        mcp_fingerprint(&[decl_with(residue.clone(), inventory.clone())]),
+        "residue hashes differently, which is why prune must remove it"
+    );
+    let mut pruned = residue;
+    pruned.prune();
+    assert_eq!(
+        mcp_fingerprint(&[decl_with(blank, inventory.clone())]),
+        mcp_fingerprint(&[decl_with(pruned, inventory)]),
+        "a pruned reset must fingerprint as the document it resolves like"
+    );
+}
+
 /// A re-probe that learned nothing must not rebuild the roster, so the
 /// discovery timestamp is not a term — while a newly discovered tool is.
 #[test]
@@ -294,4 +371,113 @@ async fn a_tool_policy_write_moves_the_mcp_fingerprint() {
         .contains(&"delete_page".to_string()),
         "the blocked tool must be denied on the attachment the rebuild produced"
     );
+}
+
+/// The same freshness promise over the `?agent=` route: a per-agent write moves
+/// the fingerprint, and a per-agent reset that decides nothing does not.
+///
+/// The company-wide case is asserted above; this is the one the new lens creates,
+/// and it is the only thing that makes `NEXT_TURN_NOTE` on that response true.
+#[tokio::test]
+async fn a_per_agent_policy_write_moves_the_mcp_fingerprint() {
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+    let home = tempfile::tempdir().expect("tempdir");
+    let state = console(home.path(), secrets.clone()).await;
+
+    let mut rec = record();
+    rec.manifest = manifest_declaring_a_server();
+    let mut deps = deps_with_plan(home.path(), Arc::new(MockContext::default()), None, None);
+    deps.secrets = Some(secrets.clone());
+
+    let pool = HarnessPool::new();
+    pool.ensure(&rec, &deps).await.expect("first ensure");
+    let before = pool
+        .mcp_fingerprint_of(&rec.id)
+        .await
+        .expect("fingerprinted");
+
+    let status = put_agent_policy(
+        &state,
+        "ceo",
+        json!({ "tools": [{ "tool": "delete_page", "mode": "blocked" }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    pool.ensure(&rec, &deps).await.expect("post-write ensure");
+    let after = pool
+        .mcp_fingerprint_of(&rec.id)
+        .await
+        .expect("fingerprinted");
+    assert_ne!(
+        before, after,
+        "a per-agent permission write must move the staleness fingerprint"
+    );
+
+    pool.ensure(&rec, &deps).await.expect("no-op ensure");
+    assert_eq!(
+        pool.mcp_fingerprint_of(&rec.id).await,
+        Some(after),
+        "re-reading an unchanged per-agent document must not rebuild the roster"
+    );
+
+    // The rebuild carries the refusal, and carries it for that teammate only.
+    let decls = pool.resolve_effective_mcp(&rec, &deps).await;
+    let denied = |agent: &str| {
+        crate::company::mcp_policy::blocked_tool_names_for_agent(
+            &decls
+                .iter()
+                .find(|decl| decl.name == SERVER)
+                .expect("declared server resolved")
+                .tool_policies,
+            &crate::company::mcp_policy::McpToolInventory::default(),
+            agent,
+        )
+    };
+    assert_eq!(denied("ceo"), vec!["delete_page".to_string()]);
+    assert!(denied("engineer").is_empty());
+
+    // Resetting the same teammate returns the document to where it started, so the
+    // fingerprint returns with it rather than drifting one write at a time.
+    let status = reset_agent_policy(&state, "ceo").await;
+    assert_eq!(status, StatusCode::OK);
+    pool.ensure(&rec, &deps).await.expect("post-reset ensure");
+    assert_eq!(
+        pool.mcp_fingerprint_of(&rec.id).await,
+        Some(before),
+        "a pruned per-agent reset must fingerprint as the document it started from"
+    );
+}
+
+async fn put_agent_policy(state: &crate::AppState, agent: &str, body: Value) -> StatusCode {
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/v1/company/mcp/servers/{SERVER}/tools/policy?agent={agent}"
+        ))
+        .header("cookie", crate::server::test_support::fixed_cookie(COMPANY))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    crate::server::router(state.clone())
+        .oneshot(request)
+        .await
+        .expect("routed")
+        .status()
+}
+
+async fn reset_agent_policy(state: &crate::AppState, agent: &str) -> StatusCode {
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!(
+            "/api/v1/company/mcp/servers/{SERVER}/tools/policy?agent={agent}"
+        ))
+        .header("cookie", crate::server::test_support::fixed_cookie(COMPANY))
+        .body(Body::empty())
+        .expect("request");
+    crate::server::router(state.clone())
+        .oneshot(request)
+        .await
+        .expect("routed")
+        .status()
 }

@@ -138,7 +138,9 @@ Without the term the deny list would be resolved once and a tool set to `blocked
 would stay callable until the host restarted; the write and reset responses carry
 `NEXT_TURN_NOTE` because the invalidation is what makes the promise true. The
 fold is canonical (tiers read totally, overrides through a `BTreeMap`) so an
-unchanged document does not rebuild the roster on every turn.
+unchanged document does not rebuild the roster on every turn. The per-agent map
+needs no such treatment — it is already a `BTreeMap` of `BTreeMap`s, which is most
+of the reason the layer lives inside this document rather than in one of its own.
 
 A **directory install** is the other shape: it is addressed by a
 `server_id` argument at call time rather than by the grant its tool was wired

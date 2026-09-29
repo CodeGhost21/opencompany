@@ -5193,13 +5193,20 @@ fn mcp_fingerprint(decls: &[McpServerDecl]) -> u64 {
 
 /// Folds one server's stored tool policy into the fingerprint, canonically.
 ///
-/// Both halves of [`McpToolPolicies`](crate::company::mcp_policy::McpToolPolicies)
+/// The company halves of [`McpToolPolicies`](crate::company::mcp_policy::McpToolPolicies)
 /// are `HashMap`-backed, and a `HashMap` iterates in an order that varies per
-/// map instance. Folding it as it iterates — or through `serde_json`, which
+/// map instance. Folding one as it iterates — or through `serde_json`, which
 /// preserves that order — gives one unchanged document a different `u64` on
 /// every read, so every `ensure` would rebuild every roster. The tiers are
 /// therefore read **totally**, in [`ToolTier::ALL`](crate::company::mcp_policy::ToolTier::ALL)
 /// order, and the overrides through a [`BTreeMap`](std::collections::BTreeMap).
+///
+/// The per-agent map needs no such treatment: it is already a `BTreeMap` of
+/// `BTreeMap`s, which is the reason the layer was put inside this document rather
+/// than in one of its own. It is a term because
+/// [`embed_servers_for_agent`](crate::harness::mcp::embed_servers_for_agent)
+/// resolves the deny list through it, so a tool blocked for one teammate would
+/// otherwise stay callable until the host restarted.
 fn hash_tool_policies<H: std::hash::Hasher>(
     policies: &crate::company::mcp_policy::McpToolPolicies,
     hasher: &mut H,
@@ -5218,6 +5225,8 @@ fn hash_tool_policies<H: std::hash::Hasher>(
         .map(|(tool, policy)| (tool.as_str(), (policy.tier, policy.mode)))
         .collect();
     overrides.hash(hasher);
+
+    policies.agents.hash(hasher);
 }
 
 /// Folds one server's discovered tool inventory into the fingerprint.
