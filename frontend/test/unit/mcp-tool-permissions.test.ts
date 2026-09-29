@@ -222,6 +222,8 @@ describe("what the panel renders after a write", () => {
       {
         tools: [{ tool: "delete_page" }],
       },
+      // The company document, which a blank `?agent=` addresses.
+      null,
     );
     // The clear control is gone because the echoed row is no longer an
     // override — the panel re-derived from the response.
@@ -719,6 +721,7 @@ describe("the mode a row is set to", () => {
       "acme",
       { kind: "declared", name: "notion" },
       { tools: [{ tool: "get_page", mode: "blocked" }] },
+      null,
     );
     expect(
       container
