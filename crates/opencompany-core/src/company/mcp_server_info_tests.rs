@@ -187,3 +187,59 @@ async fn a_malformed_record_loads_empty() {
         .expect("stored");
     assert!(load(&company(), "context7", &secrets).await.is_empty());
 }
+
+/// A PNG header announcing the given size — enough for the signature sniff and
+/// the decoded-size read, which is all the inline form depends on.
+#[cfg(feature = "mcp")]
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&w.to_be_bytes());
+    bytes.extend_from_slice(&h.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+    bytes
+}
+
+/// Image bytes become the `data:` URI the console renders, typed from the
+/// signature rather than from anything the server claimed.
+#[cfg(feature = "mcp")]
+#[test]
+fn image_bytes_become_an_inline_data_uri() {
+    let inlined = inline_image(&png(48, 48)).expect("a PNG is servable");
+    assert!(inlined.starts_with("data:image/png;base64,"), "{inlined}");
+    assert!(is_inline_image(&inlined));
+}
+
+/// Everything an icon URL could return that is not an image this host will
+/// re-serve is refused, so nothing hostile reaches an `src=`.
+#[cfg(feature = "mcp")]
+#[test]
+fn a_non_image_body_is_refused() {
+    for body in [
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>".to_vec(),
+        b"<!doctype html><html><body>hi</body></html>".to_vec(),
+        b"%PDF-1.7".to_vec(),
+        Vec::new(),
+    ] {
+        assert!(
+            inline_image(&body).is_none(),
+            "{:?} must be refused",
+            &body[..body.len().min(16)]
+        );
+    }
+}
+
+/// An oversized body is refused, and so is a small one whose header promises a
+/// decode nobody should be asked to perform.
+#[cfg(feature = "mcp")]
+#[test]
+fn an_oversized_or_bomb_icon_is_refused() {
+    let mut huge = png(48, 48);
+    huge.resize(MAX_ICON_BYTES + 1, 0);
+    assert!(inline_image(&huge).is_none(), "over the byte ceiling");
+    assert!(
+        inline_image(&png(65535, 65535)).is_none(),
+        "a decompression bomb must not be stored"
+    );
+}

@@ -210,7 +210,6 @@ pub async fn save(
 /// its letter tile.
 #[cfg(feature = "mcp")]
 pub async fn fetch_icon(url: &str) -> Option<String> {
-    use base64::Engine;
     use futures::StreamExt;
 
     if openhuman_core::tools::validate_url(url, &[]).is_err() {
@@ -233,9 +232,29 @@ pub async fn fetch_icon(url: &str) -> Option<String> {
             return None;
         }
     }
-    let media_type = super::avatar::sniff_image(&bytes)?;
-    super::avatar::check_image_dimensions(&bytes).ok()?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    inline_image(&bytes)
+}
+
+/// Fetched bytes as the inline image they will be stored and served as, or
+/// `None` when they are not an image this host will re-serve.
+///
+/// The media type comes from the bytes' own signature rather than from the
+/// `Content-Type` the server claimed, because what is claimed is a claim and
+/// what is served has to be a fact — and because the one format that could
+/// carry script, SVG, has no signature to match and lands here as `None`
+/// whatever it was labelled. The decoded size is held to the avatar
+/// decompression-bomb check, so a header promising 65535×65535 in a few hundred
+/// bytes is refused rather than handed to every operator who opens the page.
+#[cfg(feature = "mcp")]
+fn inline_image(bytes: &[u8]) -> Option<String> {
+    use base64::Engine;
+
+    if bytes.len() > MAX_ICON_BYTES {
+        return None;
+    }
+    let media_type = super::avatar::sniff_image(bytes)?;
+    super::avatar::check_image_dimensions(bytes).ok()?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     Some(format!("data:{media_type};base64,{encoded}"))
 }
 
