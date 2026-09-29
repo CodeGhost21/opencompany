@@ -510,7 +510,7 @@ function ChannelRow({
       // `""` — is what suppresses the native bubble.
       title={channelSubtitle(channel) ?? undefined}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-base transition-colors",
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-md transition-colors",
         active
           ? onPage
             ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"

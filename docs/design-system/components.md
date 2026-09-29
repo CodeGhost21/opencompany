@@ -196,7 +196,7 @@ Never nest a modal inside a modal.
   owns expanded/collapsed state and the Cmd/Ctrl+B shortcut. The desktop shell
   is transparent over `bg-chrome`; the mobile sidebar is a `Sheet` overlay. It
   is 15rem wide from `md` up, and its docked channel rail sets DM rows in
-  `text-base` with a 24px avatar. Below `md` the sidebar is a sheet, and the
+  `text-md` (15px) with a 24px avatar. Below `md` the sidebar is a sheet, and the
   title bar's switcher drops to a fixed 8rem (6rem below `sm`, where the search
   is icon-only) so the trailing controls fit a 390px phone.
 - **AgentStatusDot** (`components/agent-status-dot.tsx`) — a teammate's live
