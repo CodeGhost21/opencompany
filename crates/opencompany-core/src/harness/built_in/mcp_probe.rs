@@ -469,9 +469,8 @@ pub struct ProbeOutcome {
 /// The discovery pass already happens — the plain probe computes a count from
 /// this same listing and drops the names. A caller that persists an inventory
 /// needs them, and a second probe to re-fetch what was just discarded would be
-/// a second round trip and a second chance for the two to disagree. The
-/// handshake is read back from the transport's cached `initialize`, so the
-/// server's own description costs no extra round trip either.
+/// a second round trip and a second chance for the two to disagree. The server's
+/// own description is read back from the transport's cached `initialize`.
 pub async fn probe_server_outcome(decl: &McpServerDecl) -> ProbeOutcome {
     let secrets = decl.auth.secret_values();
     let auth_configured = decl.auth.is_configured();

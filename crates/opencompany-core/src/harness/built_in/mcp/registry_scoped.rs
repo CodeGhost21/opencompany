@@ -124,9 +124,8 @@ impl OcMcpRegistryScopedTool {
     /// install has no `read_only_tools` — that is a manifest affordance of a
     /// declared server — so the stored document is the whole policy.
     ///
-    /// Resolved for the agent this decorator was wired for. The refusal text is
-    /// unchanged and names no teammate: whose rule refused the call is not an
-    /// agent's business.
+    /// Resolved for the agent this decorator was wired for. The refusal text
+    /// names no teammate.
     async fn blocked(&self, server_id: &str, tool: &str) -> bool {
         let Some(secrets) = self.secrets.as_deref() else {
             return false;

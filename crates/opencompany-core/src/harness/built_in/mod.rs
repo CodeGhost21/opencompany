@@ -5163,10 +5163,9 @@ impl HarnessPool {
 /// credential substrings means a rotate-token also invalidates the cached roster.
 ///
 /// The per-tool policy and the discovered inventory are terms too: the attached
-/// server's deny list is resolved from them by
-/// [`embed_servers_for_agent`](crate::harness::mcp::embed_servers_for_agent), so
-/// a tool set to [`Blocked`](crate::company::mcp_policy::ApprovalMode::Blocked)
-/// stays callable for as long as the cached roster stands.
+/// server's deny list is resolved from them, so a tool set to
+/// [`Blocked`](crate::company::mcp_policy::ApprovalMode::Blocked) would
+/// otherwise stay callable for as long as the cached roster stands.
 fn mcp_fingerprint(decls: &[McpServerDecl]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -5194,19 +5193,11 @@ fn mcp_fingerprint(decls: &[McpServerDecl]) -> u64 {
 /// Folds one server's stored tool policy into the fingerprint, canonically.
 ///
 /// The company halves of [`McpToolPolicies`](crate::company::mcp_policy::McpToolPolicies)
-/// are `HashMap`-backed, and a `HashMap` iterates in an order that varies per
-/// map instance. Folding one as it iterates — or through `serde_json`, which
-/// preserves that order — gives one unchanged document a different `u64` on
-/// every read, so every `ensure` would rebuild every roster. The tiers are
-/// therefore read **totally**, in [`ToolTier::ALL`](crate::company::mcp_policy::ToolTier::ALL)
-/// order, and the overrides through a [`BTreeMap`](std::collections::BTreeMap).
-///
-/// The per-agent map needs no such treatment: it is already a `BTreeMap` of
-/// `BTreeMap`s, which is the reason the layer was put inside this document rather
-/// than in one of its own. It is a term because
-/// [`embed_servers_for_agent`](crate::harness::mcp::embed_servers_for_agent)
-/// resolves the deny list through it, so a tool blocked for one teammate would
-/// otherwise stay callable until the host restarted.
+/// are `HashMap`-backed and iterate in an order that varies per map instance, so
+/// the tiers are read totally, in
+/// [`ToolTier::ALL`](crate::company::mcp_policy::ToolTier::ALL) order, and the
+/// overrides through a [`BTreeMap`](std::collections::BTreeMap). The per-agent
+/// map is already a `BTreeMap` of `BTreeMap`s.
 fn hash_tool_policies<H: std::hash::Hasher>(
     policies: &crate::company::mcp_policy::McpToolPolicies,
     hasher: &mut H,
@@ -5231,11 +5222,8 @@ fn hash_tool_policies<H: std::hash::Hasher>(
 
 /// Folds one server's discovered tool inventory into the fingerprint.
 ///
-/// The names and suggested tiers are what a stored tier default resolves
-/// against, so a re-probe that finds a new tool moves a policy decision without
-/// the policy document changing. `discovered_at_millis` is left out — every
-/// successful probe rewrites it, and a re-probe that learned nothing must not
-/// rebuild the roster.
+/// `discovered_at_millis` is left out: every successful probe rewrites it, and a
+/// re-probe that learned nothing must not rebuild the roster.
 fn hash_tool_inventory<H: std::hash::Hasher>(
     inventory: &crate::company::mcp_policy::McpToolInventory,
     hasher: &mut H,
@@ -5826,17 +5814,11 @@ pub(crate) fn grants_for_policy(
 
 /// The MCP `(server, tool)` pairs one teammate's gate lets run without parking.
 ///
-/// Resolved through each server's stored tool policy **as it stands for this
-/// teammate**, so an operator's refusal or approval requirement wins over the
-/// manifest declaration and a per-agent one wins over the company's. Every
-/// teammate policy takes its read set from here, whether it serves the chat
-/// roster or an episode seat.
-///
-/// Also narrowed by `grants_cover_server`, which the company-wide answer never
-/// did: without it a teammate's gate treated a pair on a server it cannot dial as
-/// a declared read. Both narrowings can only remove pairs, and
-/// `mcp_call_reach` is affirmative-membership-only, so a smaller set can only
-/// park more.
+/// Resolved through each server's stored tool policy as it stands for this
+/// teammate, and narrowed by `grants_cover_server`. Both narrowings can only
+/// remove pairs, so a smaller set can only park more. Every teammate policy
+/// takes its read set from here, whether it serves the chat roster or an episode
+/// seat.
 pub(crate) fn agent_mcp_reads(
     deps: &HarnessDeps,
     agent: &str,
@@ -5857,10 +5839,8 @@ pub(crate) fn agent_policy_for(
     policy: &Policy,
     effective_budget: Option<f64>,
 ) -> ApprovalPolicy {
-    // Resolved here rather than taken as a parameter: the read set is a function
-    // of this teammate's grants, and a caller that passed a different list than
-    // the one the harness builds the agent with would give it a gate and a
-    // toolbelt that disagree.
+    // Resolved here, not passed in: the gate and the toolbelt must be built from
+    // the same grant list.
     let grants = grants_for_policy(company, &company.manifest.tools.allow, manifest_agent);
     let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
         .with_policy_hitl_disabled()

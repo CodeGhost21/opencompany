@@ -115,9 +115,7 @@ pub fn granted_secrets(decls: &[McpServerDecl], grants: &[String]) -> Vec<String
 }
 
 /// The per-tool policies for the servers an agent's grants reach, resolved for
-/// that agent and narrowed the same way [`granted_secrets`] narrows credential
-/// substrings so the refusal and the toolbelt cannot disagree about which servers
-/// an agent can name.
+/// that agent.
 pub fn granted_policies(
     decls: &[McpServerDecl],
     agent: &str,
@@ -220,8 +218,7 @@ pub fn embed_servers_for_agent(
             // there, so a server with an allow list cannot re-admit one.
             //
             // Resolved for `agent`, so one teammate's refusal reaches only that
-            // teammate's attachment. On a document with no per-agent rules the
-            // list is the company one, in the same order.
+            // teammate's attachment.
             let mut denied = decl.disallowed_tools.clone();
             for tool in crate::company::mcp_policy::blocked_tool_names_for_agent(
                 &decl.tool_policies,
