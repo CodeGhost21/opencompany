@@ -18,11 +18,27 @@ interface Props {
   value: ApprovalMode;
   label: string;
   disabled: boolean;
+  /**
+   * Modes this control may show but not set, each with the reason.
+   *
+   * Disabled rather than absent: a per-teammate rule may only narrow, and an
+   * option that has been removed cannot say why it is not there. The reason is
+   * the option's `title`, so it is reachable by pointer and by accessible
+   * description rather than only in prose somewhere above.
+   */
+  disabledModes?: Partial<Record<ApprovalMode, string>>;
   onChange: (mode: ApprovalMode) => void;
 }
 
-export function ModeChoice({ value, label, disabled, onChange }: Props) {
+export function ModeChoice({
+  value,
+  label,
+  disabled,
+  disabledModes,
+  onChange,
+}: Props) {
   const radios = useRef<(HTMLButtonElement | null)[]>([]);
+  const refused = (mode: ApprovalMode) => disabledModes?.[mode] !== undefined;
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (disabled || !ARROWS.includes(event.key)) return;
@@ -31,10 +47,19 @@ export function ModeChoice({ value, label, disabled, onChange }: Props) {
     const focused = radios.current.indexOf(event.target as HTMLButtonElement);
     if (focused === -1) return;
     event.preventDefault();
-    const next = (focused + step + MODES.length) % MODES.length;
-    radios.current[next]?.focus();
+    // Arrow keys walk past a mode this scope may not set. Landing on one would
+    // move focus to a control whose press is refused, which reads as the
+    // keyboard being broken rather than the option being unavailable.
+    let next = focused;
+    for (let hop = 0; hop < MODES.length; hop += 1) {
+      next = (next + step + MODES.length) % MODES.length;
+      const candidate = MODES[next];
+      if (candidate && !refused(candidate)) break;
+    }
     const mode = MODES[next];
-    if (mode && mode !== value) onChange(mode);
+    if (!mode || refused(mode)) return;
+    radios.current[next]?.focus();
+    if (mode !== value) onChange(mode);
   }
 
   return (
@@ -46,6 +71,7 @@ export function ModeChoice({ value, label, disabled, onChange }: Props) {
     >
       {MODES.map((mode, index) => {
         const active = mode === value;
+        const why = disabledModes?.[mode];
         return (
           <button
             key={mode}
@@ -56,7 +82,8 @@ export function ModeChoice({ value, label, disabled, onChange }: Props) {
             role="radio"
             aria-checked={active}
             tabIndex={active ? 0 : -1}
-            disabled={disabled}
+            disabled={disabled || why !== undefined}
+            title={why}
             data-testid={`mcp-mode-${mode}`}
             onClick={() => {
               if (!active) onChange(mode);
