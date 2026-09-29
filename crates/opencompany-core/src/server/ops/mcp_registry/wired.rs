@@ -445,7 +445,7 @@ pub(in crate::server::ops) async fn remove_install(
 
 use crate::company::mcp_policy;
 use crate::server::ops::mcp_tool_policy::{
-    PutToolPolicy, apply_tool_policy_patch, policy_unreadable, tool_policy_dto,
+    AgentScope, PutToolPolicy, apply_tool_policy_patch, policy_unreadable, tool_policy_dto,
 };
 
 /// Reads an install's stored policy strictly, so an unreadable document is a
@@ -473,6 +473,7 @@ async fn registry_policy_response(
     runtime: &crate::company::runtime::CompanyRuntime,
     server_id: &str,
     stored: mcp_policy::McpToolPolicies,
+    agent: Option<&str>,
 ) -> Response {
     let inventory = mcp_policy::load_tool_inventory(
         runtime.id(),
@@ -481,13 +482,14 @@ async fn registry_policy_response(
     )
     .await;
     let policies = mcp_policy::effective_policies(&[], mcp_policy::StoredPolicies::Stored(stored));
-    Json(tool_policy_dto(server_id, &policies, &inventory)).into_response()
+    Json(tool_policy_dto(server_id, &policies, &inventory, agent)).into_response()
 }
 
 /// `GET …/mcp/registry/{server_id}/tools/policy`
 pub(super) async fn read_tool_policy(
     company: ScopedCompany,
     Path(ServerIdPath { server_id }): Path<ServerIdPath>,
+    Query(scope): Query<AgentScope>,
 ) -> Response {
     let runtime = company.runtime.as_ref();
     let Some(mcp) = runtime.mcp() else {
@@ -497,7 +499,7 @@ pub(super) async fn read_tool_policy(
         return ApiError(error).into_response();
     }
     match stored_strict(runtime, &server_id).await {
-        Ok(stored) => registry_policy_response(runtime, &server_id, stored).await,
+        Ok(stored) => registry_policy_response(runtime, &server_id, stored, scope.agent()).await,
         Err(response) => *response,
     }
 }
@@ -506,6 +508,7 @@ pub(super) async fn read_tool_policy(
 pub(super) async fn write_tool_policy(
     company: AdminScopedCompany,
     Path(ServerIdPath { server_id }): Path<ServerIdPath>,
+    Query(scope): Query<AgentScope>,
     body: Option<Json<PutToolPolicy>>,
 ) -> Response {
     let runtime = company.runtime.as_ref();
@@ -527,7 +530,7 @@ pub(super) async fn write_tool_policy(
         ))
         .into_response();
     };
-    let merged = match apply_tool_policy_patch(stored, patch) {
+    let merged = match apply_tool_policy_patch(stored, patch, scope.agent()) {
         Ok(merged) => merged,
         Err(reason) => return ApiError(OpenCompanyError::InvalidRequest(reason)).into_response(),
     };
@@ -541,13 +544,14 @@ pub(super) async fn write_tool_policy(
     {
         return ApiError(error).into_response();
     }
-    registry_policy_response(runtime, &server_id, merged).await
+    registry_policy_response(runtime, &server_id, merged, scope.agent()).await
 }
 
 /// `DELETE …/mcp/registry/{server_id}/tools/policy`
 pub(super) async fn reset_tool_policy(
     company: AdminScopedCompany,
     Path(ServerIdPath { server_id }): Path<ServerIdPath>,
+    Query(scope): Query<AgentScope>,
 ) -> Response {
     let runtime = company.runtime.as_ref();
     let Some(mcp) = runtime.mcp() else {
@@ -556,16 +560,32 @@ pub(super) async fn reset_tool_policy(
     if let Err(error) = mcp.get(&server_id) {
         return ApiError(error).into_response();
     }
-    // Does not read the stored document first: this is the repair for one that
-    // cannot be read.
-    if let Err(error) = mcp_policy::clear_tool_policies(
+    // An agent-scoped reset clears one teammate's rules and leaves the company
+    // document alone, so it has to read first — which makes an unreadable
+    // document a `409` here, with the company-scoped reset still the repair.
+    let merged = match scope.agent() {
+        Some(agent) => {
+            let mut stored = match stored_strict(runtime, &server_id).await {
+                Ok(stored) => stored,
+                Err(response) => return *response,
+            };
+            stored.agents.remove(agent);
+            stored.prune();
+            stored
+        }
+        // Does not read the stored document first: this is the repair for one
+        // that cannot be read.
+        None => mcp_policy::McpToolPolicies::default(),
+    };
+    if let Err(error) = mcp_policy::save_tool_policies(
         runtime.id(),
         runtime.secrets().as_ref(),
         &mcp_policy::registry_tool_policies_key(&server_id),
+        &merged,
     )
     .await
     {
         return ApiError(error).into_response();
     }
-    registry_policy_response(runtime, &server_id, mcp_policy::McpToolPolicies::default()).await
+    registry_policy_response(runtime, &server_id, merged, scope.agent()).await
 }

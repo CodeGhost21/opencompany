@@ -159,6 +159,41 @@ The guard in the bridge tool stays as the same refusal for any path that does
 dispatch it, and both paths word it with one function so an agent cannot tell
 from the message which one refused it.
 
+## The routes
+
+`GET`/`PUT`/`DELETE {scope}/mcp/servers/{name}/tools/policy` and its registry
+sibling `…/mcp/registry/{server_id}/tools/policy` take an optional `?agent=`.
+A query parameter rather than a third level of nesting in the body: the
+two-level partial-merge contract stays intact, and refusing a per-agent tier
+becomes one check on a shape that cannot express it twice. A blank value is the
+company document, not a teammate named `""`.
+
+In an agent scope the merge is one level shallower — a teammate has modes, not
+tiers — so a `tierDefaults` body and a `tools` entry naming a `tier` are both
+`400`, refused rather than dropped. An entry naming no mode resets that
+teammate's row; a `DELETE` with `?agent=` clears only that teammate, which means
+it has to read first and an unreadable document is a `409` there. The
+company-scoped `DELETE` stays the repair for one that will not parse.
+
+Reads are member-open in both scopes and writes stay admin-only: answering "what
+can this teammate call" changes nothing, while setting it settles something on
+behalf of the company.
+
+Every row carries a **host-resolved** `source` — `server_inherited`,
+`server_pinned`, `agent_pinned` or `agent_clamped` — plus `agentMode` (the
+teammate's stored mode, present even when the clamp discarded it) and
+`differingAgents` (the teammates whose mode differs from the company's). The
+console never re-derives them: one of the four values names a *discarded*
+setting, which no client can infer from the mode alone.
+
+`GET {scope}/team/{agent_id}/mcp/permissions` is the read for the other
+direction — one teammate, every configured declared server, reached or not, with
+the grant that would reach it. One route rather than N so the host resolves
+`source` once, and because reached-or-not can only be answered cheaply for every
+server at once. One damaged document degrades its own block, never the page.
+Writes still go through the per-server route, so there stays one write path per
+document.
+
 ## Where the tiers come from
 
 A tier default can only reach tools something has named. Discovery persists an
