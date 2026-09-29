@@ -21,12 +21,12 @@ export function agentPresenceLabel(state: AgentPresenceState): string | null {
 }
 
 /** The surface the dot sits on, so its cut-out ring matches what is behind it. */
-export type AgentStatusSurface = "chrome" | "card" | "sidebar" | "background";
+export type AgentStatusSurface = "chrome" | "card" | "popover" | "background";
 
 const SURFACE: Record<AgentStatusSurface, string> = {
   chrome: "bg-chrome ring-chrome",
   card: "bg-card ring-card",
-  sidebar: "bg-sidebar ring-sidebar",
+  popover: "bg-popover ring-popover",
   background: "bg-background ring-background",
 };
 
@@ -62,6 +62,11 @@ const SIZE = { sm: "size-2", md: "size-2.5" } as const;
  * `decorative` hides it from assistive tech (no role, no label) for a surface
  * that announces the state in its own words after the agent's name.
  *
+ * `name` is for a dot that stands alone beside a face (a header, a card, the
+ * members pane): "Working" on its own does not say who, so the label becomes
+ * "Ada Lovelace: Working". The hover title stays the bare state, since the
+ * pointer is already on that agent's face.
+ *
  * Positioned at the bottom-right of a `relative` parent, which is what
  * `AgentFace` provides. It is a sibling of the avatar tile, never inside it:
  * `TeammateAvatar` clips with `overflow-hidden`.
@@ -71,17 +76,21 @@ export function AgentStatusDot({
   size = "sm",
   surface = "chrome",
   decorative = false,
+  name,
   className,
 }: {
   state: AgentPresenceState;
   size?: keyof typeof SIZE;
   /**
    * What the dot's cut-out ring blends into: `chrome` on the app sidebar's
-   * rows, `card` on cards, `background` on the page or a sheet.
+   * rows, `card` on cards, `popover` in a floating menu, `background` on the
+   * page or a sheet.
    */
   surface?: AgentStatusSurface;
   /** The surrounding control says the state itself; hide this from assistive tech. */
   decorative?: boolean;
+  /** Who the dot is about, for its accessible label where nothing else says it. */
+  name?: string;
   className?: string;
 }) {
   if (state === "inactive") return null;
@@ -89,7 +98,7 @@ export function AgentStatusDot({
   return (
     <span
       role={decorative ? undefined : "img"}
-      aria-label={decorative ? undefined : label}
+      aria-label={decorative ? undefined : name ? `${name}: ${label}` : label}
       aria-hidden={decorative ? true : undefined}
       title={label}
       data-testid="agent-status-dot"

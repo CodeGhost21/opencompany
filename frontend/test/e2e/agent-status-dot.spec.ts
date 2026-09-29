@@ -99,8 +99,8 @@ for (const scheme of ["light", "dark"] as const) {
       sse.push({ type: "turn_started", seq: 1, atMillis: Date.now(), ...seat });
       await expect(dotOf(page, RAE.name)).toHaveAttribute("data-state", "working");
       await expect(header).toHaveAttribute("data-state", "working");
-      // Where the dot stands alone it keeps its own label.
-      await expect(header).toHaveAccessibleName("Working");
+      // Where the dot stands alone it keeps its own label, naming who.
+      await expect(header).toHaveAccessibleName(`${RAE.name}: Working`);
       await page.screenshot({ path: test.info().outputPath(`dot-seat-working-${scheme}.png`) });
       sse.push({ type: "turn_settled", seq: 2, atMillis: Date.now(), outcome: "committed", ...seat });
       await expect(dotOf(page, RAE.name)).toHaveCount(0);

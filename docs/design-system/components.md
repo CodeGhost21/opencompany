@@ -207,11 +207,15 @@ Never nest a modal inside a modal.
   alone: working, typing and thinking share `status-running` and differ by shape
   (spinner arc around a solid centre, three dots, hollow pulsing ring), each of
   which stays distinct when reduced motion stills it. Where the surface names
-  the state in its own words (the DM row), pass `decorative` so the dot is
-  hidden from assistive tech and the name is not read as "Thinking Ada". Wrap an avatar in `AgentFace` to opt a surface in; the `surface` prop
-  picks the cut-out ring (`chrome` in the app sidebar, `card` on cards,
-  `background` on the page or a sheet). Historical message avatars deliberately
-  do not wear it.
+  the state in its own words (the DM row, a mention-picker option), pass
+  `decorative` so the dot is hidden from assistive tech and the name is not read
+  as "Thinking Ada". Where the dot stands alone beside a face (the chat header,
+  the members pane, a team card, the profile), pass `name` so its label says who
+  ("Ada Lovelace: Working"); the hover title stays the bare state. Wrap an
+  avatar in `AgentFace` to opt a surface in; the `surface` prop picks the
+  cut-out ring (`chrome` in the app sidebar, `card` on cards, `popover` in a
+  floating menu such as the `@` picker, `background` on the page or a sheet).
+  Historical message avatars deliberately do not wear it.
 
 ---
 

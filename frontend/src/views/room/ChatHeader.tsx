@@ -197,6 +197,7 @@ function KindIcon({ channel }: { channel: Channel }) {
         chatId={channel.member ? dmThreadId(channel.member) : undefined}
         size="md"
         surface="background"
+        name={channel.name}
       >
         <AgentAvatarButton agentId={channel.member?.id} name={channel.name}>
           <TeammateAvatar {...face} className="size-6" />

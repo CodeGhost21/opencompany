@@ -228,7 +228,7 @@ function ProfileBody({ agent }: { agent: AgentDetailDto }) {
     <>
       <SheetHeader className="gap-3 pr-10">
         <div className="flex items-start gap-3">
-          <AgentFace agentId={agent.id} size="md" surface="background">
+          <AgentFace agentId={agent.id} size="md" surface="background" name={profile.display}>
             <TeammateAvatar
               name={profile.display}
               tone={profile.tone}

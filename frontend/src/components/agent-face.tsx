@@ -20,7 +20,8 @@ import { useAgentPresence } from "@/room/store";
  * `decorative` hides the dot from assistive tech, for a surface that says the
  * state in its own words after the agent's name (the DM row), so the name is
  * not announced as "Thinking Ada Lovelace". Where the dot stands alone (a
- * header, a profile) it keeps its `role="img"` label.
+ * header, a profile) it keeps its `role="img"` label, and `name` puts the agent
+ * in it ("Ada Lovelace: Working"), since the state alone does not say who.
  *
  * The wrapper is `relative` and shrink-proof, so it drops into a flex row where
  * the bare avatar was, without changing the layout.
@@ -31,6 +32,7 @@ export function AgentFace({
   size = "sm",
   surface = "chrome",
   decorative = false,
+  name,
   className,
   children,
 }: {
@@ -40,6 +42,8 @@ export function AgentFace({
   surface?: AgentStatusSurface;
   /** The surface announces the state itself; the dot is hidden from assistive tech. */
   decorative?: boolean;
+  /** The agent's display name, for a standalone dot's accessible label. */
+  name?: string;
   className?: string;
   /** The avatar to draw. */
   children: ReactNode;
@@ -49,7 +53,13 @@ export function AgentFace({
     <span className={cn("relative inline-flex shrink-0", className)}>
       {children}
       {agentId && (
-        <AgentStatusDot state={state} size={size} surface={surface} decorative={decorative} />
+        <AgentStatusDot
+          state={state}
+          size={size}
+          surface={surface}
+          decorative={decorative}
+          name={name}
+        />
       )}
     </span>
   );

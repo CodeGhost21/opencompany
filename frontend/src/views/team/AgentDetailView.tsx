@@ -1361,7 +1361,7 @@ function Identity({
             field named after it — and the hover ring is what says so, since an
             avatar that looks identical to an inert one is a button nobody
             finds. Falls back to a plain tile where there is no handler. */}
-        <AgentFace agentId={agent.id} size="md" surface="background">
+        <AgentFace agentId={agent.id} size="md" surface="background" name={display}>
           {onPickAvatar ? (
             <button
               type="button"

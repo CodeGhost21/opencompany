@@ -8,6 +8,8 @@ import { AgentFace } from "@/components/agent-face";
 import { AgentStatusDot, agentPresenceLabel } from "@/components/agent-status-dot";
 import type { AgentPresenceState } from "@/lib/agent-presence";
 import * as room from "@/room/store";
+import { MentionPicker } from "@/views/room/MentionPicker";
+import type { Mentionable } from "@/views/room/mentions";
 
 /**
  * `AgentStatusDot` draws the six-state answer as a badge, and `AgentFace` reads
@@ -91,6 +93,13 @@ describe("AgentStatusDot", () => {
     expect(el.getAttribute("title")).toBe("Thinking");
   });
 
+  it("names the agent in a standalone dot's label, keeping the bare state as its title", () => {
+    act(() => root.render(createElement(AgentStatusDot, { state: "working", name: "Ada Lovelace" })));
+    const el = dot()!;
+    expect(el.getAttribute("aria-label")).toBe("Ada Lovelace: Working");
+    expect(el.getAttribute("title")).toBe("Working");
+  });
+
   it("agentPresenceLabel names every drawn state and nothing for inactive", () => {
     expect(agentPresenceLabel("working")).toBe("Working");
     expect(agentPresenceLabel("inactive")).toBeNull();
@@ -139,5 +148,46 @@ describe("AgentFace", () => {
     expect(dot()?.dataset.state).toBe("queued");
     act(() => room.setOpenTurns({}));
     expect(dot()).toBeNull();
+  });
+});
+
+describe("MentionPicker", () => {
+  const entries: Mentionable[] = [
+    { target: { kind: "agent", id: "rae" }, label: "Rae", aliases: ["rae"] },
+    { target: { kind: "user", id: "u1" }, label: "Sam", aliases: ["sam"] },
+    { target: { kind: "desk", id: "eng" }, label: "engineering", aliases: ["engineering"] },
+  ];
+  // jsdom has no layout, so no `scrollIntoView` for the picker's keep-in-view effect.
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = () => {};
+  });
+  const picker = () =>
+    act(() =>
+      root.render(
+        createElement(MentionPicker, { entries, active: 0, onPick: () => {}, onHover: () => {} }),
+      ),
+    );
+  const options = () => [...host.querySelectorAll<HTMLElement>('[data-testid="mention-option"]')];
+
+  it("gives an agent row its live dot, decorative, with the state in words after the name", () => {
+    picker();
+    expect(dot()).toBeNull();
+    act(() => {
+      room.setThreadAgents({ rae: "rae" });
+      room.setOpenTurns({ rae: [{ queued: false, chatId: "rae" }] });
+    });
+    const dots = host.querySelectorAll<HTMLElement>('[data-testid="agent-status-dot"]');
+    expect(dots).toHaveLength(1);
+    expect(options()[0].contains(dots[0])).toBe(true);
+    expect(dots[0].dataset.state).toBe("thinking");
+    expect(dots[0].getAttribute("aria-hidden")).toBe("true");
+    expect(options()[0].textContent).toMatch(/^.*Rae.*, Thinking$/);
+  });
+
+  it("never gives a person or a desk the agent dot", () => {
+    picker();
+    act(() => room.setApprovalAgents({ u1: 1, eng: 1 }));
+    expect(dot()).toBeNull();
+    expect(options()[1].textContent).not.toMatch(/,/);
   });
 });

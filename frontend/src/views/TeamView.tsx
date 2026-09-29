@@ -800,7 +800,7 @@ function MemberCard({
             44px, comfortably above the ~24px floor under which a mascot is a
             smudge and the bare tone tile is the honest fallback.
           */}
-          <AgentFace agentId={member.id} size="md" surface="card">
+          <AgentFace agentId={member.id} size="md" surface="card" name={member.name}>
             <TeammateAvatar name={member.name} tone={member.tone} avatar={member.avatar} className="size-11 rounded-xl text-sm" />
           </AgentFace>
           {onOpen ? (
