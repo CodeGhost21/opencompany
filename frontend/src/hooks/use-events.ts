@@ -694,9 +694,8 @@ export type CompanyStreamEvent =
        * card, a workflow node), where a consumer falls back to keying by thread.
        */
       messageSeq?: number;
-      /** The episode and round this turn runs for, when it runs in one. */
-      episodeId?: string;
-      roundRevision?: number;
+      // No `episodeId`/`roundRevision`: the host's `TurnStreamEvent` has
+      // neither (`events.md`), and a hive seat's turns emit no live frames.
     }
   | {
       type: "tool_result";
@@ -740,8 +739,6 @@ export type CompanyStreamEvent =
       elapsedMs?: number;
       /** See {@link CompanyStreamEvent} `tool_call.messageSeq`. */
       messageSeq?: number;
-      episodeId?: string;
-      roundRevision?: number;
     }
   // A coalesced "Thinking" run between tool calls — streamed so the live
   // timeline shows the same rows the final folded one does (else the count
@@ -753,14 +750,15 @@ export type CompanyStreamEvent =
       chatId?: string;
       /** See {@link CompanyStreamEvent} `tool_call.messageSeq`. */
       messageSeq?: number;
-      episodeId?: string;
-      roundRevision?: number;
     }
   // The agent has started writing its reply text (nothing more: the frame
   // carries no text, label or status). Once per run of text; a tool call or a
   // thinking frame ends the run, so text after a tool round announces itself
   // again. Never folded into a row. The console shows "typing" from it until a
-  // tool/thinking frame, `agent_reply` or `turn_settled`. Deliberately NOT given
+  // tool/thinking frame resets it, or the turn's state is cleared: the send's
+  // own POST ending, an `agent_reply` with no other turn open on the chat, or a
+  // `turn_settled` that names the chat (a chat-route settle names none, so it
+  // clears nothing on its own). Deliberately NOT given
   // the 8-second lifetime of the person `typing` frame below: an agent's reply
   // can stream for longer than that.
   | {
