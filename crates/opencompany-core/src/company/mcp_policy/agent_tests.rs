@@ -1,10 +1,8 @@
 //! The per-agent layer: it narrows, it never widens, and a document that has
 //! never heard of it resolves exactly as it did before.
 //!
-//! Ungated on purpose. The whole `harness` tree is behind
-//! `feature = "openhuman"`, so a rule proved only there is invisible to the
-//! default lane's bare `cargo test` — and this rule decides what a teammate may
-//! call.
+//! Ungated: the whole `harness` tree is behind `feature = "openhuman"`, so a rule
+//! proved only there is invisible to the default lane's bare `cargo test`.
 
 use super::*;
 use crate::company::mcp::{AuthMaterial, McpSource};
@@ -114,9 +112,8 @@ fn a_per_agent_document_round_trips() {
 }
 
 /// Residue resolves identically and hashes differently, so a reset that left it
-/// behind would move the effective-MCP fingerprint on a write that changed
-/// nothing and rebuild every roster. Asserted on the stored JSON, because that
-/// is what the fingerprint folds.
+/// behind would move the effective-MCP fingerprint. Asserted on the stored JSON,
+/// which is what the fingerprint folds.
 #[test]
 fn a_pruned_reset_leaves_no_agent_residue() {
     let mut policies = McpToolPolicies::default();
@@ -271,13 +268,11 @@ fn an_upgraded_company_gives_every_agent_the_company_allow_set() {
 
 // ---- narrow-only, totally ------------------------------------------------
 
-/// Every `ApprovalMode × ApprovalMode` pair, not a sample: the whole design
-/// rests on this and nine cases is free.
+/// Every `ApprovalMode × ApprovalMode` pair, not a sample.
 ///
-/// Two claims per pair. The resolved mode is never less restrictive than the
+/// Two claims per pair: the resolved mode is never less restrictive than the
 /// server's, and [`PolicySource::AgentClamped`] is reported on exactly the pairs
-/// where the stored per-agent setting was discarded — so a console can name a
-/// setting nothing honours instead of rendering it as live.
+/// where the stored per-agent setting was discarded.
 #[test]
 fn the_per_agent_layer_never_widens() {
     let inv = inventory(&[("search_pages", ToolTier::ReadOnly)]);
@@ -482,8 +477,7 @@ fn a_per_agent_entry_deciding_nothing_is_inert() {
     assert_eq!(resolved.source, PolicySource::ServerInherited);
 }
 
-/// A teammate's rules do not reach another teammate. The obvious claim, stated
-/// because it is the whole product requirement.
+/// A teammate's rules do not reach another teammate.
 #[test]
 fn one_teammates_rule_does_not_reach_another() {
     let inv = inventory(&[("search_pages", ToolTier::ReadOnly)]);
@@ -594,8 +588,7 @@ fn the_per_agent_allow_set_is_a_subset_of_the_company_one() {
     assert_eq!(engineer, company);
 }
 
-/// Reach is decided before mode. The company-wide set never filtered by it, so a
-/// teammate's gate treated a pair on a server it cannot dial as a declared read.
+/// Reach is decided before mode.
 #[test]
 fn a_server_the_grants_miss_contributes_no_read() {
     let mut server = decl("notion");
