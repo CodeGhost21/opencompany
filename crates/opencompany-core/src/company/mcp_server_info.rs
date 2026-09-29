@@ -174,11 +174,7 @@ pub async fn load(company: &CompanyId, name: &str, secrets: &dyn SecretStore) ->
         return McpServerInfo::default();
     }
     let mut info: McpServerInfo = serde_json::from_str(&raw).unwrap_or_default();
-    if !info
-        .icon_data_url
-        .as_deref()
-        .is_none_or(|value| is_inline_image(value))
-    {
+    if !info.icon_data_url.as_deref().is_none_or(is_inline_image) {
         info.icon_data_url = None;
     }
     info
