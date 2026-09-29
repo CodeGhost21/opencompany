@@ -23,7 +23,7 @@ import { LIVE_BRAIN, LIVE_BRAIN_REASON, MCP_SERVER } from "./capabilities";
  * probed inventory, and reading them off the public network would make this
  * spec's verdict depend on it.
  *
- * Serial, and deliberately: each test leaves a permission written that the next
+ * Serial: each test leaves a permission written that the next
  * one reads or clears, which is the same order an operator moves through.
  */
 

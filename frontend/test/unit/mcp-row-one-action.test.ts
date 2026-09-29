@@ -10,12 +10,9 @@ import type { McpHealth, McpServer, McpSource } from "@/api/types";
 /**
  * One row, one labelled action, and nothing destructive a mis-click away.
  *
- * A row used to carry up to seven icon-only controls — credentials, sign in,
- * connect, re-check, list tools, enable/disable, permissions, remove — each a
- * bare glyph distinguished only by its `aria-label`, with Remove among them. The
- * property worth pinning is not which icons are present but that exactly one
- * labelled control is, that it is the one this server's state calls for, and that
- * removal is behind the overflow and still asks before it happens.
+ * The property worth pinning is not which icons are present but that exactly
+ * one labelled control is, that it is the one this server's state calls for,
+ * and that removal is behind the overflow and still asks before it happens.
  */
 
 const api = vi.hoisted(() => ({

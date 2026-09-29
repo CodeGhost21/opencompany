@@ -10,18 +10,15 @@ import { ApiError, type McpHealth, type McpServer, type McpSource } from "@/api/
 /**
  * What the add dialog says happened.
  *
- * The add path has two outcomes that used to share one banner: the host refusing
- * the write, and the host accepting it and then failing to reach the endpoint.
- * Only the first is a failure. The second leaves a server saved, enabled and
- * attached to every agent that reaches it — so titling it "Couldn't add the
- * server" tells the operator the opposite of what happened and invites a second
- * add of a server that is already there.
+ * The add path has two outcomes: the host refusing the write, and the host
+ * accepting it and then failing to reach the endpoint. Only the first is a
+ * failure. The second leaves a server saved, enabled and attached to every
+ * agent that reaches it — so titling it "Couldn't add the server" tells the
+ * operator the opposite of what happened and invites a second add of a server
+ * that is already there.
  *
- * The outcome now lands in the dialog, on the server it is about, and offers the
- * next move rather than telling the operator to fix it "above" and leaving them
- * to find the row. The third thing pinned here is the description: the add route
- * has always accepted one and no form ever asked, so every server added by URL
- * was permanently nameless in the list.
+ * The outcome lands in the dialog, on the server it is about, and offers the
+ * next move. The third thing pinned here is the description field.
  */
 
 const api = vi.hoisted(() => ({

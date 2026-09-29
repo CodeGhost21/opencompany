@@ -5,9 +5,6 @@ import { expect, test } from "@playwright/test";
  * servers and the public directory, and both halves land in the one list under
  * headings that say which is which.
  *
- * The failure this prevents: the old directory browser could not see what the
- * company already had, so it offered Install for a server sitting one tab away.
- *
  * Default-feature host. The directory route needs the `mcp` feature, so the
  * unwired path is what this lane can assert on honestly; the reachable half is
  * that no call is made at all until something is typed.

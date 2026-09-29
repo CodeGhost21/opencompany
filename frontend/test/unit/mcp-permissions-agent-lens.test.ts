@@ -469,11 +469,6 @@ describe("a teammate lens", () => {
   });
 
   it("states the tier default's value rather than offering a dead control", async () => {
-    // This lens used to render the select disabled, on the reasoning that a
-    // boundary teaches better than an absence. Watching it used settled the
-    // question the other way: at 50% opacity a disabled select reads as live,
-    // clicking it said nothing, and three of them pushed the per-tool controls
-    // — the only editable thing here — under the fold.
     await mount("engineer");
 
     expect(el("mcp-permissions-tier-default-read_only")).toBeNull();
@@ -530,10 +525,10 @@ describe("the approvals notice", () => {
 
 describe("a fast lens switch", () => {
   it("never paints the scope the operator has left", async () => {
-    // The guard used to key on the server alone. A lens switch moves this panel
-    // from one document to another exactly as a server switch does, so an answer
-    // for the previous teammate arriving last would paint the wrong teammate's
-    // permissions under the right teammate's name.
+    // A lens switch moves this panel from one document to another exactly as a
+    // server switch does, so an answer for the previous teammate arriving last
+    // would paint the wrong teammate's permissions under the right teammate's
+    // name.
     const pending: Record<string, (d: ToolPolicyDocument) => void> = {};
     api.readToolPolicy.mockImplementation(
       (

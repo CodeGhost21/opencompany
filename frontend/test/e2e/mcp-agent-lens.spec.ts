@@ -186,9 +186,9 @@ test("the inert-approval notice is a function of the host, not a constant", asyn
   await openPermissions(page);
 
   // Approvals do not park on this build, so "needs approval" behaves as allow
-  // and the page must say so where permissions are set — not only on the
-  // teammate page, which is where the flag used to stop. When approvals return,
-  // the host reports it and this notice goes on its own.
+  // and the page must say so where permissions are set, not only on the
+  // teammate page. When approvals return, the host reports it and this notice
+  // goes on its own.
   await expect(page.getByTestId("mcp-approvals-inert")).toBeVisible({
     timeout: 30_000,
   });

@@ -5,11 +5,6 @@ import { expect, test } from "@playwright/test";
 /**
  * Adding a server asks what it is for.
  *
- * The old form was permanently expanded below every row, took four fields of
- * vertical space on every visit, and never asked for a description — so every
- * server added by URL was permanently nameless in a list that shows a name and
- * a URL and nothing else.
- *
  * Default-feature host: the add and remove routes are served here, which is
  * what this spec drives. Probing is `not_wired` on this build, so neither the
  * probe line nor the probed-description offer can appear — both are asserted in

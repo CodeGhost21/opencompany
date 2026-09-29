@@ -1,7 +1,7 @@
 //! Per-tool approval policy for MCP servers: the tier vocabulary, the operator's
 //! stored overrides, and the resolution ladder the approval gate reads.
 //!
-//! Three layers, deliberately separate:
+//! Three layers, kept separate:
 //!
 //! 1. A **suggested** tier, computed from a tool's own name and description by
 //!    [`suggest_tool_tier`]. Non-authoritative — it is a starting point a

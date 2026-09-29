@@ -10,14 +10,12 @@ import { ApiError, type McpHealth, type McpServer, type McpSource } from "@/api/
 /**
  * The directory, folded into the one list.
  *
- * Discover was a second screen answering a question the first screen already had
- * to answer: an operator types a name to find out whether this company has that
- * server. Splitting the answer across two tabs is what let a second copy of an
- * installed server be installed at all — so the property that matters is that a
- * directory entry this company already holds is rendered one row from its own
- * copy and offers no install. The other two are cost and failure: nothing calls
- * the directory until something is typed, and a directory outage leaves the
- * company's half of the answer on screen.
+ * An operator types a name to find out whether this company has that server.
+ * The property that matters is that a directory entry this company already
+ * holds is rendered one row from its own copy and offers no install. The other
+ * two are cost and failure: nothing calls the directory until something is
+ * typed, and a directory outage leaves the company's half of the answer on
+ * screen.
  */
 
 const api = vi.hoisted(() => ({
@@ -192,7 +190,7 @@ describe("a directory entry this company already has", () => {
     ]);
     await search("linear");
 
-    // Two headings carry the distinction the two tabs used to.
+    // Two headings carry the company/directory distinction.
     const groups = all('[data-testid="mcp-group-row"]');
     expect(groups).toHaveLength(2);
     expect(groups[0]?.textContent).toContain("In this company");

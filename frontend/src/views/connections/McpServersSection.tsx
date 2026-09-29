@@ -191,9 +191,6 @@ interface Props {
  *
  * This is the console's **only** MCP surface, and it has exactly one caller:
  * [`McpServersView`](../McpServersView.tsx), the `#/connections/mcp` page.
- * Settings used to carry a second implementation of this screen against an API
- * no host has ever served, which crashed on open — a second surface is how the
- * two came to disagree, so there is one (issue #414).
  */
 export function McpServersSection({
   client,
@@ -215,8 +212,7 @@ export function McpServersSection({
   const [servers, setServers] = useState<McpServer[]>([]);
   // The name of the row currently mutating. Every mutating handler serialises on
   // it with an `if (busy) return`, so while one is in flight the controls on ALL
-  // rows disable, not just the busy one (issue #1475): the guard used to be
-  // invisible on the other rows, which accepted clicks and silently did nothing.
+  // rows disable, not just the busy one.
   const [busy, setBusy] = useState<string | null>(null);
   const [tools, setTools] = useState<Record<string, ToolsState>>({});
   // Live health from an on-demand re-check, overriding the persisted badge.
@@ -246,12 +242,11 @@ export function McpServersSection({
   const [installing, setInstalling] = useState<string | null>(null);
 
   /**
-   * The server whose credential field is open, and its draft value (issue #1260).
+   * The server whose credential field is open, and its draft value.
    *
    * Per-row rather than a shared field: the add dialog's Token creates a *new*
    * server, so pointing an operator at it to fix an existing one would have them
-   * add a second copy. The host has accepted a credential rotation on
-   * `PUT …/mcp/servers/{name}` all along — this is the control that was missing.
+   * add a second copy.
    */
   const [credentialFor, setCredentialFor] = useState<string | null>(null);
   const [credentialDraft, setCredentialDraft] = useState("");
@@ -420,7 +415,7 @@ export function McpServersSection({
     setSignIns(({ [name]: _dropped, ...rest }) => rest);
   }
 
-  // Browser OAuth sign-in (issue #90): open the authorization URL in a new tab,
+  // Browser OAuth sign-in: open the authorization URL in a new tab,
   // then poll the server's health until it flips to `ok` (the host stores the
   // token on its callback route) so the amber badge turns green on its own. The
   // row holds the waiting state throughout, because a toast fired at the moment
@@ -875,7 +870,7 @@ export function McpServersSection({
   return (
     <section className="space-y-4">
       {/* `h2` in both chromes, and it lands one level under the page's `h1`
-          either way (issue #1392). `test/unit/page-section-heading-level.test.ts`
+          either way. `test/unit/page-section-heading-level.test.ts`
           pins that pairing: heading at `h3` under that `h1` would read to a
           screen reader as a subsection of a section that does not exist. */}
       <div className="flex flex-wrap items-center gap-2">
@@ -934,7 +929,7 @@ export function McpServersSection({
 
       {load === "error" ? (
         // Not an empty list: an empty list is a company with no tool servers, and
-        // this host did not tell us that (issue #414).
+        // this host did not tell us that.
         <>
           <Alert variant="destructive" data-testid="mcp-load-error">
             <AlertTriangle className="size-4" />
@@ -1204,8 +1199,7 @@ export function McpServersSection({
                       >
                         API token for {server.name}
                         {/* The value is write-only and unrecoverable, so say
-                            when saving it overwrites an existing one
-                            (issue #1464). */}
+                            when saving it overwrites an existing one. */}
                         {server.authConfigured
                           ? " — replaces the stored credential"
                           : ""}
