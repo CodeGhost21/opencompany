@@ -21,9 +21,9 @@
 //! Narrow-only is therefore a property of the type:
 //! [`ApprovalMode::max_restrictive`] is the only way a per-agent mode reaches
 //! the result, and a stored setting the clamp discards is reported as
-//! [`PolicySource::AgentClamped`] rather than dropped — a console that rendered
-//! a control whose value the host throws away is the failure this crate has
-//! already shipped once.
+//! [`PolicySource::AgentClamped`] rather than dropped, so a console can name a
+//! setting nothing honours instead of rendering a control whose value the host
+//! throws away.
 //!
 //! No per-agent tier defaults, deliberately: a tier classifies the *tool*, not
 //! the teammate, and a per-agent tier would give the tier a second source as

@@ -463,9 +463,11 @@ pub async fn clear_tool_policies(
 /// approval gate lets run without parking, resolved through each server's tool
 /// policy.
 ///
-/// The successor to the test-only `mcp_read_set`, which reads the flat
-/// declaration directly. Both produce the same shape, so one can be diffed
-/// against the other over a fixture.
+/// The company-wide answer. A teammate's gate reads
+/// [`mcp_allow_set_for_agent`] instead, which narrows this by that teammate's own
+/// modes and by the servers its grants reach; this one stays as the oracle that
+/// narrowing is diffed against, the role the test-only `mcp_read_set` already
+/// plays for it. All three produce the same shape.
 ///
 /// Enumerates the union of the policy document's own entries and the tools
 /// discovery last saw. Both halves are needed: an entry names a tool the

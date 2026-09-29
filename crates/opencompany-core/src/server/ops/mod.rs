@@ -102,7 +102,7 @@ pub mod team;
 /// for the fields the console owns. Attached to [`team`]'s existing
 /// `/team/{agent_id}` route rather than merged as its own. See [`team_agent`].
 mod team_agent;
-/// Issue #2528: one teammate's whole MCP picture — `GET
+/// One teammate's whole MCP picture — `GET
 /// {scope}/team/{agent_id}/mcp/permissions`. Every configured server, reached or
 /// not, with each tool's mode resolved for that teammate and the rule that
 /// decided it. See [`team_mcp`].
