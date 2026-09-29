@@ -24,6 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useHashParam } from "@/hooks/use-hash-param";
 import { avatarFor } from "@/lib/team";
 import {
   type PolicyLens,
@@ -113,9 +114,14 @@ export function McpToolPermissions({
     {},
   );
   // Which teammate the panel is resolved for, or `EVERYONE` for the company
-  // document. Local rather than in the address: it is a way of reading one
-  // server's page, not a page of its own.
-  const [lensValue, setLensValue] = useState<string>(EVERYONE);
+  // document.
+  //
+  // In the address, the way every other "which of the N is on screen" decision
+  // in this console is: "the notion page showing what Engineer can call" is a
+  // link somebody sends, Back undoes the switch, and the answer on screen is
+  // never a piece of private state the address disagrees with.
+  const [showing, setShowing] = useHashParam("showing");
+  const lensValue = showing ?? EVERYONE;
   /**
    * The company's own mode per tool, which a per-teammate rule may narrow but
    * never loosen.
@@ -278,7 +284,9 @@ export function McpToolPermissions({
             <span className="text-xs text-muted-foreground">Showing:</span>
             <Select
               value={lensValue}
-              onValueChange={(v) => v && setLensValue(v)}
+              onValueChange={(v) =>
+                v && setShowing(v === EVERYONE ? null : v)
+              }
               items={{
                 [EVERYONE]: "Everyone (company default)",
                 ...Object.fromEntries(agents.map((a) => [a.id, a.name])),
