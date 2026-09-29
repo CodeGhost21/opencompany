@@ -12,6 +12,11 @@
 //! attached to the spec elsewhere and described by its own brief, so a claim
 //! here that these are all of an agent's MCP servers would be false.
 //!
+//! It also carries one negative claim: a declared server every known tool of
+//! which is refused this agent is named **with that refusal**, because the
+//! alternative to saying it is either lying by omission or dropping the server
+//! and answering "no" to "do you have notion?".
+//!
 //! Lives here rather than beside the harness that calls it because the whole
 //! `harness` tree is behind `feature = "openhuman"`. The call site is gated
 //! twice over — no dispatch tool is wired without `feature = "mcp"` either —
@@ -96,10 +101,26 @@ fn pairing_identity(endpoint: &str) -> Option<String> {
 /// the brief is exactly as accurate as the belt it describes. Both are scoped by
 /// the same grant predicates the call paths enforce, so enumeration here cannot
 /// name a server a call would refuse.
+///
+/// A declared server every known tool of which is refused **this** `agent` is
+/// still named, with the refusal said out loud. Per-agent permissions create a
+/// state that could barely arise company-wide — "the writer gets only
+/// `write_page`" on a forty-tool server means thirty-nine refusals, and one
+/// careless bulk action makes it forty — and in it `mcp_list_tools` returns empty
+/// and the agent cannot tell "server down" from "you may call nothing". Dropping
+/// the line instead is its own lie: an operator asking "do you have notion?"
+/// would hear no when the answer is yes, and nothing on it is callable.
+///
+/// A server no probe has reached is never called refused. "Nothing callable" and
+/// "nothing known" are different facts, and only one of them is evidence.
+///
+/// Installs carry no refusal clause: an install's policy lives under its own key
+/// rather than on the row handed here, so this cannot say anything true about it.
 pub(crate) fn server_family_brief(
     decls: &[McpServerDecl],
     installs: &[RegistryServerRow],
     grants: &[String],
+    agent: &str,
 ) -> String {
     let reachable_decls: Vec<&McpServerDecl> = decls
         .iter()
@@ -173,6 +194,12 @@ pub(crate) fn server_family_brief(
                  server)"
             ));
         }
+        if crate::company::mcp_policy::every_known_tool_refused(decl, agent) {
+            line.push_str(
+                " — but every tool this server currently offers is refused to you, so a call \
+                 will be declined. Say so rather than retrying.",
+            );
+        }
         lines.push(line);
     }
     let unnameable_declared = reachable_decls.len() - declared.len();
@@ -216,3 +243,8 @@ pub(crate) fn server_family_brief(
 #[cfg(test)]
 #[path = "mcp_families_tests.rs"]
 mod tests;
+
+/// What the brief says about a server one teammate is refused everything on.
+#[cfg(test)]
+#[path = "mcp_families_agent_policy_tests.rs"]
+mod agent_policy_tests;

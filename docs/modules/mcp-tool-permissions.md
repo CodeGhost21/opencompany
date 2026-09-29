@@ -159,6 +159,25 @@ The guard in the bridge tool stays as the same refusal for any path that does
 dispatch it, and both paths word it with one function so an agent cannot tell
 from the message which one refused it.
 
+## What the agent is told
+
+Per-agent policy creates a state company-wide policy barely could: a teammate that
+**reaches** a server and can call nothing on it. "The writer gets only
+`write_page`" on a forty-tool server means thirty-nine refusals, and one careless
+bulk action makes it forty. In that state `mcp_list_tools` returns empty and the
+agent cannot tell "server down" from "you may call nothing".
+
+So the server-family brief names such a server **with the refusal said out loud**.
+Dropping the line instead is its own lie — an operator asking "do you have
+notion?" would hear no when the answer is yes, and nothing on it is callable. A
+server no probe has reached is never called refused: "nothing callable" and
+"nothing known" are different facts, and only one of them is evidence. The clause
+rides the existing line, so the brief still names only servers and the key that
+addresses each, never an individual remote tool.
+
+The console twin of that sentence is the per-teammate read's `fullyRefused` flag,
+so the state is visible where it is created as well as where it lands.
+
 ## The routes
 
 `GET`/`PUT`/`DELETE {scope}/mcp/servers/{name}/tools/policy` and its registry

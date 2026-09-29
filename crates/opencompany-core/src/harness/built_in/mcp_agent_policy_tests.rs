@@ -222,6 +222,108 @@ fn a_per_agent_approval_requirement_leaves_the_gates_read_set() {
     );
 }
 
+// ---- what the prompt may claim -------------------------------------------
+
+/// The state per-agent policy creates and company-wide policy barely could: a
+/// teammate that reaches a server and can call nothing on it. Both halves
+/// asserted together, because the prompt and the permission are the two things
+/// that must not disagree — the attachment refuses every tool, and the brief says
+/// so instead of describing a server the agent will only be refused by.
+#[test]
+fn a_hive_agents_prompt_names_no_server_it_cannot_call() {
+    let mut server = decl("notion", DEAD_ENDPOINT);
+    server.tool_inventory = inventory(&[
+        ("search_pages", ToolTier::ReadOnly),
+        ("delete_page", ToolTier::WriteDelete),
+    ]);
+    server.tool_policies.agents.insert(
+        "writer".to_string(),
+        AgentToolPolicies {
+            overrides: [
+                ("search_pages".to_string(), mode_only(ApprovalMode::Blocked)),
+                ("delete_page".to_string(), mode_only(ApprovalMode::Blocked)),
+            ]
+            .into_iter()
+            .collect(),
+        },
+    );
+    let servers = vec![server];
+    let reach = grants(&["mcp:notion"]);
+
+    let writer_attachment = attachment(&servers, "writer");
+    let engineer_attachment = attachment(&servers, "engineer");
+    assert!(
+        writer_attachment.contains(r#"disallowed_tools: ["delete_page", "search_pages"]"#),
+        "{writer_attachment}"
+    );
+    assert!(
+        engineer_attachment.contains("disallowed_tools: []"),
+        "{engineer_attachment}"
+    );
+
+    let writer_brief =
+        crate::company::mcp_families::server_family_brief(&servers, &[], &reach, "writer");
+    let engineer_brief =
+        crate::company::mcp_families::server_family_brief(&servers, &[], &reach, "engineer");
+
+    assert!(writer_brief.contains("`notion`"), "{writer_brief}");
+    assert!(
+        writer_brief.contains("refused to you"),
+        "the writer must be told, not left to discover it from an empty listing: {writer_brief}"
+    );
+    assert!(engineer_brief.contains("`notion`"), "{engineer_brief}");
+    assert!(
+        !engineer_brief.contains("refused to you"),
+        "{engineer_brief}"
+    );
+}
+
+/// The boundary the refusal clause must not cross: the brief names servers and
+/// the key that addresses each, never an individual remote tool. A half-written
+/// remote name is one a model may pass back verbatim and be refused for, and the
+/// tool-name channel in a system prompt belongs to the internal `opencompany`
+/// server alone.
+#[test]
+fn the_server_family_brief_never_names_a_remote_mcp_tool() {
+    let mut refused = decl("notion", DEAD_ENDPOINT);
+    refused.tool_inventory = inventory(&[
+        ("search_pages", ToolTier::ReadOnly),
+        ("delete_page", ToolTier::WriteDelete),
+    ]);
+    refused.tool_policies.agents.insert(
+        "writer".to_string(),
+        AgentToolPolicies {
+            overrides: [
+                ("search_pages".to_string(), mode_only(ApprovalMode::Blocked)),
+                ("delete_page".to_string(), mode_only(ApprovalMode::Blocked)),
+            ]
+            .into_iter()
+            .collect(),
+        },
+    );
+    let remote_names: Vec<String> = refused.tool_inventory.tools.keys().cloned().collect();
+    let servers = vec![refused];
+
+    for agent in ["writer", "engineer"] {
+        let brief = crate::company::mcp_families::server_family_brief(
+            &servers,
+            &[],
+            &grants(&["mcp:notion"]),
+            agent,
+        );
+        for name in &remote_names {
+            assert!(
+                !brief.contains(name.as_str()),
+                "the brief named the remote tool `{name}` for `{agent}`: {brief}"
+            );
+        }
+        assert!(
+            crate::harness::build::tools_named_in_mcp_brief(&brief).is_empty(),
+            "the server-family brief must not parse as the opencompany tool brief: {brief}"
+        );
+    }
+}
+
 // ---- the registry sibling ------------------------------------------------
 
 /// A minimal store the test seeds, so the policy the decorator reads is the one

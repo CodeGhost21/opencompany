@@ -1212,6 +1212,7 @@ pub fn build_agent_with_model(
             &deps.mcp_servers,
             &installs,
             grants,
+            &manifest_agent.id,
         ));
     }
 
