@@ -278,9 +278,12 @@ fn a_burst_of_thoughts_is_one_row_until_something_else_happens() {
     assert_eq!(frames.len(), 1);
 
     // Text closes the run, so the next thought opens a new row — exactly
-    // what `fold` does with its own `thinking` flag.
-    assert!(live_frame_from(&AcpUpdate::MessageChunk("hi".into()), &mut state).is_none());
-    assert!(live_frame_from(&AcpUpdate::ThoughtChunk, &mut state).is_some());
+    // what `fold` does with its own `thinking` flag. The text itself is not a
+    // thinking row: its only frame is the text-free `replying` marker.
+    let text = live_frame_from(&AcpUpdate::MessageChunk("hi".into()), &mut state);
+    assert_eq!(text.map(|f| f.kind), Some("replying"));
+    let next = live_frame_from(&AcpUpdate::ThoughtChunk, &mut state);
+    assert_eq!(next.map(|f| f.kind), Some("thinking"));
 }
 
 #[test]
