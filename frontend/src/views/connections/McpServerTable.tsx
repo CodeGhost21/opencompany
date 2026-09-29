@@ -44,11 +44,8 @@ import {
  * The company's servers and the directory's, as one table.
  *
  * One row grammar for both halves — a mark, a one-line description, where it
- * came from, whether it answers, who reaches it, and one action. The only
- * difference is the action, because the question an operator types a name to
- * answer is "do we have this?", and the honest answer is either a server they
- * already have or one they could install. Splitting that across two screens is
- * what let a second copy of an installed server be installed at all.
+ * came from, whether it answers, who reaches it, and one action. Only the action
+ * differs between the two.
  */
 
 /** Everything a row's controls can do, owned by the section that holds the state. */
@@ -104,9 +101,8 @@ export function McpServerIcon({
     );
   }
   return (
-    // An inline `data:` image the host fetched itself. Rendering it reaches
-    // nothing, which is the whole reason the host takes the picture rather than
-    // handing the operator's browser an address a remote server chose.
+    // An inline `data:` image the host fetched itself; a remote server's own
+    // address must never become a request from the operator's browser.
     <img
       src={iconUrl}
       alt=""
@@ -202,12 +198,7 @@ export function McpGroupRow({
 /**
  * The caret at the leading edge of a row.
  *
- * The **only** disclosure. An arrow floating between the name and the next
- * column reads as decoration or as a sort control; at the head of the row it is
- * the one thing it can be. Hover only tints the row — an earlier draft revealed
- * the detail on hover too, which on a list this dense makes the table move under
- * the pointer on the way to anything else, and is unreachable by touch or
- * keyboard regardless.
+ * The only disclosure. Hover only tints the row; it never reveals the detail.
  */
 function Expander({
   open,
@@ -304,9 +295,8 @@ export function McpServerRow({
   const locked = busy !== null;
   const mine = busy === server.name;
 
-  // The testid names the affordance rather than the slot, because what a row's
-  // one labelled action IS, is the thing worth pinning: the decider's answer and
-  // the control the row actually renders were able to disagree.
+  // The testid names the affordance, not the slot, so it pins the decider's
+  // answer to the control the row renders.
   const primaryLabel =
     primary === null
       ? null

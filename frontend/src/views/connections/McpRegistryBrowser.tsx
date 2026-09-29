@@ -10,13 +10,8 @@ import { registryOutage, type McpRegistryOutage } from "@/lib/mcp-registry";
 /**
  * The directory half of the server search.
  *
- * Discover used to be a panel of its own, nested under the add form, under the
- * server list, inside the same card — and it searched only the directory. So the
- * first thing it could tell an operator was that they could install something
- * they already had. It is a hook now, and its rows land in the one list beside
- * the company's own under a heading that says which is which: an operator types
- * a name to find out whether this company has that server, and the honest answer
- * is either a server they already have or one they could install.
+ * A hook, not a panel. Its rows land in the one list beside the company's own,
+ * under a heading that says which is which.
  *
  * ## It cannot take the server list down with it
  *
@@ -34,7 +29,7 @@ const PAGE_SIZE = 10;
 const DEBOUNCE_MS = 350;
 
 export type DirectoryHalf =
-  /** Nothing typed. The directory is not called at all, so opening costs nothing. */
+  /** Nothing typed. The directory is not called at all. */
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "outage"; outage: McpRegistryOutage }

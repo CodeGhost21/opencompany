@@ -151,11 +151,6 @@ type ToolsState =
 
 /**
  * One server's sign-in, while the operator is still in the other tab.
- *
- * Held on the row rather than in a toast: the toast that used to be the only
- * evidence of a two-minute poll had gone by the time anyone looked for it, and
- * a popup the browser refused to open left the poll running exactly as if it
- * had worked.
  */
 interface SignInFlight {
   authorizeUrl: string;
@@ -190,13 +185,9 @@ interface Props {
 /**
  * The company's MCP tool servers: one searchable list, and the directory in it.
  *
- * The module's front door used to be one card stacking the rows, a permanently
- * open add form and a nested directory browser on top of one another, with no
- * way to search what was already installed. It is a table now — the four things
- * an operator scans for, one labelled action per row and everything else behind
- * an overflow — and the one search field covers this company *and* the
- * directory, because "do we have this?" is one question and answering it across
- * two tabs is what let a second copy of an installed server be installed.
+ * A table: the four things an operator scans for, one labelled action per row
+ * and everything else behind an overflow. The one search field covers this
+ * company *and* the directory.
  *
  * This is the console's **only** MCP surface, and it has exactly one caller:
  * [`McpServersView`](../McpServersView.tsx), the `#/connections/mcp` page.
@@ -431,8 +422,7 @@ export function McpServersSection({
         server.name,
       );
       // See `OAuthView`: in the desktop shell a webview cannot create this tab,
-      // so the authorization page never opens. The code already knew that and
-      // carried on as if it had; now the row says so and offers the address.
+      // so the authorization page never opens.
       let opened = openOutward(authorizeUrl);
       if (!opened) {
         opened = window.open(authorizeUrl, "_blank", "noopener,noreferrer") !== null;
@@ -455,8 +445,6 @@ export function McpServersSection({
         delete pollTimers.current[server.name];
         if (unmounted.current) return;
         if (Date.now() > deadline) {
-          // A row state, not a toast: two minutes later the toast lands long
-          // after the operator stopped looking at it.
           setSignIns((s) => {
             const flight = s[server.name];
             return flight ? { ...s, [server.name]: { ...flight, timedOut: true } } : s;
@@ -999,8 +987,7 @@ export function McpServersSection({
               });
               const dial = mcpRowControls(server, health).lifecycle;
               // At most ONE labelled action per row: the one this server's state
-              // actually calls for. A row used to carry up to seven bare glyphs
-              // distinguished only by an `aria-label`.
+              // actually calls for.
               const primary: PrimaryAction =
                 credential === "sign_in"
                   ? { kind: "sign_in" }
@@ -1134,9 +1121,8 @@ export function McpServersSection({
             const toolState = tools[server.name] ?? { kind: "idle" };
             const credentialOpen = credentialFor === server.name && canManage;
             const envOpen = envFor === server.name && canManage;
-            // The host's own sentence about why a server is not answering. It
-            // is the one thing on the row an operator can act on, so it is kept
-            // verbatim rather than folded into a status word.
+            // The host's own sentence about why a server is not answering, kept
+            // verbatim.
             const complaint =
               health && health.status !== "ok" && health.message.trim()
                 ? health.message
@@ -1365,11 +1351,6 @@ function installedAs(
 
 /**
  * A sign-in the operator is still finishing somewhere else.
- *
- * The row is where the waiting belongs. Before this, the only evidence that a
- * two-minute poll was running was a toast fired at the moment of the click —
- * and a popup the browser refused to open produced the same toast and the same
- * poll as one that succeeded.
  */
 function SignInFlightPanel({
   name,

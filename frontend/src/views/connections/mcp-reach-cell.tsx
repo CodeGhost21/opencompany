@@ -8,12 +8,9 @@ import { avatarFor } from "@/lib/team";
 /**
  * Who can reach a server, as faces rather than a count.
  *
- * The mark is the shipped tiny mascot hashed from the teammate's id, and
- * deliberately never an uploaded avatar: a mascot reference resolves
- * synchronously from a static file, so a cell needs nothing but the id
- * `reachableBy` already carries — no roster read, no authenticated fetch, and no
- * request per face on a list of twenty servers. A teammate who uploaded a photo
- * wears their mascot here, and that is the choice.
+ * The mark is the shipped tiny mascot hashed from the teammate's id, never an
+ * uploaded avatar — it must resolve synchronously from a static file, with no
+ * fetch per face.
  */
 /** One face's own width, and how far the next one is offset into it. */
 const FACE = 24;
@@ -33,11 +30,8 @@ export function McpReachCell({
 }) {
   const wrap = useRef<HTMLDivElement | null>(null);
   /**
-   * The measured width, or `null` before anything has measured it.
-   *
-   * `null` shows every face rather than one: how many fit is a width question,
-   * and a company with two teammates must never be shown an overflow control
-   * because the first paint had not been measured yet.
+   * The measured width, or `null` before anything has measured it. `null` shows
+   * every face.
    */
   const [width, setWidth] = useState<number | null>(null);
 
@@ -98,12 +92,7 @@ export function McpReachCell({
 }
 
 /**
- * How many faces the cell has room for.
- *
- * Not a fixed three: the stack shows as many as the column holds and overflows
- * the rest. An unmeasured cell shows all of them, because the overflow control
- * is a statement that something is being withheld and that must not be made on
- * a guess.
+ * How many faces the cell has room for. An unmeasured cell shows all of them.
  */
 export function fitCount(total: number, width: number | null): number {
   if (width === null || width <= 0) return total;

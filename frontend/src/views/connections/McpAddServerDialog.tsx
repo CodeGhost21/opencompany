@@ -19,14 +19,10 @@ import { Textarea } from "@/components/ui/textarea";
 import type { McpBridgeState } from "@/lib/mcp-bridge";
 
 /**
- * Connecting a server by URL, as a decision rather than four fields at the
- * bottom of a list.
+ * Connecting a server by URL.
  *
- * Pasting a URL is the one flow that hands every agent a new set of tools, and
- * on a build with no MCP bridge it is also the one flow that could report a
- * genuinely green probe no agent will ever act on. Both facts are said here,
- * where the decision is, and the outcome lands on the server it is about instead
- * of as an alert above a form telling the operator to go and find the row.
+ * On a build with no MCP bridge this flow can report a green probe no agent will
+ * ever act on, so it says so here. The outcome lands on the server it is about.
  */
 
 type Phase =
@@ -118,9 +114,8 @@ export function McpAddServerDialog({
     } catch (err) {
       const sentence =
         err instanceof ApiError ? err.message : "Couldn't add the server.";
-      // The host rejects a duplicate by name, so the message sits on the field
-      // it is about: a form-level alert makes the operator re-read four fields
-      // to find which one was refused.
+      // The host rejects a duplicate by name, so the message sits on the Name
+      // field.
       if (/already exists|already configured/i.test(sentence)) {
         setNameError(sentence);
       } else {
@@ -368,9 +363,7 @@ export function McpAddServerDialog({
  * What happened, on the server it happened to.
  *
  * Added-and-broken is its own outcome and not an error on the form: the server
- * exists, is enabled, and is attached to every agent that reaches it. Saying
- * "couldn't add" there would be false and would invite the operator to add it
- * again.
+ * exists, is enabled, and is attached to every agent that reaches it.
  */
 function Outcome({
   result,

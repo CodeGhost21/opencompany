@@ -44,10 +44,8 @@ interface Props {
  * carries, so `#/connections/mcp?tab=json` opens the file directly.
  */
 const MCP_TABS = [
-  // The id stays `connections`, which is what every link already written
-  // against this page carries; only the word an operator reads changes, because
-  // "Connections" is the name of the page family this tab sits in and told a
-  // reader nothing about which of the two notations they were looking at.
+  // The id stays `connections`: every link already written against this page
+  // carries it.
   { id: "connections", label: "Your servers", icon: Server },
   { id: "json", label: "mcp.json", icon: FileJson },
 ] as const satisfies readonly PageTab<string>[];
@@ -59,11 +57,8 @@ export function McpServersView({ client, company }: Props) {
   // call, so it is an admin's (issue #403). Courtesy only: the host answers 403
   // whatever this says. Reading the installed set stays open.
   const [canManage, setCanManage] = useState(false);
-  // The roster, for the per-teammate lens on a server's tool permissions. Read
-  // here rather than inside the panel so switching lens costs no request, and
-  // read once rather than per row. A host with no team plane 404s: the lens then
-  // does not render at all, which is the honest state — nothing is claimed about
-  // a roster nobody answered for.
+  // The roster, for the per-teammate lens on a server's tool permissions. A host
+  // with no team plane 404s, and the lens then does not render at all.
   const [agents, setAgents] = useState<RosterAgent[]>([]);
   // Bumped when the document is saved. The rows are keyed on it, so a save that
   // adds or removes servers re-reads the list instead of leaving the other tab
