@@ -134,9 +134,16 @@ every behaviour it already had comes with it: collapsible sections, per-kind row
 icons, unread and mention badges, the compact collapsed variant, and the "New
 message" door. The expanded DM rows carry each teammate's live-state badge
 (`AgentStatusDot`, read from `useAgentPresence`), and their order follows the
-latest message: the list holds still while the pointer or focus is inside the
-rail (a row must not slide under a click) and slides to the new order on
-release, unless reduced motion is asked for.
+latest message: the list holds still while the pointer or keyboard focus is
+inside the rail (a row must not slide under a click) and slides to the new order
+on release, unless reduced motion is asked for. The focus a mouse click leaves
+on a row does not hold it once the pointer has left. A DM's state is keyed on
+the conversation, not the spelling: the bare teammate id the console posts
+under and the `dm:<id>` desk the hive seat brackets its turn under are one key
+(`presenceChatKey`), so a real DM turn lights its row and header. A hive seat
+streams no live frames, so a DM can show working, queued or approval there, but
+not thinking or typing. The row's accessible name is the teammate's name first,
+then the state.
 
 A portal rather than a state lift, deliberately. `ChatView` stays the one owner
 of the chat model, the rail renders from that state on the same pass, and the
