@@ -294,12 +294,13 @@ pub async fn pick_concluder(
     let lead = desk.lead().ok_or_else(|| {
         OpenCompanyError::Harness(format!("desk `{}` has no seats", desk.desk_id))
     })?;
+    // Bounded through `fit_state`, the same way the decision's own state is: this
+    // path reaches the same routing model against the same window, so clipping
+    // only the request here would have left the findings to overrun it instead.
+    let (request, findings) = fit_state(request, &findings(rows, &desk.desk_id));
     let ask = desk.hive.desk_request(
-        // Clipped for the same reason the decision's state is: this request goes
-        // to the same routing model, against the same window, and a caller is
-        // free to hand it a request nobody would have read.
-        routing_text(&clipped(request, REQUEST_CHAR_BUDGET)),
-        findings(rows, &desk.desk_id),
+        routing_text(&request),
+        findings,
         thread_root.map(|root| tinyhivemind::Sequence(root.value())),
         desk.roster_version,
         routing.policy(),

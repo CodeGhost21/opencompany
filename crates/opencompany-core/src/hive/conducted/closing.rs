@@ -117,9 +117,18 @@ impl HiveDispatcher {
             .await
             {
                 Ok(seat) => seat,
+                // The lead, not nothing. Every other failure on this path
+                // concludes with the lead, for the reason `ALREADY_ASSEMBLED`
+                // gives: an unneeded closing turn costs a turn, a missing one
+                // costs the answer. A routing failure is no different, and
+                // returning here made it the one exception.
                 Err(error) => {
-                    tracing::warn!(%error, desk = %desk.desk_id, "[hive] the closing turn routed nowhere");
-                    return None;
+                    tracing::warn!(
+                        %error,
+                        desk = %desk.desk_id,
+                        "[hive] the closing turn routed nowhere; its lead concludes"
+                    );
+                    lead.clone()
                 }
             },
         };
