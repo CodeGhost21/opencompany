@@ -92,6 +92,10 @@ export interface RoomState {
   ledgerTurns: PresenceLedgerTurn[];
   /** Agent id to how many of its approvals are pending, mirrored from the feed. */
   approvalAgents: Record<string, number>;
+  /** Agent id to how many card runs or delegations it has in flight, from `/tasks/inflight`. */
+  inflightAgents: Record<string, number>;
+  /** Chat run id to the status its last `run_status_changed` named. */
+  runStatuses: Record<string, string>;
   /** Host thread id to the teammate whose DM it is, from the roster. */
   threadAgents: Record<string, string>;
   /** Wall-clock the presence age-out reads; ticked by the shell. */
@@ -126,6 +130,8 @@ function emptyState(): RoomState {
     turnMeta: {},
     ledgerTurns: [],
     approvalAgents: {},
+    inflightAgents: {},
+    runStatuses: {},
     threadAgents: {},
     presenceNow: Date.now(),
   };
@@ -218,6 +224,8 @@ const openTurns = field("openTurns");
 const turnMeta = field("turnMeta");
 const ledgerTurns = field("ledgerTurns");
 const approvalAgents = field("approvalAgents");
+const inflightAgents = field("inflightAgents");
+const runStatuses = field("runStatuses");
 const threadAgents = field("threadAgents");
 const presenceNow = field("presenceNow");
 
@@ -236,6 +244,8 @@ export const setOpenTurns = openTurns.set;
 export const setTurnMeta = turnMeta.set;
 export const setLedgerTurns = ledgerTurns.set;
 export const setApprovalAgents = approvalAgents.set;
+export const setInflightAgents = inflightAgents.set;
+export const setRunStatuses = runStatuses.set;
 export const setThreadAgents = threadAgents.set;
 export const setPresenceNow = presenceNow.set;
 
@@ -264,6 +274,8 @@ export function writersForScope(key: string) {
     setTurnMeta: guard(setTurnMeta),
     setLedgerTurns: guard(setLedgerTurns),
     setApprovalAgents: guard(setApprovalAgents),
+    setInflightAgents: guard(setInflightAgents),
+    setRunStatuses: guard(setRunStatuses),
     setThreadAgents: guard(setThreadAgents),
     setPresenceNow: guard(setPresenceNow),
   };
@@ -329,6 +341,8 @@ function presenceIndex(): PresenceIndex {
     state.turnMeta,
     state.ledgerTurns,
     state.approvalAgents,
+    state.inflightAgents,
+    state.runStatuses,
     state.threadAgents,
     state.presenceNow,
   ];
@@ -343,6 +357,8 @@ function presenceIndex(): PresenceIndex {
     turnMeta: state.turnMeta,
     ledgerTurns: state.ledgerTurns,
     approvalAgents: state.approvalAgents,
+    inflightAgents: state.inflightAgents,
+    runStatuses: state.runStatuses,
     threadAgents: state.threadAgents,
     now: state.presenceNow,
   });

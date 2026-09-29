@@ -107,6 +107,28 @@ for (const scheme of ["light", "dark"] as const) {
       await expect(header).toHaveCount(0);
     });
 
+    test("a DM turn another console sent reads queued, then thinking once its run holds the lock", async ({ page }) => {
+      // The chat route brackets a turn with no agent; the DM's thread says whose
+      // it is, and the run id is the bracket's turn id.
+      const sse = await mockCompany(page);
+      await open(page);
+      const turn = { chatId: RAE.id, turnId: "run-elsewhere-1" };
+      sse.push({ type: "turn_started", seq: 1, atMillis: Date.now(), ...turn });
+      await expect(dotOf(page, RAE.name)).toHaveAttribute("data-state", "queued");
+      sse.push({
+        type: "run_status_changed",
+        seq: 2,
+        atMillis: Date.now(),
+        runId: turn.turnId,
+        attempt: 1,
+        status: "running",
+        from: "pending",
+      });
+      await expect(dotOf(page, RAE.name)).toHaveAttribute("data-state", "thinking");
+      sse.push({ type: "turn_settled", seq: 3, atMillis: Date.now(), outcome: "committed", ...turn });
+      await expect(dotOf(page, RAE.name)).toHaveCount(0);
+    });
+
     test("typing has no expiry: it holds past the person-typing window", async ({ page }) => {
       const sse = await mockCompany(page);
       await open(page);
@@ -135,6 +157,27 @@ for (const scheme of ["light", "dark"] as const) {
 
       approvals = [];
       sse.push({ type: "approval_resolved", seq: 2, atMillis: Date.now(), approvalId: "ap-1", verdict: "approved" });
+      await expect(dotOf(page, ADA.name)).toHaveCount(0);
+    });
+
+    test("an approval that expires clears on the frame, before the feed drops it", async ({ page }) => {
+      // The feed keeps listing it on purpose: the dot must go out on the
+      // `approval_resolved` frame itself (`automatic: true` is an expiry), not
+      // on whichever poll finally stops returning the row.
+      const approvals = [
+        { id: "ap-2", kind: "payment.send", amount_usd: 12, at_millis: Date.now(), agent: ADA.id, thread: null },
+      ];
+      const sse = await mockCompany(page, { approvals: () => approvals });
+      await open(page);
+      await expect(dotOf(page, ADA.name)).toHaveAttribute("data-state", "approval");
+      sse.push({
+        type: "approval_resolved",
+        seq: 1,
+        atMillis: Date.now(),
+        approvalId: "ap-2",
+        verdict: "deny",
+        automatic: true,
+      });
       await expect(dotOf(page, ADA.name)).toHaveCount(0);
     });
 

@@ -10,8 +10,8 @@ import { describe, expect, it } from "vitest";
  * source-contract idiom of `chat-rail-focus.test.ts`:
  *
  *  - `use-events` routes it to `onTurnEvent`, not the `default` arm that warns;
- *  - the shell's `onTurnEvent` accepts it but never folds it into a row, or the
- *    live and folded step counts would disagree;
+ *  - the shell's `onTurnEvent` accepts it and folds it through `foldTurnFrame`,
+ *    which never makes it a row (behaviour in `live-frame-replying.test.ts`);
  *  - the shell gives it no timer (a person's `typing` frame expires after 8s, an
  *    agent's reply can stream longer).
  */
@@ -28,17 +28,18 @@ describe("the replying frame", () => {
     expect(events).toMatch(/case "thinking":\s*case "replying":\s*onTurnEvent\?\.\(event\);/);
   });
 
-  it("is accepted by the shell but kept out of the folded rows", () => {
+  it("is accepted by the shell and folded through the rule that keeps it out of the rows", () => {
+    // The behaviour itself is pinned in `live-frame-replying.test.ts`; this pins
+    // that the shell runs that rule rather than a copy of it.
     expect(shell).toContain('event.type !== "replying"');
-    expect(shell).toContain('if (event.type !== "replying") {');
-    const guard = shell.indexOf('if (event.type !== "replying") {');
-    const fold = shell.indexOf("foldLiveFrame(prev[rowKey]", guard);
-    expect(fold).toBeGreaterThan(guard);
+    expect(shell).toContain("foldTurnFrame(prev[rowKey] ?? [], event)");
+    expect(shell).not.toContain("foldLiveFrame(");
+    expect(shell).toContain("frameTurnMeta(threadId, event.type, Date.now())");
   });
 
   it("has no expiry of its own", () => {
-    const start = shell.indexOf("const isReplying");
-    const body = shell.slice(start, start + 400);
+    const start = shell.indexOf("frameTurnMeta(threadId");
+    const body = shell.slice(start - 400, start + 200);
     expect(body).not.toMatch(/setTimeout|expire|TTL/i);
   });
 });

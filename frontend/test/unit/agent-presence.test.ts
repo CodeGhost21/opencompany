@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  RUN_STATUS_CAP,
   STALE_TURN_MS,
   approvalAgentCounts,
+  clearedOnThread,
   derivePresence,
   dropTurnMeta,
+  inflightAgentCounts,
   presenceChatKey,
   presenceIn,
   presenceOf,
+  recordRunStatus,
   sameCounts,
+  settledInChat,
+  staleTurnMeta,
   strongerPresence,
   type PresenceInputs,
 } from "@/lib/agent-presence";
@@ -28,6 +34,8 @@ const inputs = (over: Partial<PresenceInputs> = {}): PresenceInputs => ({
   turnMeta: {},
   ledgerTurns: [],
   approvalAgents: {},
+  inflightAgents: {},
+  runStatuses: {},
   threadAgents: {},
   now: NOW,
   ...over,
@@ -239,9 +247,86 @@ describe("derivePresence", () => {
     expect(presenceOf(framed, "rae")).toBe("typing");
   });
 
-  it("ignores a ledger turn with no agent (a chat-route bracket)", () => {
+  it("ignores a chat-route bracket (no agent) on a desk, where the thread names nobody", () => {
     const index = derivePresence(inputs({ ledgerTurns: [{ chatId: "desk", startedAtMillis: NOW }] }));
     expect(index.byAgent.size).toBe(0);
+  });
+
+  it("reads a DM turn another console sent as queued, then thinking once its run is running", () => {
+    // The chat route's bracket names no agent, and the run id is its turn id.
+    const bracket = { key: "run-1", chatId: "rae", startedAtMillis: NOW - 1000 };
+    const at = (runStatuses: Record<string, string>) =>
+      derivePresence(inputs({ ledgerTurns: [bracket], threadAgents: { rae: "rae" }, runStatuses }));
+    expect(presenceIn(at({}), "rae", "rae")).toBe("queued");
+    expect(presenceIn(at({ "run-1": "pending" }), "rae", "rae")).toBe("queued");
+    expect(presenceIn(at({ "run-1": "running" }), "rae", "rae")).toBe("thinking");
+    expect(presenceOf(at({ "run-1": "running" }), "rae")).toBe("thinking");
+    // Ended, but the settle never arrived: nothing, rather than a stuck dot.
+    expect(presenceIn(at({ "run-1": "completed" }), "rae", "rae")).toBe("inactive");
+    // Its frames, once they come, speak for it.
+    const framed = derivePresence(
+      inputs({
+        ledgerTurns: [bracket],
+        threadAgents: { rae: "rae" },
+        liveAgentByTurn: { rae: "rae" },
+        turnMeta: { rae: meta("rae", { replying: true }) },
+      }),
+    );
+    expect(presenceIn(framed, "rae", "rae")).toBe("typing");
+  });
+
+  it("does not count this console's own turn twice through its bracket", () => {
+    const index = derivePresence(
+      inputs({
+        openTurns: { rae: [{ queued: false, chatId: "rae", turnId: "run-1" }] },
+        ledgerTurns: [{ key: "run-1", chatId: "rae", startedAtMillis: NOW - 1000 }],
+        threadAgents: { rae: "rae" },
+      }),
+    );
+    // The open turn says it holds the lock; the bracket alone would say queued.
+    expect(presenceIn(index, "rae", "rae")).toBe("thinking");
+    const queuedOwn = derivePresence(
+      inputs({
+        openTurns: { rae: [{ queued: true, chatId: "rae", turnId: "run-1" }] },
+        ledgerTurns: [{ key: "run-1", chatId: "rae", startedAtMillis: NOW - 1000 }],
+        threadAgents: { rae: "rae" },
+        runStatuses: { "run-1": "running" },
+      }),
+    );
+    expect(presenceIn(queuedOwn, "rae", "rae")).toBe("queued");
+  });
+
+  it("skips a seat bracket only where the frames describe that agent, not everywhere", () => {
+    // Rae is framed on the engineering desk while her seat turn runs in her DM.
+    const index = derivePresence(
+      inputs({
+        ledgerTurns: [{ key: "seat-1", agentId: "rae", chatId: "dm:rae", startedAtMillis: NOW - 1000 }],
+        liveAgentByTurn: { engineering: "rae" },
+        turnMeta: { engineering: meta("engineering") },
+        threadAgents: { rae: "rae" },
+      }),
+    );
+    expect(presenceIn(index, "rae", "rae")).toBe("working");
+    expect(presenceIn(index, "rae", "engineering")).toBe("thinking");
+    // In the chat the frames describe, the frames win.
+    const same = derivePresence(
+      inputs({
+        ledgerTurns: [{ key: "seat-1", agentId: "rae", chatId: "engineering", startedAtMillis: NOW - 1000 }],
+        liveAgentByTurn: { engineering: "rae" },
+        turnMeta: { engineering: meta("engineering") },
+      }),
+    );
+    expect(presenceIn(same, "rae", "engineering")).toBe("thinking");
+  });
+
+  it("an inflight card run reads working agent-wide, not on the DM row", () => {
+    const index = derivePresence(inputs({ inflightAgents: { rae: 1 }, threadAgents: { rae: "rae" } }));
+    expect(presenceOf(index, "rae")).toBe("working");
+    expect(presenceIn(index, "rae", "rae")).toBe("inactive");
+    expect(presenceOf(derivePresence(inputs({ inflightAgents: { rae: 0 } })), "rae")).toBe("inactive");
+    // Approval still wins over it.
+    const both = derivePresence(inputs({ inflightAgents: { rae: 1 }, approvalAgents: { rae: 1 } }));
+    expect(presenceOf(both, "rae")).toBe("approval");
   });
 
   it("ages out a turn nothing has heard from, in the ledger and in the frames", () => {
@@ -274,6 +359,54 @@ describe("helpers", () => {
     const all = { a: meta("x"), b: meta("y") };
     expect(dropTurnMeta(all, () => false)).toBe(all);
     expect(Object.keys(dropTurnMeta(all, (_k, m) => m.chatId === "x"))).toEqual(["b"]);
+  });
+
+  it("settledInChat folds a DM's spellings, so a dm:<id> settle clears bare-id frames", () => {
+    const all = { rae: meta("rae"), q1: meta("rae"), desk: meta("engineering") };
+    const drop = settledInChat("dm:rae", { rae: "rae" });
+    expect(Object.keys(dropTurnMeta(all, drop))).toEqual(["desk"]);
+    expect(Object.keys(dropTurnMeta(all, settledInChat("engineering", { rae: "rae" })))).toEqual([
+      "rae",
+      "q1",
+    ]);
+  });
+
+  it("clearedOnThread leaves another question's per-query state when a send starts", () => {
+    const all = { rae: meta("rae"), "h:41": meta("rae"), other: meta("x") };
+    expect(Object.keys(dropTurnMeta(all, clearedOnThread("rae", { queries: false })))).toEqual([
+      "h:41",
+      "other",
+    ]);
+    expect(Object.keys(dropTurnMeta(all, clearedOnThread("rae", { queries: true })))).toEqual(["other"]);
+  });
+
+  it("staleTurnMeta collects only what the age-out already ignores", () => {
+    const all = { old: meta("a", { lastFrameAt: NOW - STALE_TURN_MS }), fresh: meta("b") };
+    expect(Object.keys(dropTurnMeta(all, staleTurnMeta(NOW)))).toEqual(["fresh"]);
+  });
+
+  it("counts an episode seat's approval when it names no agent, and skips resolved ones", () => {
+    const approvals = [
+      { id: "a1", agent: null, episode: { seat: "rae" } },
+      { id: "a2", agent: "ada" },
+      { id: "a3", agent: "ada" },
+    ];
+    expect(approvalAgentCounts(approvals)).toEqual({ rae: 1, ada: 2 });
+    // An `approval_resolved` (an expiry, `automatic: true`, included) lands
+    // before the feed re-read drops the row: the dot goes out on the frame.
+    expect(approvalAgentCounts(approvals, { a1: {}, a2: {} })).toEqual({ ada: 1 });
+  });
+
+  it("counts in-flight runs per agent and records run statuses newest-last, bounded", () => {
+    expect(inflightAgentCounts([{ agentId: "rae" }, { agentId: "rae" }, { agentId: "" }])).toEqual({ rae: 2 });
+    const one = recordRunStatus({}, "r1", "pending");
+    expect(recordRunStatus(one, "r1", "pending")).toBe(one);
+    expect(recordRunStatus(one, "r1", "running")).toEqual({ r1: "running" });
+    let many: Record<string, string> = {};
+    for (let i = 0; i <= RUN_STATUS_CAP; i++) many = recordRunStatus(many, `run-${i}`, "pending");
+    expect(Object.keys(many)).toHaveLength(RUN_STATUS_CAP);
+    expect(many["run-0"]).toBeUndefined();
+    expect(many[`run-${RUN_STATUS_CAP}`]).toBe("pending");
   });
 
   it("counts approvals per asker and skips the ones no agent raised", () => {
