@@ -437,7 +437,14 @@ function Section({
       </div>
 
       {open && (
-        <ul className="mt-0.5 flex flex-col gap-px">
+        <ul
+          // A re-sort moves rows in the DOM. Left as scroll-anchor candidates,
+          // a visible row that jumped to the top dragged the scrolled sidebar
+          // with it (to 0, or to wherever the row landed), because anchoring
+          // keeps the anchor node still on screen. Opting the sliding list out
+          // leaves the offset where the operator put it.
+          className={cn("mt-0.5 flex flex-col gap-px", rowRef && "[overflow-anchor:none]")}
+        >
           {section.channels.map((channel) => (
             <li key={channel.id} ref={rowRef?.(channel.id)}>
               <ChannelRow
