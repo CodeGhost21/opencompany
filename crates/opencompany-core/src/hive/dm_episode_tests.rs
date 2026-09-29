@@ -69,7 +69,8 @@ async fn an_operator_dm_runs_an_episode_answered_by_its_own_teammate() {
         Arc::new(deps),
         Arc::new(pool),
         None,
-    );
+    )
+    .await;
 
     // Journalled first, as `run_cycle` does. A trigger naming a row that was
     // never said threads the episode under a root nothing exists at, and the
@@ -217,7 +218,8 @@ async fn announce_then_reply_does_not_stall() {
         Arc::new(deps),
         Arc::new(pool),
         None,
-    );
+    )
+    .await;
     let reply_seq = events
         .append(
             &record.id,
@@ -286,7 +288,8 @@ async fn a_desk_episode_with_prior_history_settles() {
         Arc::new(deps),
         Arc::new(pool),
         None,
-    );
+    )
+    .await;
     // Journal the triggering message, as `run_cycle` does in production, and
     // dispatch on *its* sequence. A fabricated trigger names a row that does
     // not exist, and the episode threads under a root nothing was said at.
