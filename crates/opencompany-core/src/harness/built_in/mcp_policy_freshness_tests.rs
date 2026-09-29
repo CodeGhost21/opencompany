@@ -276,7 +276,8 @@ async fn a_tool_policy_write_moves_the_mcp_fingerprint() {
     );
 
     let decls = pool.resolve_effective_mcp(&rec, &deps).await;
-    let denied = crate::harness::mcp::embed_servers_for_agent(&decls, &["mcp:*".to_string()]);
+    let denied =
+        crate::harness::mcp::embed_servers_for_agent(&decls, "ceo", &["mcp:*".to_string()]);
     assert!(
         !denied.is_empty(),
         "the granted server must still reach the agent"

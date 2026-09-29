@@ -113,6 +113,24 @@ listed or dialled, and where deny outranks allow. The declaration's own
 it. Only `blocked` is denied this way; a tool that merely parks stays reachable,
 because parking is what the approval gate is for.
 
+The deny list is resolved **for the agent being built**, so one teammate's
+refusal reaches only that teammate's attachment. On a document with no per-agent
+rules it is the company list, in the same order, which is why the upgrade changes
+no attachment.
+
+The gate's own read set is narrowed the same way, and additionally by
+`grants_cover_server` — which the company-wide answer never applied at all, so a
+teammate's gate used to treat a pair on a server it cannot dial as a declared
+read. Both narrowings only remove pairs, and reach is affirmative-membership-only,
+so a smaller set can only park more.
+
+**`needs_approval` still parks nothing on this build.** `ApprovalPolicy::check`
+returns `Allow` at the `policy_hitl_enabled` bypass, and every roster build
+disables policy HITL, so only `blocked` and `always_allow` differ observably: a
+per-agent `needs_approval` behaves as allow. The honest sentence is "block works,
+ask does not yet" — the product requirement is fully expressible with `blocked`,
+and the tests assert on the resolved mode and the deny list, never on parking.
+
 That is resolved when the agent is built, so a block reaches the native path on
 the next roster build — and the stored document is a term of the fingerprint
 `HarnessPool::ensure` compares, so writing one *is* what triggers that build.
@@ -125,9 +143,11 @@ unchanged document does not rebuild the roster on every turn.
 A **directory install** is the other shape: it is addressed by a
 `server_id` argument at call time rather than by the grant its tool was wired
 under, so there is no build-time snapshot to attach a policy to. Its scoping
-decorator reads the install's document when the call arrives — the grant answers
-whether this agent may name the install at all, the policy whether that tool may
-run, and both refuse before anything is dialled. A deployment with no secret
+decorator reads the install's document when the call arrives, resolved for the
+teammate it was wired for — the grant answers whether this agent may name the
+install at all, the policy whether that tool may run, and both refuse before
+anything is dialled. The refusal text names no teammate: whose rule refused the
+call is not an agent's business. A deployment with no secret
 store cannot read a policy and does not invent one; the grant stays the whole
 gate.
 

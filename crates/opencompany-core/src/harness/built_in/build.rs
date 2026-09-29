@@ -440,6 +440,7 @@ pub fn build_agent_with_model(
                     Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool::new(
                         config.clone(),
                     )),
+                    manifest_agent.id.clone(),
                     grants.to_vec(),
                     company.clone(),
                     deps.secrets.clone(),
@@ -448,6 +449,7 @@ pub fn build_agent_with_model(
                     Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool::new(
                         config,
                     )),
+                    manifest_agent.id.clone(),
                     grants.to_vec(),
                     company.clone(),
                     deps.secrets.clone(),
@@ -1126,8 +1128,11 @@ pub fn build_agent_with_model(
         // those names that actually run for a company agent now — can reach
         // this company's own registered servers by name. See
         // `embed_servers_for_agent`'s doc comment for the full story.
-        company_mcp_servers =
-            crate::harness::mcp::embed_servers_for_agent(&deps.mcp_servers, grants);
+        company_mcp_servers = crate::harness::mcp::embed_servers_for_agent(
+            &deps.mcp_servers,
+            &manifest_agent.id,
+            grants,
+        );
         let mcp_security = Arc::new(SecurityPolicy::default());
         // The known-secret set for the scrubber: every credential the agent's
         // granted servers carry, so no configured token can leak into an
@@ -1136,7 +1141,7 @@ pub fn build_agent_with_model(
         // request: an empty request inherits the company belt and can therefore
         // reach servers even when `manifest_agent.tools` is empty.
         let secrets = granted_secrets(&deps.mcp_servers, grants);
-        let mcp_policies = granted_policies(&deps.mcp_servers, grants);
+        let mcp_policies = granted_policies(&deps.mcp_servers, &manifest_agent.id, grants);
         tools.push(Box::new(McpListToolsTool::new(registry.clone())));
         // `OcMcpCallTool` replaces upstream's `McpCallTool`: same name/schema,
         // but it classifies + scrubs failures, rewrites the agent-facing text,

@@ -5815,14 +5815,25 @@ pub(crate) fn grants_for_policy(
     agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref())
 }
 
-/// The MCP `(server, tool)` pairs a teammate's gate lets run without parking.
+/// The MCP `(server, tool)` pairs one teammate's gate lets run without parking.
 ///
-/// Resolved through each server's stored tool policy, so an operator's
-/// refusal or approval requirement wins over the manifest declaration. Every
+/// Resolved through each server's stored tool policy **as it stands for this
+/// teammate**, so an operator's refusal or approval requirement wins over the
+/// manifest declaration and a per-agent one wins over the company's. Every
 /// teammate policy takes its read set from here, whether it serves the chat
 /// roster or an episode seat.
-pub(crate) fn agent_mcp_reads(deps: &HarnessDeps) -> crate::policy::McpReadSet {
-    crate::company::mcp_policy::mcp_allow_set(&deps.mcp_servers)
+///
+/// Also narrowed by `grants_cover_server`, which the company-wide answer never
+/// did: without it a teammate's gate treated a pair on a server it cannot dial as
+/// a declared read. Both narrowings can only remove pairs, and
+/// `mcp_call_reach` is affirmative-membership-only, so a smaller set can only
+/// park more.
+pub(crate) fn agent_mcp_reads(
+    deps: &HarnessDeps,
+    agent: &str,
+    grants: &[String],
+) -> crate::policy::McpReadSet {
+    crate::company::mcp_policy::mcp_allow_set_for_agent(&deps.mcp_servers, agent, grants)
 }
 
 /// The approval policy one teammate is built with.
@@ -5837,13 +5848,18 @@ pub(crate) fn agent_policy_for(
     policy: &Policy,
     effective_budget: Option<f64>,
 ) -> ApprovalPolicy {
+    // Resolved here rather than taken as a parameter: the read set is a function
+    // of this teammate's grants, and a caller that passed a different list than
+    // the one the harness builds the agent with would give it a gate and a
+    // toolbelt that disagree.
+    let grants = grants_for_policy(company, &company.manifest.tools.allow, manifest_agent);
     let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
         .with_policy_hitl_disabled()
         .with_requests(deps.approval_requests.clone())
         // Issue #243: stamp who the parked effect belongs to, so approving it
         // can hand the grant back to this agent rather than to nobody.
         .with_agent(manifest_agent.id.clone())
-        .with_mcp_reads(agent_mcp_reads(deps));
+        .with_mcp_reads(agent_mcp_reads(deps, &manifest_agent.id, &grants));
     if let Some(gate) = deps.emergency_gate.as_ref() {
         agent_policy = agent_policy.with_emergency_gate(gate.clone());
     }
@@ -6425,6 +6441,10 @@ mod built_in_tests_part09;
 #[cfg(test)]
 #[path = "built_in_tests_part10.rs"]
 mod built_in_tests_part10;
+/// Per-agent MCP tool permissions at the five seams that enforce them.
+#[cfg(all(test, feature = "openhuman"))]
+#[path = "mcp_agent_policy_tests.rs"]
+mod mcp_agent_policy_tests;
 /// The tool-permission freshness gate, driven over the console's write route.
 #[cfg(test)]
 #[path = "mcp_policy_freshness_tests.rs"]
