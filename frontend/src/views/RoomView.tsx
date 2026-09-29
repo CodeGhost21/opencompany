@@ -1310,6 +1310,12 @@ export function RoomView({
   const historyPending = channel
     ? loadingTeam || !historyReady(hydration, channel.id)
     : false;
+  // Every channel's history has landed (and the roster with it). The DM list
+  // re-sorts as each history arrives, which is not a reorder worth animating.
+  const railHydrated =
+    !loadingTeam &&
+    hydration.discovered &&
+    Object.values(hydration.byChannel).every((status) => status === "ready");
   // Folded from the raw transcript, and then folded back onto it: an
   // exchange two seats are having is written to their pair channel, so the
   // rows never reach this desk and only the episode fold has seen them.
@@ -2761,6 +2767,9 @@ export function RoomView({
             // `aria-current="page"`: this rail's open channel and the section
             // rail's open sub-page.
             currentPage={routeOpen}
+            // Slide DM rows to their new slot only once every channel's history
+            // has landed: the cold load re-sorts the list as each one arrives.
+            animateReorder={railHydrated}
             // In the sidebar the rail IS the column: it drops its own width,
             // its own border and its own fill, and lets the sidebar's scroll
             // container handle a long list.

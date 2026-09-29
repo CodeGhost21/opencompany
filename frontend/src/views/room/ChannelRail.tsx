@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   ChevronRight,
   CircleDot,
@@ -12,6 +12,8 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { TeammateAvatar } from "@/components/teammate-avatar";
+import { useFlipList } from "@/hooks/use-flip-list";
+import { useStableList } from "@/hooks/use-stable-list";
 import { cn } from "@/lib/utils";
 import { NewMessageDialog } from "./NewMessageDialog";
 import { channelSubtitle, dmFace, type Channel, type ChannelSection } from "./model";
@@ -67,6 +69,12 @@ interface Props {
    * `routeOpen` straight through.
    */
   currentPage?: boolean;
+  /**
+   * Whether the Direct messages list may slide rows to their new slot when a
+   * message re-sorts it. `RoomView` passes `false` until every channel's
+   * history has landed, so a cold load does not play a storm of moves.
+   */
+  animateReorder?: boolean;
 }
 
 /**
@@ -93,6 +101,7 @@ export function ChannelRail({
   onStartDirectMessage,
   className,
   currentPage = true,
+  animateReorder = false,
 }: Props) {
   // Resolved once and threaded down, so the three row shapes cannot come to
   // disagree about what marking the open channel means.
@@ -127,9 +136,32 @@ export function ChannelRail({
     }
   };
 
+  // The Direct messages order is `latestMessageAt` descending, so a message
+  // moves its row to the top. A row sliding under the pointer can land a click
+  // on the wrong DM (the same hazard as #1414), so the order is held while the
+  // pointer or focus is anywhere in the rail and reconciles on release. Only
+  // the ORDER is held, as ids: row content (name, unread) still reads live.
+  const dmSection = sections.find((s) => s.id === "dms");
+  const liveDmIds = useMemo(() => dmSection?.channels.map((c) => c.id) ?? [], [dmSection]);
+  const stable = useStableList(liveDmIds);
+  const shownSections = useMemo(() => {
+    if (!dmSection) return sections;
+    const byId = new Map(dmSection.channels.map((c) => [c.id, c]));
+    const held = stable.items.flatMap((id) => byId.get(id) ?? []);
+    // A DM that appeared mid-hold goes last rather than shifting the rows the
+    // pointer is aiming at; the release puts it in its real slot.
+    const late = dmSection.channels.filter((c) => !stable.items.includes(c.id));
+    return sections.map((s) => (s === dmSection ? { ...s, channels: [...held, ...late] } : s));
+  }, [sections, dmSection, stable.items]);
+  const dmRowRef = useFlipList(
+    shownSections.find((s) => s.id === "dms")?.channels.map((c) => c.id) ?? [],
+    { disabled: !animateReorder || collapsed },
+  );
+
   if (collapsed) {
     return (
       <aside
+        {...stable.containerProps}
         className={cn(
           "w-14 shrink-0 flex-col items-center border-r bg-sidebar/40 py-3",
           className,
@@ -165,15 +197,17 @@ export function ChannelRail({
 
   return (
     <aside
+      {...stable.containerProps}
       className={cn(
         "w-64 shrink-0 flex-col border-r bg-sidebar/40 pb-3",
         className,
       )}
     >
-      {sections.map((section) => (
+      {shownSections.map((section) => (
         <Section
           key={section.id}
           section={section}
+          rowRef={section.id === "dms" ? dmRowRef : undefined}
           // Each section header carries its own door, and only its own.
           // Channels gets "+" (create a channel); Direct messages gets the
           // compose pencil, because a DM is what it starts. It used to float
@@ -326,6 +360,7 @@ function Section({
   open,
   onToggle,
   action,
+  rowRef,
 }: {
   section: ChannelSection;
   activeId: string | null;
@@ -339,6 +374,8 @@ function Section({
   onToggle: () => void;
   /** This section's own door, rendered at the right of its caption. */
   action?: ReactNode;
+  /** Per-row ref from `useFlipList`, for a section whose rows slide when it re-sorts. */
+  rowRef?: (channelId: string) => (node: HTMLElement | null) => void;
 }) {
   const hiddenUnread = !open
     ? section.channels.reduce((n, c) => n + (unread[c.id] ?? 0), 0)
@@ -398,7 +435,7 @@ function Section({
       {open && (
         <ul className="mt-0.5 flex flex-col gap-px">
           {section.channels.map((channel) => (
-            <li key={channel.id}>
+            <li key={channel.id} ref={rowRef?.(channel.id)}>
               <ChannelRow
                 channel={channel}
                 active={channel.id === activeId}
