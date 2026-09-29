@@ -756,6 +756,21 @@ export type CompanyStreamEvent =
       episodeId?: string;
       roundRevision?: number;
     }
+  // The agent has started writing its reply text (nothing more: the frame
+  // carries no text, label or status). Once per run of text; a tool call or a
+  // thinking frame ends the run, so text after a tool round announces itself
+  // again. Never folded into a row. The console shows "typing" from it until a
+  // tool/thinking frame, `agent_reply` or `turn_settled`. Deliberately NOT given
+  // the 8-second lifetime of the person `typing` frame below: an agent's reply
+  // can stream for longer than that.
+  | {
+      type: "replying";
+      seq: number;
+      agentId?: string;
+      chatId?: string;
+      /** See {@link CompanyStreamEvent} `tool_call.messageSeq`. */
+      messageSeq?: number;
+    }
   // Somebody arrived, went idle, or left. Published on a CHANGE only — a
   // console heartbeats every minute whether or not anything moved, and
   // republishing that would be one frame per person per minute for no visible
@@ -1223,7 +1238,7 @@ interface Options {
    */
   onWorkspaceEvent?: (event: CompanyStreamEvent) => void;
   /**
-   * Called for each live turn-progress frame (`tool_call`, `tool_result`) so the
+   * Called for each live turn-progress frame (`tool_call`, `tool_result`, `thinking`, `replying`) so the
    * chat can render the tool timeline as the turn runs, then reconcile against
    * the folded steps on the final reply.
    */
@@ -1600,6 +1615,7 @@ export function handleEvent(
     case "tool_call":
     case "tool_result":
     case "thinking":
+    case "replying":
       onTurnEvent?.(event);
       break;
     // Awareness frames, alongside the turn frames above and toast-free for the

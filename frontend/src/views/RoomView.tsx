@@ -986,6 +986,14 @@ export function RoomView({
     >
   >(new Map());
 
+  // Which teammate each DM thread belongs to, for the agent presence dot: a turn
+  // just accepted on a DM has named nobody yet, and the thread is the only clue.
+  // The roster is the RoomView's own (it resolves it independently of the
+  // shell), so the mapping is written from here.
+  useEffect(() => {
+    room.setThreadAgents(Object.fromEntries(members.map((m) => [dmThreadId(m), m.id])));
+  }, [members]);
+
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.
   //

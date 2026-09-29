@@ -37,6 +37,15 @@
 import { useSyncExternalStore } from "react";
 
 import type { TurnStep } from "@/api/types";
+import {
+  derivePresence,
+  presenceIn,
+  presenceOf,
+  type AgentPresenceState,
+  type PresenceIndex,
+  type PresenceLedgerTurn,
+  type TurnMeta,
+} from "@/lib/agent-presence";
 import type { OpenTurn } from "@/lib/live-reply";
 import type { ChatReceipt } from "@/views/room/ChatLiveReceipt";
 import {
@@ -72,6 +81,21 @@ export interface RoomState {
    */
   liveAgentByTurn: Record<string, string>;
   openTurns: Record<string, OpenTurn[]>;
+  /**
+   * What each live turn's frames last said, keyed exactly as `liveAgentByTurn`
+   * is: the thread they named and whether the last one was the host's
+   * `replying` marker. The half of "typing" that `liveStepsBy*` cannot hold,
+   * because a reply with no tool call leaves no row behind.
+   */
+  turnMeta: Record<string, TurnMeta>;
+  /** The turn-bracket ledger's open turns, mirrored from the shell's reducer. */
+  ledgerTurns: PresenceLedgerTurn[];
+  /** Agent id to how many of its approvals are pending, mirrored from the feed. */
+  approvalAgents: Record<string, number>;
+  /** Host thread id to the teammate whose DM it is, from the roster. */
+  threadAgents: Record<string, string>;
+  /** Wall-clock the presence age-out reads; ticked by the shell. */
+  presenceNow: number;
 }
 
 /**
@@ -99,6 +123,11 @@ function emptyState(): RoomState {
     receiptByThread: {},
     liveAgentByTurn: {},
     openTurns: {},
+    turnMeta: {},
+    ledgerTurns: [],
+    approvalAgents: {},
+    threadAgents: {},
+    presenceNow: Date.now(),
   };
 }
 
@@ -186,6 +215,11 @@ const liveStepsByMessage = field("liveStepsByMessage");
 const receiptByThread = field("receiptByThread");
 const liveAgentByTurn = field("liveAgentByTurn");
 const openTurns = field("openTurns");
+const turnMeta = field("turnMeta");
+const ledgerTurns = field("ledgerTurns");
+const approvalAgents = field("approvalAgents");
+const threadAgents = field("threadAgents");
+const presenceNow = field("presenceNow");
 
 /* ---- writers: `useState` semantics, so call sites move across untouched ---- */
 
@@ -199,6 +233,11 @@ export const setLiveStepsByMessage = liveStepsByMessage.set;
 export const setReceiptByThread = receiptByThread.set;
 export const setLiveAgentByTurn = liveAgentByTurn.set;
 export const setOpenTurns = openTurns.set;
+export const setTurnMeta = turnMeta.set;
+export const setLedgerTurns = ledgerTurns.set;
+export const setApprovalAgents = approvalAgents.set;
+export const setThreadAgents = threadAgents.set;
+export const setPresenceNow = presenceNow.set;
 
 /**
  * Writers bound to the scope that created an asynchronous operation.
@@ -222,6 +261,11 @@ export function writersForScope(key: string) {
     setReceiptByThread: guard(setReceiptByThread),
     setLiveAgentByTurn: guard(setLiveAgentByTurn),
     setOpenTurns: guard(setOpenTurns),
+    setTurnMeta: guard(setTurnMeta),
+    setLedgerTurns: guard(setLedgerTurns),
+    setApprovalAgents: guard(setApprovalAgents),
+    setThreadAgents: guard(setThreadAgents),
+    setPresenceNow: guard(setPresenceNow),
   };
 }
 
@@ -263,5 +307,62 @@ export function useLiveSteps(threadId: string | null): LiveStep[] {
 export function useThreadTurns(threadId: string | null): OpenTurn[] {
   const read = (): OpenTurn[] =>
     (threadId === null ? undefined : state.openTurns[threadId]) ?? NO_TURNS;
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+/**
+ * The presence index, recomputed only when one of its inputs is replaced.
+ *
+ * Every subscriber of `useAgentPresence` reads the snapshot on every store
+ * change, so without this each frame would re-derive the whole index once per
+ * avatar on screen. Inputs are compared by identity, which is what the field
+ * setters preserve for an unchanged field.
+ */
+let presenceCache: { deps: unknown[]; index: PresenceIndex } | null = null;
+
+function presenceIndex(): PresenceIndex {
+  const deps: unknown[] = [
+    state.openTurns,
+    state.liveStepsByThread,
+    state.liveStepsByMessage,
+    state.liveAgentByTurn,
+    state.turnMeta,
+    state.ledgerTurns,
+    state.approvalAgents,
+    state.threadAgents,
+    state.presenceNow,
+  ];
+  if (presenceCache && presenceCache.deps.every((d, i) => Object.is(d, deps[i]))) {
+    return presenceCache.index;
+  }
+  const index = derivePresence({
+    openTurns: state.openTurns,
+    liveStepsByThread: state.liveStepsByThread,
+    liveStepsByMessage: state.liveStepsByMessage,
+    liveAgentByTurn: state.liveAgentByTurn,
+    turnMeta: state.turnMeta,
+    ledgerTurns: state.ledgerTurns,
+    approvalAgents: state.approvalAgents,
+    threadAgents: state.threadAgents,
+    now: state.presenceNow,
+  });
+  presenceCache = { deps, index };
+  return index;
+}
+
+/**
+ * What an agent is doing, as one of six words (see `lib/agent-presence.ts`).
+ *
+ * Across every chat by default. Pass `chatId` for a surface that is about one
+ * conversation (a DM row, a DM header), so an agent busy in another channel does
+ * not light this one. A plain string, so the snapshot has a stable identity with
+ * no constant objects to hold.
+ */
+export function useAgentPresence(agentId: string | null | undefined, chatId?: string | null): AgentPresenceState {
+  const read = (): AgentPresenceState => {
+    if (!agentId) return "inactive";
+    const index = presenceIndex();
+    return chatId ? presenceIn(index, agentId, chatId) : presenceOf(index, agentId);
+  };
   return useSyncExternalStore(subscribe, read, read);
 }
