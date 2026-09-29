@@ -2094,8 +2094,28 @@ export interface McpServer {
   serverId?: string;
   /** The directory's qualified name (`@org/server`), when this row came from one. */
   qualifiedName?: string;
-  /** The directory's icon, when this row came from one. */
+  /**
+   * The server's mark: what it reported about itself on its last successful
+   * probe, else the directory's on a row backed by an install.
+   *
+   * An inline `data:` image the host fetched itself, so rendering it reaches
+   * nothing. An icon address a remote server chose must never become a request
+   * from the operator's browser — that would tell that host when someone opens
+   * this page.
+   */
   iconUrl?: string;
+  /** The display name the server reported for itself, when it reported one. */
+  probedTitle?: string;
+  /**
+   * The server's own description of what it does, when it reported one.
+   *
+   * Distinct from {@link McpServer.description}, which is what the operator or
+   * the bundle declared: the console offers this as the default for that field
+   * rather than overwriting a declaration with it.
+   */
+  probedDescription?: string;
+  /** The server's home page, when it reported one. A link; nothing fetches it. */
+  websiteUrl?: string;
   /** How an install is dialled — `http_remote` or `stdio`. Absent on a List A-only row. */
   transport?: string;
 }
