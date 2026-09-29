@@ -224,6 +224,14 @@ export function TierSection({
   onToggleShowAll,
   apply,
   onClearRow,
+  /**
+   * Draw what happens instead of the controls that decide it.
+   *
+   * A teammate's own page resolves and links; the modes are edited on the
+   * server, so a control there would be a second write path for one document —
+   * and a tier default that is never per-teammate has nothing to offer at all.
+   */
+  controls = true,
 }: {
   tier: ToolTier;
   gate?: ToolGate;
@@ -238,6 +246,7 @@ export function TierSection({
   onToggleShowAll: () => void;
   apply: (patch: ToolPolicyPatch) => void;
   onClearRow?: (tool: string) => void;
+  controls?: boolean;
 }) {
   const bodyId = `tier-body-${tier}`;
   const { shown, hidden } = visibleRows(gate, rows, showAll);
@@ -272,31 +281,33 @@ export function TierSection({
             ({rows.length})
           </span>
         </button>
-        <Select
-          value={bulk.stored ? bulk.mode : UNSET}
-          onValueChange={(v) => v && apply(tierPatch(tier, v))}
-          items={TIER_DEFAULT_LABELS}
-          disabled={!canManage || busy || perAgent}
-        >
-          <SelectTrigger
-            id={`tier-${tier}`}
-            aria-label={`Default for ${SECTION_TITLES[tier].toLowerCase()}`}
-            className="w-40"
+        {controls && (
+          <Select
+            value={bulk.stored ? bulk.mode : UNSET}
+            onValueChange={(v) => v && apply(tierPatch(tier, v))}
+            items={TIER_DEFAULT_LABELS}
+            disabled={!canManage || busy || perAgent}
           >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={UNSET}>Not set</SelectItem>
-            {(Object.keys(MODE_LABELS) as ApprovalMode[]).map((mode) => (
-              <SelectItem key={mode} value={mode}>
-                {MODE_LABELS[mode]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <SelectTrigger
+              id={`tier-${tier}`}
+              aria-label={`Default for ${SECTION_TITLES[tier].toLowerCase()}`}
+              className="w-40"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={UNSET}>Not set</SelectItem>
+              {(Object.keys(MODE_LABELS) as ApprovalMode[]).map((mode) => (
+                <SelectItem key={mode} value={mode}>
+                  {MODE_LABELS[mode]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
 
-      {perAgent && (
+      {controls && perAgent && (
         <p
           className="text-3xs text-muted-foreground"
           data-testid={`mcp-tier-company-only-${tier}`}
@@ -324,6 +335,7 @@ export function TierSection({
                   busy={busy}
                   apply={apply}
                   onClearRow={onClearRow}
+                  controls={controls}
                 />
               ))}
             </ul>
