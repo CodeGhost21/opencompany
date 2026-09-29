@@ -1,9 +1,7 @@
 //! What the server-family brief says about a server one teammate is refused
 //! everything on.
 //!
-//! Ungated, like the renderer: this is a claim in an agent's system prompt, and a
-//! claim proved only in a filtered lane is one the default lane cannot notice
-//! going wrong.
+//! Ungated, like the renderer, so the default lane runs it.
 
 use super::*;
 use crate::company::mcp::{AuthMaterial, McpSource};
@@ -67,8 +65,7 @@ fn blocked_for(agent: &str, tools: &[&str]) -> McpToolPolicies {
 }
 
 /// The state per-agent policy creates: reaches a server, can call nothing on it.
-/// Named **with** the refusal, because `mcp_list_tools` returns empty there and an
-/// agent cannot otherwise tell "server down" from "you may call nothing".
+/// Named **with** the refusal.
 #[test]
 fn a_server_every_tool_of_which_is_refused_is_named_as_refused() {
     let mut server = decl("notion");
@@ -116,8 +113,6 @@ fn one_callable_tool_leaves_the_server_named_normally() {
 }
 
 /// A server no probe has reached knows no tool, so nothing about it is refused.
-/// Claiming otherwise would tell an agent it may call nothing on a server nobody
-/// has asked yet.
 #[test]
 fn an_unprobed_server_is_never_called_refused() {
     let mut server = decl("notion");
