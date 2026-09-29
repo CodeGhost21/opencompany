@@ -99,9 +99,7 @@ pub mod mcp_file;
 pub mod mcp_policy;
 /// What an MCP server says about itself — its own title, description, website
 /// and icon, read off the `serverInfo` block of its `initialize` reply and kept
-/// beside its health record. Ungated for the same reason `mcp_policy` is: the
-/// console renders it in every build, and only the probe that fills it needs a
-/// transport.
+/// beside its health record.
 pub mod mcp_server_info;
 pub mod paypal;
 // Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the

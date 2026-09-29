@@ -1,26 +1,11 @@
 //! What an MCP server says about itself: the `serverInfo` block of its
 //! `initialize` reply, kept per server beside its health record.
 //!
-//! The protocol leaves `serverInfo` open-ended, so every field here is optional
-//! and coverage is patchy in practice — Context7 answers with a title, a
-//! description, a website and icons, DeepWiki with none of them. Absent has to
-//! stay representable: a placeholder would be this host asserting something the
-//! server never said.
-//!
-//! ## Icons never become a request from the operator's browser
-//!
-//! An icon URL is chosen by whoever runs the remote server. Put in an `src=`
-//! attribute it is a beacon that fires for every operator who opens the
-//! Connections page and reports to that host who looked and when — the same
-//! reasoning that closed the avatar grammar to URLs
-//! ([`super::avatar`]). So the host fetches the icon itself, during the probe it
-//! already performs, and stores the bytes inline as a `data:` URI: rendering one
-//! reaches nothing at all, which is the strongest form of "served from our own
-//! origin". A fetch that fails leaves [`McpServerInfo::icon_data_url`] `None`
-//! and the console draws its letter tile.
-//!
-//! [`load`] therefore refuses a stored `icon_data_url` that is not a `data:`
-//! image, so a tampered store cannot turn the field back into a remote URL.
+//! Icons never become a request from the operator's browser: the host fetches
+//! the icon during the probe it already performs and stores the bytes inline as
+//! a `data:` URI. [`load`] refuses a stored `icon_data_url` that is not a
+//! `data:` image, so a tampered store cannot turn the field back into a remote
+//! URL.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,16 +18,10 @@ use crate::ports::types::{CompanyId, SecretValue};
 /// The longest stored title.
 const MAX_TITLE_CHARS: usize = 120;
 
-/// The longest stored description. Sized for the sentence a console renders
-/// under a server's name, not for prose a server would like to send.
+/// The longest stored description.
 const MAX_DESCRIPTION_CHARS: usize = 400;
 
 /// The largest icon the host will fetch and store.
-///
-/// The console draws these at tens of pixels, so this is generous for the job
-/// and mean for anything else — the bytes ride inline in the Connections read,
-/// which is the reason the ceiling is far below
-/// [`MAX_AVATAR_BYTES`](super::avatar::MAX_AVATAR_BYTES).
 pub const MAX_ICON_BYTES: usize = 64 * 1024;
 
 /// How long the host waits for an icon before giving up on it.
@@ -87,8 +66,8 @@ impl McpServerInfo {
 
 /// Reads the `title`, `description` and `websiteUrl` a server reported.
 ///
-/// The icon is not filled here — it takes a network fetch, which [`fetch_icon`]
-/// performs against the URL [`icon_source`] picks out.
+/// The icon is not filled here: [`fetch_icon`] fetches the URL [`icon_source`]
+/// picks out.
 pub fn from_server_info(server_info: &Value) -> McpServerInfo {
     McpServerInfo {
         title: text(server_info, "title", MAX_TITLE_CHARS),
@@ -102,10 +81,6 @@ pub fn from_server_info(server_info: &Value) -> McpServerInfo {
 }
 
 /// The first `http(s)` icon source a server advertised, if any.
-///
-/// `icons` is an array of objects carrying a `src`; the first usable one wins
-/// rather than the largest, because the sizes a server declares are its own
-/// claim and every accepted icon is capped on the way in regardless.
 pub fn icon_source(server_info: &Value) -> Option<String> {
     server_info
         .get("icons")?
@@ -116,11 +91,6 @@ pub fn icon_source(server_info: &Value) -> Option<String> {
 }
 
 /// One field of the remote block, bounded and stripped of control characters.
-///
-/// Remote text reaches an operator's screen from here, so the length ceiling is
-/// the host's rather than the server's, and a control character — which could
-/// reorder or overwrite what is rendered around it — is dropped rather than
-/// escaped.
 fn text(server_info: &Value, field: &str, max_chars: usize) -> Option<String> {
     let raw = server_info.get(field)?.as_str()?;
     let cleaned: String = raw
@@ -133,9 +103,6 @@ fn text(server_info: &Value, field: &str, max_chars: usize) -> Option<String> {
 }
 
 /// A URL the console may render as a link: `http(s)` and nothing else.
-///
-/// `javascript:` and `data:` are the reason this is a scheme allow-list rather
-/// than a check for what is obviously hostile.
 fn http_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.chars().any(char::is_whitespace) {
@@ -152,10 +119,8 @@ fn is_inline_image(value: &str) -> bool {
 /// Reads a server's stored self-description, or the empty one when it has never
 /// been probed.
 ///
-/// A malformed record degrades to the empty description rather than erroring —
-/// a missing subtitle is never worth failing a status read over. A stored
-/// `icon_data_url` that is not an inline image is dropped on the way out, so the
-/// field the console puts in an `src=` cannot have become a remote URL.
+/// A malformed record degrades to the empty description rather than erroring. A
+/// stored `icon_data_url` that is not an inline image is dropped on the way out.
 pub async fn load(company: &CompanyId, name: &str, secrets: &dyn SecretStore) -> McpServerInfo {
     let raw = match secrets.get(company, &server_info_key(name)).await {
         Ok(Some(SecretValue(raw))) => raw,
@@ -196,14 +161,10 @@ pub async fn save(
 
 /// Fetches `url` and returns it as an inline `data:` image, or `None`.
 ///
-/// Four things bound what a remote server can make this host do: the SSRF guard
-/// the outbound tools apply (so an icon cannot address the instance's own
-/// network or a cloud metadata endpoint), no redirect following (so a public URL
-/// cannot hand the request onward to a private one), a byte ceiling read off the
-/// body rather than off the declared length, and a media type taken from the
-/// bytes' own signature rather than from the `Content-Type` the server claimed.
-/// Anything that fails one of them yields `None`, and the console falls back to
-/// its letter tile.
+/// Bounded by the outbound SSRF guard, no redirect following, a byte ceiling
+/// read off the body rather than the declared length, and a media type sniffed
+/// from the bytes rather than the `Content-Type` header. Anything that fails one
+/// of them yields `None`.
 #[cfg(feature = "mcp")]
 pub async fn fetch_icon(url: &str) -> Option<String> {
     use futures::StreamExt;
@@ -234,13 +195,9 @@ pub async fn fetch_icon(url: &str) -> Option<String> {
 /// Fetched bytes as the inline image they will be stored and served as, or
 /// `None` when they are not an image this host will re-serve.
 ///
-/// The media type comes from the bytes' own signature rather than from the
-/// `Content-Type` the server claimed, because what is claimed is a claim and
-/// what is served has to be a fact — and because the one format that could
-/// carry script, SVG, has no signature to match and lands here as `None`
-/// whatever it was labelled. The decoded size is held to the avatar
-/// decompression-bomb check, so a header promising 65535×65535 in a few hundred
-/// bytes is refused rather than handed to every operator who opens the page.
+/// The media type comes from the bytes' own signature, so SVG — which has none
+/// — is always `None` whatever it was labelled. The decoded size is held to the
+/// avatar decompression-bomb check.
 #[cfg(feature = "mcp")]
 fn inline_image(bytes: &[u8]) -> Option<String> {
     use base64::Engine;
@@ -254,8 +211,7 @@ fn inline_image(bytes: &[u8]) -> Option<String> {
     Some(format!("data:{media_type};base64,{encoded}"))
 }
 
-/// Without the `mcp` feature no agent in the build can call an MCP server, so
-/// there is no console row to draw an icon on and nothing to fetch.
+/// Always `None` without the `mcp` feature.
 #[cfg(not(feature = "mcp"))]
 pub async fn fetch_icon(_url: &str) -> Option<String> {
     None
