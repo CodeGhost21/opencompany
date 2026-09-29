@@ -12,10 +12,12 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { AgentFace } from "@/components/agent-face";
+import { agentPresenceLabel } from "@/components/agent-status-dot";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { useFlipList } from "@/hooks/use-flip-list";
 import { useStableList } from "@/hooks/use-stable-list";
 import { cn } from "@/lib/utils";
+import { useAgentPresence } from "@/room/store";
 import { NewMessageDialog } from "./NewMessageDialog";
 import { channelSubtitle, dmFace, dmThreadId, type Channel, type ChannelSection } from "./model";
 
@@ -487,6 +489,14 @@ function ChannelRow({
 }) {
   const hasUnread = unread > 0 && !active;
   const hasMentions = mentions > 0;
+  // The dot on the avatar is decorative here (`AgentFace decorative`): its
+  // words go AFTER the name, so the row is announced "Ada Lovelace, Thinking"
+  // and a screen-reader user hears who before what. Same lookup the dot makes.
+  const statusAgent = channel.kind === "dm" && dmFace(channel) ? channel.member?.id : undefined;
+  const status = useAgentPresence(
+    statusAgent,
+    channel.member ? dmThreadId(channel.member) : undefined,
+  );
 
   return (
     <button
@@ -511,6 +521,9 @@ function ChannelRow({
     >
       <ChannelIcon channel={channel} withStatus />
       <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+      {status !== "inactive" && (
+        <span className="sr-only">, {agentPresenceLabel(status)}</span>
+      )}
       {hasMentions && (
         <span
           data-testid="channel-mentions"
@@ -549,6 +562,7 @@ function ChannelIcon({ channel, withStatus = false }: { channel: Channel; withSt
         agentId={withStatus ? channel.member?.id : undefined}
         chatId={channel.member ? dmThreadId(channel.member) : undefined}
         surface="chrome"
+        decorative
       >
         <TeammateAvatar {...face} className="size-6 text-2xs" />
       </AgentFace>

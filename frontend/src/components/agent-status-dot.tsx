@@ -15,6 +15,11 @@ const LABEL: Record<Exclude<AgentPresenceState, "inactive">, string> = {
   queued: "Queued",
 };
 
+/** The words a state is announced by, or `null` for `inactive` (which draws nothing). */
+export function agentPresenceLabel(state: AgentPresenceState): string | null {
+  return state === "inactive" ? null : LABEL[state];
+}
+
 /** The surface the dot sits on, so its cut-out ring matches what is behind it. */
 export type AgentStatusSurface = "chrome" | "card" | "sidebar" | "background";
 
@@ -49,6 +54,9 @@ const SIZE = { sm: "size-2", md: "size-2.5" } as const;
  * | thinking | status-running   | closed ring, pulsing           |
  * | queued   | status-idle      | plain filled dot               |
  *
+ * `decorative` hides it from assistive tech (no role, no label) for a surface
+ * that announces the state in its own words after the agent's name.
+ *
  * Positioned at the bottom-right of a `relative` parent, which is what
  * `AgentFace` provides. It is a sibling of the avatar tile, never inside it:
  * `TeammateAvatar` clips with `overflow-hidden`.
@@ -57,6 +65,7 @@ export function AgentStatusDot({
   state,
   size = "sm",
   surface = "chrome",
+  decorative = false,
   className,
 }: {
   state: AgentPresenceState;
@@ -66,14 +75,17 @@ export function AgentStatusDot({
    * rows, `card` on cards, `background` on the page or a sheet.
    */
   surface?: AgentStatusSurface;
+  /** The surrounding control says the state itself; hide this from assistive tech. */
+  decorative?: boolean;
   className?: string;
 }) {
   if (state === "inactive") return null;
   const label = LABEL[state];
   return (
     <span
-      role="img"
-      aria-label={label}
+      role={decorative ? undefined : "img"}
+      aria-label={decorative ? undefined : label}
+      aria-hidden={decorative ? true : undefined}
       title={label}
       data-testid="agent-status-dot"
       data-state={state}

@@ -40,7 +40,10 @@ for (const scheme of ["light", "dark"] as const) {
       // Thinking: a thinking frame and nothing else.
       sse.push({ type: "thinking", seq: 1, agentId: RAE.id, chatId: RAE.id });
       await expect(dotOf(page, RAE.name)).toHaveAttribute("data-state", "thinking");
-      await expect(dotOf(page, RAE.name)).toHaveAccessibleName("Thinking");
+      // The row is announced name first: the dot is decorative there and the
+      // state rides after the name, not "Thinking Rae Ceo".
+      await expect(dmRow(page, RAE.name)).toHaveAccessibleName(/^Rae Ceo\W+Thinking$/);
+      await expect(dotOf(page, RAE.name)).toHaveAttribute("aria-hidden", "true");
       await page.screenshot({ path: test.info().outputPath(`dot-thinking-${scheme}.png`) });
 
       // Working: a tool call is running.
@@ -83,9 +86,6 @@ for (const scheme of ["light", "dark"] as const) {
       await expect(dotOf(page, RAE.name)).toHaveCount(0);
     });
 
-    test("typing has no expiry: it holds past the person-typing window", async ({ page }) => {
-      const sse = await mockCompany(page);
-      await open(page);
     test("a hive seat's dm:<id> bracket lights the bare-id DM row and its header", async ({ page }) => {
       // The shape a real DM turn has: the console addresses Rae's DM by the
       // bare id, and the hive seat that answers it brackets its turn under its
@@ -107,6 +107,9 @@ for (const scheme of ["light", "dark"] as const) {
       await expect(header).toHaveCount(0);
     });
 
+    test("typing has no expiry: it holds past the person-typing window", async ({ page }) => {
+      const sse = await mockCompany(page);
+      await open(page);
       sse.push({ type: "replying", seq: 1, agentId: RAE.id, chatId: RAE.id });
       await expect(dotOf(page, RAE.name)).toHaveAttribute("data-state", "typing");
       // A person's `typing` frame lapses after 8s; an agent's reply can stream
@@ -125,7 +128,9 @@ for (const scheme of ["light", "dark"] as const) {
       ];
       sse.push({ type: "approval_parked", seq: 1, atMillis: Date.now(), approvalId: "ap-1", kind: "payment.send" });
       await expect(dotOf(page, ADA.name)).toHaveAttribute("data-state", "approval");
-      await expect(dotOf(page, ADA.name)).toHaveAccessibleName("Waiting for your approval");
+      await expect(dmRow(page, ADA.name)).toHaveAccessibleName(
+        /^Ada Lovelace\W+Waiting for your approval$/,
+      );
       await page.screenshot({ path: test.info().outputPath(`dot-approval-${scheme}.png`) });
 
       approvals = [];

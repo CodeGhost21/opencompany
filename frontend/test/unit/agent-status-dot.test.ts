@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AgentFace } from "@/components/agent-face";
-import { AgentStatusDot } from "@/components/agent-status-dot";
+import { AgentStatusDot, agentPresenceLabel } from "@/components/agent-status-dot";
 import type { AgentPresenceState } from "@/lib/agent-presence";
 import * as room from "@/room/store";
 
@@ -68,6 +68,20 @@ describe("AgentStatusDot", () => {
     };
     const shapes = new Set(["working", "typing", "thinking"].map((s) => shape(s as AgentPresenceState)));
     expect(shapes.size).toBe(3);
+  });
+
+  it("hides a decorative dot from assistive tech but keeps its hover title", () => {
+    act(() => root.render(createElement(AgentStatusDot, { state: "thinking", decorative: true })));
+    const el = dot()!;
+    expect(el.getAttribute("aria-hidden")).toBe("true");
+    expect(el.getAttribute("role")).toBeNull();
+    expect(el.getAttribute("aria-label")).toBeNull();
+    expect(el.getAttribute("title")).toBe("Thinking");
+  });
+
+  it("agentPresenceLabel names every drawn state and nothing for inactive", () => {
+    expect(agentPresenceLabel("working")).toBe("Working");
+    expect(agentPresenceLabel("inactive")).toBeNull();
   });
 });
 
