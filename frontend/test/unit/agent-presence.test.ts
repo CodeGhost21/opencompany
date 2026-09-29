@@ -5,6 +5,7 @@ import {
   approvalAgentCounts,
   derivePresence,
   dropTurnMeta,
+  presenceChatKey,
   presenceIn,
   presenceOf,
   sameCounts,
@@ -76,6 +77,50 @@ describe("derivePresence", () => {
       }),
     );
     expect(presenceIn(index, "general", "dm:general")).toBe("thinking");
+  });
+
+  it("lights a bare-id DM from a hive seat's dm:<id> bracket (one key per DM)", () => {
+    // The real shape: the console addresses Rae's DM as `rae`, the hive seat
+    // that answers it brackets its turn under `dm:rae`, and streams no frames.
+    const index = derivePresence(
+      inputs({
+        ledgerTurns: [{ agentId: "rae", chatId: "dm:rae", startedAtMillis: NOW - 5000 }],
+        threadAgents: { rae: "rae" },
+      }),
+    );
+    expect(presenceIn(index, "rae", "rae")).toBe("working");
+    expect(presenceIn(index, "rae", "dm:rae")).toBe("working");
+    // A queued chat-route turn on the bare id and the seat's bracket are one
+    // conversation, so the stronger state wins rather than two keys splitting it.
+    const both = derivePresence(
+      inputs({
+        openTurns: { rae: [{ queued: true, chatId: "rae" }] },
+        ledgerTurns: [{ agentId: "rae", chatId: "dm:rae", startedAtMillis: NOW - 5000 }],
+        threadAgents: { rae: "rae" },
+      }),
+    );
+    expect(presenceIn(both, "rae", "rae")).toBe("working");
+  });
+
+  it("presenceChatKey folds a DM's two spellings and leaves desks, pairs and #general alone", () => {
+    const threads = { rae: "rae", "dm:general": "general" };
+    expect(presenceChatKey("rae", threads)).toBe("dm:rae");
+    expect(presenceChatKey("dm:rae", threads)).toBe("dm:rae");
+    expect(presenceChatKey("dm:general", threads)).toBe("dm:general");
+    expect(presenceChatKey("general", threads)).toBe("general");
+    expect(presenceChatKey("engineering", threads)).toBe("engineering");
+    expect(presenceChatKey("dm:ada+rae", threads)).toBe("dm:ada+rae");
+  });
+
+  it("does not light a teammate's DM from the #general channel", () => {
+    const index = derivePresence(
+      inputs({
+        ledgerTurns: [{ agentId: "general", chatId: "general", startedAtMillis: NOW - 5000 }],
+        threadAgents: { "dm:general": "general" },
+      }),
+    );
+    expect(presenceIn(index, "general", "dm:general")).toBe("inactive");
+    expect(presenceIn(index, "general", "general")).toBe("working");
   });
 
   it("reads queued only when every open turn is queued, and thinking beats it", () => {

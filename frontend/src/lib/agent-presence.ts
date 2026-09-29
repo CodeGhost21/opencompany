@@ -108,6 +108,8 @@ export interface PresenceIndex {
   byAgentChat: ReadonlyMap<string, AgentPresenceState>;
   /** Agents with at least one pending approval, for the per-chat lookup. */
   approving: ReadonlySet<string>;
+  /** Host thread id to the teammate whose DM it is, for {@link presenceChatKey}. */
+  threadAgents: Readonly<Record<string, string>>;
 }
 
 /** The `byAgentChat` key. */
@@ -115,15 +117,37 @@ export function presenceKey(agentId: string, chatId: string): string {
   return `${agentId}\u0000${chatId}`;
 }
 
+/**
+ * One spelling for a DM, whichever the thread id arrived in.
+ *
+ * A DM has two: the console addresses an ordinary teammate's DM by its **bare**
+ * id (`dmThreadId`), so the chat route's turns and frames name `ceo`, while the
+ * hive seat that answers it journals its turn brackets under its desk id,
+ * `dm:ceo` (`hive/host.rs`). Keyed as they arrived, a real DM turn lit
+ * `(ceo, dm:ceo)` and the DM row, which asks for `(ceo, ceo)`, stayed dark.
+ *
+ * Folded to `dm:<teammate>`, which cannot collide with a desk: a thread the
+ * roster says is a teammate's DM maps to it, and a `dm:<id>` single-seat key is
+ * already in that form. A pair conversation (`dm:a+b`) is not a teammate's DM
+ * and keeps its own key. The one teammate addressed prefixed (a General
+ * spelling, `dm:general`) folds to itself, and the bare `general` channel stays
+ * #general because the roster never maps it.
+ */
+export function presenceChatKey(chatId: string, threadAgents: Readonly<Record<string, string>>): string {
+  const owner = threadAgents[chatId];
+  return owner === undefined ? chatId : `dm:${owner}`;
+}
+
 /** Folds the live state into a {@link PresenceIndex}. */
 export function derivePresence(inputs: PresenceInputs): PresenceIndex {
   const byAgent = new Map<string, AgentPresenceState>();
   const byAgentChat = new Map<string, AgentPresenceState>();
   const fresh = (at: number) => inputs.now - at < STALE_TURN_MS;
+  const chatKey = (chat: string) => presenceChatKey(chat, inputs.threadAgents);
   const bump = (agent: string, chat: string | undefined, state: AgentPresenceState) => {
     byAgent.set(agent, strongerPresence(byAgent.get(agent) ?? "inactive", state));
     if (chat === undefined) return;
-    const key = presenceKey(agent, chat);
+    const key = presenceKey(agent, chatKey(chat));
     byAgentChat.set(key, strongerPresence(byAgentChat.get(key) ?? "inactive", state));
   };
 
@@ -135,7 +159,7 @@ export function derivePresence(inputs: PresenceInputs): PresenceIndex {
   for (const [key, meta] of Object.entries(inputs.turnMeta)) {
     const agent = inputs.liveAgentByTurn[key];
     if (!agent || !fresh(meta.lastFrameAt)) continue;
-    framedChats.add(meta.chatId);
+    framedChats.add(chatKey(meta.chatId));
     framedAgents.add(agent);
     lastFrameByAgent.set(agent, Math.max(lastFrameByAgent.get(agent) ?? 0, meta.lastFrameAt));
     const steps = inputs.liveStepsByMessage[key] ?? inputs.liveStepsByThread[key] ?? [];
@@ -149,7 +173,7 @@ export function derivePresence(inputs: PresenceInputs): PresenceIndex {
   //    the host recorded, else the teammate whose DM this is.
   for (const turns of Object.values(inputs.openTurns)) {
     for (const turn of turns) {
-      if (framedChats.has(turn.chatId)) continue;
+      if (framedChats.has(chatKey(turn.chatId))) continue;
       const agent = turn.agentId ?? inputs.threadAgents[turn.chatId];
       if (!agent) continue;
       bump(agent, turn.chatId, turn.queued ? "queued" : "thinking");
@@ -171,7 +195,7 @@ export function derivePresence(inputs: PresenceInputs): PresenceIndex {
     approving.add(agent);
     byAgent.set(agent, "approval");
   }
-  return { byAgent, byAgentChat, approving };
+  return { byAgent, byAgentChat, approving, threadAgents: inputs.threadAgents };
 }
 
 /** One agent's state across every chat. */
@@ -186,7 +210,8 @@ export function presenceOf(index: PresenceIndex, agentId: string): AgentPresence
  */
 export function presenceIn(index: PresenceIndex, agentId: string, chatId: string): AgentPresenceState {
   if (index.approving.has(agentId)) return "approval";
-  return index.byAgentChat.get(presenceKey(agentId, chatId)) ?? "inactive";
+  const key = presenceKey(agentId, presenceChatKey(chatId, index.threadAgents));
+  return index.byAgentChat.get(key) ?? "inactive";
 }
 
 /**

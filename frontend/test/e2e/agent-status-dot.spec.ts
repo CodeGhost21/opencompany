@@ -86,6 +86,27 @@ for (const scheme of ["light", "dark"] as const) {
     test("typing has no expiry: it holds past the person-typing window", async ({ page }) => {
       const sse = await mockCompany(page);
       await open(page);
+    test("a hive seat's dm:<id> bracket lights the bare-id DM row and its header", async ({ page }) => {
+      // The shape a real DM turn has: the console addresses Rae's DM by the
+      // bare id, and the hive seat that answers it brackets its turn under its
+      // desk id, `dm:<id>`, streaming no frames. Every other case in this file
+      // uses `chatId: agent.id`, which is how this mismatch hid.
+      const sse = await mockCompany(page);
+      await page.goto(`/#/chat/dm:${RAE.id}`);
+      await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
+      const header = page.locator("header").getByTestId("agent-status-dot");
+      const seat = { chatId: `dm:${RAE.id}`, turnId: "seat-turn-1", agentId: RAE.id, episodeId: "ep-1", roundRevision: 1 };
+      sse.push({ type: "turn_started", seq: 1, atMillis: Date.now(), ...seat });
+      await expect(dotOf(page, RAE.name)).toHaveAttribute("data-state", "working");
+      await expect(header).toHaveAttribute("data-state", "working");
+      // Where the dot stands alone it keeps its own label.
+      await expect(header).toHaveAccessibleName("Working");
+      await page.screenshot({ path: test.info().outputPath(`dot-seat-working-${scheme}.png`) });
+      sse.push({ type: "turn_settled", seq: 2, atMillis: Date.now(), outcome: "committed", ...seat });
+      await expect(dotOf(page, RAE.name)).toHaveCount(0);
+      await expect(header).toHaveCount(0);
+    });
+
       sse.push({ type: "replying", seq: 1, agentId: RAE.id, chatId: RAE.id });
       await expect(dotOf(page, RAE.name)).toHaveAttribute("data-state", "typing");
       // A person's `typing` frame lapses after 8s; an agent's reply can stream
