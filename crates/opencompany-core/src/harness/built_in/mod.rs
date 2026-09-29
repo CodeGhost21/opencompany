@@ -5156,11 +5156,17 @@ impl HarnessPool {
 }
 
 /// A stable fingerprint of an effective MCP server set, used to detect a console
-/// change (add / remove / enable-toggle / token rotation) between
-/// [`HarnessPool::ensure`] calls. Hashes only non-secret configuration plus the
-/// credential substrings — the resulting `u64` is non-reversible and never
-/// surfaces anywhere, so it is not a credential leak, and hashing the credential
-/// substrings means a rotate-token also invalidates the cached roster.
+/// change (add / remove / enable-toggle / token rotation / tool-permission edit)
+/// between [`HarnessPool::ensure`] calls. Hashes only non-secret configuration
+/// plus the credential substrings — the resulting `u64` is non-reversible and
+/// never surfaces anywhere, so it is not a credential leak, and hashing the
+/// credential substrings means a rotate-token also invalidates the cached roster.
+///
+/// The per-tool policy and the discovered inventory are terms too: the attached
+/// server's deny list is resolved from them by
+/// [`embed_servers_for_agent`](crate::harness::mcp::embed_servers_for_agent), so
+/// a tool set to [`Blocked`](crate::company::mcp_policy::ApprovalMode::Blocked)
+/// stays callable for as long as the cached roster stands.
 fn mcp_fingerprint(decls: &[McpServerDecl]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -5179,8 +5185,55 @@ fn mcp_fingerprint(decls: &[McpServerDecl]) -> u64 {
         for secret in decl.auth.secret_values() {
             secret.hash(&mut hasher);
         }
+        hash_tool_policies(&decl.tool_policies, &mut hasher);
+        hash_tool_inventory(&decl.tool_inventory, &mut hasher);
     }
     hasher.finish()
+}
+
+/// Folds one server's stored tool policy into the fingerprint, canonically.
+///
+/// Both halves of [`McpToolPolicies`](crate::company::mcp_policy::McpToolPolicies)
+/// are `HashMap`-backed, and a `HashMap` iterates in an order that varies per
+/// map instance. Folding it as it iterates — or through `serde_json`, which
+/// preserves that order — gives one unchanged document a different `u64` on
+/// every read, so every `ensure` would rebuild every roster. The tiers are
+/// therefore read **totally**, in [`ToolTier::ALL`](crate::company::mcp_policy::ToolTier::ALL)
+/// order, and the overrides through a [`BTreeMap`](std::collections::BTreeMap).
+fn hash_tool_policies<H: std::hash::Hasher>(
+    policies: &crate::company::mcp_policy::McpToolPolicies,
+    hasher: &mut H,
+) {
+    use crate::company::mcp_policy::{ApprovalMode, ToolTier};
+    use std::collections::BTreeMap;
+    use std::hash::Hash;
+
+    for tier in ToolTier::ALL {
+        policies.tier_defaults.get(&tier).copied().hash(hasher);
+    }
+
+    let overrides: BTreeMap<&str, (Option<ToolTier>, Option<ApprovalMode>)> = policies
+        .overrides
+        .iter()
+        .map(|(tool, policy)| (tool.as_str(), (policy.tier, policy.mode)))
+        .collect();
+    overrides.hash(hasher);
+}
+
+/// Folds one server's discovered tool inventory into the fingerprint.
+///
+/// The names and suggested tiers are what a stored tier default resolves
+/// against, so a re-probe that finds a new tool moves a policy decision without
+/// the policy document changing. `discovered_at_millis` is left out — every
+/// successful probe rewrites it, and a re-probe that learned nothing must not
+/// rebuild the roster.
+fn hash_tool_inventory<H: std::hash::Hasher>(
+    inventory: &crate::company::mcp_policy::McpToolInventory,
+    hasher: &mut H,
+) {
+    use std::hash::Hash;
+
+    inventory.tools.hash(hasher);
 }
 
 /// A small discriminant for an [`AuthMaterial`] variant, for the fingerprint.
@@ -6389,6 +6442,10 @@ mod built_in_tests_part09;
 #[cfg(test)]
 #[path = "built_in_tests_part10.rs"]
 mod built_in_tests_part10;
+/// The tool-permission freshness gate, driven over the console's write route.
+#[cfg(test)]
+#[path = "mcp_policy_freshness_tests.rs"]
+mod mcp_policy_freshness_tests;
 #[cfg(all(test, feature = "openhuman"))]
 #[path = "mcp_reads_tests.rs"]
 mod mcp_reads_tests;

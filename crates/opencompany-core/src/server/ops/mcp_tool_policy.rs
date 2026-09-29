@@ -65,6 +65,19 @@ pub struct ToolPolicyDto {
     pub tools: Vec<ToolPolicyRowDto>,
     /// When discovery last succeeded, if ever. `0` reads as never.
     pub discovered_at_millis: u64,
+    /// The rebuild reminder, on a mutating response only — the stored policy is
+    /// a term of the effective MCP set's fingerprint, so an edit reaches agents
+    /// on the company's next turn. Absent on a read, which changes nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl ToolPolicyDto {
+    /// Attaches the next-turn reminder to a mutating response.
+    fn with_note(mut self) -> Self {
+        self.note = Some(super::mcp::NEXT_TURN_NOTE.to_string());
+        self
+    }
 }
 
 /// Renders a resolved policy document for one server.
@@ -108,6 +121,7 @@ pub fn tool_policy_dto(
         tier_defaults,
         tools,
         discovered_at_millis: inventory.discovered_at_millis,
+        note: None,
     }
 }
 
@@ -343,7 +357,7 @@ async fn write_policy(
         &decl.read_only_tools,
         mcp_policy::StoredPolicies::Stored(merged),
     );
-    Json(tool_policy_dto(&name, &policies, &decl.tool_inventory)).into_response()
+    Json(tool_policy_dto(&name, &policies, &decl.tool_inventory).with_note()).into_response()
 }
 
 async fn reset_policy(
@@ -370,7 +384,7 @@ async fn reset_policy(
     }
     let policies =
         mcp_policy::effective_policies(&decl.read_only_tools, mcp_policy::StoredPolicies::Absent);
-    Json(tool_policy_dto(&name, &policies, &decl.tool_inventory)).into_response()
+    Json(tool_policy_dto(&name, &policies, &decl.tool_inventory).with_note()).into_response()
 }
 
 fn bad_request(reason: &str) -> Response {
