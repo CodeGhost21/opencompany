@@ -206,6 +206,12 @@ export function McpServersSection({
   // Whether the agent-side MCP bridge is compiled into this host (issue #567).
   // Starts `unknown` so nothing is claimed before the capability read lands.
   const [bridge, setBridge] = useState<McpBridgeState>("unknown");
+  // Whether a `needs_approval` mode parks anything on this host. `undefined`
+  // until the capability read answers, and left that way when it cannot: the
+  // notice claims nothing on a host that has not said.
+  const [approvalsPark, setApprovalsPark] = useState<boolean | undefined>(
+    undefined,
+  );
   const [servers, setServers] = useState<McpServer[]>([]);
   // The name of the row currently mutating. Every mutating handler serialises on
   // it with an `if (busy) return`, so while one is in flight the controls on ALL
@@ -317,11 +323,21 @@ export function McpServersSection({
     client
       .capabilityStatus(company)
       .then((status) => {
-        if (alive) setBridge(mcpBridgeState(status));
+        if (alive) {
+          setBridge(mcpBridgeState(status));
+          setApprovalsPark(
+            typeof status.approvalsPark === "boolean"
+              ? status.approvalsPark
+              : undefined,
+          );
+        }
       })
       // A host with no `…/capabilities` surface 404s. Unknown, not absent.
       .catch(() => {
-        if (alive) setBridge("unknown");
+        if (alive) {
+          setBridge("unknown");
+          setApprovalsPark(undefined);
+        }
       });
     return () => {
       alive = false;
@@ -837,6 +853,7 @@ export function McpServersSection({
           health={tested[openedServer.name] ?? openedServer.health}
           canManage={canManage}
           bridge={bridge}
+          approvalsPark={approvalsPark}
           agents={agents}
           reloadKey={probedAt[openedServer.name] ?? 0}
           focusPermissions={openedName === null && permissionsFor !== null}

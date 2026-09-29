@@ -2312,6 +2312,17 @@ export interface CapabilityStatusDto {
    */
   mcpInBuild?: boolean;
   /**
+   * Whether a tool set to "needs approval" actually parks the call, or is
+   * allowed through as if it were set to Allow.
+   *
+   * The permissions surfaces read it from here because it is the one fact they
+   * cannot derive: every other reading on them says which mode is stored, so an
+   * operator who sets "needs approval" and is told nothing walks away believing
+   * the tool is gated. `undefined` is **unknown** (an older host that does not
+   * send the field) and must never be rendered as "does not park".
+   */
+  approvalsPark?: boolean;
+  /**
    * Whether this company's teammates can actually think, and why not when they
    * cannot (issue #1735).
    *

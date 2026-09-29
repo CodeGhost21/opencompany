@@ -38,6 +38,11 @@ interface Props {
   canManage: boolean;
   /** Whether the agent-side MCP bridge is compiled into this host (issue #567). */
   bridge: McpBridgeState;
+  /**
+   * Whether a `needs_approval` mode parks a call on this host. `undefined` means
+   * no read answered it, and nothing is claimed either way.
+   */
+  approvalsPark?: boolean;
   /** The roster, for the per-teammate lens on this server's tool permissions. */
   agents?: RosterAgent[];
   /** Bumped when a probe re-ran, so the permissions read is not stale. */
@@ -60,6 +65,7 @@ export function McpServerPage({
   health,
   canManage,
   bridge,
+  approvalsPark,
   agents = [],
   reloadKey,
   focusPermissions,
@@ -237,6 +243,7 @@ export function McpServerPage({
         server={server}
         canManage={canManage}
         agents={agents}
+        approvalsPark={approvalsPark}
         reloadKey={reloadKey}
         focus={focusPermissions}
       />
