@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { isAtBottom } from "./bottomAnchor";
+import { isAtBottom, readsAsFollowing } from "./bottomAnchor";
 
 /**
  * Bottom-anchoring for a scrolling transcript.
@@ -13,6 +13,12 @@ import { isAtBottom } from "./bottomAnchor";
  *
  * Wire the returned refs to the scroller and to a plain wrapper around its
  * content, and `onScroll` to the scroller's scroll event.
+ *
+ * Every smooth scroll the rules start goes through `glide`, so the scroll
+ * handler can tell the pane's own travel from the reader's (`readsAsFollowing`
+ * in `bottomAnchor.ts`). Without that, the glide towards a question just sent
+ * switched following off on its own way down, and the reply landing mid-glide
+ * was left below the fold: the `thread-scroll-anchor` e2e flake.
  */
 export interface BottomAnchorOptions {
   /**
@@ -54,6 +60,13 @@ export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
    */
   const [atBottom, setAtBottom] = useState(true);
   const shown = useRef(true);
+  /**
+   * A smooth scroll to the bottom this hook started may still be travelling,
+   * and where the last scroll event left `scrollTop`. Together they tell the
+   * glide's own scroll events from the reader's (`readsAsFollowing`).
+   */
+  const gliding = useRef(false);
+  const lastTop = useRef(0);
 
   const settle = useCallback((next: boolean) => {
     following.current = next;
@@ -65,16 +78,27 @@ export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
   const onScroll = useCallback(() => {
     const el = scroller.current;
     if (!el) return;
-    settle(isAtBottom(el));
+    const next = readsAsFollowing(el, { gliding: gliding.current, previousTop: lastTop.current });
+    lastTop.current = el.scrollTop;
+    // Arrived, or the reader took over: either way the glide is over.
+    if (!next || isAtBottom(el)) gliding.current = false;
+    settle(next);
   }, [settle]);
+
+  /** Smooth-scrolls to the newest row, marking the travel as the pane's own. */
+  const glide = useCallback((el: HTMLDivElement) => {
+    gliding.current = true;
+    lastTop.current = el.scrollTop;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, []);
 
   /** Resumes following and travels to the newest row. */
   const jumpToLatest = useCallback(() => {
     const el = scroller.current;
     if (!el) return;
     settle(true);
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [settle]);
+    glide(el);
+  }, [settle, glide]);
 
   // Rule 1 — arriving at a channel. `useLayoutEffect` so the jump happens
   // before paint: with `useEffect` the browser paints the un-anchored position
@@ -127,7 +151,7 @@ export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
     // owns the anchor until the history has landed.
     if (pending) return;
     if (!following.current) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    glide(el);
     // `growth` is spread, which the rule cannot verify. The dependency list is
     // the contract above, and it belongs to the caller that knows what growing
     // means for its own rows — not to whatever satisfies the linter.
@@ -191,11 +215,11 @@ export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
       // rule 2 — a cold load's content grows repeatedly as history lands, and
       // rule 1 owns the anchor until it has.
       if (pending || !following.current) return;
-      scrollerEl.scrollTo({ top: scrollerEl.scrollHeight, behavior: "smooth" });
+      glide(scrollerEl);
     });
     observer.observe(contentEl);
     return () => observer.disconnect();
-  }, [pending]);
+  }, [pending, glide]);
 
   return { scroller, content, onScroll, following, atBottom, jumpToLatest };
 }
