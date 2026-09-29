@@ -67,6 +67,44 @@ describe("ChannelRail DM order", () => {
     expect(order()).toEqual(["cy", "ann", "bob"]);
   });
 
+  it("does not hold on the focus a click leaves behind once the pointer has left", () => {
+    render(["ann", "bob", "cy"]);
+    const rail = container.querySelector("aside")!;
+    const first = container.querySelector<HTMLButtonElement>("li button")!;
+    // Pointer in, press, focus (what a click does), pointer out.
+    act(() => {
+      rail.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      first.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      first.focus();
+    });
+    // While the pointer is still over the rail, the hover hold stands.
+    render(["cy", "ann", "bob"]);
+    expect(order()).toEqual(["ann", "bob", "cy"]);
+    act(() => {
+      rail.dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+    });
+    // The clicked row still has focus, but a click is not keyboard focus.
+    expect(document.activeElement).toBe(first);
+    expect(order()).toEqual(["cy", "ann", "bob"]);
+    render(["bob", "cy", "ann"]);
+    expect(order()).toEqual(["bob", "cy", "ann"]);
+  });
+
+  it("holds again when the keyboard moves focus after a click", () => {
+    render(["ann", "bob", "cy"]);
+    const [first, second] = Array.from(container.querySelectorAll<HTMLButtonElement>("li button"));
+    act(() => {
+      first.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      first.focus();
+    });
+    act(() => {
+      first.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      second.focus();
+    });
+    render(["cy", "ann", "bob"]);
+    expect(order()).toEqual(["ann", "bob", "cy"]);
+  });
+
   it("keeps row content live while the order is held", () => {
     render(["ann", "bob", "cy"]);
     const first = container.querySelector<HTMLButtonElement>("li button")!;

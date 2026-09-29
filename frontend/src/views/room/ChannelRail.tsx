@@ -140,11 +140,14 @@ export function ChannelRail({
   // The Direct messages order is `latestMessageAt` descending, so a message
   // moves its row to the top. A row sliding under the pointer can land a click
   // on the wrong DM (the same hazard as #1414), so the order is held while the
-  // pointer or focus is anywhere in the rail and reconciles on release. Only
-  // the ORDER is held, as ids: row content (name, unread) still reads live.
+  // pointer or keyboard focus is anywhere in the rail and reconciles on
+  // release. Focus a click left behind does not hold (`holdPointerFocus`): the
+  // clicked row keeps focus after the pointer leaves, and holding on it froze
+  // the order until focus happened to move. Only the ORDER is held, as ids:
+  // row content (name, unread) still reads live.
   const dmSection = sections.find((s) => s.id === "dms");
   const liveDmIds = useMemo(() => dmSection?.channels.map((c) => c.id) ?? [], [dmSection]);
-  const stable = useStableList(liveDmIds);
+  const stable = useStableList(liveDmIds, { holdPointerFocus: false });
   const shownSections = useMemo(() => {
     if (!dmSection) return sections;
     const byId = new Map(dmSection.channels.map((c) => [c.id, c]));

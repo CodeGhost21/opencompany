@@ -101,6 +101,30 @@ for (const scheme of ["light", "dark"] as const) {
   });
 }
 
+test("a clicked row's focus does not freeze the order once the pointer leaves", async ({ page }) => {
+  const sse = await mockCompany(page);
+  await open(page);
+  // A mouse click focuses the row's button, and the button keeps focus after
+  // the pointer moves away. Only keyboard focus may hold the order on its own.
+  await dmRow(page, NAMES[3]).click();
+  await page.mouse.move(700, 400);
+  await expect(dmRow(page, NAMES[3])).toBeFocused();
+  sse.push(reply(LAST, 1));
+  await expect.poll(() => firstRowName(page)).toBe(LAST.name);
+});
+
+test("keyboard focus in the rail still holds the order", async ({ page }) => {
+  const sse = await mockCompany(page);
+  await open(page);
+  await page.mouse.move(700, 400);
+  const head = await firstRowName(page);
+  await dmRow(page, NAMES[3]).focus();
+  await page.keyboard.press("Tab");
+  sse.push(reply(LAST, 1));
+  await page.waitForTimeout(1_000);
+  expect(await firstRowName(page)).toBe(head);
+});
+
 test("an ordinary re-sort plays the slide", async ({ page }) => {
   const sse = await mockCompany(page);
   await open(page);
