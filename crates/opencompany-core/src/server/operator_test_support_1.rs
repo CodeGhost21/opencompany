@@ -58,6 +58,7 @@ pub(super) async fn build_state_with_brain_and_manifest(
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -161,6 +162,7 @@ pub(super) async fn state_with_failing_runs(home: &std::path::Path) -> AppState 
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -245,6 +247,7 @@ pub(super) async fn state_with_roster(home: &std::path::Path) -> AppState {
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -356,6 +359,7 @@ pub(super) async fn state_with_memberless_desk(home: &std::path::Path) -> AppSta
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -399,6 +403,7 @@ pub(super) async fn state_with_dm_prefixed_desk(home: &std::path::Path) -> AppSt
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -443,6 +448,33 @@ pub(super) fn chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
 /// The same send, typed inside a thread — `parent` is the root the console
 /// sends when the operator answers in an open thread (#1890 B).
 pub(super) fn chat_in_thread(text: &str, chat: Option<&str>, parent: Option<u64>) -> Request<Body> {
+    chat_request(text, chat, parent, None)
+}
+
+/// A send with the composer's "Build me the workflow" control pressed — the
+/// one signal on which the chat route still opens a card by itself. The tests
+/// that pin what a route-opened card *records* (its assignee, its origin
+/// thread) send this, because a plain message no longer opens one: tracking
+/// is the agent's own tool call.
+pub(super) fn workflow_chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
+    chat_request(text, chat, None, Some("workflow"))
+}
+
+/// [`workflow_chat_to`], typed inside a thread.
+pub(super) fn workflow_chat_in_thread(
+    text: &str,
+    chat: Option<&str>,
+    parent: Option<u64>,
+) -> Request<Body> {
+    chat_request(text, chat, parent, Some("workflow"))
+}
+
+fn chat_request(
+    text: &str,
+    chat: Option<&str>,
+    parent: Option<u64>,
+    deliverable: Option<&str>,
+) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri("/api/v1/company/chat")
@@ -455,6 +487,7 @@ pub(super) fn chat_in_thread(text: &str, chat: Option<&str>, parent: Option<u64>
                 // A string, like every other message id on this API — the
                 // field's own note says so, and a number is a 422.
                 "parent": parent.map(|seq| seq.to_string()),
+                "deliverable": deliverable,
             })
             .to_string(),
         ))
@@ -517,6 +550,7 @@ pub(super) fn desk_manifest() -> CompanyManifest {
 /// A bare record carrying `manifest`, for resolvers that read nothing else.
 pub(super) fn record_with(manifest: CompanyManifest) -> CompanyRecord {
     CompanyRecord {
+        general_channel: Default::default(),
         overlay_desk_hive: Vec::new(),
         overlay_retired_agents: Vec::new(),
         overlay_agent_edits: Vec::new(),
@@ -552,6 +586,7 @@ pub(super) async fn state_with_manifest(
     use crate::ports::CompanyStore;
     store
         .save(&CompanyRecord {
+            general_channel: Default::default(),
             overlay_desk_hive: Vec::new(),
             overlay_retired_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
@@ -588,7 +623,23 @@ pub(super) async fn state_with_manifest(
     state
 }
 
+/// `GET {scope}/desks`, after asserting its first entry is #general; returns
+/// the desks that follow it.
 pub(super) async fn get_desks(app: &axum::Router, cookie: &str) -> serde_json::Value {
+    let mut listed = get_desk_list(app, cookie).await;
+    let all = listed.as_array_mut().expect("a desk list");
+    let general = all.remove(0);
+    assert_eq!(
+        general["id"], "general",
+        "#general is listed first: {general}"
+    );
+    assert_eq!(general["kind"], "general");
+    assert_eq!(general["mutable"], false);
+    listed
+}
+
+/// `GET {scope}/desks`, verbatim.
+pub(super) async fn get_desk_list(app: &axum::Router, cookie: &str) -> serde_json::Value {
     let response = app
         .clone()
         .oneshot(
