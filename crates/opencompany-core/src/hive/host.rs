@@ -919,6 +919,21 @@ impl Journal for DeskHost {
             self.journal_or_warn(row);
             return;
         }
+        // A row the driver refused after this host had already appended it.
+        // `commit` stamps `episode.kind` off the utterance, and the fold runs
+        // afterwards -- so a refused `complete_episode` is on the desk saying
+        // the seat finished. The log cannot take it back; this is the
+        // correction written beside it, naming the row by its sequence.
+        if let Event::Refused { seat, why, at, .. } = event {
+            self.journal_or_warn(CompanyEvent::UtteranceRefused {
+                chat_id: self.desk_id.clone(),
+                episode_id: self.episode_id.clone(),
+                seat: seat.clone(),
+                at: at.0,
+                reason: format!("{why:?}"),
+            });
+            return;
+        }
         if let Event::Parked { seat, thread } = event {
             self.journal_or_warn(self.seat_parked_row(seat, *thread));
             return;

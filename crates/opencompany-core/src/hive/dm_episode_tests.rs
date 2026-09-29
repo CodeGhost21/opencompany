@@ -317,3 +317,122 @@ async fn a_desk_episode_with_prior_history_settles() {
         .await
         .expect("a desk episode with prior history should settle");
 }
+
+/// **A seat that finishes while it is still owed an answer is refused, and the
+/// refusal names the row.**
+///
+/// The driver's half of
+/// `a_refused_completion_keeps_its_words_and_loses_its_claim`. The row is
+/// appended before the driver rules on it, so the refusal cannot prevent it --
+/// it can only name it, by the sequence the host gave it. If that sequence is
+/// wrong the correction lands on some other row, or on none, and the read plane
+/// has nothing to reconcile: the desk keeps a line claiming an episode ended
+/// that did not.
+///
+/// One turn asks and finishes, which is the shape a live run produced and the
+/// shape tinyhivemind's own `links` test pins: `ask` opens a conversation, so
+/// the `complete_episode` behind it is committed and then refused for
+/// `AwaitingReply`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completion_refused_while_owed_an_answer_is_journaled_as_refused() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let (base_url, _script) = spawn_script_recording(vec![
+        Turn::Call {
+            tool: "desk_ask",
+            args: serde_json::json!({
+                "to": "ceo",
+                "message": "is two sprints acceptable?",
+                "chat": "engineering",
+                "parent": null
+            }),
+        },
+        // Finishing behind its own open question: committed, then refused.
+        Turn::Call {
+            tool: "desk_complete_episode",
+            args: serde_json::json!({
+                "message": "wrapping up once I hear back",
+                "chat": "engineering",
+                "parent": null
+            }),
+        },
+        Turn::Say("waiting."),
+    ])
+    .await;
+    let (deps, _journal) = deps(base_url, dir.path());
+    let record = record(TWO_DESKS);
+    let pool = HarnessPool::new();
+    pool.ensure(&record, &deps).await.expect("roster");
+    let log = Arc::new(MemoryLog::default());
+    let events: Arc<dyn EventLog> = log.clone();
+    let (hives, errors) = crate::hive::graph::desk_hives(&record, 3, &|id| {
+        futures::executor::block_on(pool.agent(&record.id, id))
+            .map(|agent| agent.runtime_agent().clone())
+    });
+    assert!(errors.is_empty(), "{errors:?}");
+    let dispatcher = crate::hive::dispatch::dispatcher(
+        Arc::new(record.clone()),
+        Arc::clone(&events),
+        hives,
+        Arc::new(deps),
+        Arc::new(pool),
+        None,
+    )
+    .await;
+    let trigger_seq = events
+        .append(
+            &record.id,
+            crate::hive::test_support::operator_message("engineering", "two sprints?", None),
+        )
+        .await
+        .expect("the trigger is a real row");
+    let _ = dispatcher
+        .run_desk_message(
+            "engineering",
+            crate::hive::conducted::Trigger {
+                seq: trigger_seq,
+                text: "two sprints?".to_owned(),
+                parent: None,
+                mentions: Vec::new(),
+            },
+        )
+        .await;
+
+    let rows = log.rows();
+    let refused: Vec<(u64, String)> = rows
+        .iter()
+        .filter_map(|stored| match &stored.event {
+            crate::ports::types::CompanyEvent::UtteranceRefused { at, seat, .. } => {
+                Some((*at, seat.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let (at, seat) = refused.first().cloned().unwrap_or_else(|| {
+        panic!(
+            "a completion behind an open ask is refused: {:?}",
+            log.kinds()
+        )
+    });
+    assert_eq!(seat, "engineer", "the seat that was refused is named");
+
+    // The sequence has to be a row this desk really holds, and that row has to
+    // be the one claiming the episode ended. A refusal naming anything else is
+    // a correction the history plane cannot apply.
+    let named = rows
+        .iter()
+        .find(|stored| stored.seq.value() == at)
+        .unwrap_or_else(|| panic!("the refusal names a journalled row, not {at}"));
+    let crate::ports::types::CompanyEvent::AgentReply {
+        episode, agent_id, ..
+    } = &named.event
+    else {
+        panic!("the row named is the seat's own line: {:?}", named.event);
+    };
+    assert_eq!(agent_id, "engineer");
+    assert!(
+        episode.as_ref().is_some_and(
+            |episode| episode.kind == crate::ports::types::UtteranceKind::CompleteEpisode
+        ),
+        "and it is the row stamped as ending the episode: {episode:?}",
+    );
+}
