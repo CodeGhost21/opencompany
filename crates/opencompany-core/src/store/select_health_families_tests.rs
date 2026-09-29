@@ -280,7 +280,7 @@ impl tinymemory_api::provider::MemoryProvider for AdvertisesEverything {
 /// the list, written out, for a driver that advertises all twenty-six families.
 ///
 /// Changing it means changing `docs/spec/runtime/memory-engine.md` too: the
-/// ten absences are documented there with a reason each, and an absence with no
+/// nine absences are documented there with a reason each, and an absence with no
 /// reason is the defect issue #1968 is about.
 #[cfg(feature = "tinymemory")]
 #[test]
