@@ -566,3 +566,58 @@ fn a_publish_is_filed_where_its_rows_are_and_only_a_desk_keeps_the_thread() {
         "where the episode's thread root does apply"
     );
 }
+
+/// One turn's steps, for the carry tests.
+fn step(label: &str) -> crate::ports::types::TurnStep {
+    crate::ports::types::TurnStep {
+        kind: crate::ports::types::TurnStepKind::ToolCall,
+        status: crate::ports::types::TurnStepStatus::Ok,
+        label: label.to_string(),
+        ..Default::default()
+    }
+}
+
+/// **A retry does not erase what the first attempt did.**
+///
+/// This is the shape the whole feature exists for. A seat that writes a file
+/// and then answers in prose records nothing the room can hear, so `insist`
+/// asks it again -- and the second attempt typically calls `complete_episode`
+/// and nothing else. Replacing the held steps there dropped the write and kept
+/// only the speech call, which is the one the episode annotation already
+/// shows: the row would report the least interesting half of the turn and
+/// silently lose the rest.
+#[test]
+fn a_retrys_steps_are_added_to_the_first_attempts() {
+    let mut held = Vec::new();
+    super::carry_steps(&mut held, vec![step("File Write"), step("File Read")]);
+    super::carry_steps(&mut held, vec![step("Desk Complete Episode")]);
+    assert_eq!(
+        held.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(),
+        vec!["File Write", "File Read", "Desk Complete Episode"],
+        "the row carries both attempts, in the order they happened",
+    );
+}
+
+/// The join of several attempts is bounded, and sheds the oldest.
+///
+/// `fold_steps` caps one turn; nothing capped their sum until this. Oldest
+/// first, because a row is a timeline rather than a ledger -- and the newest
+/// step is the one a reader is most likely looking for.
+#[test]
+fn a_rows_steps_are_bounded_across_attempts() {
+    let mut held = Vec::new();
+    for round in 0..4 {
+        let batch: Vec<_> = (0..40).map(|n| step(&format!("{round}-{n}"))).collect();
+        super::carry_steps(&mut held, batch);
+    }
+    assert_eq!(held.len(), super::MAX_ROW_STEPS, "bounded");
+    assert_eq!(
+        held.last().map(|s| s.label.as_str()),
+        Some("3-39"),
+        "the most recent step survives",
+    );
+    assert!(
+        !held.iter().any(|s| s.label.starts_with("0-")),
+        "and the oldest attempt is what was shed",
+    );
+}
