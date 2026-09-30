@@ -27,7 +27,9 @@ import { AgentDetailView } from "@/views/team/AgentDetailView";
 
 const ENABLED = ["brand-voice", "invoicing", "web-research"];
 
-function detail(skills: Partial<AgentDetailDto["skills"]> = {}): AgentDetailDto {
+function detail(
+  skills: Partial<AgentDetailDto["skills"]> = {},
+): AgentDetailDto {
   return {
     id: "jamie",
     name: "Jamie",
@@ -84,13 +86,15 @@ async function click(testid: string) {
 /** Base UI's `Switch.Root` renders a `<span role="switch">`, so `aria-checked`
  *  is where its state actually lives. */
 function switchIsOn(slug: string) {
-  return node(`agent-skill-toggle-${slug}`).getAttribute("aria-checked") === "true";
+  return (
+    node(`agent-skill-toggle-${slug}`).getAttribute("aria-checked") === "true"
+  );
 }
 
 async function show(client: OpenCompanyClient) {
-  // The Skills card lives on the Tools tab, and `PageTabPanel` renders nothing
-  // for an inactive tab, so the address has to open that tab before the mount.
-  window.location.hash = "#/team/jamie?tab=tools";
+  // Skills is its own tab, and `PageTabPanel` renders nothing for an inactive
+  // one, so the address has to open that tab before the mount.
+  window.location.hash = "#/team/jamie?tab=skills";
   await act(async () => {
     root.render(
       createElement(AgentDetailView, {
@@ -104,7 +108,9 @@ async function show(client: OpenCompanyClient) {
 }
 
 beforeEach(() => {
-  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  (
+    globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -120,22 +126,28 @@ afterEach(() => {
 describe("narrowing an inherited skill scope", () => {
   it("saves every other enabled skill when the first switch is turned off, not just the ones flicked", async () => {
     const agent = detail();
-    const updateAgent = vi.fn((_id: string, body: { skills: string[] | null }) =>
-      Promise.resolve(
-        detail({ requested: body.skills, effective: body.skills ?? ENABLED }),
-      ),
+    const updateAgent = vi.fn(
+      (_id: string, body: { skills: string[] | null }) =>
+        Promise.resolve(
+          detail({ requested: body.skills, effective: body.skills ?? ENABLED }),
+        ),
     );
     await show(clientFor(agent, updateAgent));
 
     await click("agent-skills-edit");
     // Inheriting: every switch reads on, though the stored scope is `null`.
     for (const slug of ENABLED) {
-      expect(switchIsOn(slug), `${slug} reads on while the scope is inherited`).toBe(true);
+      expect(
+        switchIsOn(slug),
+        `${slug} reads on while the scope is inherited`,
+      ).toBe(true);
     }
 
     await click("agent-skill-toggle-invoicing");
     expect(switchIsOn("invoicing")).toBe(false);
-    expect(switchIsOn("brand-voice"), "the untouched switches stay on").toBe(true);
+    expect(switchIsOn("brand-voice"), "the untouched switches stay on").toBe(
+      true,
+    );
     expect(switchIsOn("web-research")).toBe(true);
 
     await click("agent-skills-save");
@@ -148,10 +160,11 @@ describe("narrowing an inherited skill scope", () => {
 
   it("keeps narrowing from the draft once the first switch has been touched", async () => {
     const agent = detail();
-    const updateAgent = vi.fn((_id: string, body: { skills: string[] | null }) =>
-      Promise.resolve(
-        detail({ requested: body.skills, effective: body.skills ?? ENABLED }),
-      ),
+    const updateAgent = vi.fn(
+      (_id: string, body: { skills: string[] | null }) =>
+        Promise.resolve(
+          detail({ requested: body.skills, effective: body.skills ?? ENABLED }),
+        ),
     );
     await show(clientFor(agent, updateAgent));
 
@@ -164,7 +177,11 @@ describe("narrowing an inherited skill scope", () => {
     expect(switchIsOn("brand-voice")).toBe(false);
 
     await click("agent-skills-save");
-    expect(updateAgent).toHaveBeenCalledWith("jamie", { skills: ["web-research"] }, null);
+    expect(updateAgent).toHaveBeenCalledWith(
+      "jamie",
+      { skills: ["web-research"] },
+      null,
+    );
   });
 
   it("offers no save until a switch has actually been touched", async () => {
@@ -193,14 +210,21 @@ describe("the dropped-slug line", () => {
 
     const dropped = node("agent-skills-dropped").textContent ?? "";
     expect(dropped).toContain("retired-playbook");
-    expect(dropped, "a slug the teammate does hold is not a dropped one").not.toContain(
-      "brand-voice",
-    );
+    expect(
+      dropped,
+      "a slug the teammate does hold is not a dropped one",
+    ).not.toContain("brand-voice");
   });
 
   it("is absent when every stored slug resolves", async () => {
-    await show(clientFor(detail({ requested: ["brand-voice"], effective: ["brand-voice"] })));
-    expect(container.querySelector('[data-testid="agent-skills-dropped"]')).toBeNull();
+    await show(
+      clientFor(
+        detail({ requested: ["brand-voice"], effective: ["brand-voice"] }),
+      ),
+    );
+    expect(
+      container.querySelector('[data-testid="agent-skills-dropped"]'),
+    ).toBeNull();
   });
 });
 
@@ -258,16 +282,18 @@ describe("restoring a scope to what was already stored", () => {
 
     await click("agent-skills-save");
     const [, body] = updateAgent.mock.calls[0];
-    expect([...(body.skills ?? [])].sort(), "invoicing is the only one left off").toEqual([
-      "brand-voice",
-      "web-research",
-    ]);
+    expect(
+      [...(body.skills ?? [])].sort(),
+      "invoicing is the only one left off",
+    ).toEqual(["brand-voice", "web-research"]);
   });
 });
 
 describe("the line shown when a teammate reads nothing", () => {
   it("separates a scope the company disabled from a deliberately empty one", async () => {
-    await show(clientFor(detail({ requested: ["retired-playbook"], effective: [] })));
+    await show(
+      clientFor(detail({ requested: ["retired-playbook"], effective: [] })),
+    );
     const text = node("agent-skills-empty").textContent ?? "";
     expect(
       text,
@@ -278,13 +304,63 @@ describe("the line shown when a teammate reads nothing", () => {
 
   it("still calls a stored empty list what it is", async () => {
     await show(clientFor(detail({ requested: [], effective: [] })));
-    expect(node("agent-skills-empty").textContent).toContain("explicit empty scope");
+    expect(node("agent-skills-empty").textContent).toContain(
+      "explicit empty scope",
+    );
   });
 
   it("names the company when an inheriting teammate reads nothing", async () => {
     await show(
-      clientFor(detail({ requested: null, companyAvailable: [], effective: [] })),
+      clientFor(
+        detail({ requested: null, companyAvailable: [], effective: [] }),
+      ),
     );
-    expect(node("agent-skills-empty").textContent).toContain("company has none enabled");
+    expect(node("agent-skills-empty").textContent).toContain(
+      "company has none enabled",
+    );
+  });
+});
+
+describe("where the section lives, and what it links at", () => {
+  it("is its own tab, not a card under Tools", async () => {
+    // A tool grant is what this teammate may call; a skill is a playbook it
+    // reads. Sharing the Tools tab made the scope read as a tool permission.
+    await show(clientFor(detail()));
+    expect(node("agent-tab-skills")).not.toBeNull();
+
+    window.location.hash = "#/team/jamie?tab=tools";
+    await act(async () => {
+      window.dispatchEvent(new Event("hashchange"));
+    });
+    expect(
+      container.querySelector('[data-testid="agent-skills-effective"]'),
+      "the Tools tab no longer carries it",
+    ).toBeNull();
+  });
+
+  it("links each skill it reads at that skill's own page", async () => {
+    await show(clientFor(detail()));
+    const link = node("agent-skill-open-brand-voice") as HTMLAnchorElement;
+    // The canonical route. `#/settings/skills` only still answers through a
+    // rewrite, so a link written against it would depend on that rewrite
+    // surviving.
+    expect(link.getAttribute("href")).toBe(
+      "#/connections/skills?skill=brand-voice",
+    );
+  });
+
+  it("says of every enabled skill whether this teammate reads it", async () => {
+    // Two states from this side, against the skill page's three: the question
+    // here is only whether it reads it.
+    await show(
+      clientFor(
+        detail({ requested: ["brand-voice"], effective: ["brand-voice"] }),
+      ),
+    );
+    await click("agent-skills-edit");
+    expect(node("agent-skill-state-brand-voice").textContent).toBe("Reads it");
+    expect(node("agent-skill-state-invoicing").textContent).toBe(
+      "Not in its scope",
+    );
   });
 });

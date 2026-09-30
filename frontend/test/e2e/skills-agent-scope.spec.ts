@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Page,
+} from "@playwright/test";
 
 /** The company's effective skills, as the host serves them. */
 interface HostSkill {
@@ -56,7 +61,10 @@ async function signInAsMember(
   const verified = await context.post("/api/v1/company/auth/verify", {
     data: { code: devCode },
   });
-  expect(verified.ok(), `member sign-in failed: ${await verified.text()}`).toBeTruthy();
+  expect(
+    verified.ok(),
+    `member sign-in failed: ${await verified.text()}`,
+  ).toBeTruthy();
   expect((await verified.json()).role).toBe("member");
 }
 
@@ -72,12 +80,15 @@ async function signInAsMember(
 async function suppressTour(page: Page) {
   await page.addInitScript(() => {
     const seen = JSON.stringify({ skipped: true, seenAt: Date.now() });
-    for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
+    for (const key of [
+      "oc-tour:single",
+      "oc-tour:e2e-harness-co",
+      "oc-tour:null",
+    ]) {
       window.localStorage.setItem(key, seen);
     }
   });
 }
-
 
 /**
  * A teammate's skill scope, from its own page (#2458).
@@ -111,20 +122,29 @@ const MEMBER_EMAIL = "member-skill-scope@example.test";
 
 async function removeAgent(request: APIRequestContext) {
   if (!AGENT_ID) return;
-  await request.delete(`/api/v1/company/team/${AGENT_ID}`).catch(() => undefined);
+  await request
+    .delete(`/api/v1/company/team/${AGENT_ID}`)
+    .catch(() => undefined);
 }
 
 /** The company's enabled skills — the set an inherited scope resolves to. */
 async function enabledSlugs(request: APIRequestContext): Promise<string[]> {
-  return (await hostSkills(request)).filter((skill) => skill.enabled).map((skill) => skill.id);
+  return (await hostSkills(request))
+    .filter((skill) => skill.enabled)
+    .map((skill) => skill.id);
 }
 
 /** Opens the teammate's Tools tab, where the Skills card lives. */
 async function openScopeCard(page: Page) {
   await page.goto(`/#/company/agent/${AGENT_ID}`);
-  await expect(page.getByTestId("agent-name")).toHaveText(AGENT_NAME, { timeout: 30_000 });
-  await page.getByRole("tab", { name: "Tools" }).click();
-  await expect(page.getByRole("heading", { name: "Skills" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("agent-name")).toHaveText(AGENT_NAME, {
+    timeout: 30_000,
+  });
+  // Skills is its own tab now, beside Tools and Permissions.
+  await page.getByTestId("agent-tab-skills").click();
+  await expect(page.getByRole("heading", { name: "Skills" })).toBeVisible({
+    timeout: 30_000,
+  });
 }
 
 test.beforeEach(async ({ page, request }) => {
@@ -133,7 +153,10 @@ test.beforeEach(async ({ page, request }) => {
   const created = await request.post("/api/v1/company/team", {
     data: { name: AGENT_NAME, role: "Probe" },
   });
-  expect(created.ok(), `creating ${AGENT_NAME} failed: ${await created.text()}`).toBeTruthy();
+  expect(
+    created.ok(),
+    `creating ${AGENT_NAME} failed: ${await created.text()}`,
+  ).toBeTruthy();
   AGENT_ID = (await created.json()).id;
 });
 
@@ -146,7 +169,10 @@ test("an inherited scope reads every enabled skill, and narrows one switch at a 
   request,
 }) => {
   const enabled = await enabledSlugs(request);
-  expect(enabled.length, "the harness company should have enabled skills").toBeGreaterThan(1);
+  expect(
+    enabled.length,
+    "the harness company should have enabled skills",
+  ).toBeGreaterThan(1);
   const dropped = enabled[0];
   const kept = enabled.slice(1);
 
@@ -155,19 +181,22 @@ test("an inherited scope reads every enabled skill, and narrows one switch at a 
   // Inheriting: no scope of its own, so it reads the company's whole set.
   await expect(page.getByTestId("agent-skills-effective")).toBeVisible();
   for (const slug of enabled) {
-    await expect(page.getByTestId("agent-skills-effective")).toContainText(slug);
+    await expect(page.getByTestId("agent-skills-effective")).toContainText(
+      slug,
+    );
   }
-  await expect(page.getByText("reads every skill the company has enabled")).toBeVisible();
+  await expect(
+    page.getByText("reads every skill the company has enabled"),
+  ).toBeVisible();
 
   await page.getByTestId("agent-skills-edit").click();
   await expect(page.getByTestId("agent-skills-toggles")).toBeVisible();
 
   // Every switch reads on, though the stored scope is nothing at all.
   for (const slug of enabled) {
-    await expect(page.getByTestId(`agent-skill-toggle-${slug}`)).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
+    await expect(
+      page.getByTestId(`agent-skill-toggle-${slug}`),
+    ).toHaveAttribute("aria-checked", "true");
   }
 
   // Saving an untouched inherited view would store the whole enabled set as an
@@ -176,26 +205,28 @@ test("an inherited scope reads every enabled skill, and narrows one switch at a 
   await expect(page.getByTestId("agent-skills-save")).toBeDisabled();
 
   await page.getByTestId(`agent-skill-toggle-${dropped}`).click();
-  await expect(page.getByTestId(`agent-skill-toggle-${dropped}`)).toHaveAttribute(
-    "aria-checked",
-    "false",
-  );
+  await expect(
+    page.getByTestId(`agent-skill-toggle-${dropped}`),
+  ).toHaveAttribute("aria-checked", "false");
   // The untouched switches stay on — this is the assertion the `touched` flag
   // exists for.
   for (const slug of kept) {
-    await expect(page.getByTestId(`agent-skill-toggle-${slug}`)).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
+    await expect(
+      page.getByTestId(`agent-skill-toggle-${slug}`),
+    ).toHaveAttribute("aria-checked", "true");
   }
 
   await page.getByTestId("agent-skills-save").click();
-  await expect(page.getByTestId("agent-skills-editor")).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByTestId("agent-skills-editor")).toHaveCount(0, {
+    timeout: 30_000,
+  });
 
   const effective = page.getByTestId("agent-skills-effective");
   for (const slug of kept) await expect(effective).toContainText(slug);
   await expect(effective).not.toContainText(dropped);
-  await expect(page.getByText("narrowed by what the company has enabled")).toBeVisible();
+  await expect(
+    page.getByText("narrowed by what the company has enabled"),
+  ).toBeVisible();
 
   // And the host agrees, rather than the card having narrowed only on screen.
   const stored = await request.get(`/api/v1/company/team/${AGENT_ID}`);
@@ -222,24 +253,30 @@ test("an explicit empty scope is warned about, and Reset puts every skill back",
   );
 
   await page.getByTestId("agent-skills-save").click();
-  await expect(page.getByTestId("agent-skills-editor")).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByTestId("agent-skills-editor")).toHaveCount(0, {
+    timeout: 30_000,
+  });
   await expect(page.getByTestId("agent-skills-empty")).toContainText(
     "it was given an explicit empty scope",
   );
   expect(
-    (await (await request.get(`/api/v1/company/team/${AGENT_ID}`)).json()).skills.requested,
+    (await (await request.get(`/api/v1/company/team/${AGENT_ID}`)).json())
+      .skills.requested,
   ).toEqual([]);
 
   // Reset is offered only once there is a stored scope to reset, and it stores
   // nothing rather than storing the enabled set.
   await page.getByTestId("agent-skills-edit").click();
   await page.getByTestId("agent-skills-reset").click();
-  await expect(page.getByTestId("agent-skills-editor")).toHaveCount(0, { timeout: 30_000 });
+  await expect(page.getByTestId("agent-skills-editor")).toHaveCount(0, {
+    timeout: 30_000,
+  });
 
   const effective = page.getByTestId("agent-skills-effective");
   for (const slug of enabled) await expect(effective).toContainText(slug);
   expect(
-    (await (await request.get(`/api/v1/company/team/${AGENT_ID}`)).json()).skills.requested,
+    (await (await request.get(`/api/v1/company/team/${AGENT_ID}`)).json())
+      .skills.requested,
   ).toBeNull();
 });
 
@@ -259,7 +296,10 @@ test("a stored slug the company has not enabled is named rather than hidden", as
   const patched = await request.patch(`/api/v1/company/team/${AGENT_ID}`, {
     data: { skills: [held, retired] },
   });
-  expect(patched.ok(), `scoping ${AGENT_ID} failed: ${await patched.text()}`).toBeTruthy();
+  expect(
+    patched.ok(),
+    `scoping ${AGENT_ID} failed: ${await patched.text()}`,
+  ).toBeTruthy();
 
   await openScopeCard(page);
 
