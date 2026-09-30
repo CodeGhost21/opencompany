@@ -97,6 +97,7 @@ import { usd } from "@/lib/money";
 import { roleSubtitle, toneFor } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { cn } from "@/lib/utils";
+import { AgentMcpPermissions } from "@/views/mcp/AgentMcpPermissions";
 import { AgentFields } from "@/views/team/AgentFields";
 import { AgentRuns } from "@/views/team/AgentRuns";
 import { AgentSession } from "@/views/team/AgentSession";
@@ -212,6 +213,14 @@ const AGENT_TABS = [
   { id: "session", label: "Session", hint: "Everything it has said and heard" },
   { id: "instructions", label: "Instructions", hint: "What it owns and how it is told to work" },
   { id: "tools", label: "Tools", hint: "What it is allowed to call" },
+  // Tools is the grant — which servers this teammate may reach. Permissions is
+  // what that resolves to once each server's own tool modes and this teammate's
+  // own narrowing are composed.
+  {
+    id: "permissions",
+    label: "Permissions",
+    hint: "What it can actually call",
+  },
   { id: "model", label: "Model", hint: "The harness and model it thinks with" },
   // Inbox and Budget are not tabs. Both are one control each — a switch, and a
   // cap — and a tab is a promise of a surface worth navigating to; a whole view
@@ -1169,6 +1178,23 @@ export function AgentDetailView({
 
             <PageTabPanel idBase="agent" id="tools" value={tab}>
             <Tools agent={agent} saving={saving} onSave={(globs) => saveTools(globs)} />
+            </PageTabPanel>
+
+            <PageTabPanel idBase="agent" id="permissions" value={tab}>
+            <AgentMcpPermissions
+              client={client}
+              company={company}
+              agentId={agent.id}
+              agentName={agent.name?.trim() || agent.role}
+              onOpenServer={(name) => {
+                // `showing` is the permissions panel's own lens parameter, so the
+                // click lands on this teammate's rows rather than on the company
+                // document they are resolved against.
+                window.location.hash =
+                  `#/connections/mcp?server=${encodeURIComponent(name)}` +
+                  `&showing=${encodeURIComponent(agent.id)}`;
+              }}
+            />
             </PageTabPanel>
 
             <PageTabPanel idBase="agent" id="model" value={tab}>

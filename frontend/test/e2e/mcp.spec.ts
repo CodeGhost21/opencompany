@@ -22,6 +22,11 @@ import { LIVE_BRAIN } from "./capabilities";
  * extra capability needed. The harness company declares one `[[mcp_server]]`
  * (`deepwiki`) in its manifest, so the list is never empty here, and the add /
  * remove half exercises the runtime source against the routes the host serves.
+ *
+ * The redesign moved where three of these readings live: the section heading is
+ * `Your servers`, a row's endpoint is behind its own disclosure, and a row's
+ * secondary controls are behind an overflow menu. Every claim below is the one
+ * it was before — read from where the page now keeps it.
  * Live probing (`Test`) and tool discovery (`Tools`) need the `openhuman`
  * feature and report `not_wired` on this build, so they are deliberately not
  * driven here.
@@ -31,6 +36,28 @@ import { LIVE_BRAIN } from "./capabilities";
  */
 
 type Page = import("@playwright/test").Page;
+type Locator = import("@playwright/test").Locator;
+
+/**
+ * Opens one row's overflow menu and returns the page-level menu.
+ *
+ * The menu content is portaled out of the row, so an item is never found by
+ * searching inside it — a scoped `toHaveCount(0)` there would pass with the menu
+ * wide open.
+ */
+async function overflow(page: Page, row: Locator) {
+  await row.getByTestId("mcp-row-overflow").click();
+  return page.getByRole("menu");
+}
+
+/** Opens one server's tool permissions from its row, and returns the panel. */
+async function openPermissionsFor(page: Page, name: string) {
+  const row = page.getByTestId("mcp-server-row").filter({ hasText: name });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  const menu = await overflow(page, row);
+  await menu.getByTestId("mcp-permissions").click();
+  return page.getByTestId("mcp-tool-permissions");
+}
 
 /** The MCP settings page, with the product tour dismissed if it appears. */
 async function openMcpSettings(page: Page) {
@@ -56,7 +83,7 @@ test("the MCP page lists the company's servers instead of crashing on open", asy
     page.getByRole("heading", { name: "MCP Servers", level: 1 }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Installed servers", level: 2 }),
+    page.getByRole("heading", { name: "Your servers", level: 2 }),
   ).toBeVisible();
 
   // The manifest server the harness company declares. Rendering it at all is
@@ -65,8 +92,14 @@ test("the MCP page lists the company's servers instead of crashing on open", asy
     .getByTestId("mcp-server-row")
     .filter({ hasText: "deepwiki" });
   await expect(manifest).toBeVisible();
-  await expect(manifest).toContainText("manifest");
-  await expect(manifest).toContainText("https://mcp.deepwiki.com/mcp");
+  await expect(manifest.getByTestId("mcp-source-badge")).toHaveText("manifest");
+
+  // The endpoint is still the host's, and still asserted — the row keeps it in
+  // its own disclosure now rather than as a second line in a cell.
+  await manifest.getByTestId("mcp-row-expander").click();
+  await expect(page.getByTestId("mcp-row-detail")).toContainText(
+    "https://mcp.deepwiki.com/mcp",
+  );
 
   // Issue #567: the screen states what this deployment can do with these
   // servers. Asserted from both sides, because the failure being fixed is a
@@ -168,14 +201,24 @@ test("an admin adds and removes a runtime MCP server", async ({ page }) => {
   // `finally` deletes through the API regardless of how the body ended, and is
   // a harmless 404 on the happy path where the UI already removed it.
   try {
+    // The form is a dialog now, so adding starts by asking for one.
+    await page.getByTestId("mcp-add-open").click();
     await page.getByTestId("mcp-add-name").fill(name);
     await page.getByTestId("mcp-add-endpoint").fill(endpoint);
     await page.getByTestId("mcp-add-submit").click();
 
+    // The outcome lands on the server it is about rather than as a toast that
+    // has gone by the time the operator looks for it.
+    await expect(page.getByTestId("mcp-add-open-server")).toBeVisible({
+      timeout: 30_000,
+    });
+    await page.getByRole("button", { name: "Done" }).click();
+
     const row = page.getByTestId("mcp-server-row").filter({ hasText: name });
     await expect(row).toBeVisible({ timeout: 15_000 });
-    await expect(row).toContainText("runtime");
-    await expect(row).toContainText(endpoint);
+    await expect(row.getByTestId("mcp-source-badge")).toHaveText("runtime");
+    await row.getByTestId("mcp-row-expander").click();
+    await expect(page.getByTestId("mcp-row-detail")).toContainText(endpoint);
 
     // The host is the authority on what was stored, so confirm the row is not
     // just optimistic console state.
@@ -190,7 +233,8 @@ test("an admin adds and removes a runtime MCP server", async ({ page }) => {
       name,
     );
 
-    await row.getByRole("button", { name: `Remove ${name}` }).click();
+    const menu = await overflow(page, row);
+    await menu.getByTestId("mcp-remove").click();
 
     // Removing takes the stored credential with it, so the trash asks first.
     // The row has to survive the question, or the confirmation is decorative.
@@ -252,17 +296,11 @@ test("the permissions panel reads a tier as set or unset, and says what is never
     expect(seeded.ok(), "the host stored the per-tool decision").toBeTruthy();
 
     await openMcpSettings(page);
-    const row = page.getByTestId("mcp-server-row").filter({ hasText: name });
-    await expect(row).toBeVisible({ timeout: 15_000 });
-    await row
-      .getByRole("button", { name: `Tool permissions for ${name}` })
-      .click();
+    const panel = await openPermissionsFor(page, name);
 
     // On the server's own page, not under the row. A panel that drifted back
     // onto the row would satisfy every other assertion here.
-    const detail = page.getByTestId("mcp-server-page");
-    await expect(detail).toBeVisible();
-    const panel = detail.getByTestId("mcp-tool-permissions");
+    await expect(page.getByTestId("mcp-server-page")).toBeVisible();
     await expect(panel).toBeVisible();
 
     // No tier default was ever written, so every tier reads as unset — not as
@@ -284,13 +322,8 @@ test("the permissions panel reads a tier as set or unset, and says what is never
     expect(wrote.ok()).toBeTruthy();
     await page.reload();
     await openMcpSettings(page);
-    await page
-      .getByTestId("mcp-server-row")
-      .filter({ hasText: name })
-      .getByRole("button", { name: `Tool permissions for ${name}` })
-      .click();
     await expect(
-      page.getByTestId("mcp-tool-permissions").locator("#tier-read_only"),
+      (await openPermissionsFor(page, name)).locator("#tier-read_only"),
     ).toContainText("Allow");
 
     // And a tier named as nothing is cleared, which the wire could not say
@@ -301,13 +334,8 @@ test("the permissions panel reads a tier as set or unset, and says what is never
     expect(cleared.ok()).toBeTruthy();
     await page.reload();
     await openMcpSettings(page);
-    await page
-      .getByTestId("mcp-server-row")
-      .filter({ hasText: name })
-      .getByRole("button", { name: `Tool permissions for ${name}` })
-      .click();
     await expect(
-      page.getByTestId("mcp-tool-permissions").locator("#tier-read_only"),
+      (await openPermissionsFor(page, name)).locator("#tier-read_only"),
     ).toContainText("Not set");
 
     expect(pageErrors, `the page threw: ${pageErrors.join(" | ")}`).toEqual([]);

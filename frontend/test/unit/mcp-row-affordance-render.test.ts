@@ -61,7 +61,7 @@ vi.mock("sonner", () => ({
 // The directory browser runs its own search on mount and owns none of the
 // behaviour under test here.
 vi.mock("@/views/connections/McpRegistryBrowser", () => ({
-  McpRegistryBrowser: () => null,
+  useMcpDirectorySearch: () => ({ kind: "idle" }),
 }));
 vi.mock("@/views/connections/ProviderDetail", () => ({
   ProviderDetail: () => null,
@@ -168,7 +168,9 @@ describe("a directory install that wants a browser sign-in", () => {
     await mount([{ ...server, health: health("needs_config") }]);
 
     expect(control("mcp-rotate-env")).not.toBeNull();
-    expect(control("mcp-lifecycle")).not.toBeNull();
+    // Connect is real for this row, and it is one press behind the overflow: a
+    // row carries one labelled action, and this row's is the credential.
+    expect(control("mcp-row-overflow")).not.toBeNull();
     expect(control("mcp-no-credential-control")).toBeNull();
   });
 });

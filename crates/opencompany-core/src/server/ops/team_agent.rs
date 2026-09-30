@@ -464,6 +464,22 @@ pub(super) fn is_global(record: &CompanyRecord, agent_id: &str) -> bool {
 /// depends on which desks this teammate sits on. Passing the record is what makes
 /// "forgot to apply the desk ceiling" unrepresentable at the call site rather
 /// than a thing three callers each have to remember.
+/// The grants one teammate is actually built with — the `effective` row of
+/// [`AgentToolsDto`], on its own.
+///
+/// Split out so a surface that needs only the resolved grant (the per-agent MCP
+/// permissions read) shares this definition instead of re-deriving the
+/// three-level narrowing, which is the drift [`agent_tools`] exists to prevent.
+pub(super) fn effective_grants(record: &CompanyRecord, agent_id: &str) -> Vec<String> {
+    let desk_tools = record.agent_desk_tools(agent_id);
+    let desk_refs: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+    agent_scoped_grants(
+        &record.manifest.tools.allow,
+        &desk_refs,
+        requested_grants(record, agent_id).as_deref(),
+    )
+}
+
 pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsDto {
     let company_allow = &record.manifest.tools.allow;
     let requested = requested_grants(record, agent_id);
@@ -494,7 +510,7 @@ pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsD
     };
 
     AgentToolsDto {
-        effective: agent_scoped_grants(company_allow, &desk_refs, requested.as_deref()),
+        effective: effective_grants(record, agent_id),
         requested,
         company_allow: company_allow.to_vec(),
         desk_allow,

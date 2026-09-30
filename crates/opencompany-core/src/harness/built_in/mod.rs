@@ -5156,11 +5156,16 @@ impl HarnessPool {
 }
 
 /// A stable fingerprint of an effective MCP server set, used to detect a console
-/// change (add / remove / enable-toggle / token rotation) between
-/// [`HarnessPool::ensure`] calls. Hashes only non-secret configuration plus the
-/// credential substrings — the resulting `u64` is non-reversible and never
-/// surfaces anywhere, so it is not a credential leak, and hashing the credential
-/// substrings means a rotate-token also invalidates the cached roster.
+/// change (add / remove / enable-toggle / token rotation / tool-permission edit)
+/// between [`HarnessPool::ensure`] calls. Hashes only non-secret configuration
+/// plus the credential substrings — the resulting `u64` is non-reversible and
+/// never surfaces anywhere, so it is not a credential leak, and hashing the
+/// credential substrings means a rotate-token also invalidates the cached roster.
+///
+/// The per-tool policy and the discovered inventory are terms too: the attached
+/// server's deny list is resolved from them, so a tool set to
+/// [`Blocked`](crate::company::mcp_policy::ApprovalMode::Blocked) would
+/// otherwise stay callable for as long as the cached roster stands.
 fn mcp_fingerprint(decls: &[McpServerDecl]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -5179,8 +5184,53 @@ fn mcp_fingerprint(decls: &[McpServerDecl]) -> u64 {
         for secret in decl.auth.secret_values() {
             secret.hash(&mut hasher);
         }
+        hash_tool_policies(&decl.tool_policies, &mut hasher);
+        hash_tool_inventory(&decl.tool_inventory, &mut hasher);
     }
     hasher.finish()
+}
+
+/// Folds one server's stored tool policy into the fingerprint, canonically.
+///
+/// The company halves of [`McpToolPolicies`](crate::company::mcp_policy::McpToolPolicies)
+/// are `HashMap`-backed and iterate in an order that varies per map instance, so
+/// the tiers are read totally, in
+/// [`ToolTier::ALL`](crate::company::mcp_policy::ToolTier::ALL) order, and the
+/// overrides through a [`BTreeMap`](std::collections::BTreeMap). The per-agent
+/// map is already a `BTreeMap` of `BTreeMap`s.
+fn hash_tool_policies<H: std::hash::Hasher>(
+    policies: &crate::company::mcp_policy::McpToolPolicies,
+    hasher: &mut H,
+) {
+    use crate::company::mcp_policy::{ApprovalMode, ToolTier};
+    use std::collections::BTreeMap;
+    use std::hash::Hash;
+
+    for tier in ToolTier::ALL {
+        policies.tier_defaults.get(&tier).copied().hash(hasher);
+    }
+
+    let overrides: BTreeMap<&str, (Option<ToolTier>, Option<ApprovalMode>)> = policies
+        .overrides
+        .iter()
+        .map(|(tool, policy)| (tool.as_str(), (policy.tier, policy.mode)))
+        .collect();
+    overrides.hash(hasher);
+
+    policies.agents.hash(hasher);
+}
+
+/// Folds one server's discovered tool inventory into the fingerprint.
+///
+/// `discovered_at_millis` is left out: every successful probe rewrites it, and a
+/// re-probe that learned nothing must not rebuild the roster.
+fn hash_tool_inventory<H: std::hash::Hasher>(
+    inventory: &crate::company::mcp_policy::McpToolInventory,
+    hasher: &mut H,
+) {
+    use std::hash::Hash;
+
+    inventory.tools.hash(hasher);
 }
 
 /// A small discriminant for an [`AuthMaterial`] variant, for the fingerprint.
@@ -5762,14 +5812,41 @@ pub(crate) fn grants_for_policy(
     agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref())
 }
 
-/// The MCP `(server, tool)` pairs a teammate's gate lets run without parking.
+/// The MCP `(server, tool)` pairs one teammate's gate lets run without parking.
 ///
-/// Resolved through each server's stored tool policy, so an operator's
-/// refusal or approval requirement wins over the manifest declaration. Every
-/// teammate policy takes its read set from here, whether it serves the chat
-/// roster or an episode seat.
-pub(crate) fn agent_mcp_reads(deps: &HarnessDeps) -> crate::policy::McpReadSet {
-    crate::company::mcp_policy::mcp_allow_set(&deps.mcp_servers)
+/// Resolved through each server's stored tool policy as it stands for this
+/// teammate, and narrowed by `grants_cover_server`. Both narrowings can only
+/// remove pairs, so a smaller set can only park more. Every teammate policy
+/// takes its read set from here, whether it serves the chat roster or an episode
+/// seat.
+pub(crate) fn agent_mcp_reads(
+    deps: &HarnessDeps,
+    agent: &str,
+    grants: &[String],
+) -> crate::policy::McpReadSet {
+    crate::company::mcp_policy::mcp_allow_set_for_agent(&deps.mcp_servers, agent, grants)
+}
+
+/// The approval policy every roster teammate starts from, before the per-agent
+/// wiring [`agent_policy_for`] chains onto it.
+///
+/// One construction, because two surfaces need the same answer: the roster that
+/// enforces the policy, and the read that reports whether a `needs_approval`
+/// tool mode parks ([`roster_approvals_park`]). A second copy of the chain would
+/// let the console describe a roster this host does not build.
+pub(crate) fn roster_policy_base(policy: &Policy, effective_budget: Option<f64>) -> ApprovalPolicy {
+    ApprovalPolicy::new(policy, effective_budget).with_policy_hitl_disabled()
+}
+
+/// Whether a tool set to `needs_approval` parks a call for this company's
+/// teammates, or is allowed through as if it were set to allow.
+///
+/// Derived from [`roster_policy_base`] rather than stated, so the day a roster
+/// parks again the console says so without a second edit. The budget is left out
+/// because nothing below it reaches the spend arm — the question is the HITL
+/// bypass alone.
+pub fn roster_approvals_park(policy: &Policy) -> bool {
+    roster_policy_base(policy, None).policy_hitl_enabled()
 }
 
 /// The approval policy one teammate is built with.
@@ -5783,15 +5860,16 @@ pub(crate) fn agent_policy_for(
     manifest_agent: &ManifestAgent,
     policy: &Policy,
     effective_budget: Option<f64>,
-    #[cfg_attr(not(feature = "composio"), allow(unused_variables))] grants: &[String],
 ) -> ApprovalPolicy {
-    let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
-        .with_policy_hitl_disabled()
+    // Resolved here, not passed in: the gate and the toolbelt must be built from
+    // the same grant list.
+    let grants = grants_for_policy(company, &company.manifest.tools.allow, manifest_agent);
+    let mut agent_policy = roster_policy_base(policy, effective_budget)
         .with_requests(deps.approval_requests.clone())
         // Issue #243: stamp who the parked effect belongs to, so approving it
         // can hand the grant back to this agent rather than to nobody.
         .with_agent(manifest_agent.id.clone())
-        .with_mcp_reads(agent_mcp_reads(deps));
+        .with_mcp_reads(agent_mcp_reads(deps, &manifest_agent.id, &grants));
     if let Some(gate) = deps.emergency_gate.as_ref() {
         agent_policy = agent_policy.with_emergency_gate(gate.clone());
     }
@@ -5815,7 +5893,6 @@ pub(crate) fn seat_policy(
     company: &CompanyRecord,
     deps: &HarnessDeps,
     manifest_agent: &ManifestAgent,
-    grants: &[String],
 ) -> ApprovalPolicy {
     agent_policy_for(
         company,
@@ -5823,7 +5900,6 @@ pub(crate) fn seat_policy(
         manifest_agent,
         &company.effective_policy(),
         company.effective_budget(&manifest_agent.id),
-        grants,
     )
 }
 
@@ -5854,7 +5930,7 @@ pub(crate) fn seat_persona(
             ))
         })?;
     let grants = grants_for_policy(company, &company.manifest.tools.allow, manifest_agent);
-    let policy = seat_policy(company, deps, manifest_agent, &grants);
+    let policy = seat_policy(company, deps, manifest_agent);
     let instructions = company.effective_instructions(&manifest_agent.id);
     let blueprint = build::build_agent_with_model(
         &company.id,
@@ -6036,22 +6112,14 @@ pub(crate) fn build_roster(
         // reaches the system prompt this agent is built with — and it wins over
         // the blueprint without cloning the borrowed `&ManifestAgent`.
         let effective_instructions = company.effective_instructions(&manifest_agent.id);
-        let grants = grants_for_policy(company, allow, manifest_agent);
         // `mut` for the Composio arm below, which is the only thing that
         // reassigns it -- and is feature-gated, so a build without that
-        // feature would see the binding as needlessly mutable. Same
-        // `cfg_attr` the `grants` parameter above carries, for the same
-        // reason: one feature owns the mutation and every other build must
-        // compile clean under `-D warnings`.
+        // feature would see the binding as needlessly mutable: one feature owns
+        // the mutation and every other build must compile clean under
+        // `-D warnings`.
         #[cfg_attr(not(feature = "composio"), allow(unused_mut))]
-        let mut agent_policy = agent_policy_for(
-            company,
-            deps,
-            manifest_agent,
-            policy,
-            effective_budget,
-            &grants,
-        );
+        let mut agent_policy =
+            agent_policy_for(company, deps, manifest_agent, policy, effective_budget);
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
         // Three-level narrowing: company → the desks this teammate sits on →
         // the teammate itself. `agent_desk_tools` resolves through the record's
@@ -6143,14 +6211,8 @@ pub(crate) fn build_roster(
         let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
         let grants = agent_scoped_grants(allow, &desk_allows, manifest_agent.tools.as_deref());
         #[cfg_attr(not(feature = "composio"), allow(unused_mut))]
-        let mut agent_policy = agent_policy_for(
-            company,
-            deps,
-            &manifest_agent,
-            policy,
-            effective_budget,
-            &grants,
-        );
+        let mut agent_policy =
+            agent_policy_for(company, deps, &manifest_agent, policy, effective_budget);
         // Issue #1759 (S2): same Composio deflection wiring as the manifest loop
         // — an overlay teammate that holds the Composio grant is guarded on the
         // same terms, including the `composio_capability_admits` check (PR
@@ -6389,6 +6451,14 @@ mod built_in_tests_part09;
 #[cfg(test)]
 #[path = "built_in_tests_part10.rs"]
 mod built_in_tests_part10;
+/// Per-agent MCP tool permissions at the five seams that enforce them.
+#[cfg(all(test, feature = "openhuman"))]
+#[path = "mcp_agent_policy_tests.rs"]
+mod mcp_agent_policy_tests;
+/// The tool-permission freshness gate, driven over the console's write route.
+#[cfg(test)]
+#[path = "mcp_policy_freshness_tests.rs"]
+mod mcp_policy_freshness_tests;
 #[cfg(all(test, feature = "openhuman"))]
 #[path = "mcp_reads_tests.rs"]
 mod mcp_reads_tests;

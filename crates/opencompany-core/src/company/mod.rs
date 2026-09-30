@@ -97,6 +97,10 @@ pub mod mcp_file;
 /// other. Ungated — the console route that edits a policy ships without the
 /// harness, and the gate that enforces one ships with it.
 pub mod mcp_policy;
+/// What an MCP server says about itself — its own title, description, website
+/// and icon, read off the `serverInfo` block of its `initialize` reply and kept
+/// beside its health record.
+pub mod mcp_server_info;
 pub mod paypal;
 // Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the
 // per-tenant browser sign-in flow. Needs the vendored `oh::mcp::config_servers` discovery
