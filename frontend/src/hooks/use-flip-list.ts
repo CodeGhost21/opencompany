@@ -84,7 +84,10 @@ export function useFlipList<K extends string | number>(
       const top = slotTop(el);
       next.set(key, top);
       const before = tops.current.get(key);
-      if (!animate || before === undefined || typeof el.animate !== "function") continue;
+      // An unchanged slot is skipped before touching any running animation: a
+      // commit that re-renders the same order mid-slide (a badge, a presence
+      // tick) must let the slide finish rather than restart it at full length.
+      if (!animate || before === undefined || before === top || typeof el.animate !== "function") continue;
       // A row already sliding restarts from where it visibly is, not from
       // where it was headed, so back-to-back reorders do not jump.
       const inFlight = running.current.get(key);

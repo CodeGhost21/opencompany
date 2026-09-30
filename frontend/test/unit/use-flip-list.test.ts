@@ -170,6 +170,17 @@ describe("useFlipList", () => {
     expect(animate).toHaveBeenCalledTimes(4);
   });
 
+  it("leaves a running slide alone when a commit renders the same order", () => {
+    render(["a", "b"], enabled);
+    render(["a", "b"], enabled);
+    render(["b", "a"], enabled);
+    expect(animate).toHaveBeenCalledTimes(2);
+    // An unrelated re-render mid-slide: no row changed slot.
+    render(["b", "a"], enabled);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(animate).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps focus on the row's button across a reorder", () => {
     render(["a", "b", "c"], enabled);
     const button = host.querySelector<HTMLButtonElement>('[data-testid="row-c"]')!;
