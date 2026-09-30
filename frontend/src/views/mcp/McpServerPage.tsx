@@ -304,14 +304,19 @@ function McpDescription({
   const [draft, setDraft] = useState(declared || probed);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // What the last successful save wrote, so the view reflects it even before
+  // a reload replaces the (now stale) `server` prop.
+  const [saved, setSaved] = useState<string | null>(null);
 
   async function save() {
     setSaving(true);
     setError(null);
     try {
+      const next = draft.trim();
       await updateMcpServer(client, company, server.name, {
-        description: draft.trim(),
+        description: next,
       });
+      setSaved(next);
       setEditing(false);
     } catch (err) {
       setError(
@@ -361,7 +366,7 @@ function McpDescription({
     );
   }
 
-  const shown = declared || probed;
+  const shown = (saved ?? declared) || probed;
   return (
     <p className="max-w-prose text-xs text-muted-foreground" data-testid="mcp-page-description">
       {shown || "No description — this server says nothing about itself, and none was declared."}
@@ -371,7 +376,7 @@ function McpDescription({
           className="ml-2 underline"
           data-testid="mcp-page-describe"
           onClick={() => {
-            setDraft(declared || probed);
+            setDraft(shown);
             setEditing(true);
           }}
         >
