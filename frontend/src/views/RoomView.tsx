@@ -63,6 +63,7 @@ import { ChannelCreateDialog } from "./room/ChannelCreateDialog";
 import { ChannelRail } from "./room/ChannelRail";
 import { ChatHeader } from "./room/ChatHeader";
 import { MembersPane } from "./room/MembersPane";
+import { dmRawTurns } from "./room/rawTurnScope";
 import { TypingLine } from "./room/TypingLine";
 import { InflightRunBar } from "./room/InflightRunBar";
 import { MessageComposer } from "./room/MessageComposer";
@@ -3326,22 +3327,6 @@ const RAW_TURN_PAGE = 200;
 type RawLoad = "loading" | "ready" | "unsupported" | "error";
 
 /**
- * Whether a session row belongs to the DM with `agentId`.
- *
- * Both spellings, because the host lists both: `chat_history::agent_channels`
- * registers a teammate's DM under its **bare** id (what `dmThreadId` posts to,
- * after issue #364 re-keyed DMs) *and* under `dm:<id>` (the console's channel
- * key and a documented route key). Matching one would silently drop every line
- * keyed the other way — including, depending on which wrote it, the whole of
- * the operator's own side of the conversation.
- */
-function inDmWith(row: AgentSessionMessageDto, agentId: string): boolean {
-  return (
-    row.sessionChannelId === agentId || row.sessionChannelId === `dm:${agentId}`
-  );
-}
-
-/**
  * How many merged-channel pages one DM's raw-turns read will walk before
  * giving up on filling {@link RAW_TURN_PAGE}. Bounds the read the same way
  * `SESSION_SCAN_LIMIT` bounds the host's own delta walk — a DM that has gone
@@ -3368,7 +3353,12 @@ async function fetchDmRawTurns(
   agentId: string,
   company: string | null | undefined,
 ): Promise<AgentSessionMessageDto[]> {
-  const collected: AgentSessionMessageDto[] = [];
+  // Whole pages are kept and scoped at the end, not filtered as they arrive.
+  // A conversation's rows belong here only because a row on the DM's own
+  // channel shares their episode, and the two can land on different pages —
+  // filtering per page would drop a pair row read before the DM row that
+  // vouches for it.
+  const seen: AgentSessionMessageDto[] = [];
   let before: string | undefined;
   for (let page = 0; page < RAW_TURN_PAGE_WALK_LIMIT; page += 1) {
     const rows = await client.agentSession(agentId, company, {
@@ -3377,12 +3367,17 @@ async function fetchDmRawTurns(
     });
     // Oldest-first, same order the route answers in: an earlier page's rows
     // belong in front of what is already collected, not behind it.
-    collected.unshift(...rows.filter((row) => inDmWith(row, agentId)));
-    if (rows.length < RAW_TURN_PAGE || collected.length >= RAW_TURN_PAGE) break;
+    seen.unshift(...rows);
+    if (
+      rows.length < RAW_TURN_PAGE ||
+      dmRawTurns(seen, agentId).length >= RAW_TURN_PAGE
+    )
+      break;
     const oldest = rows[0]?.id;
     if (!oldest || oldest === before) break;
     before = oldest;
   }
+  const collected = dmRawTurns(seen, agentId);
   return collected.length > RAW_TURN_PAGE
     ? collected.slice(collected.length - RAW_TURN_PAGE)
     : collected;
