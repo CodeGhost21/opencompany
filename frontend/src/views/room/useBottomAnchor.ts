@@ -5,9 +5,9 @@ import { isAtBottom, readsAsFollowing } from "./bottomAnchor";
 /**
  * Bottom-anchoring for a scrolling transcript.
  *
- * Four rules, accreted one issue at a time in `MessageTimeline` and lifted here
- * unchanged so a second transcript — the thread panel — gets all four rather
- * than a partial copy. Their comments came with them: each records the case
+ * The rules below, accreted one issue at a time in `MessageTimeline` and lifted
+ * here unchanged so a second transcript — the thread panel — gets all of them
+ * rather than a partial copy. Their comments came with them: each records the case
  * that made the rule necessary, and a pane carrying three of the four is a pane
  * that anchors on open and then slides behind its own composer.
  *
@@ -32,6 +32,9 @@ export interface BottomAnchorOptions {
   /** The values whose change means the transcript grew. Spread into rule 2. */
   growth: readonly unknown[];
 }
+
+/** Keys that scroll a focused transcript: the reader's own travel (rule 4). */
+const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
 
 export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -220,6 +223,45 @@ export function useBottomAnchor({ key, pending, growth }: BottomAnchorOptions) {
     observer.observe(contentEl);
     return () => observer.disconnect();
   }, [pending, glide]);
+
+  // Rule 4 — the reader taking over mid-glide. `readsAsFollowing` tells the
+  // glide's travel from the reader's by direction alone, so a reader who
+  // scrolls *down* during a glide and stops short of the bottom was read as
+  // the glide: the pane kept following, hid the jump control, and glided them
+  // to the bottom on the next row. Scroll events cannot say who moved the pane,
+  // but input can: a wheel, a swipe, a scroll key or a press on the scrollbar
+  // ends the glide, so the scroll events that follow settle on `isAtBottom`
+  // alone. A press on a row is not input to the scroller — it must not end a
+  // glide still carrying the pane to a reply — so only the gutter counts, and
+  // keys typed into a field inside the transcript do not count either.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const takeOver = () => {
+      gliding.current = false;
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target === el && (event.offsetX >= el.clientWidth || event.offsetY >= el.clientHeight)) {
+        takeOver();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!SCROLL_KEYS.has(event.key)) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      takeOver();
+    };
+    el.addEventListener("wheel", takeOver, { passive: true });
+    el.addEventListener("touchmove", takeOver, { passive: true });
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("keydown", onKeyDown);
+    return () => {
+      el.removeEventListener("wheel", takeOver);
+      el.removeEventListener("touchmove", takeOver);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
 
   return { scroller, content, onScroll, following, atBottom, jumpToLatest };
 }
