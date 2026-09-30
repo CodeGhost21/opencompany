@@ -123,7 +123,7 @@ test("unticking a teammate on the panel narrows that teammate and nothing else",
   // The panel closes on a clean save, and the host holds the narrowed list —
   // with every other skill the teammate had still on it. A body of
   // `[subject.id]` would have been accepted and would have stripped them.
-  await expect(page.getByTestId("skill-detail-panel")).toHaveCount(0, {
+  await expect(page.getByTestId("skill-page")).toHaveCount(0, {
     timeout: 30_000,
   });
   expect(await storedScope(request)).toEqual(others);
@@ -160,7 +160,7 @@ test("ticking a teammate back adds the skill to the list it already holds", asyn
   await expect(box).not.toBeChecked();
   await box.check();
   await page.getByTestId("skill-detail-save").click();
-  await expect(page.getByTestId("skill-detail-panel")).toHaveCount(0, {
+  await expect(page.getByTestId("skill-page")).toHaveCount(0, {
     timeout: 30_000,
   });
 

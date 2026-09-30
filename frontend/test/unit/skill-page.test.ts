@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenCompanyClient } from "@/api/client";
 import type { Skill, SkillAgentScope } from "@/api/skills";
 import type { TeamMemberDto } from "@/api/types";
-import { SkillDetailPanel } from "@/views/skills/SkillDetailPanel";
+import { SkillPage } from "@/views/skills/SkillPage";
 
 /**
  * The skill panel's write, which is the part of it that can lose data.
@@ -85,7 +85,7 @@ async function open(
 ) {
   await act(async () => {
     root.render(
-      createElement(SkillDetailPanel, {
+      createElement(SkillPage, {
         client,
         company: null,
         skill: subject,
@@ -98,7 +98,7 @@ async function open(
   });
 }
 
-/** The panel renders through a portal, so it is on `document`, not `container`. */
+/** Looked up on `document`, so the same helper reads a portal or a page. */
 function node(testid: string): HTMLElement {
   const el = document.querySelector(`[data-testid="${testid}"]`);
   if (!el) throw new Error(`no \`${testid}\` in the rendered panel`);
@@ -428,5 +428,56 @@ describe("what the panel says before it pins a scope", () => {
       "Reset to every skill",
     );
     expect(node("skill-agent-link-ceo").getAttribute("href")).toContain("ceo");
+  });
+});
+
+describe("what a teammate's row says", () => {
+  /** A roster row that actually carries a display name. */
+  function named(id: string, name: string): TeamMemberDto {
+    return { ...member(id, null), name } as TeamMemberDto;
+  }
+
+  it("names the teammate rather than printing its id", async () => {
+    await open(skill([scope("writer", "inherited")]), [
+      named("writer", "Wanda"),
+    ]);
+    await reveal();
+    const row = node("skill-agent-toggle-writer").closest("label");
+    expect(row?.textContent).toContain("Wanda");
+    expect(row?.textContent, "the id is not the label").not.toContain("writer");
+  });
+
+  it("carries the mascot hashed from the teammate's id", async () => {
+    await open(skill([scope("writer", "inherited")]), [
+      named("writer", "Wanda"),
+    ]);
+    await reveal();
+    const face = node("skill-agent-toggle-writer")
+      .closest("label")
+      ?.querySelector("img");
+    expect(face?.getAttribute("src") ?? "").toContain("blob-");
+  });
+
+  it("reads the reach verdict off what is stored, not off the tick", async () => {
+    // A tick is an intent until it is saved. Labelling it `Not reached` the
+    // instant the box moves would report a scope the host has not been told
+    // about — and the faces in the list behind this page would disagree.
+    await open(skill([scope("writer", "inherited")]), [
+      named("writer", "Wanda"),
+    ]);
+    await reveal();
+    expect(node("skill-agent-reach-writer").textContent).toBe("Reached");
+    await tick("writer", false);
+    expect(
+      node("skill-agent-reach-writer").textContent,
+      "still reached until the write lands",
+    ).toBe("Reached");
+  });
+
+  it("says not reached for a teammate the scope excludes", async () => {
+    await open(skill([scope("writer", "excluded")]), [
+      named("writer", "Wanda"),
+    ]);
+    expect(node("skill-agent-reach-writer").textContent).toBe("Not reached");
   });
 });

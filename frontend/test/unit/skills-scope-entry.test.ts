@@ -119,10 +119,10 @@ afterEach(() => {
 });
 
 describe("opening a skill", () => {
-  it("opens the panel from the card", async () => {
+  it("opens the page from the card", async () => {
     await show(clientWith());
     expect(
-      anywhere("skill-detail-panel"),
+      anywhere("skill-page"),
       "closed until something opens it",
     ).toBeNull();
 
@@ -137,7 +137,7 @@ describe("opening a skill", () => {
     expect(anywhere("skill-detail-name")?.textContent).toBe("Brand Voice");
   });
 
-  it("opens the same panel from the row menu's Scope…", async () => {
+  it("opens the same page from the row menu's Scope…", async () => {
     await show(clientWith());
     await click(container.querySelector('[data-testid="skill-row-menu"]')!);
     const entry = anywhere("skill-menu-scope");
@@ -145,9 +145,32 @@ describe("opening a skill", () => {
     await click(entry!);
 
     expect(anywhere("skill-detail-name")?.textContent).toBe("Brand Voice");
-    // The panel lists the same roster either way in, because both entry points
+    // The page lists the same roster either way in, because both entry points
     // set one piece of state.
     expect(anywhere("skill-detail-agents")).not.toBeNull();
+  });
+
+  it("replaces the list rather than opening beside it", async () => {
+    // The difference between this and the sheet it replaced. A sheet left the
+    // cards mounted behind it, so a suite that only asserted the subject's name
+    // passed either way — and the 384px the sheet gave the scope list is what
+    // the swap exists to stop.
+    await show(clientWith());
+    expect(
+      container.querySelectorAll('[data-testid="installed-card"]').length,
+      "the list is on screen before anything is opened",
+    ).toBeGreaterThan(0);
+
+    await click(container.querySelector('[data-testid="skill-card-open"]')!);
+
+    expect(
+      container.querySelectorAll('[data-testid="installed-card"]').length,
+      "the list is gone, not covered",
+    ).toBe(0);
+    expect(
+      anywhere("skill-page-back"),
+      "and there is a way back",
+    ).not.toBeNull();
   });
 
   it("offers no Details entry beside Scope…", async () => {

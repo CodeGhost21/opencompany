@@ -28,7 +28,7 @@ import { getInferenceStatus } from "@/api/inference";
 import type { TeamMemberDto } from "@/api/types";
 import { DraftSkillDialog } from "@/views/skills/DraftSkillDialog";
 import { InstalledSkillsList } from "@/views/skills/InstalledSkillsList";
-import { SkillDetailPanel } from "@/views/skills/SkillDetailPanel";
+import { SkillPage } from "@/views/skills/SkillPage";
 import { UpdateSkillDialog } from "@/views/skills/UpdateSkillDialog";
 import { UploadSkillDialog } from "@/views/skills/UploadSkillDialog";
 import type { OpenCompanyClient } from "@/api/client";
@@ -389,7 +389,7 @@ export function SkillsView({ client, company }: Props) {
           </>
         }
         actions={
-          canManage ? (
+          canManage && openedRow === null ? (
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="outline" onClick={() => setUploadOpen(true)}>
                 <Upload className="size-4" /> Upload
@@ -417,120 +417,143 @@ export function SkillsView({ client, company }: Props) {
               t.id === "installed" ? { ...t, count: skills.length } : t,
             )}
             value={tab}
-            onChange={setTab}
+            onChange={(next) => {
+              setOpened(null);
+              setTab(next);
+            }}
             idBase="skills"
             aria-label="Skill views"
           />
         }
       />
       <div className="min-h-0 w-full flex-1 space-y-5 overflow-y-auto px-4 py-6">
-        {!canManage && (
-          <Alert data-testid="skills-admin-only">
-            <Info className="size-4" />
-            <AlertTitle>
-              Only an admin can change this company&apos;s skills
-            </AlertTitle>
-            <AlertDescription>
-              Enabling, installing, uninstalling and adding a skill change what
-              every agent is told to do, so an admin makes those calls. You can
-              see what is installed and browse the registry.
-            </AlertDescription>
-          </Alert>
-        )}
+        {/* A page swap rather than a sheet beside the list, the way an MCP
+            server opens (`McpServersSection`): the scope list carries a face, a
+            name, a reach verdict and a link per teammate, and a 384px sheet is
+            narrower than that answer. The header stays above it — a routed view
+            names itself in every state (#1785) — so this branches in the body
+            rather than returning early. */}
+        {openedRow !== null ? (
+          <SkillPage
+            client={client}
+            company={company}
+            skill={openedRow}
+            team={team}
+            canManage={canManage}
+            onClose={() => setOpened(null)}
+            onSaved={() => void refresh()}
+          />
+        ) : (
+          <>
+            {!canManage && (
+              <Alert data-testid="skills-admin-only">
+                <Info className="size-4" />
+                <AlertTitle>
+                  Only an admin can change this company&apos;s skills
+                </AlertTitle>
+                <AlertDescription>
+                  Enabling, installing, uninstalling and adding a skill change
+                  what every agent is told to do, so an admin makes those calls.
+                  You can see what is installed and browse the registry.
+                </AlertDescription>
+              </Alert>
+            )}
 
-        {/* What install / enable actually buy. A desk agent can list, describe
-            and read a skill and can never run one — deliberate, and pinned by
-            `dispatched_belt_excludes_every_deferred_family` — but this screen's
-            vocabulary is the vocabulary of switching a capability on, so
-            without saying it the operator learns the difference by asking an
-            agent to do something and watching nothing happen. */}
-        <Alert data-testid="skills-read-only-note">
-          <BookOpen className="size-4" />
-          <AlertDescription>{SKILLS_READ_ONLY_NOTE}</AlertDescription>
-        </Alert>
-
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-
-        <PageTabPanel idBase="skills" id="installed" value={tab}>
-          {loading ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Skeleton className="h-32 rounded-xl" />
-              <Skeleton className="h-32 rounded-xl" />
-            </div>
-          ) : skills.length === 0 ? (
-            <Empty label="No skills installed yet." />
-          ) : (
-            <InstalledSkillsList
-              skills={skills}
-              filters={filters}
-              onFilters={setFilters}
-              sort={sort}
-              onSort={setSort}
-              canManage={canManage}
-              now={now}
-              onToggle={(s) => void toggle(s)}
-              onUninstall={(s) => void uninstall(s)}
-              onUpdate={setUpdating}
-              onOpen={setOpened}
-              team={team}
-            />
-          )}
-        </PageTabPanel>
-
-        <PageTabPanel
-          idBase="skills"
-          id="registry"
-          value={tab}
-          className="space-y-3"
-        >
-          <div className="relative sm:max-w-xs">
-            <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search the registry…"
-              className="pl-8"
-            />
-          </div>
-          {registryError && (
-            <Alert variant="destructive">
-              <AlertDescription>{registryError}</AlertDescription>
+            {/* What install / enable actually buy. A desk agent can list, describe
+              and read a skill and can never run one — deliberate, and pinned by
+              `dispatched_belt_excludes_every_deferred_family` — but this screen's
+              vocabulary is the vocabulary of switching a capability on, so
+              without saying it the operator learns the difference by asking an
+              agent to do something and watching nothing happen. */}
+            <Alert data-testid="skills-read-only-note">
+              <BookOpen className="size-4" />
+              <AlertDescription>{SKILLS_READ_ONLY_NOTE}</AlertDescription>
             </Alert>
-          )}
-          {registryLoading ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Skeleton className="h-32 rounded-xl" />
-              <Skeleton className="h-32 rounded-xl" />
-            </div>
-          ) : visibleRegistry.length === 0 ? (
-            // A failed read leaves `registry` empty too, so the label must not
-            // derive "serves no registry" from the same failure the alert above
-            // already reports (issue #1467). The decider keeps the three cases
-            // apart.
-            <Empty
-              label={registryEmptyLabel(
-                registryError !== null,
-                registry.length === 0,
-              )}
-            />
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2">
-              {visibleRegistry.map((s) => (
-                <RegistryCard
-                  key={s.id}
-                  skill={s}
-                  installed={installedIds.has(s.id)}
+
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <PageTabPanel idBase="skills" id="installed" value={tab}>
+              {loading ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Skeleton className="h-32 rounded-xl" />
+                  <Skeleton className="h-32 rounded-xl" />
+                </div>
+              ) : skills.length === 0 ? (
+                <Empty label="No skills installed yet." />
+              ) : (
+                <InstalledSkillsList
+                  skills={skills}
+                  filters={filters}
+                  onFilters={setFilters}
+                  sort={sort}
+                  onSort={setSort}
                   canManage={canManage}
-                  onInstall={() => void install(s)}
+                  now={now}
+                  onToggle={(s) => void toggle(s)}
+                  onUninstall={(s) => void uninstall(s)}
+                  onUpdate={setUpdating}
+                  onOpen={setOpened}
+                  team={team}
                 />
-              ))}
-            </div>
-          )}
-        </PageTabPanel>
+              )}
+            </PageTabPanel>
+
+            <PageTabPanel
+              idBase="skills"
+              id="registry"
+              value={tab}
+              className="space-y-3"
+            >
+              <div className="relative sm:max-w-xs">
+                <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search the registry…"
+                  className="pl-8"
+                />
+              </div>
+              {registryError && (
+                <Alert variant="destructive">
+                  <AlertDescription>{registryError}</AlertDescription>
+                </Alert>
+              )}
+              {registryLoading ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Skeleton className="h-32 rounded-xl" />
+                  <Skeleton className="h-32 rounded-xl" />
+                </div>
+              ) : visibleRegistry.length === 0 ? (
+                // A failed read leaves `registry` empty too, so the label must not
+                // derive "serves no registry" from the same failure the alert above
+                // already reports (issue #1467). The decider keeps the three cases
+                // apart.
+                <Empty
+                  label={registryEmptyLabel(
+                    registryError !== null,
+                    registry.length === 0,
+                  )}
+                />
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {visibleRegistry.map((s) => (
+                    <RegistryCard
+                      key={s.id}
+                      skill={s}
+                      installed={installedIds.has(s.id)}
+                      canManage={canManage}
+                      onInstall={() => void install(s)}
+                    />
+                  ))}
+                </div>
+              )}
+            </PageTabPanel>
+          </>
+        )}
       </div>
 
       <AddSkillDialog
@@ -564,15 +587,6 @@ export function SkillsView({ client, company }: Props) {
         open={draftOpen}
         onOpenChange={setDraftOpen}
         onSaved={takeUploaded}
-      />
-      <SkillDetailPanel
-        client={client}
-        company={company}
-        skill={openedRow}
-        team={team}
-        canManage={canManage}
-        onClose={() => setOpened(null)}
-        onSaved={() => void refresh()}
       />
       <UpdateSkillDialog
         client={client}
