@@ -114,8 +114,10 @@ describe("what the cell renders", () => {
         onOverflow: () => undefined,
       }),
     );
-    expect(host.textContent).toContain("Hidden from agents");
-    expect(host.textContent).not.toContain("of");
+    // The wording is `skillReachLabel`'s, so this asserts the branch rather than
+    // pinning a second copy of the sentence.
+    expect(host.textContent).toMatch(/hidden/i);
+    expect(host.textContent).not.toMatch(/\d+ of \d+/);
   });
 
   it("carries the ratio beside the faces, which cannot express it alone", () => {

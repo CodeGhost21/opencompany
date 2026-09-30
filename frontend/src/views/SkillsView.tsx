@@ -80,7 +80,13 @@ interface Props {
   company: string | null;
 }
 
-const CATEGORIES: SkillCategory[] = ["Marketing", "Research", "Ops", "Content", "Finance"];
+const CATEGORIES: SkillCategory[] = [
+  "Marketing",
+  "Research",
+  "Ops",
+  "Content",
+  "Finance",
+];
 
 /** Category badge styling, tolerating the host's free-form category strings. */
 function categoryStyle(category: string): string {
@@ -143,7 +149,9 @@ export function SkillsView({ client, company }: Props) {
   // The Installed tab's own filter/sort selection. Separate from `query`, which
   // belongs to the registry tab: a search typed while browsing what could be
   // added must not silently hide half of what already is.
-  const [filters, setFilters] = useState<SkillListFilters>(DEFAULT_SKILL_FILTERS);
+  const [filters, setFilters] = useState<SkillListFilters>(
+    DEFAULT_SKILL_FILTERS,
+  );
   const [sort, setSort] = useState<SkillSort>("edited");
   // A generation token so a response from a previous company scope (or after
   // unmount) can't overwrite the current one.
@@ -228,13 +236,19 @@ export function SkillsView({ client, company }: Props) {
   // re-read: the host returns the stored skill, so refetching would only be a
   // second chance to disagree with what it just said.
   const takeUploaded = useCallback((rows: SkillUploadRow[]) => {
-    const stored = rows.flatMap((row) => (row.skill ? [row.skill as Skill] : []));
+    const stored = rows.flatMap((row) =>
+      row.skill ? [row.skill as Skill] : [],
+    );
     if (stored.length === 0) return;
     setSkills((all) => [
       ...stored,
       ...all.filter((skill) => !stored.some((one) => one.id === skill.id)),
     ]);
-    toast.success(stored.length === 1 ? `Added ${stored[0].name}.` : `Added ${stored.length} skills.`);
+    toast.success(
+      stored.length === 1
+        ? `Added ${stored[0].name}.`
+        : `Added ${stored.length} skills.`,
+    );
   }, []);
 
   const refresh = useCallback(async () => {
@@ -267,7 +281,9 @@ export function SkillsView({ client, company }: Props) {
       setRegistryError(null);
     } else {
       const e = shared.reason;
-      setRegistryError(e instanceof Error ? e.message : "could not load the registry");
+      setRegistryError(
+        e instanceof Error ? e.message : "could not load the registry",
+      );
     }
     setRegistryLoading(false);
   }, [client, company]);
@@ -285,27 +301,37 @@ export function SkillsView({ client, company }: Props) {
     };
   }, [refresh]);
 
-  const installedIds = useMemo(() => new Set(skills.map((s) => s.id)), [skills]);
+  const installedIds = useMemo(
+    () => new Set(skills.map((s) => s.id)),
+    [skills],
+  );
   // The panel reads the row out of the list rather than holding its own copy, so
   // a refetch behind an open panel shows what is stored instead of the snapshot
   // the click captured. A row that has gone (uninstalled elsewhere) closes it.
-  const openedRow = opened === null ? null : (skills.find((s) => s.id === opened.id) ?? null);
+  const openedRow =
+    opened === null ? null : (skills.find((s) => s.id === opened.id) ?? null);
   // One instant for the whole list, so no two rows date themselves against
   // different "now"s within a single render.
   const now = Date.now();
 
   async function toggle(skill: Skill) {
     const next = !skill.enabled;
-    setSkills((all) => all.map((s) => (s.id === skill.id ? { ...s, enabled: next } : s)));
+    setSkills((all) =>
+      all.map((s) => (s.id === skill.id ? { ...s, enabled: next } : s)),
+    );
     try {
       const saved = await setSkillEnabled(client, company, skill.id, next);
       setSkills((all) => all.map((s) => (s.id === saved.id ? saved : s)));
     } catch (e) {
       // Revert only this skill, so a concurrent mutation isn't clobbered.
       setSkills((all) =>
-        all.map((s) => (s.id === skill.id ? { ...s, enabled: skill.enabled } : s)),
+        all.map((s) =>
+          s.id === skill.id ? { ...s, enabled: skill.enabled } : s,
+        ),
       );
-      toast.error(e instanceof Error ? e.message : "could not update the skill");
+      toast.error(
+        e instanceof Error ? e.message : "could not update the skill",
+      );
     }
   }
 
@@ -315,8 +341,12 @@ export function SkillsView({ client, company }: Props) {
       await uninstallSkill(client, company, skill.id);
     } catch (e) {
       // Re-insert only this skill on failure (no whole-list rollback).
-      setSkills((all) => (all.some((s) => s.id === skill.id) ? all : [...all, skill]));
-      toast.error(e instanceof Error ? e.message : "could not uninstall the skill");
+      setSkills((all) =>
+        all.some((s) => s.id === skill.id) ? all : [...all, skill],
+      );
+      toast.error(
+        e instanceof Error ? e.message : "could not uninstall the skill",
+      );
     }
   }
 
@@ -331,14 +361,19 @@ export function SkillsView({ client, company }: Props) {
       setSkills((all) => [...all.filter((s) => s.id !== saved.id), saved]);
       toast.success(`Installed ${skill.name}.`);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not install the skill");
+      toast.error(
+        e instanceof Error ? e.message : "could not install the skill",
+      );
     }
   }
 
   const visibleRegistry = useMemo(() => {
     const q = query.trim().toLowerCase();
     return registry.filter(
-      (s) => !q || s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
+      (s) =>
+        !q ||
+        s.name.toLowerCase().includes(q) ||
+        s.description.toLowerCase().includes(q),
     );
   }, [query, registry]);
 
@@ -349,7 +384,8 @@ export function SkillsView({ client, company }: Props) {
         width="full"
         description={
           <>
-            Playbooks your agents read. Enable, install from the registry, or add your own.
+            Playbooks your agents read. Enable, install from the registry, or
+            add your own.
           </>
         }
         actions={
@@ -391,11 +427,13 @@ export function SkillsView({ client, company }: Props) {
         {!canManage && (
           <Alert data-testid="skills-admin-only">
             <Info className="size-4" />
-            <AlertTitle>Only an admin can change this company&apos;s skills</AlertTitle>
+            <AlertTitle>
+              Only an admin can change this company&apos;s skills
+            </AlertTitle>
             <AlertDescription>
-              Enabling, installing, uninstalling and adding a skill change what every agent is
-              told to do, so an admin makes those calls. You can see what is installed and browse
-              the registry.
+              Enabling, installing, uninstalling and adding a skill change what
+              every agent is told to do, so an admin makes those calls. You can
+              see what is installed and browse the registry.
             </AlertDescription>
           </Alert>
         )}
@@ -418,64 +456,80 @@ export function SkillsView({ client, company }: Props) {
         )}
 
         <PageTabPanel idBase="skills" id="installed" value={tab}>
-            {loading ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Skeleton className="h-32 rounded-xl" />
-                <Skeleton className="h-32 rounded-xl" />
-              </div>
-            ) : skills.length === 0 ? (
-              <Empty label="No skills installed yet." />
-            ) : (
-              <InstalledSkillsList
-                skills={skills}
-                filters={filters}
-                onFilters={setFilters}
-                sort={sort}
-                onSort={setSort}
-                canManage={canManage}
-                now={now}
-                onToggle={(s) => void toggle(s)}
-                onUninstall={(s) => void uninstall(s)}
-                onUpdate={setUpdating}
-                onOpen={setOpened}
-              />
-            )}
+          {loading ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Skeleton className="h-32 rounded-xl" />
+              <Skeleton className="h-32 rounded-xl" />
+            </div>
+          ) : skills.length === 0 ? (
+            <Empty label="No skills installed yet." />
+          ) : (
+            <InstalledSkillsList
+              skills={skills}
+              filters={filters}
+              onFilters={setFilters}
+              sort={sort}
+              onSort={setSort}
+              canManage={canManage}
+              now={now}
+              onToggle={(s) => void toggle(s)}
+              onUninstall={(s) => void uninstall(s)}
+              onUpdate={setUpdating}
+              onOpen={setOpened}
+              team={team}
+            />
+          )}
         </PageTabPanel>
 
-        <PageTabPanel idBase="skills" id="registry" value={tab} className="space-y-3">
-            <div className="relative sm:max-w-xs">
-              <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search the registry…" className="pl-8" />
+        <PageTabPanel
+          idBase="skills"
+          id="registry"
+          value={tab}
+          className="space-y-3"
+        >
+          <div className="relative sm:max-w-xs">
+            <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search the registry…"
+              className="pl-8"
+            />
+          </div>
+          {registryError && (
+            <Alert variant="destructive">
+              <AlertDescription>{registryError}</AlertDescription>
+            </Alert>
+          )}
+          {registryLoading ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Skeleton className="h-32 rounded-xl" />
+              <Skeleton className="h-32 rounded-xl" />
             </div>
-            {registryError && (
-              <Alert variant="destructive">
-                <AlertDescription>{registryError}</AlertDescription>
-              </Alert>
-            )}
-            {registryLoading ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Skeleton className="h-32 rounded-xl" />
-                <Skeleton className="h-32 rounded-xl" />
-              </div>
-            ) : visibleRegistry.length === 0 ? (
-              // A failed read leaves `registry` empty too, so the label must not
-              // derive "serves no registry" from the same failure the alert above
-              // already reports (issue #1467). The decider keeps the three cases
-              // apart.
-              <Empty label={registryEmptyLabel(registryError !== null, registry.length === 0)} />
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-2">
-                {visibleRegistry.map((s) => (
-                  <RegistryCard
-                    key={s.id}
-                    skill={s}
-                    installed={installedIds.has(s.id)}
-                    canManage={canManage}
-                    onInstall={() => void install(s)}
-                  />
-                ))}
-              </div>
-            )}
+          ) : visibleRegistry.length === 0 ? (
+            // A failed read leaves `registry` empty too, so the label must not
+            // derive "serves no registry" from the same failure the alert above
+            // already reports (issue #1467). The decider keeps the three cases
+            // apart.
+            <Empty
+              label={registryEmptyLabel(
+                registryError !== null,
+                registry.length === 0,
+              )}
+            />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {visibleRegistry.map((s) => (
+                <RegistryCard
+                  key={s.id}
+                  skill={s}
+                  installed={installedIds.has(s.id)}
+                  canManage={canManage}
+                  onInstall={() => void install(s)}
+                />
+              ))}
+            </div>
+          )}
         </PageTabPanel>
       </div>
 
@@ -561,7 +615,10 @@ function RegistryCard({
         <p className="text-sm text-muted-foreground">{skill.description}</p>
         <div className="flex items-center justify-between pt-1">
           <div className="flex items-center gap-2">
-            <Badge variant="outline" className={cn("capitalize", categoryStyle(skill.category))}>
+            <Badge
+              variant="outline"
+              className={cn("capitalize", categoryStyle(skill.category))}
+            >
               {skill.category}
             </Badge>
             <span className="text-xs text-muted-foreground">
@@ -628,7 +685,8 @@ function AddSkillDialog({
     // The host rejects a blank description and one past the limit, so gate on
     // all three here rather than spending a round trip to be told.
     if (!name.trim() || !description.trim()) return;
-    if (skillDescriptionCount(description) > SKILL_DESCRIPTION_MAX_CHARS) return;
+    if (skillDescriptionCount(description) > SKILL_DESCRIPTION_MAX_CHARS)
+      return;
     setBusy(true);
     try {
       await onAdd({ name, description, category, body });
@@ -655,12 +713,18 @@ function AddSkillDialog({
         <DialogHeader>
           <DialogTitle>Add a skill</DialogTitle>
           <DialogDescription>
-            Describe a playbook your agents should follow — what to do, and when.
+            Describe a playbook your agents should follow — what to do, and
+            when.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">
           <Label htmlFor="skill-name">Name</Label>
-          <Input id="skill-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Press Outreach" />
+          <Input
+            id="skill-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Press Outreach"
+          />
         </div>
         <div className="grid gap-2">
           <Label htmlFor="skill-cat">Category</Label>
@@ -710,7 +774,11 @@ function AddSkillDialog({
             placeholder={SKILL_DESCRIPTION_PLACEHOLDER}
             aria-describedby="skill-desc-hint"
           />
-          <p id="skill-desc-hint" data-testid="skill-desc-hint" className="text-xs text-muted-foreground">
+          <p
+            id="skill-desc-hint"
+            data-testid="skill-desc-hint"
+            className="text-xs text-muted-foreground"
+          >
             {SKILL_DESCRIPTION_HINT}
           </p>
         </div>
@@ -727,7 +795,11 @@ function AddSkillDialog({
           />
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={busy}
+          >
             Cancel
           </Button>
           <Button

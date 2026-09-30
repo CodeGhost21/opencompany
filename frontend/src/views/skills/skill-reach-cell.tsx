@@ -4,7 +4,9 @@ import type { SkillAgentScope } from "@/api/skills";
 import type { TeamMemberDto } from "@/api/types";
 import { AgentAvatarButton } from "@/components/agent-profile-sheet";
 import { TeammateAvatar } from "@/components/teammate-avatar";
+import { skillReachLabel } from "@/lib/skills";
 import { avatarFor } from "@/lib/team";
+import { cn } from "@/lib/utils";
 
 /**
  * Who reads a skill, as faces rather than a count.
@@ -72,26 +74,21 @@ export function SkillReachCell({
     return () => observer.disconnect();
   }, []);
 
-  // Not a ratio, so not faces: the two states below are sentences in the list
-  // today and stay sentences, because "0 of 6" reads as a scope that excluded
-  // everybody rather than as a skill nobody can reach whatever their scope says.
-  if (!enabled) {
+  // Not a ratio, so not faces. A switched-off skill reaches nobody whatever its
+  // scope stores, and "0 of 6" would read as a scope that excluded everybody
+  // rather than as a skill that is off. The wording stays in `skillReachLabel`
+  // so these sentences have one source wherever they are rendered.
+  const total = (agents ?? []).length;
+  if (!enabled || agents === undefined || total === 0) {
     return (
       <span
-        className="text-xs text-status-blocked-text"
+        className={cn(
+          "text-xs",
+          enabled ? "text-muted-foreground" : "text-status-blocked-text",
+        )}
         data-testid="skill-reach"
       >
-        Hidden from agents
-      </span>
-    );
-  }
-  const total = (agents ?? []).length;
-  if (agents === undefined || total === 0) {
-    return (
-      <span className="text-xs text-muted-foreground" data-testid="skill-reach">
-        {agents === undefined
-          ? "Available for your agents to read"
-          : "No agents to read it"}
+        {skillReachLabel(enabled, agents)}
       </span>
     );
   }

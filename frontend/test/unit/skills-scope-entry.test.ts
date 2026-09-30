@@ -163,9 +163,12 @@ describe("opening a skill", () => {
 describe("the card's reach label", () => {
   it("counts the teammates that hold it rather than claiming every agent does", async () => {
     await show(clientWith());
-    expect(
-      container.querySelector('[data-testid="skill-reach"]')?.textContent,
-    ).toContain("2 of 3 agents");
+    const reach = container.querySelector('[data-testid="skill-reach"]');
+    // The ratio rides beside the faces now: a stack alone cannot say whether two
+    // faces are two of two or two of nine.
+    expect(reach?.textContent).toContain("2 of 3");
+    // One mascot per holder, and none for the teammate that does not hold it.
+    expect(reach?.querySelectorAll("img").length).toBe(2);
   });
 
   it("keeps the unconditional claim when the host does not report the scope", async () => {

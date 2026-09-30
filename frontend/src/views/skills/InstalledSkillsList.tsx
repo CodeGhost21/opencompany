@@ -13,7 +13,15 @@
 // the meta row wraps and the filter bar collapses to one control per line on a
 // phone.
 
-import { ArrowUpCircle, MoreHorizontal, Pencil, Power, Sparkles, Trash2, Users } from "lucide-react";
+import {
+  ArrowUpCircle,
+  MoreHorizontal,
+  Pencil,
+  Power,
+  Sparkles,
+  Trash2,
+  Users,
+} from "lucide-react";
 
 import type { Skill } from "@/api/skills";
 import { Badge } from "@/components/ui/badge";
@@ -36,7 +44,9 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { CATEGORY_STYLES, skillReachLabel, type SkillCategory } from "@/lib/skills";
+import { CATEGORY_STYLES, type SkillCategory } from "@/lib/skills";
+import type { TeamMemberDto } from "@/api/types";
+import { SkillReachCell } from "@/views/skills/skill-reach-cell";
 import {
   canEditSkill,
   canUninstallSkill,
@@ -90,6 +100,7 @@ export function InstalledSkillsList({
   onUninstall,
   onUpdate,
   onOpen,
+  team,
 }: {
   skills: Skill[];
   filters: SkillListFilters;
@@ -110,6 +121,9 @@ export function InstalledSkillsList({
    * One handler for both ways in — the card and the row menu's `Scope…` — so the
    * two entry points cannot open different things. */
   onOpen: (skill: Skill) => void;
+  /** The roster, for the name beside a face. `null` when the read failed, which
+   * the cell renders as the teammate's id rather than as a blank. */
+  team: TeamMemberDto[] | null;
 }) {
   const categories = skillCategories(skills);
   const rows = visibleSkills(skills, filters, sort) as Skill[];
@@ -130,21 +144,34 @@ export function InstalledSkillsList({
           id="skills-filter-source"
           label="Source"
           value={filters.source}
-          options={SKILL_SOURCE_FILTERS.map((v) => [v, v === "all" ? "Any source" : labelFor(v)])}
-          onChange={(v) => onFilters({ ...filters, source: v as SkillSourceFilter })}
+          options={SKILL_SOURCE_FILTERS.map((v) => [
+            v,
+            v === "all" ? "Any source" : labelFor(v),
+          ])}
+          onChange={(v) =>
+            onFilters({ ...filters, source: v as SkillSourceFilter })
+          }
         />
         <FilterSelect
           id="skills-filter-enabled"
           label="State"
           value={filters.enabled}
-          options={SKILL_ENABLED_FILTERS.map((v) => [v, v === "all" ? "Any state" : labelFor(v)])}
-          onChange={(v) => onFilters({ ...filters, enabled: v as SkillEnabledFilter })}
+          options={SKILL_ENABLED_FILTERS.map((v) => [
+            v,
+            v === "all" ? "Any state" : labelFor(v),
+          ])}
+          onChange={(v) =>
+            onFilters({ ...filters, enabled: v as SkillEnabledFilter })
+          }
         />
         <FilterSelect
           id="skills-filter-category"
           label="Category"
           value={filters.category}
-          options={[["all", "Any category"] as const, ...categories.map((c) => [c, c] as const)]}
+          options={[
+            ["all", "Any category"] as const,
+            ...categories.map((c) => [c, c] as const),
+          ]}
           onChange={(v) => onFilters({ ...filters, category: v })}
         />
         <FilterSelect
@@ -178,6 +205,7 @@ export function InstalledSkillsList({
               onUninstall={() => onUninstall(s)}
               onUpdate={() => onUpdate(s)}
               onOpen={() => onOpen(s)}
+              team={team}
             />
           ))}
         </div>
@@ -209,7 +237,12 @@ function FilterSelect({
       onValueChange={(v) => v && onChange(v)}
       items={Object.fromEntries(options)}
     >
-      <SelectTrigger id={id} aria-label={label} data-testid={id} className="w-full sm:w-auto">
+      <SelectTrigger
+        id={id}
+        aria-label={label}
+        data-testid={id}
+        className="w-full sm:w-auto"
+      >
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -231,10 +264,12 @@ function InstalledCard({
   onUninstall,
   onUpdate,
   onOpen,
+  team,
 }: {
   skill: Skill;
   canManage: boolean;
   now: number;
+  team: TeamMemberDto[] | null;
   onToggle: () => void;
   onUninstall: () => void;
   onUpdate: () => void;
@@ -242,7 +277,10 @@ function InstalledCard({
 }) {
   const drift = skillDriftLabel(skill);
   return (
-    <Card data-testid="installed-card" className={cn(!skill.enabled && "opacity-70")}>
+    <Card
+      data-testid="installed-card"
+      className={cn(!skill.enabled && "opacity-70")}
+    >
       <CardContent className="space-y-2">
         <div className="flex items-start justify-between gap-2">
           {/* A real button, not a click handler on the card: focus, Enter and
@@ -287,7 +325,10 @@ function InstalledCard({
               {skill.category}
             </Badge>
           ) : null}
-          <span data-testid="skill-source" className="text-xs text-muted-foreground">
+          <span
+            data-testid="skill-source"
+            className="text-xs text-muted-foreground"
+          >
             {skillSourceLabel(skill)}
           </span>
           {/* After the provenance, so the row reads "Registry v1.2 · Update
@@ -296,20 +337,27 @@ function InstalledCard({
           {drift ? (
             <Badge
               variant="outline"
-              data-testid={skill.modified ? "skill-modified" : "skill-update-available"}
+              data-testid={
+                skill.modified ? "skill-modified" : "skill-update-available"
+              }
               className="bg-status-blocked-soft text-status-blocked-text"
             >
               {drift}
             </Badge>
           ) : null}
-          <span data-testid="skill-last-edited" className="text-xs text-muted-foreground">
+          <span
+            data-testid="skill-last-edited"
+            className="text-xs text-muted-foreground"
+          >
             · {skillLastEditedLabel(skill.updatedAtMillis, now)}
           </span>
-          {/* What the switch above decides, in the terms it actually decides
-              them: reach, not capability (issue #569). */}
-          <span data-testid="skill-reach" className="text-xs text-muted-foreground">
-            · {skillReachLabel(skill.enabled, skill.agents)}
-          </span>
+          <span className="text-xs text-muted-foreground">·</span>
+          <SkillReachCell
+            agents={skill.agents}
+            team={team}
+            enabled={skill.enabled}
+            onOverflow={onOpen}
+          />
         </div>
       </CardContent>
     </Card>
@@ -368,7 +416,9 @@ function SkillRowMenu({
             Only a skill you wrote here can be edited.
           </MenuReason>
         ) : (
-          <MenuReason testId="skill-menu-edit-reason">{EDIT_UNAVAILABLE_REASON}</MenuReason>
+          <MenuReason testId="skill-menu-edit-reason">
+            {EDIT_UNAVAILABLE_REASON}
+          </MenuReason>
         )}
         <DropdownMenuItem onClick={onToggle} data-testid="skill-menu-toggle">
           <Power className="mr-2 size-4" />
@@ -390,7 +440,9 @@ function SkillRowMenu({
           Update
         </DropdownMenuItem>
         {updateReason && (
-          <MenuReason testId="skill-menu-update-reason">{updateReason}</MenuReason>
+          <MenuReason testId="skill-menu-update-reason">
+            {updateReason}
+          </MenuReason>
         )}
         <DropdownMenuSeparator />
         <DropdownMenuItem
@@ -412,9 +464,18 @@ function SkillRowMenu({
   );
 }
 
-function MenuReason({ testId, children }: { testId: string; children: React.ReactNode }) {
+function MenuReason({
+  testId,
+  children,
+}: {
+  testId: string;
+  children: React.ReactNode;
+}) {
   return (
-    <p className="px-2 pt-0.5 pb-1 text-xs text-muted-foreground" data-testid={testId}>
+    <p
+      className="px-2 pt-0.5 pb-1 text-xs text-muted-foreground"
+      data-testid={testId}
+    >
       {children}
     </p>
   );
