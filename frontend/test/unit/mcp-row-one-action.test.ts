@@ -231,3 +231,22 @@ describe("removing a server", () => {
     expect(all('[data-testid="mcp-remove"]')).toHaveLength(0);
   });
 });
+
+describe("Browse the directory, from the empty state", () => {
+  it("shows a working search field and focuses it, instead of changing nothing", async () => {
+    await mount([]);
+
+    const button = document.body.querySelector('[data-testid="mcp-browse-directory"]');
+    expect(button).not.toBeNull();
+
+    await click(button);
+
+    const input = document.body.querySelector<HTMLInputElement>(
+      '[data-testid="mcp-search"]',
+    );
+    expect(input).not.toBeNull();
+    // Not a stray whitespace query left over from nudging the field open.
+    expect(input?.value).toBe("");
+    expect(document.activeElement).toBe(input);
+  });
+});

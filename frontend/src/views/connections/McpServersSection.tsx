@@ -221,6 +221,10 @@ export function McpServersSection({
   // timer is still "signing in" even after its `busy` flag clears, so a repeat
   // click can't spawn a second overlapping poll.
   const pollTimers = useRef<Record<string, number>>({});
+  // Names the operator cancelled mid-flight — checked after the poll's own
+  // await resolves, since by then `pollTimers` may already hold a new timer
+  // for the same name with nothing to clear.
+  const cancelledSignIns = useRef<Set<string>>(new Set());
   const [signIns, setSignIns] = useState<Record<string, SignInFlight>>({});
   // Opens the detail panel on the permissions section. Kept as its own key so
   // links already written against it keep landing where they meant to.
@@ -412,6 +416,7 @@ export function McpServersSection({
     const timer = pollTimers.current[name];
     if (timer !== undefined) window.clearTimeout(timer);
     delete pollTimers.current[name];
+    cancelledSignIns.current.add(name);
     setSignIns(({ [name]: _dropped, ...rest }) => rest);
   }
 
@@ -426,6 +431,7 @@ export function McpServersSection({
     // spawn a second overlapping sign-in (duplicate token exchange + toasts).
     if (busy || pollTimers.current[server.name] !== undefined) return;
     setBusy(server.name);
+    cancelledSignIns.current.delete(server.name);
     try {
       const { authorizeUrl } = await startMcpOAuth(
         client,
@@ -465,6 +471,7 @@ export function McpServersSection({
         try {
           const health = await testMcpServer(client, company, server.name);
           if (unmounted.current) return;
+          if (cancelledSignIns.current.has(server.name)) return;
           setTested((t) => ({ ...t, [server.name]: health }));
           setSignIns((s) => {
             const flight = s[server.name];
@@ -881,7 +888,7 @@ export function McpServersSection({
           {chrome === "inline" ? "MCP Servers" : "Your servers"}
         </h2>
         <span className="flex-1" />
-        {load === "ready" && (servers.length > 0 || term !== "") && (
+        {load === "ready" && (
           <div className="relative min-w-0 flex-1 sm:max-w-xs">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -942,9 +949,7 @@ export function McpServersSection({
             </AlertDescription>
           </Alert>
           <p className="text-xs text-muted-foreground">
-            The directory half of the search still works — it reads the
-            directory, not this company. There is nothing to add to or search
-            here until the list can be read.
+            Search and adding are unavailable until the list can be read.
           </p>
         </>
       ) : load === "loading" ? (
@@ -969,7 +974,6 @@ export function McpServersSection({
                   variant="outline"
                   data-testid="mcp-browse-directory"
                   onClick={() => {
-                    setQuery(" ");
                     searchBox.current?.focus();
                   }}
                 >
@@ -1037,7 +1041,7 @@ export function McpServersSection({
                     label="Not installed — from the public directory"
                     count={
                       directory.totalPages > 1
-                        ? `showing ${directory.entries.length} of the first ${directory.totalPages} pages`
+                        ? `first ${directory.entries.length} — page 1 of ${directory.totalPages}`
                         : `${directory.entries.length} matches`
                     }
                   />
