@@ -1,6 +1,6 @@
 //! `reset_company_policy`: a company-scoped reset must not also erase every
-//! teammate's own rule, and a document that cannot be read still has to fall
-//! back to the pre-existing full wipe.
+//! teammate's own rule. An unparseable document falls back to the full wipe; a
+//! store that cannot be read refuses instead.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -129,19 +129,43 @@ async fn a_reset_with_no_agent_rules_is_the_empty_document() {
     assert_eq!(replacement, McpToolPolicies::default());
 }
 
-/// An unreadable document carries no `agents` map to preserve, so the reset
-/// falls back to the full wipe rather than refusing — the same repair path the
-/// route's own comment documents for `reset_policy`'s unreadable case.
+/// A document that will not parse carries no `agents` map to preserve, so the
+/// reset falls back to the full wipe rather than refusing — the repair path
+/// the route's own comment documents.
 #[tokio::test]
-async fn a_reset_of_an_unreadable_document_still_repairs_to_empty() {
+async fn a_reset_of_an_unparseable_document_still_repairs_to_empty() {
+    let secrets = MemSecrets::default();
+    let key = "mcp/notion/tool_policies";
+    secrets
+        .set(&company(), key, SecretValue("{ not json".into()))
+        .await
+        .expect("seeded");
+
+    let replacement = reset_company_policy(&company(), &secrets, key)
+        .await
+        .expect("an unparseable document repairs rather than refusing");
+    assert_eq!(replacement, McpToolPolicies::default());
+}
+
+/// A store that cannot be read is NOT an unparseable document: the stored
+/// document may be intact and hold a teammate's `Blocked` rule. Wiping on a
+/// keychain or backend outage would widen access on the next turn, which is
+/// the failure this whole function exists to prevent.
+#[tokio::test]
+async fn a_reset_refuses_when_the_store_cannot_be_read() {
     let secrets = MemSecrets {
         fail_reads: true,
         ..Default::default()
     };
     let key = "mcp/notion/tool_policies";
 
-    let replacement = reset_company_policy(&company(), &secrets, key)
-        .await
-        .expect("reset still succeeds — it never reads-then-fails, it repairs");
-    assert_eq!(replacement, McpToolPolicies::default());
+    let refused = reset_company_policy(&company(), &secrets, key).await;
+    assert!(
+        refused.is_err(),
+        "a store read failure must not be treated as an empty agents map"
+    );
+    assert!(
+        secrets.map.lock().unwrap().is_empty(),
+        "nothing may be written when the prior document could not be read"
+    );
 }
