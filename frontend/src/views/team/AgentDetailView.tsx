@@ -1925,7 +1925,10 @@ function Skills({
         </div>
       )}
 
-      {agent.skills.effective.length === 0 ? (
+      {/* The editor's own rows already say what this teammate reads, in more
+          detail than a chip can. Restating it under the Save button read as a
+          second, shorter answer to the same question. */}
+      {editing ? null : agent.skills.effective.length === 0 ? (
         <p
           className="text-sm text-muted-foreground"
           data-testid="agent-skills-empty"

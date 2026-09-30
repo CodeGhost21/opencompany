@@ -349,6 +349,18 @@ describe("where the section lives, and what it links at", () => {
     );
   });
 
+  it("drops the effective chips while the editor is open", async () => {
+    // The editor's rows say what it reads, in more detail than a chip can.
+    // Restating it under the Save button was a second, shorter answer to the
+    // same question.
+    await show(clientFor(detail()));
+    expect(node("agent-skills-effective")).not.toBeNull();
+    await click("agent-skills-edit");
+    expect(
+      container.querySelector('[data-testid="agent-skills-effective"]'),
+    ).toBeNull();
+  });
+
   it("says of every enabled skill whether this teammate reads it", async () => {
     // Two states from this side, against the skill page's three: the question
     // here is only whether it reads it.
