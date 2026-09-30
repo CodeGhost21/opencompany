@@ -138,7 +138,13 @@ export function SkillReachCell({
           +{hidden}
         </button>
       )}
-      <span className="shrink-0 text-xs text-muted-foreground">
+      {/* Its own element: the faces carry the teammate's initials as the tile
+          underneath each image, so a spec reading the cell's text would get
+          them run together with the ratio. */}
+      <span
+        className="shrink-0 text-xs text-muted-foreground"
+        data-testid="skill-reach-count"
+      >
         {held.length} of {total}
       </span>
     </div>

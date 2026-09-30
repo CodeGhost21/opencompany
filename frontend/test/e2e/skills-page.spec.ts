@@ -213,12 +213,19 @@ test("the card's reach label agrees with what the panel lists", async ({
   await openSkills(page);
   const card = installedCard(page, subject.name);
   await expect(card).toBeVisible({ timeout: 30_000 });
-  const label = (await card.getByTestId("skill-reach").textContent()) ?? "";
-  const counted = /(\d+) of (\d+) agents/.exec(label);
+  const label =
+    (await card.getByTestId("skill-reach-count").textContent()) ?? "";
+  const counted = /^(\d+) of (\d+)$/.exec(label.trim());
   expect(
     counted,
-    `the label should carry a count, got ${label}`,
+    `the reach cell should carry a ratio, got ${label}`,
   ).not.toBeNull();
+
+  // The faces beside it stand for the teammates that hold it, so the two halves
+  // of the cell have to agree before the page behind them is consulted.
+  await expect(card.getByTestId("skill-reach").locator("img")).toHaveCount(
+    Number(counted![1]),
+  );
 
   await card.getByTestId("skill-card-open").click();
   await page.getByTestId("skill-detail-mode-selected").click();

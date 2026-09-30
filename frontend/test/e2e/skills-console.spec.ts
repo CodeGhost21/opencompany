@@ -124,7 +124,9 @@ test("a bundled skill reads as Company, never edited, and available to read", as
   // whether one may run it. Matched on meaning rather than on wording: the label
   // is a count now that the host reports who a skill is scoped to, and the six
   // sentences it can be are pinned in `skill-scope.test.ts` instead.
-  await expect(card.getByTestId("skill-reach")).toContainText(/agents/i);
+  await expect(card.getByTestId("skill-reach-count")).toHaveText(
+    /^\d+ of \d+$/,
+  );
   await expect(card.getByTestId("skill-reach")).not.toContainText(
     /run|execute/i,
   );
