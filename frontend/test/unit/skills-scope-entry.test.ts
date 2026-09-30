@@ -234,3 +234,69 @@ describe("the card's reach label", () => {
     ).toContain("Hidden from agents");
   });
 });
+
+describe("cards or rows", () => {
+  function rowsOf(testid: string) {
+    return container.querySelectorAll(`[data-testid="${testid}"]`).length;
+  }
+
+  it("opens on cards, with the toggle offering both", async () => {
+    await show(clientWith());
+    expect(rowsOf("installed-card")).toBeGreaterThan(0);
+    expect(rowsOf("installed-row"), "no table yet").toBe(0);
+    expect(anywhere("skills-view-cards")?.getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(anywhere("skills-view-list")?.getAttribute("aria-pressed")).toBe(
+      "false",
+    );
+  });
+
+  it("swaps the cards for rows, and puts the choice on the address", async () => {
+    await show(clientWith());
+    await click(anywhere("skills-view-list")!);
+
+    expect(rowsOf("installed-row")).toBeGreaterThan(0);
+    expect(rowsOf("installed-card"), "one rendering at a time").toBe(0);
+    expect(window.location.hash).toContain("view=list");
+  });
+
+  it("drops the key rather than spelling out the default", async () => {
+    await show(clientWith());
+    await click(anywhere("skills-view-list")!);
+    await click(anywhere("skills-view-cards")!);
+
+    expect(rowsOf("installed-card")).toBeGreaterThan(0);
+    expect(window.location.hash).not.toContain("view=");
+  });
+
+  it("opens in rows when the address asks for them", async () => {
+    window.location.hash = "#/settings/skills?view=list";
+    await show(clientWith());
+    expect(rowsOf("installed-row")).toBeGreaterThan(0);
+  });
+
+  it("falls back to cards when the address names a view it does not have", async () => {
+    window.location.hash = "#/settings/skills?view=mosaic";
+    await show(clientWith());
+    expect(rowsOf("installed-card")).toBeGreaterThan(0);
+    expect(rowsOf("installed-row")).toBe(0);
+  });
+
+  it("carries the same reach cell into the rows", async () => {
+    // The column is the argument for the table: in a card the faces sit at the
+    // tail of a wrapped meta run, and here they get a column of their own.
+    window.location.hash = "#/settings/skills?view=list";
+    await show(clientWith());
+    const reach = container.querySelector('[data-testid="skill-reach"]');
+    expect(reach?.textContent).toContain("2 of 3");
+    expect(reach?.querySelectorAll("img").length).toBe(2);
+  });
+
+  it("opens the skill from a row, the way a card does", async () => {
+    window.location.hash = "#/settings/skills?view=list";
+    await show(clientWith());
+    await click(container.querySelector('[data-testid="skill-card-open"]')!);
+    expect(anywhere("skill-detail-name")?.textContent).toBe("Brand Voice");
+  });
+});

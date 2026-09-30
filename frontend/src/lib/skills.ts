@@ -59,6 +59,14 @@ export function skillHref(slug: string): string {
   return `${connectionsHref("skills")}?skill=${encodeURIComponent(slug)}`;
 }
 
+/** The tint for a category, falling back to a neutral one for an unknown name. */
+export function categoryStyle(category: string): string {
+  return (
+    CATEGORY_STYLES[category as SkillCategory] ??
+    "border-muted-foreground/30 bg-muted text-muted-foreground"
+  );
+}
+
 export const SKILLS_READ_ONLY_NOTE =
   "Skills are reference material your agents read — playbooks they follow, not buttons they press. " +
   "Enabling one makes it available to your agents, and each teammate can be scoped to a subset on its own page; " +

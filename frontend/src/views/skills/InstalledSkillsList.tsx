@@ -15,9 +15,11 @@
 
 import {
   ArrowUpCircle,
+  LayoutGrid,
   MoreHorizontal,
   Pencil,
   Power,
+  Rows3,
   Sparkles,
   Trash2,
   Users,
@@ -44,7 +46,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { CATEGORY_STYLES, type SkillCategory } from "@/lib/skills";
+import { categoryStyle } from "@/lib/skills";
+import { SkillsTable } from "@/views/skills/SkillsTable";
 import type { TeamMemberDto } from "@/api/types";
 import { SkillReachCell } from "@/views/skills/skill-reach-cell";
 import {
@@ -55,6 +58,7 @@ import {
   skillUpdateUnavailableReason,
   SKILL_BUILTIN_UNINSTALL_REASON,
   SKILL_DRIFT_FILTERS,
+  SKILL_LIST_VIEWS,
   SKILL_ENABLED_FILTERS,
   SKILL_SORT_LABELS,
   SKILL_SORTS,
@@ -64,6 +68,7 @@ import {
   skillSourceLabel,
   visibleSkills,
   type SkillDriftFilter,
+  type SkillListView,
   type SkillEnabledFilter,
   type SkillListFilters,
   type SkillSort,
@@ -83,19 +88,14 @@ const EDIT_UNAVAILABLE_REASON =
   "Editing needs the skill's full text, which the host does not serve yet.";
 
 /** Category badge styling, tolerating the host's free-form category strings. */
-function categoryStyle(category: string): string {
-  return (
-    CATEGORY_STYLES[category as SkillCategory] ??
-    "border-muted-foreground/30 bg-muted text-muted-foreground"
-  );
-}
-
 export function InstalledSkillsList({
   skills,
   filters,
   onFilters,
   sort,
   onSort,
+  view,
+  onView,
   canManage,
   now,
   onToggle,
@@ -109,6 +109,9 @@ export function InstalledSkillsList({
   onFilters: (next: SkillListFilters) => void;
   sort: SkillSort;
   onSort: (next: SkillSort) => void;
+  /** Cards or rows. Held by the view, so it rides the address. */
+  view: SkillListView;
+  onView: (next: SkillListView) => void;
   canManage: boolean;
   /** Taken once per render by the caller, so every row dates itself against the
    * same instant and the list cannot report two "now"s. */
@@ -195,6 +198,7 @@ export function InstalledSkillsList({
           options={SKILL_SORTS.map((v) => [v, SKILL_SORT_LABELS[v]])}
           onChange={(v) => onSort(v as SkillSort)}
         />
+        <ViewToggle view={view} onView={onView} />
       </div>
 
       <p className="text-xs text-muted-foreground" data-testid="skills-count">
@@ -207,6 +211,26 @@ export function InstalledSkillsList({
         <p className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
           No skills match those filters.
         </p>
+      ) : view === "list" ? (
+        <SkillsTable
+          skills={rows}
+          canManage={canManage}
+          now={now}
+          team={team}
+          onToggle={onToggle}
+          onUninstall={onUninstall}
+          onUpdate={onUpdate}
+          onOpen={onOpen}
+          renderMenu={(skill) => (
+            <SkillRowMenu
+              skill={skill}
+              onToggle={() => onToggle(skill)}
+              onUninstall={() => onUninstall(skill)}
+              onUpdate={() => onUpdate(skill)}
+              onOpen={() => onOpen(skill)}
+            />
+          )}
+        />
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           {rows.map((s) => (
@@ -267,6 +291,55 @@ function FilterSelect({
         ))}
       </SelectContent>
     </Select>
+  );
+}
+
+/**
+ * Cards or rows, as two buttons that read as one control.
+ *
+ * `aria-pressed` rather than a radio group: these are two states of one
+ * setting, and a screen reader announcing "pressed" is what the pair means.
+ * Labelled by what each draws, because "grid" and "table" name the markup
+ * rather than the choice.
+ */
+function ViewToggle({
+  view,
+  onView,
+}: {
+  view: SkillListView;
+  onView: (next: SkillListView) => void;
+}) {
+  const ICONS = { cards: LayoutGrid, list: Rows3 } as const;
+  const LABELS = { cards: "Cards", list: "List" } as const;
+  return (
+    <div
+      className="flex items-center gap-0.5 rounded-md border p-0.5"
+      data-testid="skills-view-toggle"
+    >
+      {SKILL_LIST_VIEWS.map((option) => {
+        const Icon = ICONS[option];
+        const on = view === option;
+        return (
+          <Button
+            key={option}
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-pressed={on}
+            aria-label={`${LABELS[option]} view`}
+            title={`${LABELS[option]} view`}
+            data-testid={`skills-view-${option}`}
+            className={cn(
+              "size-7 rounded-sm",
+              on ? "bg-muted text-foreground" : "text-muted-foreground",
+            )}
+            onClick={() => onView(option)}
+          >
+            <Icon className="size-4" />
+          </Button>
+        );
+      })}
+    </div>
   );
 }
 

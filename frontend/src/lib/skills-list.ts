@@ -35,6 +35,17 @@ export type SkillEnabledFilter = (typeof SKILL_ENABLED_FILTERS)[number];
 export const SKILL_DRIFT_FILTERS = ["all", "update"] as const;
 export type SkillDriftFilter = (typeof SKILL_DRIFT_FILTERS)[number];
 
+/**
+ * How the installed set is drawn.
+ *
+ * Cards are the default because a skill's description is the part an operator
+ * reads to tell two of them apart, and a card gives it a line of its own. The
+ * table is for a company with enough skills that scanning one column at a time
+ * beats reading thirty descriptions — the shape MCP's own list already has.
+ */
+export const SKILL_LIST_VIEWS = ["cards", "list"] as const;
+export type SkillListView = (typeof SKILL_LIST_VIEWS)[number];
+
 /** The orderings offered above the list, in the order shown. */
 export const SKILL_SORTS = ["edited", "name"] as const;
 export type SkillSort = (typeof SKILL_SORTS)[number];

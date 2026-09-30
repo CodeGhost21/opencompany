@@ -70,6 +70,7 @@ import { cn } from "@/lib/utils";
 import {
   DEFAULT_SKILL_FILTERS,
   type SkillListFilters,
+  type SkillListView,
   type SkillSort,
 } from "@/lib/skills-list";
 import {
@@ -144,6 +145,10 @@ export function SkillsView({ client, company }: Props) {
   // piece of state for every way in — a card click, the row menu's `Scope…`, a
   // pasted address — so they cannot open different things.
   const [openedId, setOpenedId] = useHashParam("skill");
+  // Cards or rows. On the address like the open skill, so the choice survives a
+  // reload and can be sent with the link; `cards` is the default and therefore
+  // drops the key rather than spelling itself out.
+  const [viewParam, setViewParam] = useHashParam("view");
   // The roster, for the panel's write. Each row carries that teammate's stored
   // skill list, and the panel computes the next one from it; `null` means the
   // read has not landed or failed, which is what stops the panel offering a
@@ -321,6 +326,9 @@ export function SkillsView({ client, company }: Props) {
   // address naming a skill this company does not have does the same.
   const openedRow =
     openedId === null ? null : (skills.find((s) => s.id === openedId) ?? null);
+  // An address naming no view, or naming one this console does not have, is the
+  // default rather than an error: a link is a thing people edit by hand.
+  const listView: SkillListView = viewParam === "list" ? "list" : "cards";
   // One instant for the whole list, so no two rows date themselves against
   // different "now"s within a single render.
   const now = Date.now();
@@ -525,6 +533,10 @@ export function SkillsView({ client, company }: Props) {
                   onUninstall={(s) => void uninstall(s)}
                   onUpdate={setUpdating}
                   onOpen={(skill) => setOpenedId(skill.id)}
+                  view={listView}
+                  onView={(next) =>
+                    setViewParam(next === "cards" ? null : next)
+                  }
                   team={team}
                 />
               )}

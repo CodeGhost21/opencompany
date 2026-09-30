@@ -732,3 +732,29 @@ test("editing an installed registry skill marks it modified and refuses an updat
 
   await removeSkill(request, REGISTRY_SLUG);
 });
+
+test("the installed set can be drawn as rows, and the choice rides the address", async ({
+  page,
+}) => {
+  await openSkills(page);
+  await expect(page.getByTestId("installed-card").first()).toBeVisible({
+    timeout: 30_000,
+  });
+
+  await page.getByTestId("skills-view-list").click();
+  await expect(page.getByTestId("installed-row").first()).toBeVisible();
+  await expect(page.getByTestId("installed-card")).toHaveCount(0);
+  expect(page.url()).toContain("view=list");
+
+  // A reload lands on the same rendering, which is the point of putting it on
+  // the address rather than in component state.
+  await page.reload();
+  await suppressTour(page);
+  await expect(page.getByTestId("installed-row").first()).toBeVisible({
+    timeout: 30_000,
+  });
+
+  await page.getByTestId("skills-view-cards").click();
+  await expect(page.getByTestId("installed-card").first()).toBeVisible();
+  expect(page.url()).not.toContain("view=");
+});
