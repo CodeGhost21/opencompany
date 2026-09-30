@@ -8,12 +8,14 @@ import type { OpenCompanyClient } from "@/api/client";
 import { SkillsView } from "@/views/SkillsView";
 
 /**
- * The two ways into a skill's detail panel, and the card label in front of them.
+ * The ways into a skill's page, and the card label in front of them.
  *
- * The screen flow names both — a card click, and `Scope…` on the row menu — and
+ * The screen flow names two — a card click, and `Scope…` on the row menu — and
  * says there is no `Details` entry beside them because the card click is the way
- * in. They must open the **same** thing: two pieces of state here is how one
- * entry point comes to open a stale row while the other opens the live one.
+ * in. A third arrived with the address: `?skill=<slug>`, which is what a
+ * teammate's Skills tab links at. All of them must open the **same** thing: two
+ * pieces of state here is how one entry point comes to open a stale row while
+ * the other opens the live one.
  *
  * The card's reach label is asserted in the same file because it is the claim the
  * panel behind it can contradict. Before the host reported the scope the card
@@ -91,7 +93,7 @@ async function show(client: OpenCompanyClient) {
   });
 }
 
-/** The panel renders through a portal, so it lands on `document`. */
+/** Looked up on `document`, so the same helper reads a portal or a page. */
 function anywhere(testid: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`[data-testid="${testid}"]`);
 }
@@ -171,6 +173,28 @@ describe("opening a skill", () => {
       anywhere("skill-page-back"),
       "and there is a way back",
     ).not.toBeNull();
+  });
+
+  it("opens the skill named by the address, with no click at all", async () => {
+    // The deep link a teammate's Skills tab writes. Held in the address rather
+    // than in component state so it survives a reload and can be sent to
+    // somebody — the same contract an open MCP server has.
+    window.location.hash = "#/settings/skills?skill=brand-voice";
+    await show(clientWith());
+    expect(anywhere("skill-detail-name")?.textContent).toBe("Brand Voice");
+  });
+
+  it("falls back to the list when the address names a skill this company lacks", async () => {
+    // An uninstall elsewhere, or a link from another company. The page cannot
+    // render a row it does not have, and a blank screen would be worse than the
+    // list.
+    window.location.hash = "#/settings/skills?skill=nothing-here";
+    await show(clientWith());
+    expect(anywhere("skill-page"), "no page").toBeNull();
+    expect(
+      container.querySelectorAll('[data-testid="installed-card"]').length,
+      "the list instead",
+    ).toBeGreaterThan(0);
   });
 
   it("offers no Details entry beside Scope…", async () => {

@@ -7,8 +7,10 @@
 
 import type { SkillAgentScope } from "@/api/skills";
 import { skillReachSummary } from "@/lib/skill-scope";
+import { connectionsHref } from "@/views/connection-pages";
 
-export type SkillCategory = "Marketing" | "Research" | "Ops" | "Content" | "Finance";
+export type SkillCategory =
+  "Marketing" | "Research" | "Ops" | "Content" | "Finance";
 
 /**
  * One tint per category — identity, not state.
@@ -45,6 +47,18 @@ export const CATEGORY_STYLES: Record<SkillCategory, string> = {
  * does. Says the two things the screen otherwise implies the opposite of:
  * teammates **read** skills, and **running** one is the orchestrator's job.
  */
+/**
+ * The address of one skill's own page.
+ *
+ * The canonical route is `#/connections/skills`; `#/settings/skills` only still
+ * answers through a rewrite. The slug rides a query key rather than a path
+ * segment because the page it opens is a lens over the list, the way an open MCP
+ * server is (`?server=`), and a link into it must survive a reload.
+ */
+export function skillHref(slug: string): string {
+  return `${connectionsHref("skills")}?skill=${encodeURIComponent(slug)}`;
+}
+
 export const SKILLS_READ_ONLY_NOTE =
   "Skills are reference material your agents read — playbooks they follow, not buttons they press. " +
   "Enabling one makes it available to your agents, and each teammate can be scoped to a subset on its own page; " +
@@ -66,7 +80,10 @@ export const SKILLS_READ_ONLY_NOTE =
  * scope cannot be quoted as reporting nobody, so that arm keeps the claim the
  * switch alone supports.
  */
-export function skillReachLabel(enabled: boolean, agents?: SkillAgentScope[] | null): string {
+export function skillReachLabel(
+  enabled: boolean,
+  agents?: SkillAgentScope[] | null,
+): string {
   if (!enabled) return "Hidden from agents";
   const reach = skillReachSummary(agents);
   if (reach === null) return "Available for your agents to read";
@@ -88,7 +105,10 @@ export function skillReachLabel(enabled: boolean, agents?: SkillAgentScope[] | n
  * and came back empty; a non-empty registry filtered to nothing by a search is
  * the third case.
  */
-export function registryEmptyLabel(hasError: boolean, registryIsEmpty: boolean): string {
+export function registryEmptyLabel(
+  hasError: boolean,
+  registryIsEmpty: boolean,
+): string {
   if (hasError) return "Couldn't reach the registry.";
   if (registryIsEmpty) return "This host serves no shared skill registry.";
   return "No skills match that search.";

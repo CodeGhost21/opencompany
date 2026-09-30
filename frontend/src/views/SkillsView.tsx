@@ -56,6 +56,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
+import { useHashParam } from "@/hooks/use-hash-param";
 import { useHashTab } from "@/hooks/use-hash-tab";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -130,10 +131,12 @@ export function SkillsView({ client, company }: Props) {
   // boolean, because the dialog compares this install against the registry and
   // a flag would leave it guessing which one the menu meant.
   const [updating, setUpdating] = useState<Skill | null>(null);
-  // The skill whose detail panel is open, or `null` for closed. One piece of
-  // state for both ways in — a card click and the row menu's `Scope…` — so the
-  // two cannot open different things.
-  const [opened, setOpened] = useState<Skill | null>(null);
+  // The slug of the skill whose page is open, or `null` for the list. It rides
+  // the address the way an open MCP server does (`?server=`), so a teammate's
+  // Skills tab can link straight at one and an operator can send the link. One
+  // piece of state for every way in — a card click, the row menu's `Scope…`, a
+  // pasted address — so they cannot open different things.
+  const [openedId, setOpenedId] = useHashParam("skill");
   // The roster, for the panel's write. Each row carries that teammate's stored
   // skill list, and the panel computes the next one from it; `null` means the
   // read has not landed or failed, which is what stops the panel offering a
@@ -179,7 +182,7 @@ export function SkillsView({ client, company }: Props) {
     setUploadOpen(false);
     setDraftOpen(false);
     setUpdating(null);
-    setOpened(null);
+    setOpenedId(null);
     setTeam(null);
     setCanDraft(undefined);
     setScopeGen((g) => g + 1);
@@ -305,11 +308,12 @@ export function SkillsView({ client, company }: Props) {
     () => new Set(skills.map((s) => s.id)),
     [skills],
   );
-  // The panel reads the row out of the list rather than holding its own copy, so
-  // a refetch behind an open panel shows what is stored instead of the snapshot
-  // the click captured. A row that has gone (uninstalled elsewhere) closes it.
+  // The page reads the row out of the list rather than holding its own copy, so
+  // a refetch shows what is stored instead of the snapshot the click captured. A
+  // row that has gone (uninstalled elsewhere) falls back to the list, and an
+  // address naming a skill this company does not have does the same.
   const openedRow =
-    opened === null ? null : (skills.find((s) => s.id === opened.id) ?? null);
+    openedId === null ? null : (skills.find((s) => s.id === openedId) ?? null);
   // One instant for the whole list, so no two rows date themselves against
   // different "now"s within a single render.
   const now = Date.now();
@@ -418,7 +422,7 @@ export function SkillsView({ client, company }: Props) {
             )}
             value={tab}
             onChange={(next) => {
-              setOpened(null);
+              setOpenedId(null);
               setTab(next);
             }}
             idBase="skills"
@@ -440,7 +444,7 @@ export function SkillsView({ client, company }: Props) {
             skill={openedRow}
             team={team}
             canManage={canManage}
-            onClose={() => setOpened(null)}
+            onClose={() => setOpenedId(null)}
             onSaved={() => void refresh()}
           />
         ) : (
@@ -496,7 +500,7 @@ export function SkillsView({ client, company }: Props) {
                   onToggle={(s) => void toggle(s)}
                   onUninstall={(s) => void uninstall(s)}
                   onUpdate={setUpdating}
-                  onOpen={setOpened}
+                  onOpen={(skill) => setOpenedId(skill.id)}
                   team={team}
                 />
               )}
