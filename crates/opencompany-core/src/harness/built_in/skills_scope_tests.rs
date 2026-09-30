@@ -120,26 +120,29 @@ async fn an_agent_cannot_read_a_resource_of_a_skill_scoped_to_another() {
         .output_for_llm(false);
     assert!(mine.contains("BRAND-MARKER"), "{mine}");
 
-    // The other teammate's skill is unreachable, by slug and by traversal.
+    // The other teammate's skill is unreachable, by slug and by traversal. Both
+    // attempts must come back as a reported refusal that names what was asked
+    // for. Reading the error string and asserting only that the marker is
+    // absent — which is how this was written — also passes when the read failed
+    // for a reason that has nothing to do with the scope, so it could not fail.
     let theirs = read
         .execute(json!({ "skill_id": "finance-playbook", "relative_path": "references/spec.md" }))
-        .await;
-    let denied = match theirs {
-        Ok(result) => result.output_for_llm(false),
-        Err(err) => err.to_string(),
-    };
+        .await
+        .expect("an out-of-scope skill is refused, not a dispatch failure");
+    assert!(theirs.is_error, "{theirs:?}");
+    let denied = theirs.output_for_llm(false);
     assert!(!denied.contains("FINANCE-MARKER"), "{denied}");
+    assert!(denied.contains("finance-playbook"), "{denied}");
 
     let escaped = read
         .execute(json!({
             "skill_id": "brand-voice",
             "relative_path": "../finance-playbook/references/spec.md",
         }))
-        .await;
-    let escaped = match escaped {
-        Ok(result) => result.output_for_llm(false),
-        Err(err) => err.to_string(),
-    };
+        .await
+        .expect("a path escape is refused, not a dispatch failure");
+    assert!(escaped.is_error, "{escaped:?}");
+    let escaped = escaped.output_for_llm(false);
     assert!(!escaped.contains("FINANCE-MARKER"), "{escaped}");
 }
 
