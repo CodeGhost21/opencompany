@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use axum::http::StatusCode;
 use serde::Serialize;
 
 use crate::company::skill_scan::{Verdict, scan_skill};
@@ -27,14 +26,14 @@ use crate::server::error::ApiError;
 /// `MAX_ARTIFACT_BODY_BYTES` — generous for hand-authored instructions, and
 /// still small enough that no single skill can quietly dominate what every
 /// agent reads on every turn.
-pub(super) const MAX_SKILL_DOC_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_SKILL_DOC_BYTES: usize = 256 * 1024;
 
 /// Refuses a skill document over [`MAX_SKILL_DOC_BYTES`].
 ///
 /// Checked on the assembled `SKILL.md` rather than the raw request fields, so
 /// it bounds what actually lands in the agent's prompt regardless of which
 /// field (name, description, or body) grew.
-pub(super) fn check_skill_doc_size(doc: &str) -> Result<(), ApiError> {
+pub(crate) fn check_skill_doc_size(doc: &str) -> Result<(), ApiError> {
     if doc.len() > MAX_SKILL_DOC_BYTES {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "that skill is {:.1} KB — a skill's content has to be under {} KB.",
@@ -49,7 +48,7 @@ pub(super) fn check_skill_doc_size(doc: &str) -> Result<(), ApiError> {
 /// console renders it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ScanSummary {
+pub(crate) struct ScanSummary {
     verdict: Verdict,
     /// One line per finding, in operator-facing language.
     findings: Vec<String>,
@@ -66,7 +65,7 @@ pub(super) struct ScanSummary {
 /// document that is simply not valid, which resending cannot fix. Carrying that
 /// as a variant rather than leaving callers to read the sentence keeps the
 /// distinction from depending on the wording of the sentence.
-pub(super) enum VetRefusal {
+pub(crate) enum VetRefusal {
     /// The document did not validate — unparseable, or failing a stated limit.
     Invalid { message: String },
     /// The content scan blocked it, and `force` was not set.
@@ -75,14 +74,14 @@ pub(super) enum VetRefusal {
 
 impl VetRefusal {
     /// The operator-facing sentence.
-    pub(super) fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         match self {
             Self::Invalid { message } | Self::Blocked { message } => message,
         }
     }
 
     /// Whether resending with `force` would store this document.
-    pub(super) fn is_scan_block(&self) -> bool {
+    pub(crate) fn is_scan_block(&self) -> bool {
         matches!(self, Self::Blocked { .. })
     }
 }
@@ -105,7 +104,7 @@ impl From<VetRefusal> for ApiError {
 /// the one request and records that it did; there is deliberately no setting
 /// that turns a class of finding off for a whole host, because a switch that
 /// silences an alarm is the failure this scan exists to prevent.
-pub(super) fn vet_skill(slug: &str, doc: &str, force: bool) -> Result<ScanSummary, VetRefusal> {
+pub(crate) fn vet_skill(slug: &str, doc: &str, force: bool) -> Result<ScanSummary, VetRefusal> {
     let valid = validate_skill_md(slug, doc).map_err(|problems| VetRefusal::Invalid {
         message: problems.join(" "),
     })?;
@@ -143,7 +142,7 @@ pub(super) fn vet_skill(slug: &str, doc: &str, force: bool) -> Result<ScanSummar
 /// write handler, exactly as `smtp.rs`'s `write_lock` does for its own
 /// read-modify-write, keeps that ordering rule in one place rather than in
 /// each handler.
-pub(super) fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn write_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<CompanyId, Arc<tokio::sync::Mutex<()>>>>,
     > = std::sync::OnceLock::new();

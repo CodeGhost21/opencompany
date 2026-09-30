@@ -20,8 +20,6 @@
 //! `GET …/skills` and `GET …/skills/registry` — stay open to any member; only
 //! the writes decide anything.
 
-use std::sync::Arc;
-
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{post, put};
@@ -30,11 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::skill_effective::{self, EffectiveSkill};
-use crate::company::skill_scan::{Verdict, scan_skill};
 use crate::company::skill_scope::agents_for_skill;
-use crate::company::skill_validate::{
-    MAX_SLUG_CHARS, slugify, validate_skill_md, validate_slug, validate_slug_shape,
-};
+use crate::company::skill_validate::{MAX_SLUG_CHARS, slugify, validate_slug, validate_slug_shape};
 use crate::company::{
     SkillDoc, SkillDrift, VersionChange, effective_drift, parse_skill_md, render_skill_md,
     skill_digest,
@@ -42,7 +37,7 @@ use crate::company::{
 use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::ports::skills_state::{SkillInstall, SkillSource, SkillState};
-use crate::ports::types::{CompanyId, SkillChange};
+use crate::ports::types::SkillChange;
 use crate::server::error::ApiError;
 use crate::server::ops::language;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
@@ -57,13 +52,12 @@ mod registry;
 pub(crate) mod scope;
 mod update;
 mod upload;
-mod vet;
+pub(crate) mod vet;
 
-// Re-exported into this module's scope: the submodules reach them through
-// `super::`, and the sibling test files resolve them through `use super::*`.
-use vet::{
-    MAX_SKILL_DOC_BYTES, ScanSummary, VetRefusal, check_skill_doc_size, vet_skill, write_lock,
-};
+// Re-exported rather than imported where used: the submodules reach these
+// through `super::`, and the sibling test files resolve them through
+// `use super::*`.
+pub(crate) use vet::{ScanSummary, VetRefusal, check_skill_doc_size, vet_skill, write_lock};
 
 /// Builds the skills route fragment.
 pub fn router() -> Router<AppState> {

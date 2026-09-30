@@ -1,8 +1,14 @@
 use std::path::Path as FsPath;
+use std::sync::Arc;
 
 use super::*;
+// Named rather than reached through `use super::*`: the routes module no
+// longer needs the size cap itself, so re-exporting it only for this file
+// would read as a dependency the module does not have.
+use super::vet::MAX_SKILL_DOC_BYTES;
 
 use crate::company::skill_validate::MAX_SLUG_CHARS;
+use crate::ports::types::CompanyId;
 
 fn write_bundle(root: &FsPath, slug: &str, contents: &str) {
     let dir = root.join("skills").join(slug);
