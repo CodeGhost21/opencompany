@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { LIVE_BRAIN } from "./capabilities";
+
 /**
  * Discover is not a second screen. One field searches this company's own
  * servers and the public directory, and both halves land in the one list under
@@ -78,11 +80,13 @@ test("a build without the feature reads as a missing feature, not an error", asy
   await openMcp(page);
   await page.getByTestId("mcp-search").fill("github");
 
-  // The directory route 404s without the `mcp` feature. That is a fact about
-  // the build, and must not render as a failed search or a broken page — the
-  // company's own half of the answer stays on screen either way.
-  await expect(page.getByTestId("mcp-registry-unwired")).toBeVisible({
-    timeout: 15_000,
-  });
+  // The directory route 404s without the `mcp` feature, and serves with it, so
+  // the notice is asserted against the lane rather than as a constant.
+  const unwired = page.getByTestId("mcp-registry-unwired");
+  if (LIVE_BRAIN) {
+    await expect(unwired).toHaveCount(0, { timeout: 15_000 });
+    return;
+  }
+  await expect(unwired).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId("mcp-load-error")).toHaveCount(0);
 });

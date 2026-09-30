@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { LIVE_BRAIN } from "./capabilities";
+
 /**
  * The MCP module's front door is one searchable list.
  *
@@ -149,9 +151,11 @@ test("the page states what this build can do with these servers", async ({
 }) => {
   await openMcp(page);
 
-  // The default-feature host compiles no `mcp` bridge, so the page must say so
-  // rather than reading identically to a host that honours these servers.
-  await expect(page.getByTestId("mcp-bridge-absent")).toBeVisible();
+  // Asserted in both directions: the notice is a function of the host, so a
+  // hard-coded one fails on whichever lane it is wrong for.
+  const notice = page.getByTestId("mcp-bridge-absent");
+  if (LIVE_BRAIN) await expect(notice).toHaveCount(0);
+  else await expect(notice).toBeVisible();
 });
 
 test("a double-click settles the row open and highlights nothing", async ({
