@@ -36,7 +36,9 @@ test.skip(
 );
 test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
-test.describe.configure({ mode: "serial" });
+// Serial, and each test drives at least one model turn whose own waits are
+// 120s — more than the suite's 60s default allows a test to reach.
+test.describe.configure({ mode: "serial", timeout: 300_000 });
 
 /**
  * A refusal, in either of the two wordings a blocked call can carry.
@@ -96,9 +98,22 @@ test.afterAll(async ({ request }) => {
  * scoped is this spec's premise, not its subject, and a click through a select
  * would make it fail for the picker's reasons.
  */
+/** Clears the first-visit tour, which a reload puts back over the page. */
+async function dismissTour(page: Page) {
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await skip
+    .waitFor({ state: "visible", timeout: 5_000 })
+    .then(() => skip.click())
+    .catch(() => {
+      /* not shown in this context */
+    });
+}
+
 async function openPermissions(page: Page, showing?: string) {
   const lens = showing === undefined ? "" : `&showing=${showing}`;
+  // Hash-only navigation does not remount the SPA, so each entry reloads.
   await page.goto(`/#/connections/mcp?server=${SERVER}${lens}`);
+  await page.reload();
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
@@ -132,8 +147,12 @@ function toolRow(page: Page, tool: string) {
 async function callTool(page: Page, desk: string): Promise<string> {
   const marker = `perm-${randomUUID()}`;
   await page.goto(`/#/chat/${desk}`);
+  await page.reload();
+  await dismissTour(page);
   const composer = page.getByPlaceholder(/^Message /);
   await expect(composer).toBeVisible({ timeout: 30_000 });
+
+  const send = page.getByRole("button", { name: "Send", exact: true });
 
   const posted = page.waitForResponse(
     (response) =>
@@ -150,18 +169,56 @@ async function callTool(page: Page, desk: string): Promise<string> {
       },
     })}`,
   );
-  await page.getByRole("button", { name: "Send", exact: true }).click();
+  // Send enables only once the composer holds a draft.
+  await expect(send).toBeEnabled({ timeout: 60_000 });
+  await send.click();
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
   expect((await posted).ok(), "the chat POST did not succeed").toBeTruthy();
 
   // Read from a reloaded transcript, so what is asserted is the durable record
   // of the turn rather than whatever the open view chose to draw.
   await page.reload();
+  await dismissTour(page);
   await page.goto(`/#/chat/${desk}`);
   await expect(page.getByPlaceholder(/^Message /)).toBeVisible({
     timeout: 30_000,
   });
   return marker;
+}
+
+/** Drives one listing of the server's tools, so the belt's inventory is readable. */
+async function listTools(page: Page, desk: string): Promise<void> {
+  await page.goto(`/#/chat/${desk}`);
+  await page.reload();
+  await dismissTour(page);
+  const composer = page.getByPlaceholder(/^Message /);
+  await expect(composer).toBeVisible({ timeout: 30_000 });
+
+  const send = page.getByRole("button", { name: "Send", exact: true });
+
+  const posted = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/chat") && response.request().method() === "POST",
+    { timeout: 120_000 },
+  );
+  await composer.fill(
+    `__MOCK_TOOL_CALL__ ${JSON.stringify({
+      name: "mcp_list_tools",
+      arguments: { server: SERVER },
+    })}`,
+  );
+  // Send enables only once the composer holds a draft.
+  await expect(send).toBeEnabled({ timeout: 60_000 });
+  await send.click();
+  await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
+  expect((await posted).ok(), "the chat POST did not succeed").toBeTruthy();
+
+  await page.reload();
+  await dismissTour(page);
+  await page.goto(`/#/chat/${desk}`);
+  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({
+    timeout: 30_000,
+  });
 }
 
 /** Every bubble in the open transcript. */
@@ -193,15 +250,15 @@ test("a block set for one teammate refuses that teammate's next turn", async ({
     0,
   );
 
-  // The blocked tool is gone from what this teammate can even see. Asserted
-  // because a deny that only refuses the dispatch still shows the model a tool
-  // it will be punished for choosing, and the turn is then spent discovering
-  // that rather than doing the work.
+  // The blocked tool is gone from what this teammate can even see: a deny that
+  // only refuses the dispatch still offers the model a tool it will be refused
+  // for choosing. The listing is asked for rather than waited on, because the
+  // mock brain chooses no tool of its own.
+  await listTools(page, BLOCKED.desk);
+  const listing = bubbles(page).filter({ hasText: /"name":\s*"describe"/ });
+  await expect(listing.last()).toBeVisible({ timeout: 120_000 });
   await expect(
-    bubbles(page).filter({ hasText: /"name":\s*"describe"/ }).last(),
-  ).toBeVisible({ timeout: 120_000 });
-  await expect(
-    bubbles(page).filter({ hasText: new RegExp(`"name":\\s*"${TOOL}"`) }),
+    listing.filter({ hasText: new RegExp(`"name":\\s*"${TOOL}"`) }),
   ).toHaveCount(0);
 });
 
@@ -215,7 +272,12 @@ test("the same tool stays callable for a teammate the rule does not name", async
   await expect(
     bubbles(page).filter({ hasText: `echo: ${marker}` }).last(),
   ).toBeVisible({ timeout: 120_000 });
-  await expect(bubbles(page).filter({ hasText: REFUSAL })).toHaveCount(0);
+
+  // Scoped to this turn by its marker: the transcript still holds the
+  // refusal the earlier block produced, and that one is meant to stay.
+  await expect(
+    bubbles(page).filter({ hasText: marker }).filter({ hasText: REFUSAL }),
+  ).toHaveCount(0);
 });
 
 test("clearing the teammate's rule restores the call, again with no restart", async ({
@@ -235,7 +297,12 @@ test("clearing the teammate's rule restores the call, again with no restart", as
   await expect(
     bubbles(page).filter({ hasText: `echo: ${marker}` }).last(),
   ).toBeVisible({ timeout: 120_000 });
-  await expect(bubbles(page).filter({ hasText: REFUSAL })).toHaveCount(0);
+
+  // Scoped to this turn by its marker: the transcript still holds the
+  // refusal the earlier block produced, and that one is meant to stay.
+  await expect(
+    bubbles(page).filter({ hasText: marker }).filter({ hasText: REFUSAL }),
+  ).toHaveCount(0);
 });
 
 test("a teammate refused every tool is told so, not left guessing", async ({
