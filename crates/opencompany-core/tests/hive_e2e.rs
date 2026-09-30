@@ -2590,27 +2590,50 @@ async fn a_turn_that_only_publishes_hands_over_on_a_row_of_its_own() {
         .collect();
     assert_eq!(handed.len(), 1, "handed over once: {delivered:?}");
     let (kind, text, outputs, task_id) = handed[0];
-    assert!(
-        text.is_empty(),
-        "a row of its own, with nothing said: {text}"
-    );
+    // **The handover rides on the completion, where it used to ride alone.**
+    //
+    // This row was a bare `Post` with no text: the turn that published said
+    // nothing the room records, so its wave ended and the artifact handed over
+    // on a row of its own. Since tinyhivemind#84 a turn that recorded nothing
+    // is asked again, and what this seat does on the second attempt is the
+    // `complete_episode` it would otherwise have made a wave later -- so the
+    // outputs attach to *that* row. The desk shows one row carrying the
+    // artifact and the words about it rather than two rows carrying one each.
+    //
+    // Worth knowing while reading the rows here: the completion is journalled
+    // twice, with the same text, before this change and after. That duplication
+    // is neither new nor this test's subject.
+    //
+    // What is still asserted is what the test is for -- the artifact hands over
+    // exactly once, on a row belonging to the episode, naming the card it was
+    // published against -- and one thing more than before: that it rides on the
+    // *first* completion. A retry that recorded nothing and left the outputs to
+    // a later wave would still satisfy every claim above it.
     assert_eq!(
         *kind,
-        Some(UtteranceKind::Post),
+        Some(UtteranceKind::CompleteEpisode),
         "it belongs to the episode"
+    );
+    assert!(
+        text.contains("on its card"),
+        "and carries what the seat was asked again to say: {text}"
     );
     assert_eq!(outputs[0]["kind"], json!("artifact"));
     assert_eq!(outputs[0]["taskId"], json!(task_id.clone().unwrap()));
-    let recorded = delivered
+    let first_completion = delivered
         .iter()
         .position(|(kind, ..)| *kind == Some(UtteranceKind::CompleteEpisode))
-        .expect("the engineer recorded its part on a later turn");
+        .expect("the engineer recorded its part");
     let handed_at = delivered
         .iter()
-        .position(|(_, text, ..)| text.is_empty())
+        .position(|(.., outputs, _)| {
+            outputs
+                .as_array()
+                .is_some_and(|outputs| !outputs.is_empty())
+        })
         .unwrap();
-    assert!(
-        handed_at < recorded,
-        "handed over when its turn's wave ended"
+    assert_eq!(
+        handed_at, first_completion,
+        "the artifact hands over on the retry that recorded, not on a later wave: {delivered:?}"
     );
 }

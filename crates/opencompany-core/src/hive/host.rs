@@ -919,6 +919,21 @@ impl Journal for DeskHost {
             self.journal_or_warn(row);
             return;
         }
+        // A row the driver refused after this host had already appended it.
+        // `commit` stamps `episode.kind` off the utterance, and the fold runs
+        // afterwards -- so a refused `complete_episode` is on the desk saying
+        // the seat finished. The log cannot take it back; this is the
+        // correction written beside it, naming the row by its sequence.
+        if let Event::Refused { seat, why, at, .. } = event {
+            self.journal_or_warn(CompanyEvent::UtteranceRefused {
+                chat_id: self.desk_id.clone(),
+                episode_id: self.episode_id.clone(),
+                seat: seat.clone(),
+                at: at.0,
+                reason: format!("{why:?}"),
+            });
+            return;
+        }
         if let Event::Parked { seat, thread } = event {
             self.journal_or_warn(self.seat_parked_row(seat, *thread));
             return;
@@ -1177,6 +1192,32 @@ impl EpisodeHost for DeskHost {
     ///
     /// The episode id is in it because a seat's belt is lent under this key:
     /// two episodes seating the same teammate must not read each other's.
+    /// Narrow one turn of `seat` to `only` — most of a seated turn's belt is
+    /// this host's own, so only this host can withhold it.
+    ///
+    /// Keyed by [`Self::seat_session`], the same key the loan is under, so the
+    /// belt factory finds the narrowing beside the loan it already looks up. The
+    /// guard lifts it however the turn ends.
+    fn narrow_turn(&self, seat: &str, only: &[String]) -> tinyhivemind_openhuman::Narrowing {
+        let held = self
+            .seated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(seat)
+            .cloned();
+        let Some(agent) = held else {
+            return tinyhivemind_openhuman::Narrowing::none();
+        };
+        let seating = agent.seating().clone();
+        let key = self.seat_session(seat);
+        let prefixed: Vec<String> = only
+            .iter()
+            .map(|verb| format!("{}{verb}", crate::hive::host::TOOL_PREFIX))
+            .collect();
+        seating.narrow(key.clone(), prefixed);
+        tinyhivemind_openhuman::Narrowing::until(move || seating.widen(&key))
+    }
+
     fn seat_session(&self, seat: &str) -> String {
         format!("episode:{}:{}", self.episode_id, seat)
     }
