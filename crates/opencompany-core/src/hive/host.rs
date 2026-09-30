@@ -520,6 +520,40 @@ impl DeskHost {
             })
     }
 
+    /// The channel a note belongs in: the conversation its thread roots, or
+    /// the desk when the thread is the desk's own.
+    ///
+    /// **A note names the thread it is about, and not every thread is on the
+    /// desk.** `nudge_silent_askees_in` addresses a seat inside the
+    /// conversation it went silent in, so the note carries that
+    /// conversation's root -- a row that lives in the pair channel, beside
+    /// the `ask` that opened it and the answer that closes it.
+    ///
+    /// Writing such a note to the desk while keeping the conversation's root
+    /// as its parent stranded it between the two: the parent is in another
+    /// channel, so no desk reader can place the row under anything. A live
+    /// run showed both halves of the cost. The nudge that unblocked a
+    /// conversation rendered in the room as a loose instruction addressed to
+    /// nobody, with no question above it -- and, sitting between the
+    /// operator's message and the first answer, it read to the timeline as a
+    /// second conversation racing in the channel, which folded the whole
+    /// answered episode behind a chip.
+    ///
+    /// Resolved against the map [`Self::channel_for`] resolves a commit's
+    /// against, and for its reason: where a thread's rows go is recorded when
+    /// the conversation opens, and is not guessable from the note.
+    fn note_chat(&self, thread: Option<Sequence>) -> String {
+        thread
+            .and_then(|root| {
+                self.conversations
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&root.0)
+                    .cloned()
+            })
+            .unwrap_or_else(|| self.desk_id.clone())
+    }
+
     /// The mentions `text` names, resolved against this company (#2441).
     ///
     /// Empty without a seam, which is what a host built with no user
@@ -1069,7 +1103,7 @@ impl Journal for DeskHost {
 
     fn note(&self, note: &Note) -> tinyhivemind_openhuman::Result<()> {
         let event = self.reply(
-            &self.desk_id.clone(),
+            &self.note_chat(note.thread),
             DESK_AUTHOR,
             note.body.clone(),
             note.thread,
