@@ -11,12 +11,29 @@
 export type SkillSourceId = "company" | "registry" | "custom";
 
 /** The provenance filters offered above the list, in the order shown. */
-export const SKILL_SOURCE_FILTERS = ["all", "company", "registry", "custom"] as const;
+export const SKILL_SOURCE_FILTERS = [
+  "all",
+  "company",
+  "registry",
+  "custom",
+] as const;
 export type SkillSourceFilter = (typeof SKILL_SOURCE_FILTERS)[number];
 
 /** The enabled-state filters offered above the list, in the order shown. */
 export const SKILL_ENABLED_FILTERS = ["all", "enabled", "disabled"] as const;
 export type SkillEnabledFilter = (typeof SKILL_ENABLED_FILTERS)[number];
+
+/**
+ * The library-drift filters offered above the list, in the order shown.
+ *
+ * `"update"` is every row the library has moved under, including one whose own
+ * document was edited since — that row's Update is refused, but it is still a
+ * row an operator filtering for drift is looking for, and the badge beside it
+ * already says why it cannot be applied. Filtering on `canUpdateSkill` instead
+ * would hide exactly the rows that need a decision.
+ */
+export const SKILL_DRIFT_FILTERS = ["all", "update"] as const;
+export type SkillDriftFilter = (typeof SKILL_DRIFT_FILTERS)[number];
 
 /** The orderings offered above the list, in the order shown. */
 export const SKILL_SORTS = ["edited", "name"] as const;
@@ -137,6 +154,7 @@ export interface SkillListFilters {
   enabled: SkillEnabledFilter;
   /** A category name, or `"all"`. */
   category: string;
+  drift: SkillDriftFilter;
 }
 
 /** Nothing filtered out, newest edit first — what the list opens on. */
@@ -145,6 +163,7 @@ export const DEFAULT_SKILL_FILTERS: SkillListFilters = {
   source: "all",
   enabled: "all",
   category: "all",
+  drift: "all",
 };
 
 /**
@@ -159,7 +178,9 @@ export const DEFAULT_SKILL_FILTERS: SkillListFilters = {
  * vocabulary, and a console that silently rendered nothing for a value it did
  * not know would hide the row's provenance entirely.
  */
-export function skillSourceLabel(skill: Pick<SkillListRow, "source"> & { version?: string | null }): string {
+export function skillSourceLabel(
+  skill: Pick<SkillListRow, "source"> & { version?: string | null },
+): string {
   const source = text(skill.source).trim();
   if (source === "registry") {
     const version = text(skill.version).trim();
@@ -209,9 +230,12 @@ export function skillLastEditedLabel(
   if (millis === null || millis === undefined) return "Never edited";
   const elapsed = now - millis;
   if (elapsed < MINUTE) return "Edited just now";
-  if (elapsed < HOUR) return `Edited ${plural(Math.floor(elapsed / MINUTE), "minute")} ago`;
-  if (elapsed < DAY) return `Edited ${plural(Math.floor(elapsed / HOUR), "hour")} ago`;
-  if (elapsed < 30 * DAY) return `Edited ${plural(Math.floor(elapsed / DAY), "day")} ago`;
+  if (elapsed < HOUR)
+    return `Edited ${plural(Math.floor(elapsed / MINUTE), "minute")} ago`;
+  if (elapsed < DAY)
+    return `Edited ${plural(Math.floor(elapsed / HOUR), "hour")} ago`;
+  if (elapsed < 30 * DAY)
+    return `Edited ${plural(Math.floor(elapsed / DAY), "day")} ago`;
   return `Edited ${new Date(millis).toLocaleDateString(locale, {
     year: "numeric",
     month: "short",
@@ -232,9 +256,11 @@ function plural(count: number, unit: string): string {
  * anything else.
  */
 export function skillCategories(skills: readonly SkillListRow[]): string[] {
-  return [...new Set(skills.map((s) => text(s.category)).filter((c) => c.trim() !== ""))].sort(
-    (a, b) => a.localeCompare(b),
-  );
+  return [
+    ...new Set(
+      skills.map((s) => text(s.category)).filter((c) => c.trim() !== ""),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
 }
 
 /**
@@ -251,7 +277,7 @@ export function skillCategories(skills: readonly SkillListRow[]): string[] {
  * renders.
  */
 export function visibleSkills(
-  skills: readonly SkillListRow[],
+  skills: readonly (SkillListRow & SkillDriftRow)[],
   filters: SkillListFilters,
   sort: SkillSort,
 ): SkillListRow[] {
@@ -263,14 +289,18 @@ export function visibleSkills(
       !text(skill.description).toLowerCase().includes(q)
     )
       return false;
-    if (filters.source !== "all" && skill.source !== filters.source) return false;
+    if (filters.source !== "all" && skill.source !== filters.source)
+      return false;
     if (filters.enabled === "enabled" && !skill.enabled) return false;
     if (filters.enabled === "disabled" && skill.enabled) return false;
-    if (filters.category !== "all" && skill.category !== filters.category) return false;
+    if (filters.category !== "all" && skill.category !== filters.category)
+      return false;
+    if (filters.drift === "update" && !skill.updateAvailable) return false;
     return true;
   });
 
-  const byName = (a: SkillListRow, b: SkillListRow) => text(a.name).localeCompare(text(b.name));
+  const byName = (a: SkillListRow, b: SkillListRow) =>
+    text(a.name).localeCompare(text(b.name));
   if (sort === "name") return matching.sort(byName);
   return matching.sort((a, b) => {
     const left = a.updatedAtMillis ?? null;

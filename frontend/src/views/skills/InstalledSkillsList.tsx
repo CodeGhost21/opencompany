@@ -54,6 +54,7 @@ import {
   skillDriftLabel,
   skillUpdateUnavailableReason,
   SKILL_BUILTIN_UNINSTALL_REASON,
+  SKILL_DRIFT_FILTERS,
   SKILL_ENABLED_FILTERS,
   SKILL_SORT_LABELS,
   SKILL_SORTS,
@@ -62,6 +63,7 @@ import {
   skillLastEditedLabel,
   skillSourceLabel,
   visibleSkills,
+  type SkillDriftFilter,
   type SkillEnabledFilter,
   type SkillListFilters,
   type SkillSort,
@@ -162,6 +164,18 @@ export function InstalledSkillsList({
           ])}
           onChange={(v) =>
             onFilters({ ...filters, enabled: v as SkillEnabledFilter })
+          }
+        />
+        <FilterSelect
+          id="skills-filter-drift"
+          label="Updates"
+          value={filters.drift}
+          options={SKILL_DRIFT_FILTERS.map((v) => [
+            v,
+            v === "all" ? "Any version" : "Has update",
+          ])}
+          onChange={(v) =>
+            onFilters({ ...filters, drift: v as SkillDriftFilter })
           }
         />
         <FilterSelect
