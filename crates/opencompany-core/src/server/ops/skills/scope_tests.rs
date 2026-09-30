@@ -52,6 +52,7 @@ async fn state_with_roster(home: &std::path::Path) -> AppState {
             manifest: manifest.clone(),
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
+            general_channel: Default::default(),
             overlay_agents: Vec::new(),
             overlay_agent_edits: Vec::new(),
             overlay_retired_agents: Vec::new(),
