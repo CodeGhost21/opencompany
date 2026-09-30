@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   Check,
+  ChevronDown,
   Download,
   Info,
   Loader2,
@@ -45,6 +46,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -393,24 +400,41 @@ export function SkillsView({ client, company }: Props) {
           </>
         }
         actions={
+          // One control, three ways in. They were three buttons of equal weight
+          // — Upload, Draft with a teammate, Add skill — which read as three
+          // different things to do rather than three ways to do one thing, and
+          // the widest of them named a teammate in a page header.
           canManage && openedRow === null ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" onClick={() => setUploadOpen(true)}>
-                <Upload className="size-4" /> Upload
-              </Button>
-              {canDraft !== false && (
-                <Button
-                  variant="outline"
-                  data-testid="skills-draft-trigger"
-                  onClick={() => setDraftOpen(true)}
-                >
-                  <Sparkles className="size-4" /> Draft with a teammate
-                </Button>
-              )}
-              <Button onClick={() => setAddOpen(true)}>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={<Button data-testid="skills-add-menu" />}
+              >
                 <Plus className="size-4" /> Add skill
-              </Button>
-            </div>
+                <ChevronDown className="size-4 opacity-60" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64">
+                <DropdownMenuItem
+                  data-testid="skills-add-write"
+                  onClick={() => setAddOpen(true)}
+                >
+                  <Plus className="size-4" /> Write one here
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  data-testid="skills-add-upload"
+                  onClick={() => setUploadOpen(true)}
+                >
+                  <Upload className="size-4" /> Upload a document
+                </DropdownMenuItem>
+                {canDraft !== false && (
+                  <DropdownMenuItem
+                    data-testid="skills-draft-trigger"
+                    onClick={() => setDraftOpen(true)}
+                  >
+                    <Sparkles className="size-4" /> Draft with a teammate
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           ) : undefined
         }
         tabs={
