@@ -1192,6 +1192,32 @@ impl EpisodeHost for DeskHost {
     ///
     /// The episode id is in it because a seat's belt is lent under this key:
     /// two episodes seating the same teammate must not read each other's.
+    /// Narrow one turn of `seat` to `only` — most of a seated turn's belt is
+    /// this host's own, so only this host can withhold it.
+    ///
+    /// Keyed by [`Self::seat_session`], the same key the loan is under, so the
+    /// belt factory finds the narrowing beside the loan it already looks up. The
+    /// guard lifts it however the turn ends.
+    fn narrow_turn(&self, seat: &str, only: &[String]) -> tinyhivemind_openhuman::Narrowing {
+        let held = self
+            .seated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(seat)
+            .cloned();
+        let Some(agent) = held else {
+            return tinyhivemind_openhuman::Narrowing::none();
+        };
+        let seating = agent.seating().clone();
+        let key = self.seat_session(seat);
+        let prefixed: Vec<String> = only
+            .iter()
+            .map(|verb| format!("{}{verb}", crate::hive::host::TOOL_PREFIX))
+            .collect();
+        seating.narrow(key.clone(), prefixed);
+        tinyhivemind_openhuman::Narrowing::until(move || seating.widen(&key))
+    }
+
     fn seat_session(&self, seat: &str) -> String {
         format!("episode:{}:{}", self.episode_id, seat)
     }

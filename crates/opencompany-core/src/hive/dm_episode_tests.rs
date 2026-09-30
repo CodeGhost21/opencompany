@@ -318,6 +318,149 @@ async fn a_desk_episode_with_prior_history_settles() {
         .expect("a desk episode with prior history should settle");
 }
 
+/// Every tool name a request advertised to the model.
+fn advertised(body: &serde_json::Value) -> Vec<String> {
+    body.get("tools")
+        .and_then(|tools| tools.as_array())
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(|name| name.as_str())
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **A turn the room narrowed is offered only the verbs it asked for.**
+///
+/// A seat whose turn recorded nothing is asked again, and that second ask
+/// exists for one purpose: to put what it already said on the record. The room
+/// names the verbs that would do it, and the belt is cut down to them.
+///
+/// Read off the wire rather than off the seating map, because every part of
+/// this can hold while the belt the model is actually handed is untouched --
+/// which is what happened. `narrow_turn` keys the narrowing by the seat's
+/// session and the belt factory looks it up by the turn's; a unit test on
+/// either half passes with those two keys disagreeing, and a live run is easy
+/// to misread, because a retry's belt is smaller than a first turn's for an
+/// unrelated reason. The only claim that cannot be satisfied by accident is
+/// what the request carried.
+///
+/// The `desk_` sweep is the regression guard. The filter has to be the last
+/// thing done to the belt: it ran before `desk_take_over` was appended, so a
+/// turn narrowed to `desk_complete_episode` was still offered the verb that
+/// claims the work instead -- the one thing a retry is not asking for. Naming
+/// the absent verbs individually would not have caught that, since the leak was
+/// a verb no assertion mentioned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_narrowed_retry_is_offered_only_the_verbs_the_room_asked_for() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let completing = || Turn::Call {
+        tool: "desk_complete_episode",
+        args: serde_json::json!({
+            "message": "two sprints is fine",
+            "chat": "engineering",
+            "parent": null
+        }),
+    };
+    // Plain text records nothing, which is what makes the room ask again.
+    let (base_url, script) = spawn_script_recording(vec![
+        Turn::Say("I think two sprints is fine."),
+        completing(),
+        completing(),
+        completing(),
+    ])
+    .await;
+    let (deps, _journal) = deps(base_url, dir.path());
+    let record = record(TWO_DESKS);
+    let pool = HarnessPool::new();
+    pool.ensure(&record, &deps).await.expect("roster");
+    let log = Arc::new(MemoryLog::default());
+    let events: Arc<dyn EventLog> = log.clone();
+    let (hives, errors) = crate::hive::graph::desk_hives(&record, 3, &|id| {
+        futures::executor::block_on(pool.agent(&record.id, id))
+            .map(|agent| agent.runtime_agent().clone())
+    });
+    assert!(errors.is_empty(), "{errors:?}");
+    let dispatcher = crate::hive::dispatch::dispatcher(
+        Arc::new(record.clone()),
+        Arc::clone(&events),
+        hives,
+        Arc::new(deps),
+        Arc::new(pool),
+        None,
+    )
+    .await;
+    let trigger_seq = events
+        .append(
+            &record.id,
+            crate::hive::test_support::operator_message("engineering", "two sprints?", None),
+        )
+        .await
+        .expect("the trigger is a real row");
+    dispatcher
+        .run_desk_message(
+            "engineering",
+            crate::hive::conducted::Trigger {
+                seq: trigger_seq,
+                text: "two sprints?".to_owned(),
+                parent: None,
+                mentions: Vec::new(),
+            },
+        )
+        .await
+        .expect("the episode runs");
+
+    let seen = script.seen.lock().unwrap().clone();
+    // The retry names itself: `insist` tells the seat the room heard none of it.
+    const INSISTED: &str = "ended without calling any of the verbs this room records by";
+    let retry = seen
+        .iter()
+        .position(|body| {
+            serde_json::to_string(body)
+                .unwrap_or_default()
+                .contains(INSISTED)
+        })
+        .expect("the silent turn was asked again");
+    assert!(
+        retry > 0,
+        "the retry cannot be the episode's first request: {retry}"
+    );
+
+    // The turn before it is the un-narrowed one. Asserting it *has* the verbs
+    // the retry lacks is what makes the comparison mean anything: without it
+    // this test passes just as well on a build that never offered them.
+    let before = advertised(&seen[retry - 1]);
+    for verb in ["desk_read", "desk_ask_teammates"] {
+        assert!(
+            before.contains(&verb.to_owned()),
+            "an ordinary turn is offered `{verb}`, or the comparison below is vacuous: {before:?}"
+        );
+    }
+
+    let narrowed = advertised(&seen[retry]);
+    assert!(
+        narrowed.contains(&"desk_complete_episode".to_owned()),
+        "a narrowed turn keeps the verb it is being asked to call: {narrowed:?}"
+    );
+    // The room's own verbs for a desk turn, as `recording_verbs` names them.
+    let asked_for = ["desk_broadcast", "desk_ask", "desk_complete_episode"];
+    let leaked: Vec<&String> = narrowed
+        .iter()
+        .filter(|name| name.starts_with(crate::hive::host::TOOL_PREFIX))
+        .filter(|name| !asked_for.contains(&name.as_str()))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "a narrowed turn is offered no room verb outside {asked_for:?}: {leaked:?}"
+    );
+}
+
 /// **A seat that finishes while it is still owed an answer is refused, and the
 /// refusal names the row.**
 ///
