@@ -199,6 +199,7 @@ test("a member sees what is connected but is offered nothing that changes it", a
     // ---- MCP: the tool servers, rows and the file both ---------------------
     await openSettingsPage(memberPage, "mcp");
     await expect(memberPage.getByTestId("mcp-read-only")).toBeVisible({ timeout: 30_000 });
+    await expect(memberPage.getByTestId("mcp-add-open")).toHaveCount(0);
     await expect(memberPage.locator("#mcp-name")).toHaveCount(0);
     await expect(memberPage.locator("#mcp-token")).toHaveCount(0);
     // The document is the other way to write the same store, so it must refuse
@@ -293,7 +294,12 @@ test("an admin is still offered every control across the four pages", async ({ p
 
   await openSettingsPage(page, "mcp");
   await expect(page.getByTestId("mcp-read-only")).toHaveCount(0);
+  const addServer = page.getByTestId("mcp-add-open");
+  await expect(addServer).toBeEnabled({ timeout: 30_000 });
+  await addServer.click();
   await expect(page.locator("#mcp-name")).toBeVisible({ timeout: 30_000 });
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("mcp-add-dialog")).toHaveCount(0);
   await page.getByTestId("mcp-tab-json").click();
   await expect(page.getByTestId("mcp-json-revert")).toBeVisible();
 
