@@ -27,6 +27,10 @@ test.skip(
 );
 test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
+// A test here may open the panel twice, and each open waits up to 30s for the
+// probed inventory — which does not fit the suite's 60s default.
+test.describe.configure({ timeout: 120_000 });
+
 /** The tools `mcp-server.mjs` advertises. */
 const TOOL = "echo";
 
@@ -55,7 +59,10 @@ test.afterAll(async ({ request }) => {
 
 async function openPermissions(page: Page, showing?: string) {
   const lens = showing === undefined ? "" : `&showing=${showing}`;
+  // A reload, because moving between lenses changes only the hash: the SPA
+  // would not remount and the panel under test would be the previous one.
   await page.goto(`/#/connections/mcp?server=${SERVER}${lens}`);
+  await page.reload();
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
     .waitFor({ state: "visible", timeout: 10_000 })
@@ -138,14 +145,16 @@ test("a teammate lens says whose permissions a click would change", async ({
 test("an option the host would refuse is disabled, and says why", async ({
   page,
 }) => {
-  // Set the company's own mode first, because the rule under test is relative:
-  // with the company allowing a tool there is nothing stricter to refuse, so an
-  // assertion made without this would be measuring an empty set.
+  // The rule under test is relative, so the company's own mode is asserted
+  // rather than assumed: if this tool ever resolves to always_allow, the
+  // refusal below is measuring an empty set and this line fails first.
   await openPermissions(page);
   const company = toolRow(page, TOOL);
   await expect(company).toBeVisible({ timeout: 30_000 });
-  await company.getByTestId("mcp-mode-needs_approval").click();
-  await expect(company.getByTestId("mcp-permission-clear-row")).toBeVisible();
+  await expect(company.getByTestId("mcp-mode-needs_approval")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
 
   await openPermissions(page, TEAMMATE.id);
   const scoped = toolRow(page, TOOL);
