@@ -2094,8 +2094,25 @@ export interface McpServer {
   serverId?: string;
   /** The directory's qualified name (`@org/server`), when this row came from one. */
   qualifiedName?: string;
-  /** The directory's icon, when this row came from one. */
+  /**
+   * The server's mark: what it reported about itself on its last successful
+   * probe, else the directory's on a row backed by an install.
+   *
+   * An inline `data:` image the host fetched itself. An icon address a remote
+   * server chose must never become a request from the operator's browser.
+   */
   iconUrl?: string;
+  /** The display name the server reported for itself, when it reported one. */
+  probedTitle?: string;
+  /**
+   * The server's own description of what it does, when it reported one.
+   *
+   * Distinct from {@link McpServer.description}, which is what the operator or
+   * the bundle declared.
+   */
+  probedDescription?: string;
+  /** The server's home page, when it reported one. A link; nothing fetches it. */
+  websiteUrl?: string;
   /** How an install is dialled — `http_remote` or `stdio`. Absent on a List A-only row. */
   transport?: string;
 }
@@ -2294,6 +2311,17 @@ export interface CapabilityStatusDto {
    * send the field) and must never be rendered as "absent".
    */
   mcpInBuild?: boolean;
+  /**
+   * Whether a tool set to "needs approval" actually parks the call, or is
+   * allowed through as if it were set to Allow.
+   *
+   * The permissions surfaces read it from here because it is the one fact they
+   * cannot derive: every other reading on them says which mode is stored, so an
+   * operator who sets "needs approval" and is told nothing walks away believing
+   * the tool is gated. `undefined` is **unknown** (an older host that does not
+   * send the field) and must never be rendered as "does not park".
+   */
+  approvalsPark?: boolean;
   /**
    * Whether this company's teammates can actually think, and why not when they
    * cannot (issue #1735).

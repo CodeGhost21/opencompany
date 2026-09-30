@@ -881,6 +881,13 @@ const OPS_SCOPED_ROUTES: &[Route] = &[
     r!(Post, "/team/design", Scoped, Ordinary, ""),
     r!(Post, "/team/{agent_id}/draft", Scoped, Ordinary, ""),
     r!(
+        Get,
+        "/team/{agent_id}/mcp/permissions",
+        Scoped,
+        Ordinary,
+        "Members may read which MCP servers and tools a teammate reaches."
+    ),
+    r!(
         Put,
         "/team/{agent_id}/inbox",
         Scoped,
@@ -1798,24 +1805,24 @@ async fn company_status_temp_password_boundary_waits_for_an_assigned_branch() {
 
 #[test]
 fn table_counts_and_intentional_widenings_are_explicit() {
-    assert_eq!(OPS_SCOPED_ROUTES.len(), 218);
+    assert_eq!(OPS_SCOPED_ROUTES.len(), 219);
     assert_eq!(
         OPS_SCOPED_ROUTES
             .iter()
             .map(|route| route.path)
             .collect::<BTreeSet<_>>()
             .len(),
-        169,
+        170,
     );
     assert_eq!(OPS_EXACT_ROUTES.len(), 3);
     assert_eq!(
         OPS_SCOPED_ROUTES.len() * 2,
-        436,
+        438,
         "dual-address ops route-method rows",
     );
     assert_eq!(
         OPS_SCOPED_ROUTES.len() * 2 + OPS_EXACT_ROUTES.len(),
-        439,
+        441,
         "complete ops route-method rows",
     );
     assert_eq!(EXTERNAL_AUTHORITY_ROUTES.len(), 4);
@@ -1826,7 +1833,7 @@ fn table_counts_and_intentional_widenings_are_explicit() {
         all_routes()
             .map(|route| route_patterns(route).len())
             .sum::<usize>(),
-        489,
+        491,
         "concrete route-method rows",
     );
     assert_eq!(
@@ -1834,10 +1841,10 @@ fn table_counts_and_intentional_widenings_are_explicit() {
             .flat_map(route_patterns)
             .collect::<BTreeSet<_>>()
             .len(),
-        384,
+        386,
         "concrete paths",
     );
-    assert_eq!(render_snapshot().lines().count(), 3_423);
+    assert_eq!(render_snapshot().lines().count(), 3_437);
     assert_eq!(
         all_routes()
             .map(|route| {

@@ -102,6 +102,11 @@ pub mod team;
 /// for the fields the console owns. Attached to [`team`]'s existing
 /// `/team/{agent_id}` route rather than merged as its own. See [`team_agent`].
 mod team_agent;
+/// One teammate's whole MCP picture — `GET
+/// {scope}/team/{agent_id}/mcp/permissions`. Every configured server, reached or
+/// not, with each tool's mode resolved for that teammate and the rule that
+/// decided it. See [`team_mcp`].
+pub mod team_mcp;
 /// The unified tool catalog read (`GET {scope}/tools/catalog`): everything this
 /// company can grant an agent — built-ins, MCP servers and Composio toolkits —
 /// in one vocabulary. Read-only and openhuman-free.
@@ -157,6 +162,11 @@ mod tests_mcp_default_server_can;
 #[cfg(test)]
 #[path = "write_mcp_manifest_tests.rs"]
 mod tests_mcp_manifest;
+/// Probed MCP identity. Gated on `mcp` as well as `test`: without the feature no
+/// probe runs.
+#[cfg(all(test, feature = "mcp"))]
+#[path = "write_mcp_probed_identity_tests.rs"]
+mod tests_mcp_probed_identity;
 #[cfg(test)]
 #[path = "write_memory_stats_last_updated_tests.rs"]
 mod tests_memory_stats_last_updated;
@@ -323,6 +333,7 @@ pub fn router() -> Router<AppState> {
         .merge(mentions::router())
         .merge(inference::router())
         .merge(team::router())
+        .merge(team_mcp::router())
         .merge(setup::router())
         .merge(activation::router())
         .merge(policy::router())

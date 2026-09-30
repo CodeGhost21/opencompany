@@ -3,6 +3,7 @@ import { FileJson, Info, Server } from "lucide-react";
 
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import type { RosterAgent } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
@@ -43,7 +44,9 @@ interface Props {
  * carries, so `#/connections/mcp?tab=json` opens the file directly.
  */
 const MCP_TABS = [
-  { id: "connections", label: "Connections", icon: Server },
+  // The id stays `connections`: every link already written against this page
+  // carries it.
+  { id: "connections", label: "Your servers", icon: Server },
   { id: "json", label: "mcp.json", icon: FileJson },
 ] as const satisfies readonly PageTab<string>[];
 
@@ -54,6 +57,9 @@ export function McpServersView({ client, company }: Props) {
   // call, so it is an admin's (issue #403). Courtesy only: the host answers 403
   // whatever this says. Reading the installed set stays open.
   const [canManage, setCanManage] = useState(false);
+  // The roster, for the per-teammate lens on a server's tool permissions. A host
+  // with no team plane 404s, and the lens then does not render at all.
+  const [agents, setAgents] = useState<RosterAgent[]>([]);
   // Bumped when the document is saved. The rows are keyed on it, so a save that
   // adds or removes servers re-reads the list instead of leaving the other tab
   // describing the configuration as it was before the file was written.
@@ -74,6 +80,26 @@ export function McpServersView({ client, company }: Props) {
         // No user plane on this host, or not signed in — treat as non-admin.
       }
       if (live) setCanManage(admin);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const roster = await client.listTeam(company);
+        if (live) {
+          setAgents(
+            roster.map((m) => ({ id: m.id, name: m.name?.trim() || m.role })),
+          );
+        }
+      } catch {
+        // No team plane on this host. The lens does not render.
+        if (live) setAgents([]);
+      }
     })();
     return () => {
       live = false;
@@ -120,6 +146,7 @@ export function McpServersView({ client, company }: Props) {
             company={company}
             canManage={canManage}
             chrome="standalone"
+            agents={agents}
           />
         </PageTabPanel>
         <PageTabPanel idBase="mcp" id="json" value={tab}>
