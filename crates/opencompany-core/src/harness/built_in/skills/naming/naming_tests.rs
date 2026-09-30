@@ -7,6 +7,8 @@
 use serde_json::json;
 
 use super::*;
+use tinytools::ToolErrorKind;
+
 use crate::harness::skills::EffectiveSkills;
 
 /// Materializes a one-skill effective set and returns its read tools.
@@ -203,18 +205,26 @@ async fn read_resource_echoes_skill_id_not_workflow_id() {
     assert!(out.contains("BODY."), "{out}");
 }
 
-/// Upstream returns "not found" as an `Err` whose string reaches the agent, and
-/// that string names `describe_workflow` and a "workflow".
+/// Upstream returns "not found" as an `Err`, whose string reaches the agent and
+/// names `describe_workflow` and a "workflow". The wrapper rewrites the words
+/// and settles the arm: an answered failure, not a dispatch error.
 #[tokio::test]
-async fn missing_skill_error_is_phrased_in_skills() {
+async fn a_missing_skill_is_answered_as_a_failure_not_an_err() {
     let (_ws, tools) = tools_for("web-research", "Web Research");
-    let err = find(&tools, DESCRIBE_SKILL_TOOL)
+    let result = find(&tools, DESCRIBE_SKILL_TOOL)
         .execute(json!({ SKILL_ID_ARG: "nope" }))
         .await
-        .expect_err("a missing skill must error")
-        .to_string();
-    assert!(!err.contains("workflow"), "{err}");
-    assert!(err.contains("skill"), "{err}");
+        .expect("a missing skill is reported, not a dispatch failure");
+
+    assert!(result.is_error, "{result:?}");
+    // Permanent, so the loop is not told to try the same read again. Without
+    // the tag a harness is free to treat the failure as retryable.
+    assert_eq!(result.error_kind, Some(ToolErrorKind::Failed), "{result:?}");
+
+    let prose = result.output_for_llm(false);
+    assert!(prose.contains("nope"), "{prose}");
+    assert!(!prose.contains("workflow"), "{prose}");
+    assert!(prose.contains("skill"), "{prose}");
 }
 
 /// The catalogue sentence in the persona is what hands an agent the three
