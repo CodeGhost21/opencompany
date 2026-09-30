@@ -346,7 +346,7 @@ impl AcpRunTurn {
     /// reason it is not closed here.
     fn session_key(&self, company: &CompanyId, agent_id: &str, chat_id: Option<&str>) -> String {
         match chat_id {
-            Some(chat) if chat != crate::ports::general_channel::GENERAL_CHANNEL_ID => {
+            Some(chat) if !crate::ports::general_channel::is_general_spelling(chat) => {
                 // …and a named desk's two spellings likewise. The key was
                 // `(company, agent)` before #1890 H, where no selector could
                 // disagree with itself; adding the chat introduced the
