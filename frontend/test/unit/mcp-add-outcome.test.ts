@@ -262,6 +262,103 @@ describe("what a server calls itself", () => {
   });
 });
 
+/** An `addMcpServer` call whose resolution the test drives by hand. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+describe("closing the dialog while the add request is in flight", () => {
+  it("ignores the close, so the outcome has somewhere to land", async () => {
+    const inFlight = deferred<{
+      server: ReturnType<typeof server>;
+      note: string;
+      test: typeof UNREACHABLE;
+    }>();
+    api.addMcpServer.mockReturnValue(inFlight.promise);
+    const onOpenChange = vi.fn();
+
+    await act(async () => {
+      root.render(
+        createElement(McpAddServerDialog, {
+          client,
+          company: "acme",
+          open: true,
+          bridge: "present" as const,
+          onOpenChange,
+          onAdded: () => {},
+          onOpenServer: () => {},
+        }),
+      );
+    });
+
+    await type('[data-testid="mcp-add-name"]', "deadsrv");
+    await type('[data-testid="mcp-add-endpoint"]', "https://mcp.example.com/mcp");
+    await submit();
+
+    // Still saving — `addMcpServer` has not resolved yet.
+    expect(el("mcp-add-submit")?.getAttribute("disabled")).not.toBeNull();
+
+    const closeButton = document.body.querySelector('[data-slot="dialog-close"]');
+    expect(closeButton).not.toBeNull();
+    await act(async () => {
+      closeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // A close while saving must not tell the parent to close, and must not
+    // reset the form under the in-flight request.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(
+      (document.body.querySelector('[data-testid="mcp-add-name"]') as HTMLInputElement | null)
+        ?.value,
+    ).toBe("deadsrv");
+
+    await act(async () => {
+      inFlight.resolve({
+        server: server({ source: "runtime" }),
+        note: "Agents pick it up on their next turn.",
+        test: UNREACHABLE,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The request's own result lands on the still-open dialog rather than a
+    // reset one nobody will see.
+    expect(el("mcp-add-outcome")).not.toBeNull();
+  });
+});
+
+describe("a failed 'Use that description'", () => {
+  it("shows the error rather than silently doing nothing", async () => {
+    api.addMcpServer.mockResolvedValue({
+      server: server({
+        source: "runtime",
+        probedDescription: "Search, read and update pages.",
+      }),
+      note: "Agents pick it up on their next turn.",
+      test: { status: "ok", message: "", toolCount: 16, checkedAtMillis: 2 },
+    });
+    api.updateMcpServer.mockRejectedValue(
+      new ApiError(500, "internal", "the host could not save that.", true),
+    );
+
+    await mount();
+    await add();
+
+    await act(async () => {
+      el("mcp-add-use-probed")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(el("mcp-add-error")?.textContent).toContain(
+      "the host could not save that.",
+    );
+  });
+});
+
 describe("a build with no MCP bridge", () => {
   it("says the probe cannot be acted on, and still offers the save", async () => {
     await act(async () => {

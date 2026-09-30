@@ -74,6 +74,7 @@ export function McpAddServerDialog({
   }
 
   function close() {
+    if (phase.kind === "saving") return;
     onOpenChange(false);
     reset();
   }
@@ -152,6 +153,7 @@ export function McpAddServerDialog({
           <Outcome
             result={phase.result}
             describing={describing}
+            error={formError}
             onUseProbed={useProbedDescription}
             onOpenServer={(server) => {
               close();
@@ -368,12 +370,14 @@ export function McpAddServerDialog({
 function Outcome({
   result,
   describing,
+  error,
   onUseProbed,
   onOpenServer,
   onDone,
 }: {
   result: McpMutationResponse;
   describing: boolean;
+  error: string | null;
   onUseProbed: (server: string, probed: string) => void;
   onOpenServer: (server: string) => void;
   onDone: () => void;
@@ -433,6 +437,11 @@ function Outcome({
               )}
             </Button>
           </div>
+        )}
+        {error && (
+          <p className="text-xs text-destructive" data-testid="mcp-add-error">
+            {error}
+          </p>
         )}
       </div>
       <DialogFooter>
