@@ -185,9 +185,16 @@ export function useStableList<T>(
     pointerFocus.current = true;
   }, []);
 
+  // A key pressed inside turns focus a click left behind into keyboard focus,
+  // so the hold starts here rather than on the next focus event: a key that
+  // does not move focus (Shift, Enter on the row) fires none, and a message
+  // arriving before one would otherwise re-sort the list under the keyboard.
   const onKeyDownCapture = useCallback(() => {
     pointerFocus.current = false;
-  }, []);
+    focusInside.current = true;
+    setHeld(true);
+    freeze();
+  }, [freeze]);
 
   const onFocusCapture = useCallback(() => {
     if (!holdPointerFocus && pointerFocus.current) return;

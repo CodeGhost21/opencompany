@@ -105,6 +105,21 @@ describe("ChannelRail DM order", () => {
     expect(order()).toEqual(["ann", "bob", "cy"]);
   });
 
+  it("holds from a key press on the clicked row even when focus does not move", () => {
+    render(["ann", "bob", "cy"]);
+    const first = container.querySelector<HTMLButtonElement>("li button")!;
+    act(() => {
+      first.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+      first.focus();
+    });
+    act(() => {
+      first.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", bubbles: true }));
+    });
+    expect(document.activeElement).toBe(first);
+    render(["cy", "ann", "bob"]);
+    expect(order()).toEqual(["ann", "bob", "cy"]);
+  });
+
   it("keeps row content live while the order is held", () => {
     render(["ann", "bob", "cy"]);
     const first = container.querySelector<HTMLButtonElement>("li button")!;
