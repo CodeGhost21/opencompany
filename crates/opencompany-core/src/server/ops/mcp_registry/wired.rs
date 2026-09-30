@@ -445,7 +445,8 @@ pub(in crate::server::ops) async fn remove_install(
 
 use crate::company::mcp_policy;
 use crate::server::ops::mcp_tool_policy::{
-    AgentScope, PutToolPolicy, apply_tool_policy_patch, policy_unreadable, tool_policy_dto,
+    AgentScope, PutToolPolicy, apply_tool_policy_patch, policy_unreadable, require_roster_agent,
+    tool_policy_dto,
 };
 
 /// Reads an install's stored policy strictly, so an unreadable document is a
@@ -520,6 +521,11 @@ pub(super) async fn write_tool_policy(
     if let Err(error) = mcp.get(&server_id) {
         return ApiError(error).into_response();
     }
+    if let Some(agent) = scope.agent()
+        && let Err(response) = require_roster_agent(runtime, agent).await
+    {
+        return *response;
+    }
     let stored = match stored_strict(runtime, &server_id).await {
         Ok(stored) => stored,
         Err(response) => return *response,
@@ -571,21 +577,30 @@ pub(super) async fn reset_tool_policy(
             };
             stored.agents.remove(agent);
             stored.prune();
+            if let Err(error) = mcp_policy::save_tool_policies(
+                runtime.id(),
+                runtime.secrets().as_ref(),
+                &mcp_policy::registry_tool_policies_key(&server_id),
+                &stored,
+            )
+            .await
+            {
+                return ApiError(error).into_response();
+            }
             stored
         }
-        // Does not read the stored document first: this is the repair for one
-        // that cannot be read.
-        None => mcp_policy::McpToolPolicies::default(),
+        None => {
+            match mcp_policy::reset_company_policy(
+                runtime.id(),
+                runtime.secrets().as_ref(),
+                &mcp_policy::registry_tool_policies_key(&server_id),
+            )
+            .await
+            {
+                Ok(replacement) => replacement,
+                Err(error) => return ApiError(error).into_response(),
+            }
+        }
     };
-    if let Err(error) = mcp_policy::save_tool_policies(
-        runtime.id(),
-        runtime.secrets().as_ref(),
-        &mcp_policy::registry_tool_policies_key(&server_id),
-        &merged,
-    )
-    .await
-    {
-        return ApiError(error).into_response();
-    }
     registry_policy_response(runtime, &server_id, merged, scope.agent()).await
 }

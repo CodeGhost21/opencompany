@@ -447,6 +447,32 @@ pub async fn clear_tool_policies(
 ) -> Result<()> {
     save_tool_policies(company, secrets, key, &McpToolPolicies::default()).await
 }
+
+/// Resets a server's company-wide policy while preserving whatever `agents`
+/// map is already stored, so a company-scoped reset cannot silently drop a
+/// teammate's own `Blocked` rule.
+///
+/// Reads the document strictly first. A document that cannot be read falls
+/// back to a full wipe — the existing repair path for one that will not
+/// parse, since there is no `agents` map to preserve from it either way.
+pub async fn reset_company_policy(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    key: &str,
+) -> Result<McpToolPolicies> {
+    let agents = load_tool_policies_strict(company, secrets, key)
+        .await
+        .ok()
+        .flatten()
+        .map(|stored| stored.agents)
+        .unwrap_or_default();
+    let replacement = McpToolPolicies {
+        agents,
+        ..McpToolPolicies::default()
+    };
+    save_tool_policies(company, secrets, key, &replacement).await?;
+    Ok(replacement)
+}
 /// Flattens a company's effective MCP servers into the `(server, tool)` set the
 /// approval gate lets run without parking, resolved through each server's tool
 /// policy.
@@ -704,3 +730,9 @@ pub async fn save_tool_inventory(
 #[cfg(test)]
 #[path = "mcp_policy_tests.rs"]
 mod tests;
+
+/// `reset_company_policy`: preserving `agents` on a company-wide reset, and
+/// falling back to the full wipe when the document cannot be read.
+#[cfg(test)]
+#[path = "mcp_policy_reset_tests.rs"]
+mod reset_tests;

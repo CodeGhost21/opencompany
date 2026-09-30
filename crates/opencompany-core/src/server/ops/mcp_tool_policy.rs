@@ -396,6 +396,40 @@ pub fn policy_unreadable(name: &str) -> Response {
         .into_response()
 }
 
+/// Confirms `agent` names a roster teammate, so a write cannot store rules
+/// under an id no teammate uses. Read-only routes and agent-scoped resets
+/// skip this — a reset must still be able to clean up a departed teammate's
+/// rules.
+pub fn unknown_agent(agent_id: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": format!("no teammate named `{agent_id}` on this company's roster"),
+            "code": "not_found",
+        })),
+    )
+        .into_response()
+}
+
+/// Loads the company record and checks `agent` against its roster, returning
+/// the `404` to send back when it is not there.
+pub async fn require_roster_agent(
+    runtime: &CompanyRuntime,
+    agent: &str,
+) -> Result<(), Box<Response>> {
+    match runtime.store().load(runtime.id()).await {
+        Ok(Some(record)) if record.is_roster_agent(agent) => Ok(()),
+        Ok(Some(_)) => Err(Box::new(unknown_agent(agent))),
+        Ok(None) => Err(Box::new(
+            ApiError(crate::error::OpenCompanyError::CompanyNotFound(
+                runtime.id().to_string(),
+            ))
+            .into_response(),
+        )),
+        Err(err) => Err(Box::new(ApiError(err).into_response())),
+    }
+}
+
 /// Reads the stored document strictly, so an unreadable one is a `409` rather
 /// than silently rendered as "no overrides".
 ///
@@ -456,6 +490,11 @@ async fn write_policy(
         Ok(decl) => decl,
         Err(response) => return *response,
     };
+    if let Some(agent) = scope.agent()
+        && let Err(response) = require_roster_agent(runtime, agent).await
+    {
+        return *response;
+    }
     let stored = match stored_strict(runtime, &name).await {
         Ok(stored) => stored,
         Err(response) => return *response,
@@ -527,19 +566,17 @@ async fn reset_policy(
             mcp_policy::StoredPolicies::Stored(stored)
         }
         None => {
-            // Does not read the stored document first: this is the repair for one
-            // that cannot be read, so requiring it to parse would lock the
-            // operator out of the only way back.
-            if let Err(err) = mcp_policy::clear_tool_policies(
+            let replacement = match mcp_policy::reset_company_policy(
                 runtime.id(),
                 runtime.secrets().as_ref(),
                 &mcp_policy::tool_policies_key(&name),
             )
             .await
             {
-                return ApiError(err).into_response();
-            }
-            mcp_policy::StoredPolicies::Absent
+                Ok(replacement) => replacement,
+                Err(err) => return ApiError(err).into_response(),
+            };
+            mcp_policy::StoredPolicies::Stored(replacement)
         }
     };
     let policies = mcp_policy::effective_policies(&decl.read_only_tools, merged);
@@ -563,3 +600,9 @@ mod tests;
 #[cfg(test)]
 #[path = "mcp_tool_policy_agent_tests.rs"]
 mod agent_tests;
+
+/// The roster check on write, and the company reset preserving `agents` —
+/// driven over the real router.
+#[cfg(test)]
+#[path = "mcp_tool_policy_route_tests.rs"]
+mod route_tests;
