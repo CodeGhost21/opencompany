@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 import {
   amendSkills,
@@ -9,22 +9,16 @@ import {
 } from "./skills";
 
 /**
- * The two states of the installed list a live host cannot be put into.
+ * The reach cell when a skill reaches more teammates than the cell can draw.
  *
- * Everything else in the Skills suite asserts against what the host serves.
- * These two cannot: a row carrying an available update needs the shared
- * library to move under a running process (see the note above
- * `skills-console.spec.ts`'s drift test), and the reach cell's overflow
- * control needs more teammates than the harness company has. Both are driven
- * here over the host's own answer with one field rewritten — `amendSkills`
- * says what that does and does not prove.
- *
- * What is being proved is client-side and worth proving: a predicate over the
- * rows, a count, a badge, and a control that only exists once the faces stop
- * fitting. The cards-or-rows choice itself needs no fixture, so it stays in
- * `skills-console.spec.ts` beside the rest of the list. The host's half — that `updateAvailable` is computed by comparing a
- * pinned digest against the library's current one — belongs to
- * `skill_provenance_tests.rs` and `graphql/skills_drift_tests.rs`.
+ * Every other Skills spec asserts against what the host serves, and the drift
+ * states that a live host could not reach now have one of their own in
+ * `skills-drift-live.spec.ts`. This one keeps an interception, because what it
+ * needs is not a state the host computes: it is a scope wider than the column,
+ * and the harness company has six teammates. Widening the answer is cheaper
+ * and steadier than creating a dozen agents to make a layout branch happen,
+ * and the branch is client-side arithmetic over a width — `amendSkills` says
+ * what a spec built this way can and cannot claim.
  *
  * Default features are enough; every route here ships in the default build.
  */
@@ -33,102 +27,8 @@ import {
 const NAME = "Meeting Brief";
 const SLUG = "meeting-brief";
 
-/** Picks `option` from the Base UI select at `testId`. */
-async function choose(page: Page, testId: string, option: string) {
-  await page.getByTestId(testId).click();
-  await page.getByRole("option", { name: option, exact: true }).click();
-}
-
 test.beforeEach(async ({ page }) => {
   await suppressTour(page);
-});
-
-// ---------------------------------------------------------------------------
-// Filtering to the rows a library has moved under
-// ---------------------------------------------------------------------------
-
-test("the Updates filter keeps the row with an update and drops the rest", async ({
-  page,
-  request,
-}) => {
-  const served = await hostSkills(request);
-  await amendSkills(page, (skills) =>
-    skills.map((skill) =>
-      skill.id === SLUG
-        ? { ...skill, updateAvailable: { from: "1.0.0", to: "1.1.0" } }
-        : skill,
-    ),
-  );
-  await openSkills(page);
-
-  const cards = page.getByTestId("installed-card");
-  await expect(cards).toHaveCount(served.length, { timeout: 30_000 });
-  // The badge is on the row before any filtering, which is what makes the
-  // filter findable in the first place.
-  await expect(
-    installedCard(page, NAME).getByTestId("skill-update-available"),
-  ).toBeVisible();
-
-  await choose(page, "skills-filter-drift", "Has update");
-
-  await expect(cards).toHaveCount(1);
-  await expect(cards.first()).toContainText(NAME);
-  await expect(page.getByTestId("skills-count")).toContainText(
-    `1 of ${served.length} installed`,
-  );
-
-  await choose(page, "skills-filter-drift", "Any version");
-  await expect(cards).toHaveCount(served.length);
-});
-
-test("a row the library moved under is still offered when it has also been edited", async ({
-  page,
-  request,
-}) => {
-  // The decision this pins: `"Has update"` collects every row the library has
-  // moved under, including one whose own document was edited since. That row's
-  // Update is refused and its badge says so — but it is precisely the row an
-  // operator filtering for drift needs to make a decision about, so filtering
-  // on "can this be applied" would hide it. A second row, edited with no
-  // update behind it, must not be collected.
-  const served = await hostSkills(request);
-  const other = served.find((skill) => skill.id !== SLUG);
-  expect(
-    other,
-    "the harness company should install more than one skill",
-  ).toBeTruthy();
-
-  await amendSkills(page, (skills) =>
-    skills.map((skill) => {
-      if (skill.id === SLUG) {
-        return {
-          ...skill,
-          modified: true,
-          updateAvailable: { from: "1.0.0", to: "1.1.0" },
-        };
-      }
-      return skill.id === other!.id ? { ...skill, modified: true } : skill;
-    }),
-  );
-  await openSkills(page);
-
-  const cards = page.getByTestId("installed-card");
-  await expect(cards).toHaveCount(served.length, { timeout: 30_000 });
-  // Both rows read as modified, which is the badge that outranks the update.
-  await expect(
-    installedCard(page, NAME).getByTestId("skill-modified"),
-  ).toBeVisible();
-  await expect(
-    installedCard(page, other!.name).getByTestId("skill-modified"),
-  ).toBeVisible();
-
-  await choose(page, "skills-filter-drift", "Has update");
-
-  await expect(cards).toHaveCount(1);
-  await expect(cards.first()).toContainText(NAME);
-  // And the row menu still refuses the update it collected, naming the edit.
-  await installedCard(page, NAME).getByTestId("skill-row-menu").click();
-  await expect(page.getByTestId("skill-menu-update")).toBeDisabled();
 });
 
 // ---------------------------------------------------------------------------
