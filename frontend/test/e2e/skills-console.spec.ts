@@ -625,6 +625,55 @@ test("a member sees the installed list and is offered nothing that writes to it"
   }
 });
 
+test("a member reads a skill's own page, and the row view, without a control that writes", async ({
+  page,
+  browser,
+}) => {
+  // The member case above predates both of these surfaces. A new control that
+  // forgot its permission check would render for a member and still pass every
+  // other test in this file, because every other test signs in as the admin.
+  const memberContext = await browser.newContext({ storageState: undefined });
+  try {
+    await signInAsMember(page.request, memberContext.request, MEMBER_EMAIL);
+    const memberPage = await memberContext.newPage();
+    await suppressTour(memberPage);
+    await openSkills(memberPage);
+
+    // Rows: readable, and every row's switch and menu are as inert as a
+    // card's.
+    await memberPage.getByTestId("skills-view-list").click();
+    const row = memberPage
+      .getByTestId("installed-row")
+      .filter({ hasText: BUNDLED_NAME });
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    await expect(row.getByRole("switch")).toBeDisabled();
+    await expect(memberPage.getByTestId("skill-row-menu")).toHaveCount(0);
+
+    // The page: the roster is listed without the ticks that change it, and it
+    // says why rather than simply omitting them.
+    await row.getByTestId("skill-card-open").click();
+    await expect(memberPage.getByTestId("skill-detail-name")).toHaveText(
+      BUNDLED_NAME,
+      { timeout: 30_000 },
+    );
+    await expect(
+      memberPage.getByTestId("skill-detail-read-only"),
+    ).toBeVisible();
+    await expect(memberPage.getByTestId("skill-detail-agents")).toBeVisible();
+    await expect(memberPage.getByTestId("skill-detail-mode")).toHaveCount(0);
+    await expect(memberPage.getByTestId("skill-detail-save")).toHaveCount(0);
+    await expect(
+      memberPage.getByTestId("skill-detail-agents").getByRole("checkbox"),
+    ).toHaveCount(0);
+
+    // And the way back is still there for a member.
+    await memberPage.getByTestId("skill-page-back").click();
+    await expect(memberPage.getByTestId("installed-row").first()).toBeVisible();
+  } finally {
+    await memberContext.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Install drift (#2487)
 // ---------------------------------------------------------------------------
@@ -634,12 +683,14 @@ test("a member sees the installed list and is offered nothing that writes to it"
  *
  * `updateAvailable` needs the shared library to be republished under a running
  * host, which no console action and no route can do — so the browser cannot
- * reach that state and a spec that faked it would be asserting against a
- * fixture rather than against the host. It is covered where it is reachable:
- * `write_skills_drift_tests.rs` and `graphql/skills_drift_tests.rs` seed a moved
- * library and read both transports, and `test/unit/skills-drift.test.ts` drives
- * the badge, the menu and the Update/Keep review over a client that answers with
- * it.
+ * reach that state against this host. Its host half is covered where it is
+ * computed: `write_skills_drift_tests.rs` and `graphql/skills_drift_tests.rs`
+ * seed a moved library and read both transports, and
+ * `test/unit/skills-drift.test.ts` drives the badge, the menu and the
+ * Update/Keep review over a client that answers with it. Its console half — the
+ * Updates filter, which has no unit-level screen to run on — is driven in
+ * `skills-list-view.spec.ts` over this host's own answer with that one field
+ * rewritten, and that file states what such a spec cannot claim.
  *
  * `modified` **is** reachable, through exactly the path issue #2487 said was a
  * branch nothing could enter: an upload over a slug that already carries an
@@ -735,16 +786,33 @@ test("editing an installed registry skill marks it modified and refuses an updat
 
 test("the installed set can be drawn as rows, and the choice rides the address", async ({
   page,
+  request,
 }) => {
+  const served = await hostSkills(request);
   await openSkills(page);
-  await expect(page.getByTestId("installed-card").first()).toBeVisible({
+  await expect(page.getByTestId("installed-card")).toHaveCount(served.length, {
     timeout: 30_000,
   });
 
   await page.getByTestId("skills-view-list").click();
-  await expect(page.getByTestId("installed-row").first()).toBeVisible();
+  // Every card became a row: a rendering that dropped one would still pass a
+  // `first()` check.
+  await expect(page.getByTestId("installed-row")).toHaveCount(served.length);
   await expect(page.getByTestId("installed-card")).toHaveCount(0);
+  await expect(page.getByTestId("skills-view-list")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   expect(page.url()).toContain("view=list");
+
+  // A row's name opens the same page a card's does.
+  await page
+    .getByTestId("installed-row")
+    .filter({ hasText: BUNDLED_NAME })
+    .getByTestId("skill-card-open")
+    .click();
+  await expect(page.getByTestId("skill-detail-name")).toHaveText(BUNDLED_NAME);
+  await page.getByTestId("skill-page-back").click();
 
   // A reload lands on the same rendering, which is the point of putting it on
   // the address rather than in component state.
