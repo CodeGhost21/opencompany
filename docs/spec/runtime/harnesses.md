@@ -278,59 +278,15 @@ Two constraints on that message are deliberate:
 
 ### A ceiling hit pauses; it does not fail the run
 
-Until issue #1680's second half it did fail the run, and that was the expensive
-half of the defect rather than the misleading message.
+Until issue #1680's second half it failed the run, and that was the expensive
+half of the defect rather than the misleading message. A ceiling hit now settles
+as a pause carrying what the turn had already done, like the three other limits
+that stop a turn short.
 
-A turn that stops short of an answer can do so in four ways, and OpenCompany now
-reports all four the same way — as a **pause** carrying what the turn had
-already done, not as an error:
-
-| Limit | `TurnOutcome` field | Operator's lever |
-|---|---|---|
-| Tool-iteration cap | `hit_iteration_cap` | reply `"continue"` — there is a checkpoint |
-| In-turn spend brake | `halted_for_spend` | raise the company's cap, or narrow the ask |
-| Account out of credits | `budget_paused` | add credits |
-| **Wall-clock ceiling** | `ceiling_paused` | **narrow the ask, or raise the ceiling** |
-
-The ceiling's lever is distinct from all three, which is why it is a fourth
-field rather than a reading of an existing one: credits buy nothing, there is no
-company-declared cap to raise, and — unlike a step pause — **there is no
-checkpoint to continue from.** `ceiling_pause_notice`
-(`src/harness/built_in/brain.rs`) therefore never uses the word "continue";
-doing so would invite the operator to spend another full ceiling arriving at the
-same wall.
-
-**What survives, and what does not.** Three different answers:
-
-- **The reply text does not.** The vendored harness returns an `Err` with no
-  partial `String` in it, so the draft the turn was composing is unrecoverable
-  from here. A salvage would have to happen upstream, inside the harness.
-- **The spend already did**, via issue B-120 — `turn_costs` is returned outside
-  the `Result` precisely because a ceiling hit "fires precisely *because* the
-  agent worked for ten minutes" and was reporting the most expensive runs a
-  founder owns as free.
-- **The folded step timeline does now.** `pump.finish()` runs unconditionally
-  and `fold_steps` builds the full `Vec<TurnStep>` whether the reply is `Ok` or
-  `Err` — but `reply.map(..)` then dropped it on every `Err`, so a `Hard` ceiling
-  arm discarded a complete timeline one line after computing it. On a ceiling hit
-  that timeline is by definition substantial, and for the workflow node #1680 was
-  filed against it is the fetched material the summary was going to be written
-  from.
-
-**At a workflow node**, a ceiling pause settles the attempt row `Failed` with
-the notice as its error, pushes the node id onto `RunCappedNodes` so the row and
-the attempt agree (the #1865 reconciliation, as for the other three), and
-reports `StopReason::LimitStop { limit: "wall_clock_ceiling" }` rather than
-`Finished` — so the pause copy is never bound downstream as if it were the
-node's deliverable. The run then continues to the next node, which is what #1680
-asked for: on its own workflow, the **Send update** step is reached.
-
-**On a delegation chain**, the pause folds first-wins exactly as
-`budget_paused` does, so a ceiling hit two desks down names the teammate that
-actually ran out of time. The CEO-relay is deliberately **not** skipped for it,
-unlike a budget pause: the provider has not run dry, and no caller overwrites the
-reply, so the relay's inference buys a real synthesis over the branches that did
-finish.
+Moved to [`agents-turn-limits.md`](agents-turn-limits.md) on this repo's
+500-line cap, and because that page already owns the sibling limits: it is where
+all four are compared, where what survives a ceiling hit is set out, and where
+the workflow-node and delegation behaviour is described.
 
 ### The per-tool bounds this crate *does* set
 
