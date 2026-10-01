@@ -254,7 +254,9 @@ async fn cached_icon(url: String) -> Option<String> {
         if cache.len() >= ICON_CACHE_LIMIT {
             cache.clear();
         }
-        cache.insert(url, icon.clone());
+        if icon.is_some() {
+            cache.insert(url, icon.clone());
+        }
     }
     icon
 }
