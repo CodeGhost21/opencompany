@@ -35,9 +35,12 @@ import { Separator } from "@/components/ui/separator";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { consoleHref } from "@/lib/console-paths";
 import {
+  SCOPE_CLEARS_TO_INHERITED_WARNING,
   SCOPE_ONLY_TAKES_AWAY,
   SCOPE_PINS_INHERITED_WARNING,
+  agentsToUnpin,
   pinsAnInheritedScope,
+  slugsGainedByInheriting,
   toggleSkillInScope,
 } from "@/lib/skill-scope";
 import { skillSourceLabel } from "@/lib/skills-list";
@@ -126,6 +129,21 @@ export function SkillPage({
   const pinning = changed.filter((agent) => pinsAnInheritedScope(agent.state));
   const allTicked = (agents ?? []).length > 0 && (agents ?? []).every(ticked);
   const mode = allTicked && !revealed ? "all" : "selected";
+  // "All agents" means inheriting, not a list that happens to name everybody:
+  // a pinned teammate left holding today's set stops receiving whatever is
+  // installed next. The work is therefore every teammate not already
+  // inheriting, whether or not a checkbox moved.
+  const unpinning = mode === "all" ? agentsToUnpin(agents) : [];
+  const pending = mode === "all" ? unpinning : changed;
+  const widening = unpinning
+    .map((agent) => ({
+      id: agent.id,
+      gains: slugsGainedByInheriting(
+        rosterById.get(agent.id)?.skills?.requested,
+        rosterById.get(agent.id)?.skills?.companyAvailable ?? [],
+      ),
+    }))
+    .filter((entry) => entry.gains.length > 0);
 
   /**
    * One `PATCH` per moved teammate, in order, stopping at the first failure.
@@ -145,10 +163,10 @@ export function SkillPage({
     if (!skill || missingStoredList) return;
     setSaving(true);
     setProblem(null);
-    const total = changed.length;
+    const total = pending.length;
     let done = 0;
     let failure: { agent: string; message: string } | null = null;
-    for (const agent of changed) {
+    for (const agent of pending) {
       const member = rosterById.get(agent.id);
       const scope = member?.skills;
       if (!scope) {
@@ -159,15 +177,22 @@ export function SkillPage({
         break;
       }
       try {
-        // The whole list, computed from what that teammate *stores*. A body of
-        // `[skill.id]` is a legal narrowing the host accepts, and it would strip
-        // every other skill this teammate has.
-        const next = toggleSkillInScope(
-          scope.requested,
-          scope.companyAvailable,
-          skill.id,
-          ticked(agent),
-        );
+        // `null` resets the teammate to inheriting. Writing the list that names
+        // everybody instead would leave it pinned to today's set, which is the
+        // state this mode exists to clear.
+        //
+        // Otherwise the whole list, computed from what that teammate *stores*:
+        // a body of `[skill.id]` is a legal narrowing the host accepts, and it
+        // would strip every other skill this teammate has.
+        const next =
+          mode === "all"
+            ? null
+            : toggleSkillInScope(
+                scope.requested,
+                scope.companyAvailable,
+                skill.id,
+                ticked(agent),
+              );
         await client.updateAgent(agent.id, { skills: next }, company);
         setMoved((all) => {
           const rest = { ...all };
@@ -412,6 +437,25 @@ export function SkillPage({
               </p>
             )}
 
+            {widening.length > 0 && (
+              <div
+                className="space-y-1 text-xs text-status-blocked-text"
+                data-testid="skill-detail-widening-warning"
+              >
+                <p>{SCOPE_CLEARS_TO_INHERITED_WARNING}</p>
+                <ul className="list-disc pl-4">
+                  {widening.map((entry) => (
+                    <li key={entry.id}>
+                      {teammateName(entry.id, team)} gains{" "}
+                      {entry.gains.length}{" "}
+                      {entry.gains.length === 1 ? "skill" : "skills"}:{" "}
+                      {entry.gains.join(", ")}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {missingStoredList && canManage && (
               <Alert
                 variant="destructive"
@@ -439,7 +483,7 @@ export function SkillPage({
                 </Button>
                 <Button
                   size="sm"
-                  disabled={saving || changed.length === 0 || missingStoredList}
+                  disabled={saving || pending.length === 0 || missingStoredList}
                   onClick={() => void save()}
                   data-testid="skill-detail-save"
                 >

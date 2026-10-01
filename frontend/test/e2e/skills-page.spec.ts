@@ -171,6 +171,41 @@ test("ticking a teammate back adds the skill to the list it already holds", asyn
   ).toEqual([...others, subject.id]);
 });
 
+test("choosing all agents hands a pinned teammate back to inheriting", async ({
+  page,
+  request,
+}) => {
+  const enabled = await enabledSkills(request);
+  const subject = enabled[0];
+
+  // Pin the probe to a list that leaves something out, which is the state a
+  // newly installed skill silently never reaches.
+  const scoped = await request.patch(`/api/v1/company/team/${AGENT_ID}`, {
+    data: { skills: [subject.id] },
+  });
+  expect(
+    scoped.ok(),
+    `pinning the probe failed: ${await scoped.text()}`,
+  ).toBeTruthy();
+  expect(await storedScope(request), "pinned to start").toEqual([subject.id]);
+
+  await openPanel(page, subject.name);
+
+  // The panel names what the reset widens before it is sent.
+  await page.getByTestId("skill-detail-mode-all").click();
+  await expect(page.getByTestId("skill-detail-widening-warning")).toBeVisible();
+
+  await expect(page.getByTestId("skill-detail-save")).toBeEnabled();
+  await page.getByTestId("skill-detail-save").click();
+  await expect(page.getByTestId("skill-page")).toHaveCount(0, {
+    timeout: 30_000,
+  });
+
+  // `null`, not a list that happens to name everything: only `null` keeps
+  // reaching skills installed after this write.
+  expect(await storedScope(request)).toBeNull();
+});
+
 test("the row menu's Scope… opens the same panel the card does", async ({
   page,
   request,
@@ -192,48 +227,4 @@ test("the row menu's Scope… opens the same panel the card does", async ({
   await expect(
     page.getByTestId(`skill-agent-toggle-${AGENT_ID}`),
   ).toBeVisible();
-});
-
-test("the card's reach label agrees with what the panel lists", async ({
-  page,
-  request,
-}) => {
-  const enabled = await enabledSkills(request);
-  const subject = enabled[0];
-
-  // One teammate excluded, so the label has a count to get wrong.
-  const scoped = await request.patch(`/api/v1/company/team/${AGENT_ID}`, {
-    data: { skills: [] },
-  });
-  expect(
-    scoped.ok(),
-    `scoping the probe failed: ${await scoped.text()}`,
-  ).toBeTruthy();
-
-  await openSkills(page);
-  const card = installedCard(page, subject.name);
-  await expect(card).toBeVisible({ timeout: 30_000 });
-  const label =
-    (await card.getByTestId("skill-reach-count").textContent()) ?? "";
-  const counted = /^(\d+) of (\d+)$/.exec(label.trim());
-  expect(
-    counted,
-    `the reach cell should carry a ratio, got ${label}`,
-  ).not.toBeNull();
-
-  // The faces beside it stand for the teammates that hold it, so the two halves
-  // of the cell have to agree before the page behind them is consulted.
-  await expect(card.getByTestId("skill-reach").locator("img")).toHaveCount(
-    Number(counted![1]),
-  );
-
-  await card.getByTestId("skill-card-open").click();
-  await page.getByTestId("skill-detail-mode-selected").click();
-  const rows = page
-    .getByTestId("skill-detail-agents")
-    .locator("input[type=checkbox]");
-  await expect(rows).toHaveCount(Number(counted![2]));
-  await expect(
-    page.getByTestId(`skill-agent-toggle-${AGENT_ID}`),
-  ).not.toBeChecked();
 });

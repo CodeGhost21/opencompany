@@ -13,6 +13,7 @@
 // nothing) put a slug outside the effective set identically while the company has
 // the skill disabled, and only the first gets it back when the switch returns.
 
+import type { SkillAgentScope } from "@/api/skills";
 
 /** Which of the three stored states an agent's scope puts one skill in. */
 export type SkillScopeState = "inherited" | "included" | "excluded";
@@ -145,6 +146,46 @@ export function pinsAnInheritedScope(state: SkillScopeState): boolean {
 export const SCOPE_PINS_INHERITED_WARNING =
   "Removing a teammate that inherits every skill will pin its list to today's set, " +
   "so a skill you enable later will not reach it. Hand it back to inheriting on the teammate's own page.";
+
+/**
+ * The teammates "All agents" has to write, which is every one not already
+ * inheriting.
+ *
+ * An inheriting teammate is already reached by every enabled skill, so writing
+ * to it would be a no-op that could only lose a race with another editor.
+ */
+export function agentsToUnpin(
+  agents: readonly SkillAgentScope[] | null | undefined,
+): SkillAgentScope[] {
+  return (agents ?? []).filter((agent) => agent.state !== "inherited");
+}
+
+/**
+ * The slugs a teammate gains when its pinned list is handed back to inheriting.
+ *
+ * Returning to inherit is not scoped to the skill being edited: it hands the
+ * teammate everything the company has enabled. These are the extras, so the
+ * panel can name them before the save rather than after.
+ */
+export function slugsGainedByInheriting(
+  requested: string[] | null | undefined,
+  companyAvailable: readonly string[],
+): string[] {
+  if (requested === null || requested === undefined) return [];
+  const held = new Set(requested);
+  return companyAvailable.filter((slug) => !held.has(slug));
+}
+
+/**
+ * The sentence the skill panel shows before handing pinned teammates back to
+ * inheriting.
+ *
+ * The mirror of [`SCOPE_PINS_INHERITED_WARNING`], and one string with one test
+ * on it for the same reason.
+ */
+export const SCOPE_CLEARS_TO_INHERITED_WARNING =
+  "Choosing all agents hands each pinned teammate back to inheriting, so it gets every skill " +
+  "the company has enabled — not only this one. The teammates below gain more than they had.";
 
 /** What a scope can and cannot do, stated on both surfaces that edit one. */
 export const SCOPE_ONLY_TAKES_AWAY =

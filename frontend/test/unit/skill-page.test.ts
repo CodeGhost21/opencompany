@@ -145,6 +145,132 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("all agents means inheriting, not a list naming everybody", () => {
+  /** A roster row whose display name is its id, so a warning naming one is readable. */
+  function named(id: string, requested: string[] | null): TeamMemberDto {
+    return { ...member(id, requested), name: id } as TeamMemberDto;
+  }
+
+  /** Picks "All agents", which is a choice rather than a state here. */
+  async function chooseAll() {
+    await act(async () => {
+      node("skill-detail-mode-all").dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
+  }
+
+  it("hands every pinned teammate back to inheriting", async () => {
+    // The defect: a teammate holding a fixed list keeps missing whatever is
+    // installed next. `null` is the only body that restores the dynamic state.
+    const updateAgent = vi.fn(() => Promise.resolve({}));
+    await open(
+      skill([
+        scope("ceo", "inherited"),
+        scope("writer", "included"),
+        scope("analyst", "excluded"),
+      ]),
+      [
+        named("ceo", null),
+        named("writer", ["brand-voice"]),
+        named("analyst", []),
+      ],
+      true,
+      clientWith(updateAgent),
+    );
+
+    await chooseAll();
+    await click("skill-detail-save");
+
+    expect(updateAgent).toHaveBeenCalledTimes(2);
+    expect(updateAgent).toHaveBeenCalledWith("writer", { skills: null }, null);
+    expect(updateAgent).toHaveBeenCalledWith("analyst", { skills: null }, null);
+  });
+
+  it("writes nothing for a teammate that already inherits", async () => {
+    const updateAgent = vi.fn(() => Promise.resolve({}));
+    await open(
+      skill([scope("ceo", "inherited"), scope("writer", "inherited")]),
+      [member("ceo", null), member("writer", null)],
+      true,
+      clientWith(updateAgent),
+    );
+
+    // Nothing to unpin, so Save has no work and is refused.
+    expect(
+      (node("skill-detail-save") as HTMLButtonElement).disabled,
+      "nothing to do",
+    ).toBe(true);
+    expect(updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("offers Save although no checkbox moved", async () => {
+    // Every box is already ticked in all-mode, so a gate keyed on a moved
+    // checkbox would disable Save exactly when there is work to do.
+    await open(
+      skill([scope("ceo", "inherited"), scope("writer", "included")]),
+      [member("ceo", null), member("writer", ["brand-voice"])],
+      true,
+      clientWith(),
+    );
+    expect((node("skill-detail-save") as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+  });
+
+  it("names each teammate and what it gains before the save", async () => {
+    await open(
+      skill([scope("ceo", "inherited"), scope("writer", "included")]),
+      [named("ceo", null), named("writer", ["brand-voice"])],
+      true,
+      clientWith(),
+    );
+
+    const warning = node("skill-detail-widening-warning");
+    expect(warning.textContent).toContain("writer");
+    // `writer` stores only brand-voice, so inheriting hands it the rest.
+    expect(warning.textContent).toContain("invoicing");
+    expect(warning.textContent).toContain("web-research");
+    // The teammate that already inherits gains nothing and is not listed.
+    expect(warning.textContent).not.toContain("ceo");
+  });
+
+  it("says nothing about widening when no teammate gains anything", async () => {
+    await open(
+      skill([scope("ceo", "inherited"), scope("writer", "included")]),
+      [named("ceo", null), named("writer", CEILING)],
+      true,
+      clientWith(),
+    );
+    expect(has("skill-detail-widening-warning")).toBe(false);
+  });
+
+  it("still narrows one teammate at a time once the list is revealed", async () => {
+    // Revealing drops out of all-mode, so the per-teammate arithmetic is
+    // unchanged and a tick still writes a list rather than `null`.
+    const updateAgent = vi.fn(() => Promise.resolve({}));
+    await open(
+      skill([scope("ceo", "inherited"), scope("writer", "included")]),
+      [member("ceo", null), member("writer", ["brand-voice"])],
+      true,
+      clientWith(updateAgent),
+    );
+
+    await reveal();
+    await tick("writer", false);
+    await click("skill-detail-save");
+
+    expect(updateAgent).toHaveBeenCalledTimes(1);
+    const [id, body] = updateAgent.mock.calls[0] as unknown as [
+      string,
+      { skills: string[] | null },
+    ];
+    expect(id).toBe("writer");
+    expect(body.skills, "a list, not a reset").not.toBeNull();
+    expect(body.skills).not.toContain("brand-voice");
+  });
+});
+
 describe("the write the panel sends", () => {
   it("adds the skill to a teammate's stored list rather than replacing it", async () => {
     // THE data-losing bug. `analyst` stores `["invoicing","web-research"]`, and

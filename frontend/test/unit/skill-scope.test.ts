@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import type { SkillAgentScope } from "@/api/skills";
 import {
+  SCOPE_CLEARS_TO_INHERITED_WARNING,
+  SCOPE_PINS_INHERITED_WARNING,
+  agentsToUnpin,
   droppedSlugs,
   pinsAnInheritedScope,
   scopeUnchanged,
   showingInherited,
   skillScopeState,
+  slugsGainedByInheriting,
   toggleSkillInScope,
 } from "@/lib/skill-scope";
 
@@ -164,6 +168,67 @@ describe("droppedSlugs", () => {
 
   it("names nothing for an inherited scope", () => {
     expect(droppedSlugs(null, ["a"])).toEqual([]);
+  });
+});
+
+describe("agentsToUnpin", () => {
+  const scope = (id: string, state: "inherited" | "included" | "excluded") => ({
+    id,
+    state,
+    holds: state !== "excluded",
+  });
+
+  it("names every teammate that is not already inheriting", () => {
+    expect(
+      agentsToUnpin([
+        scope("a", "inherited"),
+        scope("b", "included"),
+        scope("c", "excluded"),
+      ]).map((agent) => agent.id),
+    ).toEqual(["b", "c"]);
+  });
+
+  it("names nobody when the whole roster already inherits", () => {
+    expect(agentsToUnpin([scope("a", "inherited")])).toEqual([]);
+  });
+
+  it("treats an absent roster as nothing to write", () => {
+    expect(agentsToUnpin(undefined)).toEqual([]);
+    expect(agentsToUnpin(null)).toEqual([]);
+  });
+});
+
+describe("slugsGainedByInheriting", () => {
+  it("names what a pinned list was leaving out", () => {
+    expect(slugsGainedByInheriting(["a"], ["a", "b", "c"])).toEqual(["b", "c"]);
+  });
+
+  it("names nothing for a teammate that already inherits", () => {
+    // Already inheriting: it holds everything, so returning to inherit is a
+    // no-op rather than a widening.
+    expect(slugsGainedByInheriting(null, ["a", "b"])).toEqual([]);
+    expect(slugsGainedByInheriting(undefined, ["a", "b"])).toEqual([]);
+  });
+
+  it("names the whole enabled set for a list that holds nothing", () => {
+    expect(slugsGainedByInheriting([], ["a", "b"])).toEqual(["a", "b"]);
+  });
+
+  it("names nothing when the pinned list already holds everything", () => {
+    expect(slugsGainedByInheriting(["a", "b"], ["a", "b"])).toEqual([]);
+  });
+});
+
+describe("SCOPE_CLEARS_TO_INHERITED_WARNING", () => {
+  it("says the widening reaches past the skill being edited", () => {
+    expect(SCOPE_CLEARS_TO_INHERITED_WARNING).toMatch(/not only this one/i);
+    expect(SCOPE_CLEARS_TO_INHERITED_WARNING).toMatch(/every skill/i);
+  });
+
+  it("is not the same claim as its mirror", () => {
+    expect(SCOPE_CLEARS_TO_INHERITED_WARNING).not.toBe(
+      SCOPE_PINS_INHERITED_WARNING,
+    );
   });
 });
 
