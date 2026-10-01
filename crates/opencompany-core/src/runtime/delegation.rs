@@ -33,7 +33,7 @@ use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::run_trace::RunTraceSink;
 use crate::harness::workflow_refs::WorkflowRefQueue;
 use crate::ports::tasks::{
-    COLUMN_TODO, TaskOutput, TaskOutputAction, TaskOutputSource, TaskOutputWorkflow,
+    TaskOutput, TaskOutputAction, TaskOutputSource, TaskOutputWorkflow,
 };
 use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, TurnStep};
 use crate::ports::{TaskOrigin, TaskRecord, TaskStore, generate_id, now_millis};
@@ -3114,65 +3114,20 @@ impl<'a> DelegationRunner<'a> {
                     .map(|name| assignee::resolve(self.record, name))
                     .and_then(|resolved| resolved.canonical().map(str::to_string))
                     .unwrap_or_default();
-                let card = TaskRecord {
-                    opened_by: None,
-                    id: generate_id(),
-                    title: crate::ports::tasks::TaskTitle::system(&title),
+                let card = crate::runtime::spawn_card::SpawnCard {
+                    title,
                     note,
-                    origin_message_seq: None,
-                    column: COLUMN_TODO.to_string(),
-                    priority: "medium".to_string(),
                     assignee: owner,
-                    updated_at_millis: now_millis(),
-                    // Issue #151 §3.2: remember which conversation asked for this,
-                    // so the completion can answer there instead of only landing in
-                    // the note.
-                    // Issue #661 (M5): `None` on the workflow path, and that is
-                    // the lineage-root decision rather than a gap. A run has no
-                    // conversation behind it, so there is nowhere for a
-                    // completion to post back to — and stamping the chat that
-                    // *scheduled* the workflow hours earlier would make the card
-                    // answer into a conversation the operator has left. The run
-                    // reference below is the provenance instead.
-                    // Issue #1890 B: which thread inside it, too — the root the
-                    // runner was bound to by `in_thread`, so a card a threaded
-                    // turn spawns settles back into that thread rather than flat
-                    // in the channel. On the workflow path the whole origin is
-                    // `None` for the reason above: no conversation is behind a
-                    // run, so there is no thread inside one either.
                     origin: TaskOrigin::new(chat_id.map(str::to_string), self.thread_root),
-                    // Lineage (#185): the dispatched card whose turn queued this
-                    // one, when the drain is running inside a task
-                    // (`for_task`) — since #204 a dispatched turn drains the
-                    // queue too, so a task IS in scope here and this is the site
-                    // that stamps it. An orchestrator *chat* turn has no task in
-                    // scope and still writes `None`; lineage for those is written
-                    // through the task API's `parentTaskId` instead.
                     parent_task_id: self.task.clone(),
-                    // Nothing has run yet, so there is no deliverable to point
-                    // at (issue #339). The first successful settle stamps it.
-                    output: None,
-                    plan: None,
-                    planning_attempts: Vec::new(),
-                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
-                    workflow_proposal: None,
-                    // Issue #661 (M5): machine provenance for a card a workflow
-                    // node opened — a reference to the run, never a parent. Both
-                    // ids or neither; `None` on every chat and task path, which is
-                    // every caller that did not go through `for_workflow_run`.
-                    //
-                    // A `sub_workflow` child's node stamps the PARENT run's ids:
-                    // the resolver runs the child inside the engine under the
-                    // parent's bundle, so there is exactly one run id in
-                    // existence and it is the only one a console can navigate to.
                     origin_run_id: self.workflow_run.as_ref().map(|run| run.run_id.clone()),
                     origin_workflow_id: self
                         .workflow_run
                         .as_ref()
                         .map(|run| run.workflow_id.clone()),
-                    // Issue #1865: a card just being minted has never bounced.
-                    bounced: None,
-                };
+                    opened_by: None,
+                }
+                .into_record();
                 tasks.upsert(self.company, &card).await?;
                 // Issue #246: report the card so the caller can surface it. The
                 // id is reported only after the write succeeded, so a bubble can
