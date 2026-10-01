@@ -169,6 +169,22 @@ pub(crate) const BUDGET_PAUSED_PLACEHOLDER_REPLY: &str = "(no reply — see the 
 /// string; keep the two in sync by hand until a structured field exists.
 pub(crate) const BUDGET_PAUSE_NOTICE_PREFIX: &str = "⏸ Paused — out of credits:";
 
+/// [`BUDGET_PAUSED_PLACEHOLDER_REPLY`]'s sibling for a wall-clock ceiling hit
+/// (issue #1680), and it exists for the identical reason: the authored bubble
+/// must not claim words the teammate did not produce.
+///
+/// A ceiling pause's `reply` is `wall_clock_ceiling_message` — host-authored
+/// runtime copy, not the model's. Rendering it under the teammate's name is the
+/// author-vs-channel conflation #885/#966 exist to prevent, and PR #2554's
+/// review is what turned it up: the first cut left the reply in place on the
+/// grounds that it carried #1761's text, which is true and is exactly why it
+/// cannot also be the teammate's bubble. The text now lives in one place only:
+/// `CeilingPause::summary`, on the run surface, with
+/// [`ceiling_pause_notice`] as the unauthored chat bubble beside this
+/// placeholder.
+pub(crate) const CEILING_PAUSED_PLACEHOLDER_REPLY: &str =
+    "(no reply — the turn ran out of time; see the notice below)";
+
 /// The system bubble emitted when a turn paused for lack of inference
 /// budget/credits (issue #1846) — the sibling of
 /// [`iteration_cap_pause_notice`] and [`spend_halt_notice`], and, like both,
@@ -493,6 +509,16 @@ fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
 /// returned `null` followed by a POST that 404'd. The no-resend prefix makes
 /// the claim true.
 fn confined_turn_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
+    // Issue #1680: a ceiling pause routes here for the same reason a budget
+    // pause does. Falling through to `confined_bubble` would attribute
+    // `wall_clock_ceiling_message` -- host-authored runtime copy -- to
+    // `CONFINED_AGENT_ID` as the copilot's own answer, which is the defect
+    // this function was extracted to prevent. No `_no_resend` distinction
+    // applies: a ceiling pause parks no marker and offers no CTA on any path,
+    // so there is only one notice to reach for.
+    if let Some(pause) = &outcome.ceiling_paused {
+        return system_notice(ceiling_pause_notice(pause));
+    }
     match &outcome.budget_paused {
         Some(pause) => system_notice(budget_pause_notice_no_resend(pause)),
         None => confined_bubble(outcome),
@@ -979,6 +1005,14 @@ impl HarnessBrain {
             // identity, which the generic chat-message redeem path does not
             // carry; until it does, the honest surface is a notice with no
             // button rather than a button that cannot work.
+            // Issue #1680: and a continuation whose turn ran out of time says
+            // so, rather than falling into the `None` arm below and reading as
+            // the teammate's answer to the operator's decision.
+            Ok(outcome) if outcome.ceiling_paused.is_some() => outcome
+                .ceiling_paused
+                .as_ref()
+                .map(ceiling_pause_notice)
+                .unwrap_or_default(),
             Ok(outcome) => match &outcome.budget_paused {
                 Some(pause) => budget_pause_notice_no_resend(pause),
                 None => {
@@ -1308,6 +1342,21 @@ impl HarnessBrain {
                             // still sitting in the queue.
                             if let Some(pause) = &outcome.budget_paused {
                                 let result = budget_pause_notice(pause);
+                                settle(&mut card, TaskRunEnd::Paused, &responder, &result);
+                                break (TaskRunEnd::Paused, result);
+                            }
+                            // Issue #1680, and the same asymmetry one step
+                            // further: without this a ceiling-paused card
+                            // settled as a COMPLETION whose deliverable was the
+                            // pause copy, so a card whose work ran out of time
+                            // landed in review as a finished, reviewable
+                            // result. Checked and returned on before the drain
+                            // for the reason stated above -- the ceiling arm of
+                            // `classify_turn` only fires on an `Err`, which
+                            // cannot also have queued a hand-off on the same
+                            // attempt.
+                            if let Some(pause) = &outcome.ceiling_paused {
+                                let result = ceiling_pause_notice(pause);
                                 settle(&mut card, TaskRunEnd::Paused, &responder, &result);
                                 break (TaskRunEnd::Paused, result);
                             }
@@ -3569,6 +3618,15 @@ impl HarnessBrain {
                     if turn.budget_paused.is_some() {
                         operator_reply = BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string();
                     }
+                    // Issue #1680: the same wholesale override, and the same
+                    // contract for the delegation layer above. Separate `if`
+                    // rather than an `||` because the two placeholders differ:
+                    // one says the account ran dry, the other says the clock
+                    // did, and an operator who reads the wrong one looks for
+                    // the wrong lever.
+                    if turn.ceiling_paused.is_some() {
+                        operator_reply = CEILING_PAUSED_PLACEHOLDER_REPLY.to_string();
+                    }
 
                     // Drain what the conversation published (#445). Unconditional
                     // so nothing survives into the next turn, and only *recorded*
@@ -3954,6 +4012,12 @@ impl HarnessBrain {
                         agent: Some(responder.clone()),
                         text: if turn.budget_paused.is_some() {
                             BUDGET_PAUSED_PLACEHOLDER_REPLY.to_string()
+                        } else if turn.ceiling_paused.is_some() {
+                            // Issue #1680: the journaled sibling. A scheduled
+                            // turn's journal is its only durable record, so an
+                            // unauthored placeholder here is what keeps the
+                            // teammate's name off runtime copy permanently.
+                            CEILING_PAUSED_PLACEHOLDER_REPLY.to_string()
                         } else {
                             turn.reply
                         },

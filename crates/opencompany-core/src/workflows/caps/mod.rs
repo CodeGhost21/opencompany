@@ -3190,7 +3190,12 @@ impl HarnessAgentRunner {
             self.capped.push(lineage_node.clone());
             (
                 crate::ports::RunStatus::Failed,
-                Some(crate::harness::built_in::brain::ceiling_pause_notice(pause)),
+                // The LONG copy, not the chat notice: `RunHistoryPanel` renders
+                // an attempt's error as the row's headline, and the leaf
+                // #1761 appends verbatim is the only thing that names which
+                // call was in flight. The short, actionable notice is for the
+                // chat bubble, where a debugging leaf would be noise.
+                Some(pause.summary.clone()),
             )
         } else {
             (crate::ports::RunStatus::Succeeded, None)

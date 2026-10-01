@@ -658,6 +658,9 @@ async fn a_ceiling_paused_node_settles_failed_and_keeps_its_steps() {
         ceiling_paused: Some(crate::harness::CeilingPause {
             agent: "product_manager".to_string(),
             elapsed: std::time::Duration::from_millis(601_000),
+            summary: "product_manager hit the per-turn wall-clock ceiling after 10m 01s. \
+                      Underlying error: exceeded its remaining wall-clock budget (56636 ms)"
+                .to_string(),
         }),
     }));
     let board_claim = Arc::new(deps.delegations.claim_board("run-1680"));

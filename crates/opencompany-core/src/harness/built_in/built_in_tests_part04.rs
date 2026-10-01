@@ -732,6 +732,11 @@ fn the_ceiling_notice_never_invites_continue() {
     let notice = crate::harness::built_in::brain::ceiling_pause_notice(&CeilingPause {
         agent: "product_manager".to_string(),
         elapsed: Duration::from_millis(601_000),
+        // Ignored by the notice on purpose: it is the run surface's long copy,
+        // and the chat notice is built from `agent` and `elapsed` alone.
+        summary: "product_manager hit the per-turn wall-clock ceiling after 10m 01s. \
+                  Underlying error: exceeded its remaining wall-clock budget (56636 ms)"
+            .to_string(),
     });
 
     assert!(

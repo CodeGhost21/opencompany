@@ -1279,15 +1279,23 @@ pub struct CeilingPause {
     /// with a fresh budget, so a duration spanning two attempts would be
     /// compared against a ceiling neither of them saw.
     pub elapsed: Duration,
+    /// #1761's honest copy, verbatim: the measured elapsed, the statement that
+    /// the harness's own figure is a remainder, the knob that moves the
+    /// ceiling, and the underlying error appended as raised.
+    ///
+    /// **Two surfaces, two lengths.** This is the long one, and it goes to the
+    /// workflow run surface (`RunHistoryPanel` renders an attempt's error as
+    /// the row's headline), because the appended leaf is the only thing that
+    /// names *which call was in flight* and that is a debugging fact. The chat
+    /// notice is `brain::ceiling_pause_notice`, built from `agent` and
+    /// `elapsed` alone: short, actionable, and refusing the word "continue".
+    ///
+    /// Dropped in this branch's first cut on the reasoning that the turn's
+    /// `reply` already carried it, then restored: PR #2554 review turned up the
+    /// three paths that overwrite that reply with an unauthored placeholder, so
+    /// `reply` is not a surface this text survives on.
+    pub summary: String,
 }
-
-// Deliberately **no** `summary` field, unlike [`BudgetPause`]. That one carries
-// its copy because its notice renders from it and `BudgetPauseMarker` persists
-// it. This one's notice is built fresh from the two fields above
-// (`brain::ceiling_pause_notice`), and #1761's honest text is already the turn's
-// `reply` -- so a `summary` here would be a second copy of a string this struct
-// has no reader for, on a type that rides inside `TurnOutcome` and therefore
-// inside `MonthlyBudgetGate::Refused`.
 
 impl CompanyAgent {
     /// Registers one blueprint on the runtime and wraps the result.
@@ -1686,7 +1694,8 @@ impl CompanyAgent {
         // Issue #1680, the sibling slot. Same idiom and same reason: the
         // classifier runs inside the stop-hook body and cannot return a second
         // value, so the one fact it learned travels out in a slot read below.
-        let ceiling_pause: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(None);
+        let ceiling_pause: std::sync::Mutex<Option<(String, Duration)>> =
+            std::sync::Mutex::new(None);
 
         // A hive seat turn (plan hive-desks, Phase 4): the driver's episode
         // coordinates ride on the in-flight registration below so the MCP
@@ -1816,7 +1825,7 @@ impl CompanyAgent {
                     AttemptOutcome::CeilingPaused { summary, elapsed } => {
                         let redacted = crate::harness::mcp_probe::redact(&summary, &[]);
                         if let Ok(mut slot) = ceiling_pause.lock() {
-                            *slot = Some(elapsed);
+                            *slot = Some((redacted.clone(), elapsed));
                         }
                         Ok(crate::harness::mcp_probe::scrub(&redacted, &[]))
                     }
@@ -1852,7 +1861,7 @@ impl CompanyAgent {
                                 AttemptOutcome::CeilingPaused { summary, elapsed } => {
                                     let redacted = crate::harness::mcp_probe::redact(&summary, &[]);
                                     if let Ok(mut slot) = ceiling_pause.lock() {
-                                        *slot = Some(elapsed);
+                                        *slot = Some((redacted.clone(), elapsed));
                                     }
                                     Ok(crate::harness::mcp_probe::scrub(&redacted, &[]))
                                 }
@@ -2014,9 +2023,10 @@ impl CompanyAgent {
             .lock()
             .ok()
             .and_then(|mut slot| slot.take())
-            .map(|elapsed| CeilingPause {
+            .map(|(summary, elapsed)| CeilingPause {
                 agent: self.agent_id.clone(),
                 elapsed,
+                summary,
             });
         if let Some(pause) = &ceiling_paused {
             tracing::info!(
@@ -2905,9 +2915,17 @@ enum CeilingGate {
     Refused(TurnOutcome),
 }
 
+/// As [`CeilingGate`], for the monthly-spend axis.
+///
+/// `Refused` is **boxed** where `CeilingGate`'s is not, and only because of the
+/// size ratio between the two variants rather than any difference in meaning:
+/// `Admitted` here holds a guard of a few bytes, so a `TurnOutcome` beside it
+/// trips `clippy::large_enum_variant` (it did, on #1680 adding a field).
+/// `CeilingGate::Admitted` carries a `TokenReservation` and stays under the
+/// threshold. Pure indirection on a value that is destructured immediately.
 enum MonthlyBudgetGate {
     Admitted(Option<tokio::sync::OwnedMutexGuard<()>>),
-    Refused(TurnOutcome),
+    Refused(Box<TurnOutcome>),
 }
 
 impl HarnessPool {
@@ -4550,10 +4568,10 @@ impl HarnessPool {
                     cap = configured_cap,
                     "[company-budget] company record is unavailable; refusing inference dispatch"
                 );
-                return MonthlyBudgetGate::Refused(spend_gate_refusal(
+                return MonthlyBudgetGate::Refused(Box::new(spend_gate_refusal(
                     unmeasurable_monthly_budget_notice(configured_cap),
                     SpendGateCause::Unmeasurable,
-                ));
+                )));
             }
             Err(error) => {
                 tracing::error!(
@@ -4563,10 +4581,10 @@ impl HarnessPool {
                     %error,
                     "[company-budget] ledger read failed; refusing inference dispatch"
                 );
-                return MonthlyBudgetGate::Refused(spend_gate_refusal(
+                return MonthlyBudgetGate::Refused(Box::new(spend_gate_refusal(
                     unmeasurable_monthly_budget_notice(configured_cap),
                     SpendGateCause::Unmeasurable,
-                ));
+                )));
             }
         };
 
@@ -4588,10 +4606,10 @@ impl HarnessPool {
                 cap,
                 "[company-budget] monthly spend cap reached; refusing inference dispatch"
             );
-            return MonthlyBudgetGate::Refused(spend_gate_refusal(
+            return MonthlyBudgetGate::Refused(Box::new(spend_gate_refusal(
                 monthly_budget_exhausted_notice(cap),
                 SpendGateCause::Exhausted,
-            ));
+            )));
         }
 
         MonthlyBudgetGate::Admitted(Some(guard))
@@ -4636,7 +4654,7 @@ impl HarnessPool {
             .await
         {
             MonthlyBudgetGate::Admitted(guard) => guard,
-            MonthlyBudgetGate::Refused(refusal) => return Ok(refusal),
+            MonthlyBudgetGate::Refused(refusal) => return Ok(*refusal),
         };
 
         let runtime = crate::harness::openhuman_runtime::global(
@@ -4816,7 +4834,7 @@ impl HarnessPool {
 
         let _monthly_budget = match self.monthly_budget_refusal(company, agent_id, deps).await {
             MonthlyBudgetGate::Admitted(guard) => guard,
-            MonthlyBudgetGate::Refused(refusal) => return Ok(refusal),
+            MonthlyBudgetGate::Refused(refusal) => return Ok(*refusal),
         };
 
         // Per-agent daily spend cap (issue #304): the same HARD, pre-model-call

@@ -161,6 +161,7 @@ impl Turn {
             ceiling_paused: Some(crate::harness::CeilingPause {
                 agent: agent.to_string(),
                 elapsed: std::time::Duration::from_millis(elapsed_ms),
+                summary: format!("{agent} hit the per-turn wall-clock ceiling"),
             }),
             ..Self::default()
         }
