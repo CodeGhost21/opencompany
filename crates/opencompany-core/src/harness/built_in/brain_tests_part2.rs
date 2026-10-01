@@ -1,4 +1,5 @@
 use super::*;
+use crate::ports::tasks::COLUMN_IN_REVIEW;
 use crate::ports::TaskOrigin;
 
 /// The "zero tool work" claim in #552, proven rather than asserted: a
@@ -246,8 +247,8 @@ async fn a_failed_node_write_still_records_the_artifact() {
 }
 fn card(id: &str, assignee: &str) -> TaskRecord {
     TaskRecord {
-        id: id.to_string(),
         opened_by: None,
+        id: id.to_string(),
         title: TaskTitle::authored("Ship the thing"),
         note: None,
         column: "in_progress".to_string(),
