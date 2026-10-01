@@ -427,9 +427,11 @@ pub(crate) struct DelegationOutcome {
 /// A board-write refusal and its operator-facing reason.
 #[derive(Clone, Debug)]
 pub(crate) struct RefusedCardWrite {
-    /// `"assign_task"` or `"review_task"`, for the operator-facing note.
+    /// `"spawn_task"`, `"assign_task"` or `"review_task"`, for the
+    /// operator-facing note.
     pub(crate) tool: &'static str,
-    pub(crate) task_id: String,
+    /// The card the write named: its id, or the title of one never opened.
+    pub(crate) card: String,
     pub(crate) reason: String,
 }
 
@@ -1881,7 +1883,7 @@ impl<'a> DelegationRunner<'a> {
         for unknown in refused_cards {
             operator_reply.push_str(&format!(
                 "\n\n(tried to {} card {:?}, but {})",
-                unknown.tool, unknown.task_id, unknown.reason
+                unknown.tool, unknown.card, unknown.reason
             ));
         }
         // Drained after the relay, not before it: a relay turn carries the same
@@ -2228,7 +2230,7 @@ impl<'a> DelegationRunner<'a> {
                         delegator,
                         &format!(
                             "{} refused for card {:?}: {}",
-                            refused.tool, refused.task_id, refused.reason
+                            refused.tool, refused.card, refused.reason
                         ),
                     ));
                 }
@@ -2652,7 +2654,7 @@ impl<'a> DelegationRunner<'a> {
         for unknown in nested.refused_cards {
             reply.push_str(&format!(
                 "\n\n({member} tried to {} card {:?}, but {})",
-                unknown.tool, unknown.task_id, unknown.reason
+                unknown.tool, unknown.card, unknown.reason
             ));
         }
         // Issue #1846 review (Codex #3865395868): this hand-off's own card
@@ -3067,8 +3069,9 @@ impl<'a> DelegationRunner<'a> {
     /// [`TaskStore::upsert`](crate::ports::TaskStore) path the console uses and
     /// **reports the card's id** so the caller can say one was opened (issue
     /// #246) — it surfaces no bubble of its own, which is a different thing
-    /// from the nothing it used to surface. A missing task store is a silent
-    /// no-op.
+    /// from the nothing it used to surface. A missing task store or a failed
+    /// write comes back as a [`RefusedCardWrite`], so the rest of the drain
+    /// still runs.
     /// `delegate_to_desk` runs a single turn on the desk's lead member and
     /// **returns its reply for the orchestrator to relay** (a [`DeskReply`]). An
     /// unknown desk (no roster-backed lead) or a cancelled run yields nothing to
@@ -3103,7 +3106,18 @@ impl<'a> DelegationRunner<'a> {
                 assignee,
             } => {
                 let Some(tasks) = self.tasks else {
-                    return Ok(DelegationOutcome::default());
+                    tracing::warn!(
+                        company = %self.company,
+                        "[delegation] spawn_task could not open its card: no task store is wired"
+                    );
+                    return Ok(DelegationOutcome {
+                        refused_card: Some(RefusedCardWrite {
+                            tool: "spawn_task",
+                            card: title,
+                            reason: "no task board is wired here".to_string(),
+                        }),
+                        ..DelegationOutcome::default()
+                    });
                 };
                 // Grounded against the roster on the same terms `AssignTask`
                 // grounds its own: a name that resolves to nobody opens the card
@@ -3128,7 +3142,22 @@ impl<'a> DelegationRunner<'a> {
                     opened_by: None,
                 }
                 .into_record();
-                tasks.upsert(self.company, &card).await?;
+                if let Err(error) = tasks.upsert(self.company, &card).await {
+                    tracing::error!(
+                        company = %self.company,
+                        %error,
+                        "[delegation] spawn_task could not write its card; the rest of the drain \
+                         carries on"
+                    );
+                    return Ok(DelegationOutcome {
+                        refused_card: Some(RefusedCardWrite {
+                            tool: "spawn_task",
+                            card: card.title.to_string(),
+                            reason: "the board would not save it".to_string(),
+                        }),
+                        ..DelegationOutcome::default()
+                    });
+                }
                 // Issue #246: report the card so the caller can surface it. The
                 // id is reported only after the write succeeded, so a bubble can
                 // never claim a card that is not on the board.
@@ -3249,7 +3278,7 @@ impl<'a> DelegationRunner<'a> {
                     return Ok(DelegationOutcome {
                         refused_card: Some(RefusedCardWrite {
                             tool: "assign_task",
-                            task_id,
+                            card: task_id,
                             reason: "no such card is on the board".to_string(),
                         }),
                         ..DelegationOutcome::default()
@@ -3331,7 +3360,7 @@ impl<'a> DelegationRunner<'a> {
                     return Ok(DelegationOutcome {
                         refused_card: Some(RefusedCardWrite {
                             tool: "assign_task",
-                            task_id,
+                            card: task_id,
                             reason: "the card changed before the assignment could be recorded"
                                 .to_string(),
                         }),
@@ -3369,7 +3398,7 @@ impl<'a> DelegationRunner<'a> {
                     return Ok(DelegationOutcome {
                         refused_card: Some(RefusedCardWrite {
                             tool: "review_task",
-                            task_id,
+                            card: task_id,
                             reason: "no such card is on the board".to_string(),
                         }),
                         ..DelegationOutcome::default()
@@ -3380,7 +3409,7 @@ impl<'a> DelegationRunner<'a> {
                     return Ok(DelegationOutcome {
                         refused_card: Some(RefusedCardWrite {
                             tool: "review_task",
-                            task_id,
+                            card: task_id,
                             reason: format!("the card is {:?}, not in_review", card.column),
                         }),
                         ..DelegationOutcome::default()
@@ -3400,7 +3429,7 @@ impl<'a> DelegationRunner<'a> {
                     return Ok(DelegationOutcome {
                         refused_card: Some(RefusedCardWrite {
                             tool: "review_task",
-                            task_id,
+                            card: task_id,
                             reason: "the card changed before the review could be recorded"
                                 .to_string(),
                         }),
@@ -3969,3 +3998,6 @@ mod tests_part8;
 #[cfg(test)]
 #[path = "delegation_tests_part9.rs"]
 mod tests_part9;
+#[cfg(test)]
+#[path = "delegation_tests_spawn_honesty.rs"]
+mod tests_spawn_honesty;
