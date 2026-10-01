@@ -431,6 +431,7 @@ pub(super) fn workflow_body(id: &str) -> Value {
 
 pub(super) fn discussion_card(id: &str, title: &str) -> TaskRecord {
     TaskRecord {
+        opened_by: None,
         id: id.into(),
         title: TaskTitle::authored(title),
         note: None,
@@ -464,6 +465,7 @@ pub(super) async fn dispatched_task(
         .upsert(
             company,
             &TaskRecord {
+                opened_by: None,
                 id: "t-1".into(),
                 title: TaskTitle::authored("Ship it"),
                 note: None,
@@ -578,6 +580,7 @@ pub(super) async fn seed_proposal_card_assigned(
         .expect("company");
     let id = crate::ports::generate_id();
     let record = TaskRecord {
+        opened_by: None,
         id: id.clone(),
         title: TaskTitle::authored("Automate the weekly digest"),
         note: None,
