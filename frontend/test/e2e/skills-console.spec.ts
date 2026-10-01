@@ -120,16 +120,10 @@ test("a bundled skill reads as Company, never edited, and available to read", as
   await expect(card.getByTestId("skill-category")).toHaveText(
     bundled!.category,
   );
-  // Reach, not capability — the switch decides what an agent may read, never
-  // whether one may run it. Matched on meaning rather than on wording: the label
-  // is a count now that the host reports who a skill is scoped to, and the six
-  // sentences it can be are pinned in `skill-scope.test.ts` instead.
-  await expect(card.getByTestId("skill-reach-count")).toHaveText(
-    /^\d+ of \d+$/,
-  );
-  await expect(card.getByTestId("skill-reach")).not.toContainText(
-    /run|execute/i,
-  );
+  // Who reads a skill is the detail page's answer now, named teammate by
+  // teammate rather than counted on the row. What the row must not do is imply
+  // the switch decides whether an agent may *run* one — it never did.
+  await expect(card).not.toContainText(/run|execute/i);
 
   // The count line states the whole set, unfiltered.
   await expect(page.getByTestId("skills-count")).toHaveText(
@@ -355,7 +349,9 @@ test("a repository-authored skill shows its playbook and says it is read-only", 
   page,
 }) => {
   await openSkills(page);
-  await installedCard(page, BUNDLED_NAME).click();
+  // The name is the link, on a card as on a row — the card body is not a
+  // control.
+  await installedCard(page, BUNDLED_NAME).getByTestId("skill-card-open").click();
 
   await expect(page.getByTestId("skill-page")).toBeVisible();
   // The document comes off disk for a bundled skill, so an empty panel here
