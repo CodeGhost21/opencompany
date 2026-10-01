@@ -24,6 +24,7 @@ impl HiveDispatcher {
     /// summary turn stalled would lose a finished episode over an extra. A
     /// warning names the seat and the episode instead, and the row goes down
     /// with `completed_by: None` exactly as it did before this existed.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn conclusion(
         &self,
         desk: &DeskHive,
