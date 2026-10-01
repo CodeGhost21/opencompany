@@ -183,7 +183,7 @@ test("search and the three filters narrow the list, and the count says how far",
   );
 });
 
-test("sorting by name orders the list alphabetically", async ({
+test("the list opens in name order, with no ordering to choose", async ({
   page,
   request,
 }) => {
@@ -193,7 +193,7 @@ test("sorting by name orders the list alphabetically", async ({
     timeout: 30_000,
   });
 
-  await choose(page, "skills-sort", "Name");
+  await expect(page.getByTestId("skills-sort")).toHaveCount(0);
 
   const byName = [...served]
     .map((s) => s.name)

@@ -1,11 +1,11 @@
-// The Installed tab's list: the filter/sort bar above it and one card per
+// The Installed tab's list: the filter bar above it and one card per
 // skill.
 //
 // Split out of `SkillsView` because that file is the tab shell — it owns the
 // host reads, the write handlers and the three dialogs — and this is the one
 // surface an operator spends time in. All of the rules the list obeys (what a
 // provenance label says, which rows a filter drops, where an unedited skill
-// sorts) live in `@/lib/skills-list` as pure functions under the unit runner;
+// ordering) live in `@/lib/skills-list` as pure functions under the unit runner;
 // what is left here is layout and the menu.
 //
 // Sized for the real cap rather than a demo: a company's installed set is the
@@ -58,8 +58,6 @@ import {
   SKILL_DRIFT_FILTERS,
   SKILL_LIST_VIEWS,
   SKILL_ENABLED_FILTERS,
-  SKILL_SORT_LABELS,
-  SKILL_SORTS,
   SKILL_SOURCE_FILTERS,
   skillCategories,
   skillLastEditedLabel,
@@ -69,7 +67,6 @@ import {
   type SkillListView,
   type SkillEnabledFilter,
   type SkillListFilters,
-  type SkillSort,
   type SkillSourceFilter,
 } from "@/lib/skills-list";
 
@@ -90,8 +87,6 @@ export function InstalledSkillsList({
   skills,
   filters,
   onFilters,
-  sort,
-  onSort,
   view,
   onView,
   canManage,
@@ -104,8 +99,6 @@ export function InstalledSkillsList({
   skills: Skill[];
   filters: SkillListFilters;
   onFilters: (next: SkillListFilters) => void;
-  sort: SkillSort;
-  onSort: (next: SkillSort) => void;
   /** Cards or rows. Held by the view, so it rides the address. */
   view: SkillListView;
   onView: (next: SkillListView) => void;
@@ -125,7 +118,7 @@ export function InstalledSkillsList({
   onOpen: (skill: Skill) => void;
 }) {
   const categories = skillCategories(skills);
-  const rows = visibleSkills(skills, filters, sort) as Skill[];
+  const rows = visibleSkills(skills, filters) as Skill[];
   const enabledCount = skills.filter((s) => s.enabled).length;
 
   return (
@@ -184,13 +177,6 @@ export function InstalledSkillsList({
             ...categories.map((c) => [c, c] as const),
           ]}
           onChange={(v) => onFilters({ ...filters, category: v })}
-        />
-        <FilterSelect
-          id="skills-sort"
-          label="Sort by"
-          value={sort}
-          options={SKILL_SORTS.map((v) => [v, SKILL_SORT_LABELS[v]])}
-          onChange={(v) => onSort(v as SkillSort)}
         />
         <ViewToggle view={view} onView={onView} />
       </div>

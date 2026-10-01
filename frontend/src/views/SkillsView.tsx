@@ -71,7 +71,6 @@ import {
   DEFAULT_SKILL_FILTERS,
   type SkillListFilters,
   type SkillListView,
-  type SkillSort,
 } from "@/lib/skills-list";
 import {
   CATEGORY_STYLES,
@@ -161,13 +160,12 @@ export function SkillsView({ client, company }: Props) {
   // ever return `no_model`.
   const [canDraft, setCanDraft] = useState<boolean | undefined>(undefined);
   const [query, setQuery] = useState("");
-  // The Installed tab's own filter/sort selection. Separate from `query`, which
+  // The Installed tab's own filter selection. Separate from `query`, which
   // belongs to the registry tab: a search typed while browsing what could be
   // added must not silently hide half of what already is.
   const [filters, setFilters] = useState<SkillListFilters>(
     DEFAULT_SKILL_FILTERS,
   );
-  const [sort, setSort] = useState<SkillSort>("edited");
   // A generation token so a response from a previous company scope (or after
   // unmount) can't overwrite the current one.
   const gen = useRef(0);
@@ -525,8 +523,6 @@ export function SkillsView({ client, company }: Props) {
                   skills={skills}
                   filters={filters}
                   onFilters={setFilters}
-                  sort={sort}
-                  onSort={setSort}
                   canManage={canManage}
                   now={now}
                   onToggle={(s) => void toggle(s)}

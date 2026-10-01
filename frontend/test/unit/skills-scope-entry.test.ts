@@ -207,6 +207,26 @@ describe("opening a skill", () => {
   });
 });
 
+describe("the filter bar", () => {
+  it("offers no ordering, because name order is the only one", async () => {
+    await show(clientWith());
+    expect(anywhere("skills-sort")).toBeNull();
+    expect(container.textContent).not.toContain("Sort by");
+  });
+
+  it("keeps every filter that still narrows the list", async () => {
+    await show(clientWith());
+    for (const id of [
+      "skills-filter-source",
+      "skills-filter-enabled",
+      "skills-filter-category",
+      "skills-filter-drift",
+    ]) {
+      expect(anywhere(id), id).not.toBeNull();
+    }
+  });
+});
+
 describe("cards or rows", () => {
   function rowsOf(testid: string) {
     return container.querySelectorAll(`[data-testid="${testid}"]`).length;

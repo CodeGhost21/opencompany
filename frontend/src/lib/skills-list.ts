@@ -46,16 +46,6 @@ export type SkillDriftFilter = (typeof SKILL_DRIFT_FILTERS)[number];
 export const SKILL_LIST_VIEWS = ["cards", "list"] as const;
 export type SkillListView = (typeof SKILL_LIST_VIEWS)[number];
 
-/** The orderings offered above the list, in the order shown. */
-export const SKILL_SORTS = ["edited", "name"] as const;
-export type SkillSort = (typeof SKILL_SORTS)[number];
-
-/** The human label for each ordering. */
-export const SKILL_SORT_LABELS: Record<SkillSort, string> = {
-  edited: "Last edited",
-  name: "Name",
-};
-
 /**
  * Why a built-in skill's Uninstall is greyed rather than hidden.
  *
@@ -275,22 +265,14 @@ export function skillCategories(skills: readonly SkillListRow[]): string[] {
 }
 
 /**
- * The rows the list should render, filtered and ordered.
+ * The rows the list should render, filtered and in name order.
  *
  * Never mutates its input: the view holds `skills` as state and React compares
  * it by identity.
- *
- * Under `edited`, a row with no stamp sorts **after** every row that has one.
- * It is not the oldest edit — it is the absence of one, and putting the
- * company's untouched baseline at the top of a list titled "last edited" would
- * say the opposite of what happened. Name is the tie-break in both orderings,
- * so two skills written in the same millisecond do not swap places between
- * renders.
  */
 export function visibleSkills(
   skills: readonly (SkillListRow & SkillDriftRow)[],
   filters: SkillListFilters,
-  sort: SkillSort,
 ): SkillListRow[] {
   const q = filters.query.trim().toLowerCase();
   const matching = skills.filter((skill) => {
@@ -310,15 +292,5 @@ export function visibleSkills(
     return true;
   });
 
-  const byName = (a: SkillListRow, b: SkillListRow) =>
-    text(a.name).localeCompare(text(b.name));
-  if (sort === "name") return matching.sort(byName);
-  return matching.sort((a, b) => {
-    const left = a.updatedAtMillis ?? null;
-    const right = b.updatedAtMillis ?? null;
-    if (left === null && right === null) return byName(a, b);
-    if (left === null) return 1;
-    if (right === null) return -1;
-    return right - left || byName(a, b);
-  });
+  return matching.sort((a, b) => text(a.name).localeCompare(text(b.name)));
 }

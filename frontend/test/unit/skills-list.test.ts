@@ -164,13 +164,13 @@ describe("visibleSkills", () => {
 
   it("returns everything under the default filters", () => {
     expect(
-      visibleSkills(skills, DEFAULT_SKILL_FILTERS, "name").map((s) => s.name),
+      visibleSkills(skills, DEFAULT_SKILL_FILTERS).map((s) => s.name),
     ).toEqual(["Alpha", "Bravo", "Charlie"]);
   });
 
   it("filters by source, enabled state and category independently", () => {
     const by = (over: Partial<typeof DEFAULT_SKILL_FILTERS>) =>
-      visibleSkills(skills, { ...DEFAULT_SKILL_FILTERS, ...over }, "name").map(
+      visibleSkills(skills, { ...DEFAULT_SKILL_FILTERS, ...over }).map(
         (s) => s.name,
       );
 
@@ -185,14 +185,13 @@ describe("visibleSkills", () => {
       visibleSkills(
         skills,
         { ...DEFAULT_SKILL_FILTERS, source: "registry", enabled: "enabled" },
-        "name",
       ),
     ).toEqual([]);
   });
 
   it("matches the query against name and description", () => {
     const by = (query: string) =>
-      visibleSkills(skills, { ...DEFAULT_SKILL_FILTERS, query }, "name").map(
+      visibleSkills(skills, { ...DEFAULT_SKILL_FILTERS, query }).map(
         (s) => s.name,
       );
 
@@ -201,24 +200,16 @@ describe("visibleSkills", () => {
     expect(by("  ")).toEqual(["Alpha", "Bravo", "Charlie"]);
   });
 
-  // "Last edited" with the never-edited baseline on top would say the opposite
-  // of what happened, and the baseline is the bulk of the list at the real cap.
-  it("sorts newest edit first and sinks the never-edited rows to the bottom", () => {
-    expect(
-      visibleSkills(skills, DEFAULT_SKILL_FILTERS, "edited").map((s) => s.name),
-    ).toEqual(["Charlie", "Bravo", "Alpha"]);
-  });
-
-  it("breaks an edited-time tie by name so rows do not swap between renders", () => {
+  it("orders by name, the only ordering, whatever the stamps say", () => {
     const tied = [
       row({ name: "Zulu", updatedAtMillis: NOW }),
       row({ name: "Kilo", updatedAtMillis: NOW }),
       row({ name: "Oscar", updatedAtMillis: null }),
       row({ name: "Echo", updatedAtMillis: null }),
     ];
-    expect(
-      visibleSkills(tied, DEFAULT_SKILL_FILTERS, "edited").map((s) => s.name),
-    ).toEqual(["Kilo", "Zulu", "Echo", "Oscar"]);
+    expect(visibleSkills(tied, DEFAULT_SKILL_FILTERS).map((s) => s.name)).toEqual(
+      ["Echo", "Kilo", "Oscar", "Zulu"],
+    );
   });
 
   it("filters and sorts a partial row instead of throwing on it", () => {
@@ -227,13 +218,12 @@ describe("visibleSkills", () => {
       ...skills,
     ];
     expect(() =>
-      visibleSkills(partial, DEFAULT_SKILL_FILTERS, "edited"),
+      visibleSkills(partial, DEFAULT_SKILL_FILTERS),
     ).not.toThrow();
     expect(
       visibleSkills(
         partial,
         { ...DEFAULT_SKILL_FILTERS, query: "press" },
-        "name",
       ),
     ).toHaveLength(1);
     expect(skillCategories(partial)).toEqual(["Ops", "Research"]);
@@ -241,7 +231,7 @@ describe("visibleSkills", () => {
 
   it("never mutates the array the view holds as state", () => {
     const held = [...skills];
-    visibleSkills(held, DEFAULT_SKILL_FILTERS, "edited");
+    visibleSkills(held, DEFAULT_SKILL_FILTERS);
     expect(held.map((s) => s.name)).toEqual(["Alpha", "Bravo", "Charlie"]);
   });
 });
@@ -347,7 +337,7 @@ describe("the Has-update filter", () => {
   ];
 
   const by = (over: Partial<typeof DEFAULT_SKILL_FILTERS>) =>
-    visibleSkills(drifted, { ...DEFAULT_SKILL_FILTERS, ...over }, "name").map(
+    visibleSkills(drifted, { ...DEFAULT_SKILL_FILTERS, ...over }).map(
       (s) => s.name,
     );
 
