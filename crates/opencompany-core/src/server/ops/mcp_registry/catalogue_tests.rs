@@ -92,6 +92,18 @@ fn a_later_browse_page_follows_the_featured_one_without_repeating_it() {
 }
 
 #[test]
+fn a_browse_without_a_featured_page_keeps_the_official_connectors() {
+    let mut results = CatalogueSearchDto {
+        servers: vec![entry("io.x/other", 0), entry("com.notion/mcp", 0)],
+        page: 1,
+        total_pages: 5,
+    };
+    shift_browse_page(&mut results, 1, &[]);
+    assert_eq!(names(&results.servers), ["io.x/other", "com.notion/mcp"]);
+    assert_eq!((results.page, results.total_pages), (2, 6));
+}
+
+#[test]
 fn a_featured_lookup_needs_a_dialable_endpoint() {
     let hosted = json!({ "server": {
         "qualified_name": "com.notion/mcp",

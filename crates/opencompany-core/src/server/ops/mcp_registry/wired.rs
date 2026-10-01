@@ -331,7 +331,12 @@ pub(super) async fn search(company: ScopedCompany, Query(query): Query<SearchQue
         Err(error) => return ApiError(error).into_response(),
     };
     if browsing {
-        shift_browse_page(&mut results, upstream_page, OFFICIAL_SERVERS);
+        let already_listed: &[&str] = if shown_page == 1 {
+            &[]
+        } else {
+            OFFICIAL_SERVERS
+        };
+        shift_browse_page(&mut results, upstream_page, already_listed);
     }
     rank_catalogue(&mut results.servers, OFFICIAL_SERVERS);
     inline_icons(&mut results.servers, cached_icon).await;
