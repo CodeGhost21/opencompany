@@ -1316,6 +1316,7 @@ impl EpisodeHost for DeskHost {
             persona.push_str(crate::hive::conclude::PERSONA_NOTE);
             persona.push_str(&broadcast_absent_note(TOOL_PREFIX));
         }
+        persona.push_str(seat_cards::SEAT_CARDS_NOTE);
         self.personas
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

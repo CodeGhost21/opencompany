@@ -22,6 +22,19 @@ use crate::ports::types::{CompanyId, CompanyRecord, EventSeq};
 use crate::ports::{TaskOrigin, TaskRecord, TaskStore, now_millis};
 use crate::runtime::spawn_card::SpawnCard;
 
+/// What a seat is told about opening cards, appended to its persona.
+///
+/// The roster briefs that describe the board are stripped from a seat
+/// (`seat_persona`), so this is the only place a seat learns what
+/// `spawn_task` does in a room.
+pub(crate) const SEAT_CARDS_NOTE: &str = "\n\n## Opening cards\n\nNothing said here is \
+tracked unless somebody opens a card for it. When the operator asks for real work, open one with \
+`spawn_task`: one card per piece of work, at most three for this whole conversation across every \
+teammate in it, and never a second card for work that already has one. The card is written when \
+your turn ends, so do not describe it as open until you are told it is. If the operator only \
+asked a question, open nothing. Handing a card to somebody else is not available here: \
+`desk_ask` the teammate who should take it.";
+
 /// The most cards one episode may open.
 pub(crate) const EPISODE_CARD_CAP: usize = 3;
 

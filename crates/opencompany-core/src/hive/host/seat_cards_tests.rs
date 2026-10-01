@@ -228,3 +228,12 @@ async fn a_minted_publish_card_is_marked_as_the_message_card() {
     let board = tasks.list(&company).await.unwrap();
     assert_eq!(board[0].origin_message_seq, Some(EventSeq::new(5)));
 }
+
+#[test]
+fn the_seat_note_names_the_card_verb_and_no_withheld_one() {
+    assert!(SEAT_CARDS_NOTE.contains("`spawn_task`"));
+    assert!(SEAT_CARDS_NOTE.contains(&format!("`{}ask`", crate::hive::host::TOOL_PREFIX)));
+    for withheld in crate::harness::built_in::EPISODE_WITHHELD_TOOLS {
+        assert!(!SEAT_CARDS_NOTE.contains(withheld), "{withheld}");
+    }
+}
