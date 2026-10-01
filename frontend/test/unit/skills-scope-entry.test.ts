@@ -207,34 +207,6 @@ describe("opening a skill", () => {
   });
 });
 
-describe("the card's reach label", () => {
-  it("counts the teammates that hold it rather than claiming every agent does", async () => {
-    await show(clientWith());
-    const reach = container.querySelector('[data-testid="skill-reach"]');
-    // The ratio rides beside the faces now: a stack alone cannot say whether two
-    // faces are two of two or two of nine.
-    expect(reach?.textContent).toContain("2 of 3");
-    // One mascot per holder, and none for the teammate that does not hold it.
-    expect(reach?.querySelectorAll("img").length).toBe(2);
-  });
-
-  it("keeps the unconditional claim when the host does not report the scope", async () => {
-    // Absent is not zero. A host that says nothing about the scope cannot be
-    // quoted as saying nobody holds the skill.
-    await show(clientWith([{ ...INSTALLED[0], agents: undefined }]));
-    expect(
-      container.querySelector('[data-testid="skill-reach"]')?.textContent,
-    ).toContain("Available for your agents to read");
-  });
-
-  it("says hidden for a switched-off skill whatever the scope says", async () => {
-    await show(clientWith([{ ...INSTALLED[0], enabled: false }]));
-    expect(
-      container.querySelector('[data-testid="skill-reach"]')?.textContent,
-    ).toContain("Hidden from agents");
-  });
-});
-
 describe("cards or rows", () => {
   function rowsOf(testid: string) {
     return container.querySelectorAll(`[data-testid="${testid}"]`).length;
@@ -281,16 +253,6 @@ describe("cards or rows", () => {
     await show(clientWith());
     expect(rowsOf("installed-card")).toBeGreaterThan(0);
     expect(rowsOf("installed-row")).toBe(0);
-  });
-
-  it("carries the same reach cell into the rows", async () => {
-    // The column is the argument for the table: in a card the faces sit at the
-    // tail of a wrapped meta run, and here they get a column of their own.
-    window.location.hash = "#/settings/skills?view=list";
-    await show(clientWith());
-    const reach = container.querySelector('[data-testid="skill-reach"]');
-    expect(reach?.textContent).toContain("2 of 3");
-    expect(reach?.querySelectorAll("img").length).toBe(2);
   });
 
   it("opens the skill from a row, the way a card does", async () => {

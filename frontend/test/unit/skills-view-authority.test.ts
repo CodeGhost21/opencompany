@@ -149,11 +149,11 @@ describe("SkillsView authority", () => {
 
     expect(at("installed-card")?.querySelector('[aria-label="Uninstall"]')).toBeNull();
 
-    // Not a blank page: the installed skill's name and reach are still shown.
-    // Checked before switching tabs — the Installed panel unmounts once the
-    // Registry tab takes its place.
+    // Not a blank page: the installed skill's name and its metadata are still
+    // shown. Checked before switching tabs — the Installed panel unmounts once
+    // the Registry tab takes its place.
     expect(container.textContent).toContain("SEO audit");
-    expect(container.textContent).toContain("Available for your agents to read");
+    expect(at("installed-card")?.querySelector('[data-testid="skill-last-edited"]')).not.toBeNull();
 
     await openRegistryTab();
     expect(

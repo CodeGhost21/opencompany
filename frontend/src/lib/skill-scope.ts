@@ -13,7 +13,6 @@
 // nothing) put a slug outside the effective set identically while the company has
 // the skill disabled, and only the first gets it back when the switch returns.
 
-import type { SkillAgentScope } from "@/api/skills";
 
 /** Which of the three stored states an agent's scope puts one skill in. */
 export type SkillScopeState = "inherited" | "included" | "excluded";
@@ -122,23 +121,6 @@ export function droppedSlugs(
   effective: string[],
 ): string[] {
   return (requested ?? []).filter((slug) => !effective.includes(slug));
-}
-
-/**
- * How many agents hold a skill, out of how many there are.
- *
- * `null` when the host did not report the roster — which is not the same as
- * nobody holding it, and the difference is why the card's label has a separate
- * rendering for each.
- */
-export function skillReachSummary(
-  agents: SkillAgentScope[] | null | undefined,
-): { held: number; total: number } | null {
-  if (!agents) return null;
-  return {
-    held: agents.filter((agent) => agent.holds).length,
-    total: agents.length,
-  };
 }
 
 /**

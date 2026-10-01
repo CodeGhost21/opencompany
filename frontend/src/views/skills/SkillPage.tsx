@@ -41,8 +41,7 @@ import {
   toggleSkillInScope,
 } from "@/lib/skill-scope";
 import { skillSourceLabel } from "@/lib/skills-list";
-import { avatarFor } from "@/lib/team";
-import { reachName } from "@/views/skills/skill-reach-cell";
+import { avatarFor, teammateName } from "@/lib/team";
 
 /** Why the picker is read-only although the page opened. */
 const MEMBER_READ_ONLY =
@@ -365,12 +364,12 @@ export function SkillPage({
                         />
                       ) : null}
                       <TeammateAvatar
-                        name={reachName(agent.id, team)}
+                        name={teammateName(agent.id, team)}
                         avatar={avatarFor(agent.id)}
                         className="size-6 shrink-0"
                       />
                       <span className="min-w-0 truncate text-sm">
-                        {reachName(agent.id, team)}
+                        {teammateName(agent.id, team)}
                       </span>
                     </label>
                     <div className="flex shrink-0 items-center gap-2">

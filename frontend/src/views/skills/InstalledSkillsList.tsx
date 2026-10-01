@@ -48,8 +48,6 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { categoryStyle } from "@/lib/skills";
 import { SkillsTable } from "@/views/skills/SkillsTable";
-import type { TeamMemberDto } from "@/api/types";
-import { SkillReachCell } from "@/views/skills/skill-reach-cell";
 import {
   canEditSkill,
   canUninstallSkill,
@@ -102,7 +100,6 @@ export function InstalledSkillsList({
   onUninstall,
   onUpdate,
   onOpen,
-  team,
 }: {
   skills: Skill[];
   filters: SkillListFilters;
@@ -126,9 +123,6 @@ export function InstalledSkillsList({
    * One handler for both ways in — the card and the row menu's `Scope…` — so the
    * two entry points cannot open different things. */
   onOpen: (skill: Skill) => void;
-  /** The roster, for the name beside a face. `null` when the read failed, which
-   * the cell renders as the teammate's id rather than as a blank. */
-  team: TeamMemberDto[] | null;
 }) {
   const categories = skillCategories(skills);
   const rows = visibleSkills(skills, filters, sort) as Skill[];
@@ -216,7 +210,6 @@ export function InstalledSkillsList({
           skills={rows}
           canManage={canManage}
           now={now}
-          team={team}
           onToggle={onToggle}
           onUninstall={onUninstall}
           onUpdate={onUpdate}
@@ -243,7 +236,6 @@ export function InstalledSkillsList({
               onUninstall={() => onUninstall(s)}
               onUpdate={() => onUpdate(s)}
               onOpen={() => onOpen(s)}
-              team={team}
             />
           ))}
         </div>
@@ -351,12 +343,10 @@ function InstalledCard({
   onUninstall,
   onUpdate,
   onOpen,
-  team,
 }: {
   skill: Skill;
   canManage: boolean;
   now: number;
-  team: TeamMemberDto[] | null;
   onToggle: () => void;
   onUninstall: () => void;
   onUpdate: () => void;
@@ -438,13 +428,6 @@ function InstalledCard({
           >
             · {skillLastEditedLabel(skill.updatedAtMillis, now)}
           </span>
-          <span className="text-xs text-muted-foreground">·</span>
-          <SkillReachCell
-            agents={skill.agents}
-            team={team}
-            enabled={skill.enabled}
-            onOverflow={onOpen}
-          />
         </div>
       </CardContent>
     </Card>

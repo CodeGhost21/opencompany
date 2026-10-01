@@ -537,7 +537,6 @@ export function SkillsView({ client, company }: Props) {
                   onView={(next) =>
                     setViewParam(next === "cards" ? null : next)
                   }
-                  team={team}
                 />
               )}
             </PageTabPanel>

@@ -6,7 +6,6 @@ import {
   pinsAnInheritedScope,
   scopeUnchanged,
   showingInherited,
-  skillReachSummary,
   skillScopeState,
   toggleSkillInScope,
 } from "@/lib/skill-scope";
@@ -165,39 +164,6 @@ describe("droppedSlugs", () => {
 
   it("names nothing for an inherited scope", () => {
     expect(droppedSlugs(null, ["a"])).toEqual([]);
-  });
-});
-
-describe("skillReachSummary", () => {
-  const scope = (id: string, holds: boolean): SkillAgentScope => ({
-    id,
-    state: holds ? "inherited" : "excluded",
-    holds,
-  });
-
-  it("separates a host that cannot say from a skill nobody holds", () => {
-    expect(skillReachSummary(undefined), "absent is not zero").toBeNull();
-    expect(skillReachSummary([scope("a", false)])).toEqual({
-      held: 0,
-      total: 1,
-    });
-  });
-
-  it("counts the agents that hold it", () => {
-    expect(
-      skillReachSummary([
-        scope("a", true),
-        scope("b", false),
-        scope("c", true),
-      ]),
-    ).toEqual({
-      held: 2,
-      total: 3,
-    });
-  });
-
-  it("reports an empty roster as nought of nought", () => {
-    expect(skillReachSummary([])).toEqual({ held: 0, total: 0 });
   });
 });
 

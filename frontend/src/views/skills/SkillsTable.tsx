@@ -2,9 +2,9 @@
 // can be scanned.
 //
 // The same columns MCP's own list settled on — what it is, where it came from,
-// what state it is in, who it reaches — because the two are the same kind of
-// answer about the same kind of object, and an operator who has learned to read
-// one should not have to learn the other.
+// what state it is in — because the two are the same kind of answer about the
+// same kind of object, and an operator who has learned to read one should not
+// have to learn the other.
 //
 // Every control here carries the test id its card equivalent carries, so a spec
 // can drive either rendering.
@@ -12,7 +12,6 @@
 import { Sparkles } from "lucide-react";
 
 import type { Skill } from "@/api/skills";
-import type { TeamMemberDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { categoryStyle } from "@/lib/skills";
@@ -22,15 +21,13 @@ import {
   skillSourceLabel,
 } from "@/lib/skills-list";
 import { cn } from "@/lib/utils";
-import { SkillReachCell } from "@/views/skills/skill-reach-cell";
 
-const HEADERS = ["Skill", "Source", "Edited", "Reach", ""];
+const HEADERS = ["Skill", "Source", "Edited", ""];
 
 export function SkillsTable({
   skills,
   canManage,
   now,
-  team,
   onToggle,
   onUninstall,
   onUpdate,
@@ -40,7 +37,6 @@ export function SkillsTable({
   skills: Skill[];
   canManage: boolean;
   now: number;
-  team: TeamMemberDto[] | null;
   onToggle: (skill: Skill) => void;
   onUninstall: (skill: Skill) => void;
   onUpdate: (skill: Skill) => void;
@@ -70,7 +66,6 @@ export function SkillsTable({
               skill={skill}
               canManage={canManage}
               now={now}
-              team={team}
               onToggle={() => onToggle(skill)}
               onUninstall={() => onUninstall(skill)}
               onUpdate={() => onUpdate(skill)}
@@ -88,7 +83,6 @@ function SkillRow({
   skill,
   canManage,
   now,
-  team,
   onToggle,
   onOpen,
   menu,
@@ -96,7 +90,6 @@ function SkillRow({
   skill: Skill;
   canManage: boolean;
   now: number;
-  team: TeamMemberDto[] | null;
   onToggle: () => void;
   onUninstall: () => void;
   onUpdate: () => void;
@@ -168,14 +161,6 @@ function SkillRow({
         >
           {skillLastEditedLabel(skill.updatedAtMillis, now)}
         </span>
-      </td>
-      <td className="border-b border-border px-3 py-3">
-        <SkillReachCell
-          agents={skill.agents}
-          team={team}
-          enabled={skill.enabled}
-          onOverflow={onOpen}
-        />
       </td>
       <td className="border-b border-border py-3 pr-4 pl-3">
         <div className="flex items-center justify-end gap-1">
