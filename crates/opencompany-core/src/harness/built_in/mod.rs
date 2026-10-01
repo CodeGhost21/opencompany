@@ -5248,6 +5248,15 @@ impl HarnessPool {
             steer.and_then(SteerControl::pending),
             Some(SteerAction::Cancel)
         ) && outcome.budget_paused.is_none()
+            // Issue #1680 -- CodeRabbit on PR #2554, and the guard's own
+            // reasoning above applies verbatim. A ceiling-paused turn's `reply`
+            // is the scrubbed `wall_clock_ceiling_message`: host-authored, not
+            // an answer the teammate produced. Writing it back would recall
+            // "you hit the wall-clock ceiling" as prior context in the NEXT
+            // turn, and on record as something this teammate said. The steps
+            // this pause preserves are the turn's real work and travel on the
+            // outcome; the diagnosis is not memory.
+            && outcome.ceiling_paused.is_none()
         {
             deps.context
                 .put(

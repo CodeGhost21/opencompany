@@ -1345,21 +1345,6 @@ impl HarnessBrain {
                                 settle(&mut card, TaskRunEnd::Paused, &responder, &result);
                                 break (TaskRunEnd::Paused, result);
                             }
-                            // Issue #1680, and the same asymmetry one step
-                            // further: without this a ceiling-paused card
-                            // settled as a COMPLETION whose deliverable was the
-                            // pause copy, so a card whose work ran out of time
-                            // landed in review as a finished, reviewable
-                            // result. Checked and returned on before the drain
-                            // for the reason stated above -- the ceiling arm of
-                            // `classify_turn` only fires on an `Err`, which
-                            // cannot also have queued a hand-off on the same
-                            // attempt.
-                            if let Some(pause) = &outcome.ceiling_paused {
-                                let result = ceiling_pause_notice(pause);
-                                settle(&mut card, TaskRunEnd::Paused, &responder, &result);
-                                break (TaskRunEnd::Paused, result);
-                            }
                             // Issue #204: the turn may have DELEGATED rather
                             // than done the work. The dispatched responder is
                             // the orchestrator, which carries `delegate_to_desk`
@@ -1514,6 +1499,38 @@ impl HarnessBrain {
                                 }
                                 // Nothing was handed off — the responder did the
                                 // work itself, as before.
+                                // Issue #1680. Settled AFTER the drain, not
+                                // before it -- CodeRabbit on PR #2554, and it
+                                // is right. The first cut of this arm sat
+                                // beside the budget one above and borrowed its
+                                // rationale ("the model call itself errored, so
+                                // nothing can have queued a hand-off"). That
+                                // reasoning does not transfer: a budget pause
+                                // fires when the model call fails, with no tool
+                                // loop behind it, while a CEILING pause fires
+                                // on a turn that ran for the entire budget --
+                                // by construction a turn that executed tool
+                                // calls, since `TurnOutcome::steps` retaining
+                                // that timeline is the point of this issue. So
+                                // it can absolutely have staged a `spawn_task`
+                                // or a hand-off before the clock ran out, and
+                                // breaking before the drain dropped that work
+                                // with the claim.
+                                //
+                                // Reached only when the drain found nothing to
+                                // run: a hand-off that DID happen is the
+                                // delegate's work and settles from their output
+                                // in the arms above, which is a real completion
+                                // rather than this pause.
+                                None if outcome.ceiling_paused.is_some() => {
+                                    let pause = outcome
+                                        .ceiling_paused
+                                        .as_ref()
+                                        .expect("guarded by this arm");
+                                    let result = ceiling_pause_notice(pause);
+                                    settle(&mut card, TaskRunEnd::Paused, &responder, &result);
+                                    (TaskRunEnd::Paused, result)
+                                }
                                 None => {
                                     let result = outcome.reply;
                                     settle(&mut card, TaskRunEnd::Completed, &responder, &result);
@@ -3915,7 +3932,16 @@ impl HarnessBrain {
                             task_id: None,
                             outputs: Vec::new(),
                             channel: "operator".to_string(),
-                            agent: None,
+                            // `SYSTEM_AUTHOR`, not `None` -- CodeRabbit on PR
+                            // #2554. The iteration-cap notice above documents
+                            // why at length: `agent: None` journals as
+                            // `agent_id: "operator"`, no roster member matches,
+                            // and the console falls back to the channel's
+                            // voice, so the platform's words render under the
+                            // orchestrator's name. This arm was written against
+                            // the budget and spend notices below, which still
+                            // carry that unfixed shape.
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: ceiling_pause_notice(pause),
                             steps: Vec::new(),
                             reply_to: None,

@@ -161,6 +161,15 @@ asked for: on its own workflow, the **Send update** step is reached.
 **On a delegation chain**, the pause folds first-wins exactly as
 `budget_paused` does, so a ceiling hit two desks down names the teammate that
 actually ran out of time. The CEO-relay is deliberately **not** skipped for it,
-unlike a budget pause: the provider has not run dry, and no caller overwrites the
-reply, so the relay's inference buys a real synthesis over the branches that did
-finish.
+unlike a budget pause: the provider has not run dry, so the relay call will
+work, and the synthesis it produces over the branches that *did* finish is what
+the delegates' own text would otherwise never reach the operator as.
+
+What the relay buys is the **fold onto the operator's timeline**, not its reply
+text. Both chat callers replace the primary reply with
+`CEILING_PAUSED_PLACEHOLDER_REPLY` whenever `ceiling_paused` is set, exactly as
+#1906 established for a budget pause — so the relay's own words are discarded
+the same way, and anything appended to `OperatorTurn::reply` upstream is
+unreachable from there. A delegate's words reaching the operator through a pause
+would need a channel of their own, which is the constraint #1906 already
+records.
