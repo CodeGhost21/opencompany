@@ -287,8 +287,8 @@ opens the page and selects nothing.
 
 **mcp.json** ([`McpJsonEditor`](../../frontend/src/views/mcp/McpJsonEditor.tsx))
 is a button and a pop-up over `…/mcp/config`, opened by `?tab=json` as well, and
-read-only for a member. It is the same store the rows read: a save bumps the key
-the list is mounted on, so the rows re-read rather than describing the
+read-only for a member. It is the same store the rows read: a save re-reads the
+server list (`onSaved` → `refresh()`), so the rows never describe the
 configuration as it was before the file was written.
 
 **Add custom server**
