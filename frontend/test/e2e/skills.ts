@@ -55,17 +55,30 @@ export async function suppressTour(page: Page) {
   });
 }
 
-/** Opens the Skills tab and waits for the list to have rendered. */
-export async function openSkills(page: Page) {
-  await page.goto(SKILLS_URL);
+/**
+ * Opens the Skills tab and waits for the list to have rendered.
+ *
+ * Asks for cards by default. The Installed tab opens on rows, and the helpers
+ * below — and most specs using them — assert against `installed-card`; naming
+ * the view here keeps those assertions driving the drawing they were written
+ * for, instead of each spec silently testing whichever shape the tab defaults
+ * to this month. Pass `"list"` to drive rows deliberately.
+ */
+export async function openSkills(page: Page, view: "cards" | "list" = "cards") {
+  await page.goto(`${SKILLS_URL}?view=${view}`);
   await expect(page.getByTestId("skills-read-only-note")).toBeVisible({
     timeout: 30_000,
   });
 }
 
-/** The installed row for `name`. */
+/** The installed card for `name`, in the cards drawing. */
 export function installedCard(page: Page, name: string) {
   return page.getByTestId("installed-card").filter({ hasText: name });
+}
+
+/** The installed row for `name`, in the rows drawing the tab opens on. */
+export function installedRow(page: Page, name: string) {
+  return page.getByTestId("installed-row").filter({ hasText: name });
 }
 
 /** The company's effective skill set, read straight from the host. */

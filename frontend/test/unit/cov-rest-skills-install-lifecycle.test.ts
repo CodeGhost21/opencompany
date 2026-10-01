@@ -149,7 +149,7 @@ describe("uninstall lifecycle", () => {
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
-          '[data-testid="installed-card"] [data-testid="skill-row-menu"]',
+          '[data-testid="installed-row"] [data-testid="skill-row-menu"]',
         )!
         .click();
     });

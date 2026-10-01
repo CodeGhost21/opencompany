@@ -62,7 +62,7 @@ async function show(client: OpenCompanyClient) {
 }
 
 function cards(): HTMLElement[] {
-  return Array.from(container.querySelectorAll('[data-testid="installed-card"]'));
+  return Array.from(container.querySelectorAll('[data-testid="installed-row"]'));
 }
 
 function cardNamed(name: string): HTMLElement {

@@ -95,7 +95,7 @@ test("a library that moves under an install is offered as an update, and applyin
     ).toBeNull();
 
     // The console agrees there is nothing to offer.
-    await page.goto("/#/connections/skills");
+    await page.goto("/#/connections/skills?view=cards");
     const card = installedCard(page, NAME);
     await expect(card).toBeVisible({ timeout: 30_000 });
     await expect(card.getByTestId("skill-update-available")).toHaveCount(0);
@@ -211,7 +211,7 @@ test("a row the library moved under is offered even when its own copy was edited
 
     // Edit the company's own copy: an upload over an installed slug keeps the
     // pin and replaces the document, so the stored copy stops matching it.
-    await page.goto("/#/connections/skills");
+    await page.goto("/#/connections/skills?view=cards");
     await expect(installedCard(page, NAME)).toBeVisible({ timeout: 30_000 });
     await page.getByTestId("skills-add-menu").click();
     await page.getByTestId("skills-add-upload").click();

@@ -15,11 +15,9 @@
 
 import {
   ArrowUpCircle,
-  LayoutGrid,
   MoreHorizontal,
   Pencil,
   Power,
-  Rows3,
   Sparkles,
   Trash2,
   Users,
@@ -47,6 +45,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { categoryStyle } from "@/lib/skills";
+import { SkillViewToggle } from "@/views/skills/SkillViewToggle";
 import { SkillsTable } from "@/views/skills/SkillsTable";
 import {
   canEditSkill,
@@ -56,7 +55,6 @@ import {
   skillUpdateUnavailableReason,
   SKILL_BUILTIN_UNINSTALL_REASON,
   SKILL_DRIFT_FILTERS,
-  SKILL_LIST_VIEWS,
   SKILL_ENABLED_FILTERS,
   SKILL_SOURCE_FILTERS,
   skillCategories,
@@ -178,7 +176,7 @@ export function InstalledSkillsList({
           ]}
           onChange={(v) => onFilters({ ...filters, category: v })}
         />
-        <ViewToggle view={view} onView={onView} />
+        <SkillViewToggle view={view} onView={onView} />
       </div>
 
       <p className="text-xs text-muted-foreground" data-testid="skills-count">
@@ -280,47 +278,6 @@ function FilterSelect({
  * Labelled by what each draws, because "grid" and "table" name the markup
  * rather than the choice.
  */
-function ViewToggle({
-  view,
-  onView,
-}: {
-  view: SkillListView;
-  onView: (next: SkillListView) => void;
-}) {
-  const ICONS = { cards: LayoutGrid, list: Rows3 } as const;
-  const LABELS = { cards: "Cards", list: "List" } as const;
-  return (
-    <div
-      className="flex items-center gap-0.5 rounded-md border p-0.5"
-      data-testid="skills-view-toggle"
-    >
-      {SKILL_LIST_VIEWS.map((option) => {
-        const Icon = ICONS[option];
-        const on = view === option;
-        return (
-          <Button
-            key={option}
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-pressed={on}
-            aria-label={`${LABELS[option]} view`}
-            title={`${LABELS[option]} view`}
-            data-testid={`skills-view-${option}`}
-            className={cn(
-              "size-7 rounded-sm",
-              on ? "bg-muted text-foreground" : "text-muted-foreground",
-            )}
-            onClick={() => onView(option)}
-          >
-            <Icon className="size-4" />
-          </Button>
-        );
-      })}
-    </div>
-  );
-}
-
 function InstalledCard({
   skill,
   canManage,

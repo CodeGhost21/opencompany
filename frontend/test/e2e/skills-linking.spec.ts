@@ -2,7 +2,7 @@ import { expect, test, type APIRequestContext } from "@playwright/test";
 
 import {
   hostSkills,
-  installedCard,
+  installedRow,
   skillPageUrl,
   suppressTour,
 } from "./skills";
@@ -56,11 +56,11 @@ test("a skill's address opens its page cold, and Back returns to the list", asyn
   await expect(page.getByTestId("skill-detail-name")).toHaveText(NAME);
 
   // The list is not also on screen underneath it.
-  await expect(page.getByTestId("installed-card")).toHaveCount(0);
+  await expect(page.getByTestId("installed-row")).toHaveCount(0);
 
   await page.getByTestId("skill-page-back").click();
 
-  await expect(installedCard(page, NAME)).toBeVisible();
+  await expect(installedRow(page, NAME)).toBeVisible();
   await expect(page.getByTestId("skill-page")).toHaveCount(0);
   // And the address drops the skill again, so a reload lands on the list.
   expect(new URL(page.url()).hash).not.toContain("skill=");
@@ -78,7 +78,7 @@ test("a slug the company does not have is not mistaken for a skill", async ({
     timeout: 30_000,
   });
   await expect(page.getByTestId("skill-page")).toHaveCount(0);
-  await expect(page.getByTestId("installed-card").first()).toBeVisible();
+  await expect(page.getByTestId("installed-row").first()).toBeVisible();
 });
 
 test("a teammate's Skills tab links each skill it reads at that skill's page", async ({

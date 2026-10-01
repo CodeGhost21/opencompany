@@ -159,14 +159,14 @@ describe("opening a skill", () => {
     // the swap exists to stop.
     await show(clientWith());
     expect(
-      container.querySelectorAll('[data-testid="installed-card"]').length,
+      container.querySelectorAll('[data-testid="installed-row"]').length,
       "the list is on screen before anything is opened",
     ).toBeGreaterThan(0);
 
     await click(container.querySelector('[data-testid="skill-card-open"]')!);
 
     expect(
-      container.querySelectorAll('[data-testid="installed-card"]').length,
+      container.querySelectorAll('[data-testid="installed-row"]').length,
       "the list is gone, not covered",
     ).toBe(0);
     expect(
@@ -192,7 +192,7 @@ describe("opening a skill", () => {
     await show(clientWith());
     expect(anywhere("skill-page"), "no page").toBeNull();
     expect(
-      container.querySelectorAll('[data-testid="installed-card"]').length,
+      container.querySelectorAll('[data-testid="installed-row"]').length,
       "the list instead",
     ).toBeGreaterThan(0);
   });
@@ -232,47 +232,47 @@ describe("cards or rows", () => {
     return container.querySelectorAll(`[data-testid="${testid}"]`).length;
   }
 
-  it("opens on cards, with the toggle offering both", async () => {
+  it("opens the installed set on rows, with the toggle offering both", async () => {
     await show(clientWith());
-    expect(rowsOf("installed-card")).toBeGreaterThan(0);
-    expect(rowsOf("installed-row"), "no table yet").toBe(0);
-    expect(anywhere("skills-view-cards")?.getAttribute("aria-pressed")).toBe(
+    expect(rowsOf("installed-row")).toBeGreaterThan(0);
+    expect(rowsOf("installed-card"), "no cards yet").toBe(0);
+    expect(anywhere("skills-view-list")?.getAttribute("aria-pressed")).toBe(
       "true",
     );
-    expect(anywhere("skills-view-list")?.getAttribute("aria-pressed")).toBe(
+    expect(anywhere("skills-view-cards")?.getAttribute("aria-pressed")).toBe(
       "false",
     );
   });
 
-  it("swaps the cards for rows, and puts the choice on the address", async () => {
+  it("swaps the rows for cards, and puts the choice on the address", async () => {
     await show(clientWith());
-    await click(anywhere("skills-view-list")!);
+    await click(anywhere("skills-view-cards")!);
 
-    expect(rowsOf("installed-row")).toBeGreaterThan(0);
-    expect(rowsOf("installed-card"), "one rendering at a time").toBe(0);
-    expect(window.location.hash).toContain("view=list");
+    expect(rowsOf("installed-card")).toBeGreaterThan(0);
+    expect(rowsOf("installed-row"), "one rendering at a time").toBe(0);
+    expect(window.location.hash).toContain("view=cards");
   });
 
   it("drops the key rather than spelling out the default", async () => {
     await show(clientWith());
-    await click(anywhere("skills-view-list")!);
     await click(anywhere("skills-view-cards")!);
+    await click(anywhere("skills-view-list")!);
 
-    expect(rowsOf("installed-card")).toBeGreaterThan(0);
+    expect(rowsOf("installed-row")).toBeGreaterThan(0);
     expect(window.location.hash).not.toContain("view=");
   });
 
-  it("opens in rows when the address asks for them", async () => {
-    window.location.hash = "#/settings/skills?view=list";
-    await show(clientWith());
-    expect(rowsOf("installed-row")).toBeGreaterThan(0);
-  });
-
-  it("falls back to cards when the address names a view it does not have", async () => {
-    window.location.hash = "#/settings/skills?view=mosaic";
+  it("opens in cards when the address asks for them", async () => {
+    window.location.hash = "#/settings/skills?view=cards";
     await show(clientWith());
     expect(rowsOf("installed-card")).toBeGreaterThan(0);
-    expect(rowsOf("installed-row")).toBe(0);
+  });
+
+  it("falls back to the tab default when the address names a view it does not have", async () => {
+    window.location.hash = "#/settings/skills?view=mosaic";
+    await show(clientWith());
+    expect(rowsOf("installed-row")).toBeGreaterThan(0);
+    expect(rowsOf("installed-card")).toBe(0);
   });
 
   it("opens the skill from a row, the way a card does", async () => {

@@ -784,11 +784,12 @@ test("editing an installed registry skill marks it modified and refuses an updat
   await removeSkill(request, REGISTRY_SLUG);
 });
 
-test("the installed set can be drawn as rows, and the choice rides the address", async ({
+test("the installed set can be drawn either way, and the choice rides the address", async ({
   page,
   request,
 }) => {
   const served = await hostSkills(request);
+  // The helper asks for cards; rows are what this tab opens on by itself.
   await openSkills(page);
   await expect(page.getByTestId("installed-card")).toHaveCount(served.length, {
     timeout: 30_000,
@@ -803,7 +804,8 @@ test("the installed set can be drawn as rows, and the choice rides the address",
     "aria-pressed",
     "true",
   );
-  expect(page.url()).toContain("view=list");
+  // Rows are this tab's default, so choosing them spells nothing out.
+  expect(page.url()).not.toContain("view=");
 
   // A row's name opens the same page a card's does.
   await page
@@ -814,15 +816,15 @@ test("the installed set can be drawn as rows, and the choice rides the address",
   await expect(page.getByTestId("skill-detail-name")).toHaveText(BUNDLED_NAME);
   await page.getByTestId("skill-page-back").click();
 
+  await page.getByTestId("skills-view-cards").click();
+  await expect(page.getByTestId("installed-card").first()).toBeVisible();
+  expect(page.url()).toContain("view=cards");
+
   // A reload lands on the same rendering, which is the point of putting it on
   // the address rather than in component state.
   await page.reload();
   await suppressTour(page);
-  await expect(page.getByTestId("installed-row").first()).toBeVisible({
+  await expect(page.getByTestId("installed-card").first()).toBeVisible({
     timeout: 30_000,
   });
-
-  await page.getByTestId("skills-view-cards").click();
-  await expect(page.getByTestId("installed-card").first()).toBeVisible();
-  expect(page.url()).not.toContain("view=");
 });

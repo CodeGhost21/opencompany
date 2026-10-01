@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
-  Check,
   ChevronDown,
-  Download,
   Info,
   Loader2,
   Plus,
-  Search,
   Sparkles,
   Upload,
 } from "lucide-react";
@@ -35,9 +32,7 @@ import { UploadSkillDialog } from "@/views/skills/UploadSkillDialog";
 import type { OpenCompanyClient } from "@/api/client";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -63,6 +58,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
+import { RegistryList } from "@/views/skills/RegistryList";
 import { useHashParam } from "@/hooks/use-hash-param";
 import { useHashTab } from "@/hooks/use-hash-tab";
 import { Textarea } from "@/components/ui/textarea";
@@ -73,8 +69,6 @@ import {
   type SkillListView,
 } from "@/lib/skills-list";
 import {
-  CATEGORY_STYLES,
-  registryEmptyLabel,
   SKILL_DESCRIPTION_HINT,
   SKILL_DESCRIPTION_MAX_CHARS,
   SKILL_DESCRIPTION_PLACEHOLDER,
@@ -96,13 +90,6 @@ const CATEGORIES: SkillCategory[] = [
   "Finance",
 ];
 
-/** Category badge styling, tolerating the host's free-form category strings. */
-function categoryStyle(category: string): string {
-  return (
-    CATEGORY_STYLES[category as SkillCategory] ??
-    "border-muted-foreground/30 bg-muted text-muted-foreground"
-  );
-}
 
 /**
  * The company's skills: the real effective set read from the host (`…/skills`),
@@ -324,9 +311,13 @@ export function SkillsView({ client, company }: Props) {
   // address naming a skill this company does not have does the same.
   const openedRow =
     openedId === null ? null : (skills.find((s) => s.id === openedId) ?? null);
-  // An address naming no view, or naming one this console does not have, is the
-  // default rather than an error: a link is a thing people edit by hand.
-  const listView: SkillListView = viewParam === "list" ? "list" : "cards";
+  // Each tab opens in the shape that suits what it holds: the installed set is
+  // scanned, so rows; the registry is browsed, so cards. An address naming no
+  // view, or naming one this console does not have, is that tab's default
+  // rather than an error — a link is a thing people edit by hand.
+  const defaultView: SkillListView = tab === "registry" ? "cards" : "list";
+  const listView: SkillListView =
+    viewParam === "list" || viewParam === "cards" ? viewParam : defaultView;
   // One instant for the whole list, so no two rows date themselves against
   // different "now"s within a single render.
   const now = Date.now();
@@ -531,7 +522,7 @@ export function SkillsView({ client, company }: Props) {
                   onOpen={(skill) => setOpenedId(skill.id)}
                   view={listView}
                   onView={(next) =>
-                    setViewParam(next === "cards" ? null : next)
+                    setViewParam(next === defaultView ? null : next)
                   }
                 />
               )}
@@ -543,49 +534,21 @@ export function SkillsView({ client, company }: Props) {
               value={tab}
               className="space-y-3"
             >
-              <div className="relative sm:max-w-xs">
-                <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search the registry…"
-                  className="pl-8"
-                />
-              </div>
-              {registryError && (
-                <Alert variant="destructive">
-                  <AlertDescription>{registryError}</AlertDescription>
-                </Alert>
-              )}
-              {registryLoading ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Skeleton className="h-32 rounded-xl" />
-                  <Skeleton className="h-32 rounded-xl" />
-                </div>
-              ) : visibleRegistry.length === 0 ? (
-                // A failed read leaves `registry` empty too, so the label must not
-                // derive "serves no registry" from the same failure the alert above
-                // already reports (issue #1467). The decider keeps the three cases
-                // apart.
-                <Empty
-                  label={registryEmptyLabel(
-                    registryError !== null,
-                    registry.length === 0,
-                  )}
-                />
-              ) : (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {visibleRegistry.map((s) => (
-                    <RegistryCard
-                      key={s.id}
-                      skill={s}
-                      installed={installedIds.has(s.id)}
-                      canManage={canManage}
-                      onInstall={() => void install(s)}
-                    />
-                  ))}
-                </div>
-              )}
+              <RegistryList
+                skills={registry}
+                visible={visibleRegistry}
+                installedIds={installedIds}
+                canManage={canManage}
+                loading={registryLoading}
+                error={registryError}
+                query={query}
+                onQuery={setQuery}
+                view={listView}
+                onView={(next) =>
+                  setViewParam(next === defaultView ? null : next)
+                }
+                onInstall={(s) => void install(s)}
+              />
             </PageTabPanel>
           </>
         )}
@@ -640,55 +603,6 @@ export function SkillsView({ client, company }: Props) {
         }}
       />
     </div>
-  );
-}
-
-function RegistryCard({
-  skill,
-  installed,
-  canManage,
-  onInstall,
-}: {
-  skill: RegistrySkill;
-  installed: boolean;
-  canManage: boolean;
-  onInstall: () => void;
-}) {
-  return (
-    <Card data-testid="registry-card">
-      <CardContent className="space-y-2">
-        <div className="flex items-center gap-2">
-          <Sparkles className="size-4 text-muted-foreground" />
-          <p className="font-medium">{skill.name}</p>
-        </div>
-        <p className="text-sm text-muted-foreground">{skill.description}</p>
-        <div className="flex items-center justify-between pt-1">
-          <div className="flex items-center gap-2">
-            <Badge
-              variant="outline"
-              className={cn("capitalize", categoryStyle(skill.category))}
-            >
-              {skill.category}
-            </Badge>
-            <span className="text-xs text-muted-foreground">
-              {skill.publisher}
-              {skill.version ? ` · v${skill.version}` : ""}
-            </span>
-          </div>
-          {installed ? (
-            <span className="inline-flex items-center gap-1 text-xs font-medium text-status-done-text">
-              <Check className="size-3.5" /> Installed
-            </span>
-          ) : (
-            canManage && (
-              <Button variant="outline" size="sm" onClick={onInstall}>
-                <Download className="size-4" /> Install
-              </Button>
-            )
-          )}
-        </div>
-      </CardContent>
-    </Card>
   );
 }
 
