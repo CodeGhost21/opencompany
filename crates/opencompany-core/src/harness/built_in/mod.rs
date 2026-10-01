@@ -1039,8 +1039,9 @@ enum AttemptOutcome {
     /// The turn hit the harness's per-turn **wall-clock ceiling** (issue
     /// #1680) — the fourth and last of the limits that stop a turn short.
     ///
-    /// **Not retryable** (the one-shot retry would double a ten-minute
-    /// failure, which is why #1761 made this `Hard` in the first place) and,
+    /// **Not retryable** (the one-shot retry would double a failure that by
+    /// construction already ran for the whole ceiling, which is why #1761 made
+    /// this `Hard` in the first place) and,
     /// since this issue, **not a `Hard` error** either: the turn's folded
     /// [`TurnStep`] timeline is the nine minutes of work that *caused* the
     /// ceiling to fire, and a `Hard` arm threw it away at the `reply.map`
@@ -2505,9 +2506,13 @@ fn humanise_elapsed(elapsed: Duration) -> String {
 /// run began. Model time is therefore fully counted against it, as is tool
 /// time, sub-agent time and retry backoff. But the number the harness prints is
 /// the budget that **remained** when the offending call was issued, not that
-/// call's duration and not the ceiling — so a turn that genuinely ran for the
-/// full ten minutes reports a figure ten times smaller than the limit it hit,
-/// and reads as though one slow model call were at fault.
+/// call's duration and not the ceiling — so a turn that genuinely ran for its
+/// full ceiling reports a figure far smaller than the limit it hit, and reads
+/// as though one slow model call were at fault. (#1680's own arithmetic,
+/// `600000 - 56636`, holds only at the 600-second default it was filed
+/// against; the #2466 vendored bump moved `DEFAULT_AGENT_TURN_TIMEOUT_SECS` to
+/// 3600, which is exactly the drift the message below declines to restate a
+/// literal for.)
 ///
 /// That reading is what issue #1680 was filed on: a node that had spent about
 /// nine minutes before its last model call even started was diagnosed as a 56

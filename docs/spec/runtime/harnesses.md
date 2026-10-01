@@ -232,7 +232,7 @@ workflow run ............................. no time bound
 
 The ceiling is the vendored harness policy's `max_wall_clock_ms`, set in
 `vendor/openhuman/src/openhuman/agent/tinyagents/mod.rs::run_policy_for`. It
-defaults to ten minutes, is overridden with
+defaults to `DEFAULT_AGENT_TURN_TIMEOUT_SECS`, is overridden with
 **`OPENHUMAN_AGENT_TURN_TIMEOUT_SECS`** (whole seconds; `0` removes it
 entirely), and is process-global — not per node, not per workflow, and not
 settable from a manifest or from the console.
@@ -253,11 +253,19 @@ model call for run 'agent_turn' exceeded its remaining wall-clock budget (56636 
 
 Every word of that is true and it is almost impossible to read correctly. The
 number is the budget that **remained** when that call was issued — not the
-call's duration, and not the ceiling. A turn that ran the full ten minutes
-therefore reports a figure ten times smaller than the limit it hit, and reads
-as though one slow model call were at fault. Issue #1680 was filed on exactly
-that reading: a node that had already spent about nine minutes before its last
-model call started was diagnosed as a 56-second budget being too tight.
+call's duration, and not the ceiling. A turn that ran the full ceiling
+therefore reports a figure far smaller than the limit it hit, and reads as
+though one slow model call were at fault. Issue #1680 was filed on exactly that
+reading: a node that had already spent about nine minutes before its last model
+call started was diagnosed as a 56-second budget being too tight.
+
+**The ceiling's value has already moved, which is why nothing here quotes it.**
+#1680 and #1761 were written when `DEFAULT_AGENT_TURN_TIMEOUT_SECS` was 600 —
+the arithmetic in that issue (`600000 - 56636`) only works at that value, and
+the 10m 01s death matches it exactly. The vendored bump in #2466 raised it to
+**3600**, so the default ceiling is now an hour and this crate sets no override
+anywhere. That is the drift `wall_clock_ceiling_message` declines to restate a
+literal `600` for, and a test asserts the message contains no such number.
 
 `CompanyAgent::classify_turn` (`src/harness/built_in/mod.rs`) therefore times
 each turn attempt and rewrites this one class of error, naming what the turn

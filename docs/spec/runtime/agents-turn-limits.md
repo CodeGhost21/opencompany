@@ -112,7 +112,9 @@ to an operator must not label it with the other.
 ## Wall-clock — the vendored harness's own ceiling
 
 The fourth limit, and the only one not set by this crate: the vendored harness
-policy's `max_wall_clock_ms`, ten minutes by default, overridden with
+policy's `max_wall_clock_ms` — `DEFAULT_AGENT_TURN_TIMEOUT_SECS`, **3600** at
+the current pin and 600 when #1680 was filed, with no override set anywhere in
+this repo — overridden with
 `OPENHUMAN_AGENT_TURN_TIMEOUT_SECS`. It bounds the whole turn from the moment
 the harness run starts — model time, tool time, sub-agent time and retry backoff
 all count against it. See
@@ -138,7 +140,7 @@ same wall.
   from here. A salvage would have to happen upstream, inside the harness.
 - **The spend already did**, via issue B-120 — `turn_costs` is returned outside
   the `Result` precisely because a ceiling hit "fires precisely *because* the
-  agent worked for ten minutes" and was reporting the most expensive runs a
+  agent worked for the full ceiling" and was reporting the most expensive runs a
   founder owns as free.
 - **The folded step timeline does now.** `pump.finish()` runs unconditionally
   and `fold_steps` builds the full `Vec<TurnStep>` whether the reply is `Ok` or
