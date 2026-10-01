@@ -481,6 +481,9 @@ pub enum DelegationScope {
     /// several genuinely overlap, bounded only by the #401 in-flight cap. That
     /// is the concurrency this scoping exists for.
     Run(String),
+    /// One HiveMind seat turn, keyed by its episode-seat turn key
+    /// ([`turn_key`](crate::runtime::episode_resume::turn_key)).
+    Seat(String),
 }
 
 tokio::task_local! {
@@ -702,6 +705,22 @@ impl DelegationQueue {
         self.claim_as(Self::current_scope(), DrainClaim::Answering)
     }
 
+    /// Claims one HiveMind seat turn's bucket, keyed by its episode-seat turn
+    /// key.
+    ///
+    /// A seat may open cards and nothing else. When the operator's message
+    /// read as a question the claim answers instead, which refuses card
+    /// writes exactly as a pooled question turn does.
+    #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
+    pub fn claim_seat(&self, turn_key: impl Into<String>, answering: bool) -> DelegationClaim {
+        let state = if answering {
+            DrainClaim::Answering
+        } else {
+            DrainClaim::Seat
+        };
+        self.claim_as(DelegationScope::Seat(turn_key.into()), state)
+    }
+
     /// The shared body of the claim constructors.
     ///
     /// # Everything it touches is `scope`'s and only `scope`'s (issue #661)
@@ -858,7 +877,10 @@ impl DelegationQueue {
                     _ => NoDrainReason::WorkflowLifecycle,
                 });
             }
-            DrainClaim::Answering | DrainClaim::Full | DrainClaim::Board => {}
+            DrainClaim::Seat if !matches!(delegation, Delegation::SpawnTask { .. }) => {
+                return Staged::NoDrain(NoDrainReason::Seat);
+            }
+            DrainClaim::Answering | DrainClaim::Full | DrainClaim::Board | DrainClaim::Seat => {}
         }
         // Issue #176: checked after the claim (a context that drains nothing is
         // still the only fact worth reporting) and before the queue lock, so the
@@ -1019,8 +1041,13 @@ impl DelegationQueue {
     /// the cap means some caller bypassed that boundary and is quietly losing
     /// work the model already claimed it had done.
     pub fn drain(&self, cap: usize) -> Vec<Delegation> {
+        self.drain_scope(&Self::current_scope(), cap)
+    }
+
+    /// [`drain`](Self::drain) against an explicitly named scope.
+    fn drain_scope(&self, scope: &DelegationScope, cap: usize) -> Vec<Delegation> {
         let mut guard = self.inner.lock().expect("delegation queue");
-        let Some(bucket) = guard.get_mut(&Self::current_scope()) else {
+        let Some(bucket) = guard.get_mut(scope) else {
             return Vec::new();
         };
         let take = bucket.len().min(cap);
@@ -1132,6 +1159,9 @@ pub enum NoDrainReason {
     /// naming: open a card for the desk instead, which persists and is exactly
     /// what a run *can* do.
     WorkflowHandOff,
+    /// The queue is claimed by a HiveMind seat turn ([`DrainClaim::Seat`]),
+    /// which may open cards and nothing else on the board.
+    Seat,
 }
 
 impl NoDrainReason {
@@ -1149,6 +1179,7 @@ impl NoDrainReason {
             Self::Depth => "depth_capped",
             Self::WorkflowLifecycle => "workflow_lifecycle_operator_only",
             Self::WorkflowHandOff => "workflow_handoff_no_reply_target",
+            Self::Seat => "seat_opens_cards_only",
         }
     }
 }
@@ -1198,6 +1229,10 @@ pub enum DrainClaim {
     /// → run cycles stay bounded precisely because every dispatch requires an
     /// operator act. Relaxing the column rule would take that bound with it.
     Board,
+    /// A HiveMind seat turn has claimed its own scope's bucket. Only
+    /// [`SpawnTask`](Delegation::SpawnTask) may be staged; the seat's settle
+    /// drains it.
+    Seat,
 }
 
 /// The live claim on a [`DelegationQueue`] — proof that some drain site is
@@ -1226,6 +1261,12 @@ impl DelegationClaim {
     /// The scope this claim owns.
     pub fn scope(&self) -> &DelegationScope {
         &self.scope
+    }
+
+    /// Drains up to `cap` of this claim's own staged delegations, wherever
+    /// the caller is running.
+    pub fn drain(&self, cap: usize) -> Vec<Delegation> {
+        self.queue.drain_scope(&self.scope, cap)
     }
 
     /// Runs `fut` with this claim's scope installed, so every delegation call
@@ -3618,6 +3659,11 @@ fn no_drain(tool: &str, effect: &str, reason: NoDrainReason) -> String {
              owns it with `assign_task` — do that and leave the verdict to a person. Do not retry \
              this call; it will fail the same way, and do NOT report the card as reviewed, \
              approved or moved."
+        ),
+        NoDrainReason::Seat => format!(
+            "Refused: in this room you can open a card and nothing else on the board, so {effect}. \
+             Ask the teammate concerned with `{prefix}ask` instead. Do NOT report it as done.",
+            prefix = crate::hive::host::TOOL_PREFIX
         ),
         NoDrainReason::WorkflowHandOff => format!(
             "Refused: you are running inside a workflow, which has no conversation for a desk's \

@@ -21,6 +21,8 @@ mod tests_part10;
 mod tests_part11;
 #[path = "orchestrator_tests_part2.rs"]
 mod tests_part2;
+#[path = "orchestrator_tests_seat_scope.rs"]
+mod tests_seat_scope;
 #[path = "orchestrator_tests_part3.rs"]
 mod tests_part3;
 #[path = "orchestrator_tests_part4.rs"]
