@@ -2840,6 +2840,7 @@ impl Tool for SpawnTaskTool {
         // a name that resolves to nobody is refused here, in the model's own
         // turn, rather than surviving as a queued card the drain silently
         // opens unowned with no signal anywhere that the assignee was bogus.
+        let mut unverified = None;
         let owner = match assignee.as_deref() {
             Some(name) => match self.store.load(&self.company).await {
                 Ok(Some(record)) => {
@@ -2867,11 +2868,26 @@ impl Tool for SpawnTaskTool {
                     Some(name.to_string())
                 }
                 Err(err) => {
+                    if matches!(DelegationQueue::current_scope(), DelegationScope::Seat(_)) {
+                        tracing::warn!(
+                            company = %self.company,
+                            error = %err,
+                            "[spawn_task] refused a seat's card: the roster could not be read to \
+                             check its assignee"
+                        );
+                        return Ok(ToolResult::error(format!(
+                            "Could not open the card \"{title}\": the roster could not be read \
+                             to check that \"{name}\" is on it. Nothing was queued; try again, \
+                             or leave `assignee` out."
+                        )));
+                    }
                     tracing::warn!(
                         company = %self.company,
                         error = %err,
-                        "[spawn_task] could not read the company record to ground the assignee"
+                        "[spawn_task] could not read the company record to ground the assignee; \
+                         queuing with it unverified"
                     );
+                    unverified = Some(name.to_string());
                     Some(name.to_string())
                 }
             },
@@ -2919,6 +2935,13 @@ impl Tool for SpawnTaskTool {
             return Ok(ToolResult::success(format!(
                 "Queued a task card: \"{title}\". It is written to the board when your turn \
                  ends; you will be told here if it cannot be. Do not describe it as open yet."
+            )));
+        }
+        if let Some(name) = unverified {
+            return Ok(ToolResult::success(format!(
+                "Queued a task card: \"{title}\". It will be opened on the board this turn, but \
+                 its assignee \"{name}\" could not be checked against the roster; if it names \
+                 nobody, the card opens unassigned."
             )));
         }
         Ok(ToolResult::success(format!(

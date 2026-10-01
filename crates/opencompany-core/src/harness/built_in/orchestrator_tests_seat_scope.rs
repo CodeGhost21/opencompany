@@ -204,3 +204,77 @@ async fn a_pooled_spawn_keeps_its_receipt_and_the_description_names_no_other_too
         assert!(!description.contains(other), "{description}");
     }
 }
+
+#[tokio::test]
+async fn a_seat_refuses_a_card_whose_assignee_the_roster_read_could_not_check() {
+    let queue = DelegationQueue::default();
+    let claim = queue.claim_seat("ep:writer", false);
+    let budget = Arc::new(OneEach(StdMutex::new(Vec::new())));
+    let spawn_task =
+        SpawnTaskTool::new(queue.clone(), CompanyId::new("acme"), Arc::new(BrokenStore));
+    let refused = claim
+        .scoped(crate::harness::built_in::card_budget::scoped(
+            budget.clone() as Arc<dyn crate::harness::built_in::card_budget::CardBudget>,
+            spawn_task.execute(json!({ "title": "Draft the post", "assignee": "eng" })),
+        ))
+        .await
+        .unwrap();
+    assert!(refused.is_error, "{}", refused.text());
+    assert!(
+        refused.text().contains("could not be read")
+            && refused.text().contains("Nothing was queued"),
+        "{}",
+        refused.text()
+    );
+    assert!(budget.0.lock().unwrap().is_empty(), "nothing is reserved");
+    assert!(claim.drain(MAX_DELEGATIONS_PER_TURN).is_empty());
+}
+
+#[tokio::test]
+async fn a_seat_with_no_assignee_still_opens_its_card_when_the_roster_is_unreadable() {
+    let queue = DelegationQueue::default();
+    let claim = queue.claim_seat("ep:writer", false);
+    let spawn_task =
+        SpawnTaskTool::new(queue.clone(), CompanyId::new("acme"), Arc::new(BrokenStore));
+    let queued = claim
+        .scoped(spawn_task.execute(json!({ "title": "Draft the post" })))
+        .await
+        .unwrap();
+    assert!(!queued.is_error, "{}", queued.text());
+    assert_eq!(
+        claim.drain(MAX_DELEGATIONS_PER_TURN),
+        vec![spawn("Draft the post")]
+    );
+}
+
+#[tokio::test]
+async fn an_absent_company_record_queues_the_assignee_as_typed_with_the_plain_receipt() {
+    let queue = DelegationQueue::default();
+    let _claim = queue.claim();
+    let receipt = tool(&queue)
+        .execute(json!({ "title": "Ship it", "assignee": "eng" }))
+        .await
+        .unwrap();
+    assert!(!receipt.is_error, "{}", receipt.text());
+    assert!(
+        !receipt.text().contains("could not be checked"),
+        "{}",
+        receipt.text()
+    );
+
+    let seat_queue = DelegationQueue::default();
+    let seat = seat_queue.claim_seat("ep:writer", false);
+    let seated = seat
+        .scoped(tool(&seat_queue).execute(json!({ "title": "Ship it", "assignee": "eng" })))
+        .await
+        .unwrap();
+    assert!(!seated.is_error, "{}", seated.text());
+    assert_eq!(
+        seat.drain(MAX_DELEGATIONS_PER_TURN),
+        vec![Delegation::SpawnTask {
+            title: "Ship it".to_string(),
+            note: None,
+            assignee: Some("eng".to_string()),
+        }]
+    );
+}
