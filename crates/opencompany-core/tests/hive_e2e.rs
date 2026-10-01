@@ -1011,12 +1011,7 @@ async fn a_desk_answers_through_the_seat_its_routing_named() {
     assert_eq!(done.len(), 1, "{done:?}");
     assert_eq!(done[0].1, ENGINEERING);
     assert_eq!(done[0].2, EpisodeReason::CompleteEpisode);
-    // One wave of seat turns, plus the closing round. `rounds` is
-    // `report.waves + closing_waves`, and the closing round runs on its own
-    // conductor -- which is why `rounds()` above, folded from `TurnStarted`
-    // rows, still sees exactly one. The two count different things and both
-    // are right.
-    assert_eq!(done[0].3, 2, "the seat's wave, and the closing round");
+    assert_eq!(done[0].3, 1, "one wave ran");
 
     // **The episode wrote down what a restart would otherwise lose.**
     //
@@ -1050,15 +1045,6 @@ async fn a_desk_answers_through_the_seat_its_routing_named() {
 
     // Recording *is* a seat's contribution: there is no separate "say
     // something" act in a completion episode, so one seat leaves one row.
-    //
-    // Two rows here, from the one seat. The first is its own part. The second
-    // is the closing round's: once the desk settles, OpenCompany asks Jev
-    // whether an assembly is still owed, seats whoever it names for a single
-    // turn, and that turn's `complete_episode` message becomes the episode's
-    // summary -- `summary_seq` and `completed_by` are filled from it. On a
-    // one-seat desk the seat it names is the seat that just finished, so the
-    // same agent records twice. The scripted model says the same words both
-    // times; a real one would assemble.
     let desk = replies(&rows, ENGINEERING);
     let kinds: Vec<(String, Option<UtteranceKind>)> = desk
         .iter()
@@ -1066,11 +1052,8 @@ async fn a_desk_answers_through_the_seat_its_routing_named() {
         .collect();
     assert_eq!(
         kinds,
-        vec![
-            (ENGINEER.to_string(), Some(UtteranceKind::CompleteEpisode)),
-            (ENGINEER.to_string(), Some(UtteranceKind::CompleteEpisode)),
-        ],
-        "the seat's own part, then the closing round's summary: {desk:?}"
+        vec![(ENGINEER.to_string(), Some(UtteranceKind::CompleteEpisode))],
+        "the seat's recorded part is its reply: {desk:?}"
     );
     assert!(
         desk.iter()
@@ -1101,18 +1084,11 @@ async fn a_desk_answers_through_the_seat_its_routing_named() {
     let measured = report(&runtime).await;
     assert_eq!(measured.episodes_completed, 1);
     assert_eq!(measured.same_agent_overlaps, 0);
-    // The measure reads the journalled `rounds`, so it carries the closing
-    // round too -- it is a round of work, and analytics should see it. It no
-    // longer equals what `rounds()` folds out of the desk's turn rows: the
-    // closing round does leave a turn row, but stamped wave `0` like the
-    // first, because it runs on a conductor that numbers from zero. Folding
-    // by revision therefore cannot see it.
     assert_eq!(
-        measured.episodes[&done[0].0].rounds, 2,
-        "the measure counts the closing round as well: {measured:?}"
+        measured.episodes[&done[0].0].rounds, 1,
+        "the measure counts the wave the turn rows carry: {measured:?}"
     );
-    // Two completions: the seat's own part, and the closing round's summary.
-    assert_eq!(measured.utterance_kinds["complete_episode"], 2);
+    assert_eq!(measured.utterance_kinds["complete_episode"], 1);
     assert!(
         !measured.utterance_kinds.contains_key("post"),
         "`post` is not served to a seat: {measured:?}"
@@ -1145,15 +1121,10 @@ async fn a_desk_answers_through_the_seat_its_routing_named() {
             _ => None,
         })
         .collect();
-    // Two turns, both stamped wave `0`. The second is the closing round's,
-    // and it numbers its own waves from zero because it runs on a conductor
-    // of its own -- so wave numbers are unique per conductor, not per
-    // episode. `rounds()` above folds these two into one entry only because
-    // it collapses a repeated seat within a revision.
     assert_eq!(
         attributed,
-        vec![(ENGINEER.to_string(), 0), (ENGINEER.to_string(), 0)],
-        "the seat's turn and the closing round's, each naming its own wave"
+        vec![(ENGINEER.to_string(), 0)],
+        "the seat turn names its episode and its wave"
     );
 }
 
@@ -2261,11 +2232,9 @@ async fn an_approved_request_resumes_the_seat_and_completes_the_episode() {
     let rows = wait_for(&runtime, "the episode to complete", EPISODE, completed(1)).await;
     dump(&rows, &script);
     assert_eq!(seat_resumed(&rows), vec![ENGINEER.to_string()]);
-    // Twice: the resumed turn, and the closing round's turn, which carries
-    // the same brief. Both are real turns the seat was shown the decision on.
     assert_eq!(
         told(&script, "approved your request: Email the client"),
-        2,
+        1,
         "the resumed seat is shown the decision once"
     );
     assert!(
@@ -2307,8 +2276,7 @@ async fn a_denied_request_resumes_the_seat_with_the_denial() {
 
     let rows = wait_for(&runtime, "the episode to complete", EPISODE, completed(1)).await;
     dump(&rows, &script);
-    // The resumed turn and the closing round's turn, as above.
-    assert_eq!(told(&script, "denied your request: Email the client"), 2);
+    assert_eq!(told(&script, "denied your request: Email the client"), 1);
     assert_eq!(told(&script, "approved your request"), 0);
 }
 
@@ -2346,8 +2314,7 @@ async fn an_answered_escalation_reaches_the_seat_that_asked() {
 
     let rows = wait_for(&runtime, "the episode to complete", EPISODE, completed(1)).await;
     dump(&rows, &script);
-    // The resumed turn and the closing round's turn, as above.
-    assert_eq!(told(&script, "\"eu-west first\""), 2);
+    assert_eq!(told(&script, "\"eu-west first\""), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
