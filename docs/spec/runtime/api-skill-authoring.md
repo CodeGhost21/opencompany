@@ -179,10 +179,11 @@ stored copy still matches its pin — the same predicate both reads project as
 `updateAvailable`/`modified` and the console mirrors in `canUpdateSkill`. One
 rule, three surfaces, no second copy to drift.
 
-The modified refusal is the one the recorded digest exists for. The edit it would
-overwrite exists nowhere else — no route serves a skill's full text, so there is
-nothing to recover it from — and a host that silently chose the library's version
-would destroy an operator's work with no record that it had.
+The modified refusal is the one the recorded digest exists for, and
+`PUT …/skills/{slug}/doc` (below) is what makes it reachable: once an operator
+has rewritten an install's document, that text exists only in this company's own
+row. A host that silently chose the library's version would destroy it with no
+record that it had.
 
 ### An update is a write, held to a write's gates
 
@@ -204,3 +205,55 @@ There is no "remind me later" flag, here or on the row. A console's Keep writes
 nothing, so the badge returns on the next read. That is correct: the library has
 genuinely moved on, and an install that stays behind is a fact about the company
 rather than a notification to be dismissed.
+
+## `GET`/`PUT …/skills/{slug}/doc` — the document itself
+
+Every other read on this surface is metadata: a name, a description, a category,
+a version. The `SKILL.md` — the procedure an agent actually follows — had no
+address, so the console could only ever offer a greyed-out Edit; an editor that
+loaded metadata alone would save it back over a body it never read.
+
+**The read is a member's read.** A skill's content joins every agent's prompt
+company-wide, so any member may see what their teammates are told to do. It is
+resolved through `company::skill_effective::resolve`, the same derivation
+`GET …/skills` reports from, so the editor opens on the layer actually in effect:
+a console-authored or installed document comes from the row, a global baseline
+one from its rendered text, and a company bundle's off disk.
+
+Answer: `{slug, markdown, editable}`. `markdown` is the whole document,
+frontmatter included. `editable` is the host's own statement about whether a
+write would be accepted, so the console does not re-derive that rule from
+`source` and then offer an editor the host refuses. `404` when the slug is not in
+the company's effective set, and when the row it has supplies no document — one
+sentence for both, because the operator's next move is the same either way.
+
+**The write is admin-only and provenance-limited** to `Registry` and `Custom`,
+the same two arms `uninstall` accepts. A `Company` skill is authored in the
+repository and its document travels with sibling resource files a stored delta
+cannot carry, so storing an inline body over it would silently drop them; that is
+a `409` naming the reason.
+
+Body: `{markdown, force?}` — the whole document, not a patch, because the stored
+copy is what every agent reads and a partial write would leave the authoritative
+text between two versions. Held to every gate a write path shares: the 256 KiB
+ceiling, the shared validator, the content scan, under the same per-company write
+lock, so a document an install of the same text would have been refused cannot
+arrive through the editor instead. `enabled` is carried from the existing row —
+an edit says nothing about switching a disabled skill back on.
+
+### Editing an install is the local-copy flow
+
+The row's `install` pin is carried through untouched. The pin still names what
+the library shipped, the stored document no longer digests to it, so the row
+reports `modified` and `update` then refuses rather than discarding the edit.
+That is the whole mechanism — there is no separate fork or detach step.
+
+One consequence worth stating: `skill_effective::registry_heal` replaces a
+degenerate stored snapshot with the library's live document, and an operator's
+edit could in principle be degenerate (a body equal to its own description). The
+heal is therefore also skipped for any row that no longer matches its pin, which
+is exactly the rows an edit produces.
+
+The write is journaled as `SkillChanged { change: edited }`
+([`events.md`](events.md)) — a separate word from `updated`, which takes the
+library's text rather than replacing it with the operator's.

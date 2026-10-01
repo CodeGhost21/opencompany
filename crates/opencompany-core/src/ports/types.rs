@@ -284,6 +284,13 @@ pub enum SkillChange {
     Installed,
     /// An existing install was re-pinned to the library's current document.
     Updated,
+    /// The stored document was rewritten in the console's skill editor.
+    ///
+    /// Distinct from `Updated`: that one takes the library's text, this one
+    /// replaces it with the operator's. An audit reader who cannot tell them
+    /// apart cannot tell a re-pin from a local rewrite of what every agent
+    /// reads.
+    Edited,
     /// The delta was removed.
     Removed,
 }

@@ -283,6 +283,8 @@ alias).
 | Upload | `POST …/skills/upload` → `upload` | `AdminScopedCompany` | multipart `.md` / `.zip` / `.skill`, one result row per file; archive hardening in [`company/skill_upload.rs`](../../crates/opencompany-core/src/company/skill_upload.rs) |
 | Draft | `POST …/skills/draft` → `draft` | `AdminScopedCompany` | writes nothing; returns a drafted document, scanned before it is shown |
 | Update | `POST …/skills/{slug}/update` → `update` | `AdminScopedCompany` | re-pins an install onto the library's current document, re-running the scan; refuses a locally edited copy |
+| Read a document | `GET …/skills/{slug}/doc` → `read_doc` | `ScopedCompany` (any member) | the whole `SKILL.md` an agent reads, resolved through the same effective set `GET …/skills` reports; a bundle entry off disk |
+| Rewrite a document | `PUT …/skills/{slug}/doc` → `write_doc` | `AdminScopedCompany` | `Registry` and `Custom` only, the same arms uninstall accepts; carries the install pin through, so the edit reports as `modified` |
 
 `/skills/registry` is a static segment, so it wins over the `{slug}` pattern
 regardless of registration order — and the methods differ anyway.

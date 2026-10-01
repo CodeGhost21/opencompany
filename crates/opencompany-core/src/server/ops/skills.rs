@@ -45,6 +45,7 @@ use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 /// The default category stamped on a skill whose doc carries none.
 const DEFAULT_CATEGORY: &str = "Ops";
 
+mod doc;
 mod draft;
 mod drift;
 mod journal;
@@ -63,6 +64,7 @@ pub(crate) use vet::{ScanSummary, VetRefusal, check_skill_doc_size, vet_skill, w
 pub fn router() -> Router<AppState> {
     scoped("/skills/{slug}/install", post(install))
         .merge(upload::router())
+        .merge(doc::router())
         .merge(draft::router())
         .merge(update::router())
         .merge(scoped("/skills/{slug}/uninstall", post(uninstall)))

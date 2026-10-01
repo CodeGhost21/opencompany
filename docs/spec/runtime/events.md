@@ -355,14 +355,17 @@ record that a playbook every agent reads was installed, replaced or removed.
 | field | meaning |
 | --- | --- |
 | `slug` | the skill's id |
-| `change` | `installed` \| `updated` \| `removed` |
+| `change` | `installed` \| `updated` \| `edited` \| `removed` |
 | `tier` | `builtin` \| `company` \| `registry` \| `custom`, from the row's provenance at the moment of the change |
 | `digest` | SHA-256 of the document written; absent on a removal, which writes none |
 | `by` | who did it, when the surface carried an attributed actor |
 
 Emitted by install (both arms), console authoring, each stored file of an upload,
-and `POST …/skills/{slug}/update`
-([api-skill-authoring.md](api-skill-authoring.md)). A **toggle emits nothing**:
+`POST …/skills/{slug}/update` and `PUT …/skills/{slug}/doc`
+([api-skill-authoring.md](api-skill-authoring.md)). `updated` and `edited` are
+separate words for a reason: the first takes the library's text, the second
+replaces it with the operator's, and a reader who cannot tell them apart cannot
+tell a re-pin from a local rewrite of what every agent reads. A **toggle emits nothing**:
 there is no variant for it, a toggle writes no document, and recording one as
 `updated` would tell a reader a re-pin happened that did not. The append
 propagates its failure rather than being dropped — an unrecordable change

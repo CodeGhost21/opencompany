@@ -395,10 +395,14 @@ fn is_registry_stub(doc: &SkillDoc) -> bool {
 ///
 /// * **Only `Registry`-sourced rows.** A `Custom` row is operator-authored and a
 ///   `Company` row is committed to the repo; neither is ever second-guessed, so
-///   the heal cannot clobber content a human wrote. There is no route that
-///   writes an operator-authored body onto a `Registry` row — `install` upserts
-///   a snapshot and `set_enabled` only carries the existing doc forward — so a
-///   `Registry` body is always machine-generated.
+///   the heal cannot clobber content a human wrote.
+/// * **Only a row still matching its own pin.** A `Registry` body is normally
+///   machine-generated — `install` upserts a snapshot and `set_enabled` carries
+///   the existing doc forward — but the skill editor
+///   (`PUT …/skills/{slug}/doc`) can store an operator's text onto one. Such a
+///   row no longer digests to what its install pinned, and that is what tells
+///   the two apart: without this arm, an operator whose edit happened to be
+///   degenerate would have it silently replaced by the library's copy.
 /// * **Only a degenerate or unparseable snapshot.** A real snapshot is left
 ///   pinned, so an install does not silently track later library edits.
 /// * **Only when the slug is in the library**, so an install of a skill that has
@@ -409,6 +413,11 @@ fn registry_heal<'a>(
     registry: &'a [SkillDoc],
 ) -> Option<&'a SkillDoc> {
     if delta.source != SkillSource::Registry {
+        return None;
+    }
+    if let (Some(install), Some(stored_doc)) = (&delta.install, &delta.custom_doc)
+        && crate::company::skill_digest(stored_doc) != install.digest
+    {
         return None;
     }
     if stored.is_some_and(|doc| !is_registry_stub(doc)) {

@@ -82,6 +82,17 @@ pub const SKILL_FIELDS_REQUIRED: &str = "A skill needs a name and a description.
 /// Error shown when an install names a slug the shared skill library lacks.
 pub const SKILL_NOT_IN_REGISTRY: &str = "That skill isn't in the registry.";
 
+/// `GET …/skills/{slug}/doc` found no document to serve: the slug is not in the
+/// company's effective set, or the row it has supplies no text. One sentence for
+/// both, because the operator's next move is the same either way.
+pub const SKILL_NO_DOC: &str = "That skill has no document on this company.";
+
+/// `PUT …/skills/{slug}/doc` refused the write on provenance.
+pub const SKILL_DOC_NOT_EDITABLE: &str = concat!(
+    "That skill is authored in the repository, not here, and its document ships with files ",
+    "alongside it. Installed and console-authored skills can be edited.",
+);
+
 /// Error shown when an update names a skill that records no registry install.
 ///
 /// A skill written here, or one the company bundles, has no library copy to be
