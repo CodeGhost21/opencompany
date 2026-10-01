@@ -212,7 +212,10 @@ them. On a desk, colleagues are reached by **speaking**: `post` to the room,
 ([hive.md](hive.md#speaking)); another desk is reached by a referral
 ([hive.md](hive.md#referral)). Every roster agent also carries `spawn_task`,
 and the brief under it (`orchestrator::member_delegation_brief`) says when to
-leave a slice tracked on the board rather than in the conversation. The
+leave a slice tracked on the board rather than in the conversation. A seat in
+a HiveMind episode keeps it too; the card is queued in the turn and written
+when the turn settles, at most three per episode
+([hive.md](hive.md#seats-open-cards)). The
 orchestrator gets the same section ahead of its own brief, so it can assign by
 id without a `query_company` call first.
 
