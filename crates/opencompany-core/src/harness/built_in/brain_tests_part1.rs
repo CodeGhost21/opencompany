@@ -158,6 +158,7 @@ async fn schedule_fired_journals_halt_notices() {
         // This fixture scripts a SPEND halt; a budget pause is the separate
         // signal added in issue #1846 and is not what it exercises.
         budget_paused: None,
+        ceiling_paused: None,
     };
     let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
         .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
@@ -221,6 +222,7 @@ async fn schedule_fired_journals_a_budget_pause_notice() {
             agent: "ceo".to_string(),
             summary: "the provider is exhausted".to_string(),
         }),
+        ceiling_paused: None,
     };
     let brain = brain_with_queue_and_events(dir.path(), Default::default(), log.clone())
         .with_default_engine(Some(Arc::new(FixedOutcomeTurn {
@@ -293,6 +295,7 @@ async fn schedule_fired_journals_approval_overflow_notice() {
                 halted_for_spend: None,
                 // Added by #1846 after these fixtures were written.
                 budget_paused: None,
+                ceiling_paused: None,
             },
             approval_requests: Some(requests.clone()),
         })));

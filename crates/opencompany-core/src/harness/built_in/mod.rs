@@ -897,6 +897,7 @@ fn spend_gate_refusal(reply: String, cause: SpendGateCause) -> TurnOutcome {
         abnormal_stop: Some(cause.abnormal_stop().to_string()),
         halted_for_spend: None,
         budget_paused: None,
+        ceiling_paused: None,
     }
 }
 
@@ -1035,6 +1036,24 @@ enum AttemptOutcome {
         /// The actionable, operator-facing halt copy.
         summary: String,
     },
+    /// The turn hit the harness's per-turn **wall-clock ceiling** (issue
+    /// #1680) — the fourth and last of the limits that stop a turn short.
+    ///
+    /// **Not retryable** (the one-shot retry would double a ten-minute
+    /// failure, which is why #1761 made this `Hard` in the first place) and,
+    /// since this issue, **not a `Hard` error** either: the turn's folded
+    /// [`TurnStep`] timeline is the nine minutes of work that *caused* the
+    /// ceiling to fire, and a `Hard` arm threw it away at the `reply.map`
+    /// below. It ends the turn gracefully with the actionable summary as the
+    /// reply, exactly as [`BudgetPaused`](Self::BudgetPaused) does.
+    CeilingPaused {
+        /// The actionable, operator-facing copy.
+        summary: String,
+        /// How long this attempt ran before the ceiling fired. Carried rather
+        /// than re-measured because the notice quotes it, and only the
+        /// classifier is holding the attempt's own clock.
+        elapsed: Duration,
+    },
     /// A hard error (auth/build/non-budget provider rejection/etc.) —
     /// propagated loudly, never swallowed.
     Hard(OpenCompanyError),
@@ -1142,6 +1161,28 @@ pub struct TurnOutcome {
     /// credits, not continuing or raising a cap. Conflating it with either
     /// would tell the operator the wrong next action.
     pub budget_paused: Option<BudgetPause>,
+    /// The turn **hit the harness's per-turn wall-clock ceiling** (issue
+    /// #1680) rather than dying with a hard error.
+    ///
+    /// `Some` exactly when [`classify_turn`](CompanyAgent) recognised the
+    /// vendored harness's wall-clock leaf via
+    /// [`is_wall_clock_ceiling`]. `None` on every other path.
+    ///
+    /// The **fourth** distinct terminal state, and the one whose operator
+    /// action differs from all three siblings. An iteration-cap pause is
+    /// resumable with "continue"; an in-turn spend halt means the company's
+    /// own cap was reached; a budget pause means the account is out of money.
+    /// A ceiling hit means the turn was given more work than fits in one
+    /// turn — there is no checkpoint to continue from (so this must never
+    /// invite "continue", which would spend another full ceiling reaching the
+    /// same wall) and no amount of money changes it. The lever is narrowing
+    /// the ask, or raising `OPENHUMAN_AGENT_TURN_TIMEOUT_SECS`.
+    ///
+    /// Unlike [`budget_paused`](Self::budget_paused), this pause carries
+    /// genuine partial work: [`steps`](Self::steps) is the tool timeline the
+    /// turn had already built, which is folded unconditionally and was being
+    /// discarded whenever the reply was an `Err`.
+    pub ceiling_paused: Option<CeilingPause>,
 }
 
 /// What one in-turn spend halt cost, and whose cap it was measured against
@@ -1208,6 +1249,45 @@ pub struct BudgetPause {
     /// way everywhere a company hits it.
     pub summary: String,
 }
+
+/// One turn stopped by the harness's per-turn wall-clock ceiling (issue
+/// #1680).
+///
+/// The fourth sibling of [`BudgetPause`], [`SpendHalt`] and
+/// [`TurnOutcome::hit_iteration_cap`], and the only one of the four that used
+/// to be a hard error. #1761 established the diagnosis — the ceiling bounds
+/// the whole turn, model time included, and the figure the harness prints is
+/// the budget that *remained* when the last call was issued — and made the
+/// error text honest. It deliberately left the failure hard. This is the other
+/// half: a ceiling hit settles as a pause, so the work the turn had already
+/// done survives it.
+///
+/// **Not resume, and not resumable.** There is no checkpoint — the reply the
+/// turn was composing is gone, because the vendored harness returns an `Err`
+/// with no partial `String` in it. What survives is
+/// [`TurnOutcome::steps`](TurnOutcome::steps), the folded tool timeline, which
+/// on a ceiling hit is by definition substantial: the ceiling fired *because*
+/// the agent worked for the full budget. For the workflow node that filed this
+/// issue that timeline is the fetched material the summary was going to be
+/// written from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CeilingPause {
+    /// The teammate whose turn hit the ceiling.
+    pub agent: String,
+    /// How long the attempt ran. Measured per attempt, not across the retry,
+    /// for the reason #1761 gives: each `agent.turn` opens a fresh harness run
+    /// with a fresh budget, so a duration spanning two attempts would be
+    /// compared against a ceiling neither of them saw.
+    pub elapsed: Duration,
+}
+
+// Deliberately **no** `summary` field, unlike [`BudgetPause`]. That one carries
+// its copy because its notice renders from it and `BudgetPauseMarker` persists
+// it. This one's notice is built fresh from the two fields above
+// (`brain::ceiling_pause_notice`), and #1761's honest text is already the turn's
+// `reply` -- so a `summary` here would be a second copy of a string this struct
+// has no reader for, on a type that rides inside `TurnOutcome` and therefore
+// inside `MonthlyBudgetGate::Refused`.
 
 impl CompanyAgent {
     /// Registers one blueprint on the runtime and wraps the result.
@@ -1603,6 +1683,10 @@ impl CompanyAgent {
         }
 
         let budget_pause_summary: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        // Issue #1680, the sibling slot. Same idiom and same reason: the
+        // classifier runs inside the stop-hook body and cannot return a second
+        // value, so the one fact it learned travels out in a slot read below.
+        let ceiling_pause: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(None);
 
         // A hive seat turn (plan hive-desks, Phase 4): the driver's episode
         // coordinates ride on the in-flight registration below so the MCP
@@ -1729,6 +1813,13 @@ impl CompanyAgent {
                         }
                         Ok(crate::harness::mcp_probe::scrub(&redacted, &[]))
                     }
+                    AttemptOutcome::CeilingPaused { summary, elapsed } => {
+                        let redacted = crate::harness::mcp_probe::redact(&summary, &[]);
+                        if let Ok(mut slot) = ceiling_pause.lock() {
+                            *slot = Some(elapsed);
+                        }
+                        Ok(crate::harness::mcp_probe::scrub(&redacted, &[]))
+                    }
                     AttemptOutcome::Empty => {
                         let spend_halted = spend_brake.as_ref().is_some_and(|(_, halted)| {
                             halted.load(std::sync::atomic::Ordering::SeqCst)
@@ -1749,6 +1840,19 @@ impl CompanyAgent {
                                     let redacted = crate::harness::mcp_probe::redact(&summary, &[]);
                                     if let Ok(mut slot) = budget_pause_summary.lock() {
                                         *slot = Some(redacted.clone());
+                                    }
+                                    Ok(crate::harness::mcp_probe::scrub(&redacted, &[]))
+                                }
+                                // A ceiling can fire on the retry too: the
+                                // first attempt returned the transient empty
+                                // class, the second worked until the budget ran
+                                // out. Terminal here as well -- this arm is the
+                                // end of the ladder, so there is nothing left
+                                // to re-enter.
+                                AttemptOutcome::CeilingPaused { summary, elapsed } => {
+                                    let redacted = crate::harness::mcp_probe::redact(&summary, &[]);
+                                    if let Ok(mut slot) = ceiling_pause.lock() {
+                                        *slot = Some(elapsed);
                                     }
                                     Ok(crate::harness::mcp_probe::scrub(&redacted, &[]))
                                 }
@@ -1906,6 +2010,22 @@ impl CompanyAgent {
                 pause.summary
             );
         }
+        let ceiling_paused = ceiling_pause
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .map(|elapsed| CeilingPause {
+                agent: self.agent_id.clone(),
+                elapsed,
+            });
+        if let Some(pause) = &ceiling_paused {
+            tracing::info!(
+                agent = %self.agent_id,
+                elapsed_ms = pause.elapsed.as_millis(),
+                progress_events = events.len(),
+                "[turn] hit the per-turn wall-clock ceiling; keeping the steps it had taken"
+            );
+        }
         let steps = steps::fold_steps(events);
 
         let outcome = reply.map(|reply| TurnOutcome {
@@ -1919,6 +2039,7 @@ impl CompanyAgent {
             abnormal_stop: None,
             halted_for_spend,
             budget_paused,
+            ceiling_paused,
         });
         (outcome, usages)
     }
@@ -2017,16 +2138,24 @@ impl CompanyAgent {
             Ok(reply) if reply.trim().is_empty() => AttemptOutcome::Empty,
             Ok(reply) => AttemptOutcome::Reply(reply),
             Err(err) if is_transient_empty_response(&err) => AttemptOutcome::Empty,
-            // Issue #1680: still Hard — a ceiling hit is not retryable and the
-            // one-shot retry must not double a ten-minute failure — but told in
-            // terms the operator can act on rather than the harness's own.
-            Err(err) if is_wall_clock_ceiling(&err) => {
-                AttemptOutcome::Hard(OpenCompanyError::Harness(wall_clock_ceiling_message(
-                    &self.agent_id,
-                    elapsed,
-                    &err,
-                )))
-            }
+            // Issue #1680: a graceful pause, not a hard error.
+            //
+            // Still **not retryable** — the `Empty` arm's one-shot retry must
+            // not double a ten-minute failure, which is why #1761 reached for
+            // `Hard` and why neither classifier pass may re-enter a turn from
+            // here. `CeilingPaused` is terminal in exactly the way
+            // `BudgetPaused` is.
+            //
+            // What changes is what the stop *costs*. A `Hard` arm here reached
+            // `reply.map(..)` as an `Err`, so the folded `TurnStep` timeline —
+            // computed one line above it, unconditionally — was dropped. On a
+            // ceiling hit that timeline is the whole of the turn's work. The
+            // honest text from #1761 is preserved verbatim as the pause's
+            // summary; only the channel it travels in has changed.
+            Err(err) if is_wall_clock_ceiling(&err) => AttemptOutcome::CeilingPaused {
+                summary: wall_clock_ceiling_message(&self.agent_id, elapsed, &err),
+                elapsed,
+            },
             // Issue #1846: the top-level orchestrator's own inference call
             // carries no delegated-tool envelope, so it cannot be recognised by
             // `RepeatedToolFailureMiddleware`'s envelope-gated check — only by

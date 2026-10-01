@@ -184,6 +184,49 @@ pub(crate) fn budget_pause_notice(pause: &crate::harness::BudgetPause) -> String
     format!("{BUDGET_PAUSE_NOTICE_PREFIX} {}", pause.summary)
 }
 
+/// The system bubble emitted when a turn hit the harness's per-turn wall-clock
+/// ceiling (issue #1680) — the fourth and last sibling of
+/// [`iteration_cap_pause_notice`], [`spend_halt_notice`] and
+/// [`budget_pause_notice`], and, like all three, deliberately unauthored.
+///
+/// The operator's next move is distinct from all three, which is why this could
+/// not be folded into any of them:
+///
+/// * a step pause is resumable — `"continue"` finishes the work;
+/// * a spend halt means the company's declared cap was reached, so raising that
+///   cap or narrowing the ask is the lever;
+/// * a budget pause means the *account* is out of money, so the lever is credits;
+/// * a ceiling hit means the step was given more work than fits in one turn.
+///   Credits change nothing and there is no cap to raise. **It must never say
+///   `"continue"`**: unlike a step pause there is no checkpoint, so continuing
+///   would spend another full ten minutes reaching the identical wall — the same
+///   reasoning [`spend_halt_notice`] gives for refusing that word.
+///
+/// Names the teammate and quotes the elapsed time for
+/// [`spend_halt_notice`]'s reason: one operator message can run a responder, a
+/// desk and a relay turn, and a bare duration would be a number the operator
+/// cannot attribute. The ceiling's own *value* is still not restated — see
+/// [`wall_clock_ceiling_message`](super::wall_clock_ceiling_message), whose
+/// doc explains why a literal `600` here would be a copy that goes stale on the
+/// next vendored bump with nothing failing.
+///
+/// Unlike its three siblings this notice can promise the work survived, because
+/// on this path it does: the folded [`TurnStep`](crate::ports::types::TurnStep)
+/// timeline rides out on the same outcome, and on a ceiling hit it is by
+/// definition substantial.
+pub(crate) fn ceiling_pause_notice(pause: &crate::harness::CeilingPause) -> String {
+    format!(
+        "The reply above is where this turn stopped, not a finished answer: {agent} reached \
+         the longest a single turn may run ({elapsed}) and stopped before it could write up \
+         what it had gathered. Nothing errored, and the steps it took are recorded on this \
+         reply — but there is no checkpoint to resume, so asking again runs a fresh turn \
+         against the same limit. Narrowing what {agent} was asked to do in one step is what \
+         lets the work finish.",
+        agent = pause.agent,
+        elapsed = super::humanise_elapsed(pause.elapsed),
+    )
+}
+
 /// The non-redeemable sibling of [`BUDGET_PAUSE_NOTICE_PREFIX`] (issue #1846
 /// review, Codex #3870562586 / #3870562590).
 ///
@@ -3802,6 +3845,25 @@ impl HarnessBrain {
                             mentions: Vec::new(),
                         });
                     }
+                    // Issue #1680: and a turn that ran out of *time* says so,
+                    // in its own bubble, on the same terms as the three above.
+                    // Mutually exclusive with all three in practice:
+                    // `classify_turn` reaches this arm only on the vendored
+                    // wall-clock leaf, which is an `Err`, so the same attempt
+                    // cannot also have capped or been halted by a hook.
+                    if let Some(pause) = &turn.ceiling_paused {
+                        channel_responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            outputs: Vec::new(),
+                            channel: "operator".to_string(),
+                            agent: None,
+                            text: ceiling_pause_notice(pause),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
                     channel_responses.extend(turn.bubbles);
                 }
                 CompanyEvent::TaskDispatched { task_id, run_id } => {
@@ -3947,6 +4009,24 @@ impl HarnessBrain {
                             channel: crate::server::ops::language::GENERAL_CHANNEL_ID.to_string(),
                             agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
                             text: budget_pause_notice(pause),
+                            steps: Vec::new(),
+                            reply_to: None,
+                            mentions: Vec::new(),
+                        });
+                    }
+                    // Issue #1680, journaled for the same reason as the three
+                    // above: a scheduled turn's journal is its only durable
+                    // record. This is the path the 24hr-status workflow's
+                    // predecessor ran on, where a ceiling hit previously left
+                    // nothing but a run-level error.
+                    if let Some(pause) = &turn.ceiling_paused {
+                        responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            outputs: Vec::new(),
+                            channel: crate::server::ops::language::GENERAL_CHANNEL_ID.to_string(),
+                            agent: Some(crate::ports::SYSTEM_AUTHOR.to_string()),
+                            text: ceiling_pause_notice(pause),
                             steps: Vec::new(),
                             reply_to: None,
                             mentions: Vec::new(),

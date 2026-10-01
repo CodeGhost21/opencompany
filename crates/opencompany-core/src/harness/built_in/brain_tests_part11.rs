@@ -29,6 +29,7 @@ fn a_confined_turns_budget_pause_is_a_system_notice_not_a_copilot_reply() {
             agent: confine::CONFINED_AGENT_ID.to_string(),
             summary: "Add credits to your account, then resend your message.".to_string(),
         }),
+        ceiling_paused: None,
     };
 
     let bubble = confined_turn_bubble(outcome);
