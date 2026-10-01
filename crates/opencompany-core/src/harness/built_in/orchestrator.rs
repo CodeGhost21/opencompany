@@ -728,7 +728,10 @@ impl DelegationQueue {
     /// in a pooled turn's bucket instead.
     #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
     pub fn claim_seat_unwired(&self, turn_key: impl Into<String>) -> DelegationClaim {
-        self.claim_as(DelegationScope::Seat(turn_key.into()), DrainClaim::Unclaimed)
+        self.claim_as(
+            DelegationScope::Seat(turn_key.into()),
+            DrainClaim::Unclaimed,
+        )
     }
 
     /// The shared body of the claim constructors.

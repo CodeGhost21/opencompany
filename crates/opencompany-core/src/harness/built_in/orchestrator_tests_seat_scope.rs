@@ -77,7 +77,11 @@ async fn a_seat_answering_a_question_refuses_cards_as_a_pooled_question_turn_doe
 
 #[test]
 fn the_seat_refusal_points_at_asking_a_teammate() {
-    let text = no_drain(SPAWN_TASK_TOOL, "the card was NOT opened", NoDrainReason::Seat);
+    let text = no_drain(
+        SPAWN_TASK_TOOL,
+        "the card was NOT opened",
+        NoDrainReason::Seat,
+    );
     assert!(text.contains("desk_ask"), "{text}");
     assert!(text.starts_with("Refused"), "{text}");
 }
@@ -85,7 +89,10 @@ fn the_seat_refusal_points_at_asking_a_teammate() {
 struct OneEach(StdMutex<Vec<String>>);
 
 impl crate::harness::built_in::card_budget::CardBudget for OneEach {
-    fn reserve(&self, title: &str) -> Result<(), crate::harness::built_in::card_budget::CardRefusal> {
+    fn reserve(
+        &self,
+        title: &str,
+    ) -> Result<(), crate::harness::built_in::card_budget::CardRefusal> {
         let mut held = self.0.lock().unwrap();
         let key = crate::harness::built_in::card_budget::normalize_title(title);
         if held.contains(&key) {
@@ -120,23 +127,44 @@ async fn a_seated_spawn_is_queued_honestly_and_refused_in_turn_past_its_budget()
         Arc::new(OneEach(StdMutex::new(Vec::new())));
     let spawn_task = tool(&queue);
     let (first, again, second, third) = claim
-        .scoped(crate::harness::built_in::card_budget::scoped(budget, async {
-            (
-                spawn_task.execute(json!({ "title": "Draft the post" })).await,
-                spawn_task.execute(json!({ "title": "draft the POST." })).await,
-                spawn_task.execute(json!({ "title": "Book the venue" })).await,
-                spawn_task.execute(json!({ "title": "Order lunch" })).await,
-            )
-        }))
+        .scoped(crate::harness::built_in::card_budget::scoped(
+            budget,
+            async {
+                (
+                    spawn_task
+                        .execute(json!({ "title": "Draft the post" }))
+                        .await,
+                    spawn_task
+                        .execute(json!({ "title": "draft the POST." }))
+                        .await,
+                    spawn_task
+                        .execute(json!({ "title": "Book the venue" }))
+                        .await,
+                    spawn_task.execute(json!({ "title": "Order lunch" })).await,
+                )
+            },
+        ))
         .await;
     let first = first.unwrap();
     assert!(!first.is_error, "{}", first.text());
-    assert!(first.text().contains("Do not describe it as open yet"), "{}", first.text());
+    assert!(
+        first.text().contains("Do not describe it as open yet"),
+        "{}",
+        first.text()
+    );
     let again = again.unwrap();
-    assert!(again.is_error && again.text().contains("already open or queued"), "{}", again.text());
+    assert!(
+        again.is_error && again.text().contains("already open or queued"),
+        "{}",
+        again.text()
+    );
     assert!(!second.unwrap().is_error);
     let third = third.unwrap();
-    assert!(third.is_error && third.text().contains("already opened 2 cards"), "{}", third.text());
+    assert!(
+        third.is_error && third.text().contains("already opened 2 cards"),
+        "{}",
+        third.text()
+    );
     assert_eq!(claim.drain(MAX_DELEGATIONS_PER_TURN).len(), 2);
 }
 
@@ -166,7 +194,11 @@ async fn a_pooled_spawn_keeps_its_receipt_and_the_description_names_no_other_too
         .execute(json!({ "title": "Ship it" }))
         .await
         .unwrap();
-    assert!(receipt.text().contains("It will be opened on the board this turn."));
+    assert!(
+        receipt
+            .text()
+            .contains("It will be opened on the board this turn.")
+    );
     let description = spawn_task.description();
     for other in ["delegate_to", "assign_task", "review_task", "desk_"] {
         assert!(!description.contains(other), "{description}");

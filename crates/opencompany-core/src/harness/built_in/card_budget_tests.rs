@@ -28,7 +28,10 @@ impl CardBudget for Counting {
 
 #[test]
 fn titles_that_differ_only_in_case_and_punctuation_are_one_card() {
-    assert_eq!(normalize_title("Draft the  Launch-Post!"), "draft the launch post");
+    assert_eq!(
+        normalize_title("Draft the  Launch-Post!"),
+        "draft the launch post"
+    );
     assert_eq!(
         normalize_title("draft the launch post"),
         normalize_title("DRAFT: the launch post.")

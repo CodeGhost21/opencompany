@@ -117,7 +117,12 @@ pub fn seat_of(ask: &Ask, roles: &[(&str, &str)]) -> Option<Seat> {
     let desk = prompt[at + FENCE.len()..].split_once('"')?.0.to_string();
     let parent = prompt.rfind(FENCE_PARENT).and_then(|at| {
         let rest = &prompt[at + FENCE_PARENT.len()..];
-        rest.split_once('.')?.0.trim().trim_matches('"').parse().ok()
+        rest.split_once('.')?
+            .0
+            .trim()
+            .trim_matches('"')
+            .parse()
+            .ok()
     });
     let role_text = ask.messages.iter().rev().find_map(|message| {
         let (_, opening) = content(message).rsplit_once("You are the ")?;
@@ -179,7 +184,11 @@ pub fn speech(tool: &str, seat: &Seat, mut arguments: Value) -> Reply {
 
 /// Records the seat's part.
 pub fn complete(seat: &Seat, message: impl Into<String>) -> Reply {
-    speech("complete_episode", seat, json!({ "message": message.into() }))
+    speech(
+        "complete_episode",
+        seat,
+        json!({ "message": message.into() }),
+    )
 }
 
 /// Opens a conversation with `to`.
@@ -283,7 +292,10 @@ impl Room {
             .expect("the loopback host answers");
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
-        (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
     }
 
     /// Reads `path`, returning the status and the JSON answer.
@@ -297,7 +309,10 @@ impl Room {
             .expect("the loopback host answers");
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
-        (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
     }
 
     /// Sends `text` to `desk`.

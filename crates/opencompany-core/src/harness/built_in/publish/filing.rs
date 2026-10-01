@@ -560,5 +560,4 @@ impl PublishFiling<'_> {
         );
         Ok(card.id)
     }
-
 }

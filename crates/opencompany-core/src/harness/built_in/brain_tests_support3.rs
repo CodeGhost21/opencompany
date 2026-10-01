@@ -1,6 +1,6 @@
 use super::*;
-use crate::ports::tasks::COLUMN_IN_REVIEW;
 use crate::company::steer::InflightRegistry;
+use crate::ports::tasks::COLUMN_IN_REVIEW;
 use crate::ports::tasks::TaskTitle;
 use std::collections::VecDeque;
 use std::sync::Mutex as StdMutex;

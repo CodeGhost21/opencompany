@@ -71,7 +71,10 @@ async fn a_spawn_with_no_board_is_reported_rather_than_silently_dropped() {
         .collect();
     assert_eq!(
         refused,
-        vec![("spawn_task", "Draft the plan"), ("spawn_task", "Book the venue")]
+        vec![
+            ("spawn_task", "Draft the plan"),
+            ("spawn_task", "Book the venue")
+        ]
     );
 }
 

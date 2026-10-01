@@ -32,7 +32,9 @@ impl HiveDispatcher {
     ) -> (EventSeq, bool) {
         let fallback = thread_root.unwrap_or(EventSeq::new(0));
         let Some(opened_at) = rows.iter().find_map(|row| match &row.event {
-            CompanyEvent::EpisodeOpened { opened_by_seq, .. } => Some(EventSeq::new(*opened_by_seq)),
+            CompanyEvent::EpisodeOpened { opened_by_seq, .. } => {
+                Some(EventSeq::new(*opened_by_seq))
+            }
             _ => None,
         }) else {
             return (fallback, false);

@@ -61,7 +61,10 @@ fn store() -> (tempfile::TempDir, Arc<dyn TaskStore>) {
 fn the_budget_holds_three_cards_and_one_per_title() {
     let cards = EpisodeCards::default();
     assert_eq!(cards.reserve("Draft the post"), Ok(()));
-    assert_eq!(cards.reserve("draft the post!"), Err(CardRefusal::Duplicate));
+    assert_eq!(
+        cards.reserve("draft the post!"),
+        Err(CardRefusal::Duplicate)
+    );
     assert_eq!(cards.reserve("Book the venue"), Ok(()));
     assert_eq!(cards.reserve("Order lunch"), Ok(()));
     assert_eq!(
@@ -78,7 +81,10 @@ fn the_budget_holds_three_cards_and_one_per_title() {
 async fn the_first_card_takes_over_the_message_card_and_the_next_is_minted() {
     let (_dir, tasks) = store();
     let company = CompanyId::new("acme");
-    tasks.upsert(&company, &handler(COLUMN_TODO, DESK)).await.unwrap();
+    tasks
+        .upsert(&company, &handler(COLUMN_TODO, DESK))
+        .await
+        .unwrap();
     let cards = EpisodeCards::default();
     cards.reserve("Draft the post").unwrap();
     cards.reserve("Book the venue").unwrap();
@@ -158,11 +164,20 @@ async fn a_resumed_episode_recalls_its_cards_once_and_its_message_card() {
     let board = tasks.list(&company).await.unwrap();
     resumed.recall(&board, DESK, EPISODE, Some(EventSeq::new(5)));
     resumed.recall(&board, DESK, EPISODE, Some(EventSeq::new(5)));
-    assert_eq!(resumed.reserve("draft the post"), Err(CardRefusal::Duplicate));
+    assert_eq!(
+        resumed.reserve("draft the post"),
+        Err(CardRefusal::Duplicate)
+    );
     assert_eq!(resumed.reserve("Two"), Ok(()));
     assert_eq!(resumed.reserve("Three"), Ok(()));
-    assert!(matches!(resumed.reserve("Four"), Err(CardRefusal::Full { .. })));
-    assert_eq!(resumed.publish_target("analyst"), Some("message".to_owned()));
+    assert!(matches!(
+        resumed.reserve("Four"),
+        Err(CardRefusal::Full { .. })
+    ));
+    assert_eq!(
+        resumed.publish_target("analyst"),
+        Some("message".to_owned())
+    );
 }
 
 struct Refusing;
@@ -210,8 +225,16 @@ async fn a_card_the_board_refuses_is_named_to_the_seat_and_its_hold_released() {
         .await;
     assert!(opened.cards.is_empty());
     assert_eq!(opened.problems.len(), 1);
-    assert!(opened.problems[0].contains("\"Draft the post\""), "{:?}", opened.problems);
-    assert_eq!(cards.reserve("Draft the post"), Ok(()), "the title is free again");
+    assert!(
+        opened.problems[0].contains("\"Draft the post\""),
+        "{:?}",
+        opened.problems
+    );
+    assert_eq!(
+        cards.reserve("Draft the post"),
+        Ok(()),
+        "the title is free again"
+    );
 }
 
 #[tokio::test]

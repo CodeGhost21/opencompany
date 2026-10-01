@@ -32,9 +32,7 @@ use crate::harness::orchestrator::{self, Delegation, DelegationQueue};
 use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::run_trace::RunTraceSink;
 use crate::harness::workflow_refs::WorkflowRefQueue;
-use crate::ports::tasks::{
-    TaskOutput, TaskOutputAction, TaskOutputSource, TaskOutputWorkflow,
-};
+use crate::ports::tasks::{TaskOutput, TaskOutputAction, TaskOutputSource, TaskOutputWorkflow};
 use crate::ports::types::{CompanyId, CompanyRecord, EventSeq, OutboundMessage, TurnStep};
 use crate::ports::{TaskOrigin, TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;

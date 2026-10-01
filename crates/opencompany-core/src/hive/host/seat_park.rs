@@ -397,11 +397,9 @@ impl DeskHost {
                     .await?;
                 self.cards.minted_message_card(&card);
                 if let Some(tasks) = deps.tasks.as_deref()
-                    && let Err(error) = super::seat_cards::stamp_message_card(
-                        &self.card_desk(tasks, record),
-                        &card,
-                    )
-                    .await
+                    && let Err(error) =
+                        super::seat_cards::stamp_message_card(&self.card_desk(tasks, record), &card)
+                            .await
                 {
                     tracing::warn!(
                         company = %self.company,
@@ -442,7 +440,11 @@ impl DeskHost {
     }
 
     /// Writes the cards a seat's turn queued, under the episode's write lock.
-    async fn open_seat_cards(&self, seat: &str, delegations: Vec<Delegation>) -> super::seat_cards::Opened {
+    async fn open_seat_cards(
+        &self,
+        seat: &str,
+        delegations: Vec<Delegation>,
+    ) -> super::seat_cards::Opened {
         if delegations.is_empty() {
             return super::seat_cards::Opened::default();
         }

@@ -299,7 +299,6 @@ pub struct Trigger {
     pub carried_on: bool,
 }
 
-
 /// What one episode came to, in this host's words.
 #[derive(Clone, Debug)]
 pub struct EpisodeReport {

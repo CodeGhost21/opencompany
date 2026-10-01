@@ -191,7 +191,11 @@ async fn a_spawn_and_a_publish_make_one_card_that_links_back_and_names_its_opene
     );
     assert_eq!(card["openedBy"]["agentId"], CEO);
     assert_eq!(card["openedBy"]["episodeId"], episode_id(&rows));
-    assert_eq!(artifacts(&room, card).await.len(), 1, "the publish is on it");
+    assert_eq!(
+        artifacts(&room, card).await.len(),
+        1,
+        "the publish is on it"
+    );
     let receipts = spawn_results(&script);
     assert!(
         receipts
@@ -221,7 +225,10 @@ async fn the_first_card_takes_over_the_card_the_message_opened() {
     let cards = room.cards().await;
     assert_eq!(cards.len(), 1, "one message, one card: {cards:#?}");
     let card = &cards[0];
-    assert_ne!(card["title"], "Draft the launch post", "it is the message's card");
+    assert_ne!(
+        card["title"], "Draft the launch post",
+        "it is the message's card"
+    );
     assert_eq!(card["assignee"], CEO);
     assert_eq!(card["openedBy"]["agentId"], CEO);
     assert!(
