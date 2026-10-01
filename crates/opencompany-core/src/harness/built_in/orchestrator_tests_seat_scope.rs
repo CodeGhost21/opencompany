@@ -81,3 +81,94 @@ fn the_seat_refusal_points_at_asking_a_teammate() {
     assert!(text.contains("desk_ask"), "{text}");
     assert!(text.starts_with("Refused"), "{text}");
 }
+
+struct OneEach(StdMutex<Vec<String>>);
+
+impl crate::harness::built_in::card_budget::CardBudget for OneEach {
+    fn reserve(&self, title: &str) -> Result<(), crate::harness::built_in::card_budget::CardRefusal> {
+        let mut held = self.0.lock().unwrap();
+        let key = crate::harness::built_in::card_budget::normalize_title(title);
+        if held.contains(&key) {
+            return Err(crate::harness::built_in::card_budget::CardRefusal::Duplicate);
+        }
+        if held.len() >= 2 {
+            return Err(crate::harness::built_in::card_budget::CardRefusal::Full { cap: 2 });
+        }
+        held.push(key);
+        Ok(())
+    }
+
+    fn release(&self, title: &str) {
+        let key = crate::harness::built_in::card_budget::normalize_title(title);
+        self.0.lock().unwrap().retain(|held| *held != key);
+    }
+}
+
+fn tool(queue: &DelegationQueue) -> SpawnTaskTool {
+    SpawnTaskTool::new(
+        queue.clone(),
+        CompanyId::new("acme"),
+        Arc::new(MemStore::default()),
+    )
+}
+
+#[tokio::test]
+async fn a_seated_spawn_is_queued_honestly_and_refused_in_turn_past_its_budget() {
+    let queue = DelegationQueue::default();
+    let claim = queue.claim_seat("ep:writer", false);
+    let budget: Arc<dyn crate::harness::built_in::card_budget::CardBudget> =
+        Arc::new(OneEach(StdMutex::new(Vec::new())));
+    let spawn_task = tool(&queue);
+    let (first, again, second, third) = claim
+        .scoped(crate::harness::built_in::card_budget::scoped(budget, async {
+            (
+                spawn_task.execute(json!({ "title": "Draft the post" })).await,
+                spawn_task.execute(json!({ "title": "draft the POST." })).await,
+                spawn_task.execute(json!({ "title": "Book the venue" })).await,
+                spawn_task.execute(json!({ "title": "Order lunch" })).await,
+            )
+        }))
+        .await;
+    let first = first.unwrap();
+    assert!(!first.is_error, "{}", first.text());
+    assert!(first.text().contains("Do not describe it as open yet"), "{}", first.text());
+    let again = again.unwrap();
+    assert!(again.is_error && again.text().contains("already open or queued"), "{}", again.text());
+    assert!(!second.unwrap().is_error);
+    let third = third.unwrap();
+    assert!(third.is_error && third.text().contains("already opened 2 cards"), "{}", third.text());
+    assert_eq!(claim.drain(MAX_DELEGATIONS_PER_TURN).len(), 2);
+}
+
+#[tokio::test]
+async fn a_spawn_the_queue_refuses_gives_its_title_back_to_the_budget() {
+    let queue = DelegationQueue::default();
+    let claim = queue.claim_seat("ep:writer", true);
+    let budget = Arc::new(OneEach(StdMutex::new(Vec::new())));
+    let spawn_task = tool(&queue);
+    let refused = claim
+        .scoped(crate::harness::built_in::card_budget::scoped(
+            budget.clone() as Arc<dyn crate::harness::built_in::card_budget::CardBudget>,
+            spawn_task.execute(json!({ "title": "Draft the post" })),
+        ))
+        .await
+        .unwrap();
+    assert!(refused.is_error, "{}", refused.text());
+    assert!(budget.0.lock().unwrap().is_empty(), "the hold is released");
+}
+
+#[tokio::test]
+async fn a_pooled_spawn_keeps_its_receipt_and_the_description_names_no_other_tool() {
+    let queue = DelegationQueue::default();
+    let _claim = queue.claim();
+    let spawn_task = tool(&queue);
+    let receipt = spawn_task
+        .execute(json!({ "title": "Ship it" }))
+        .await
+        .unwrap();
+    assert!(receipt.text().contains("It will be opened on the board this turn."));
+    let description = spawn_task.description();
+    for other in ["delegate_to", "assign_task", "review_task", "desk_"] {
+        assert!(!description.contains(other), "{description}");
+    }
+}

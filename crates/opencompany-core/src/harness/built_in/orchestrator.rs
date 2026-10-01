@@ -2790,7 +2790,7 @@ impl Tool for SpawnTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Open a task card on the company's board. Nothing said in chat is tracked unless an agent tracks it, so use this when an ask is real work that should be visible and followed up — something you are taking on that outlasts this reply, something for later, or something for somebody else. Provide a `title`, an optional `note` brief, and an optional `assignee` (a desk or teammate id). Do NOT use this to get a hand-off tracked: work you hand off with `delegate_to_desk` or `delegate_to_teammate` already opens its own card, and calling both for the same work opens two."
+        "Open a task card on the company's board. Nothing said in chat is tracked unless an agent tracks it, so use this when an ask is real work that should be visible and followed up — something you are taking on that outlasts this reply, something for later, or something for somebody else. Provide a `title`, an optional `note` brief, and an optional `assignee` (a desk or teammate id). Open one card per piece of work: work that already has a card does not need another."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -2866,7 +2866,19 @@ impl Tool for SpawnTaskTool {
         };
 
         let effect = format!("the card \"{title}\" was NOT opened");
-        match self.queue.push_within_cap(
+        let seated = match super::card_budget::reserve(&title) {
+            None => false,
+            Some(Ok(())) => true,
+            Some(Err(refusal)) => {
+                tracing::info!(
+                    company = %self.company,
+                    ?refusal,
+                    "[spawn_task] refused a card the conversation's budget does not allow"
+                );
+                return Ok(ToolResult::error(card_refused(&effect, refusal)));
+            }
+        };
+        let staged = self.queue.push_within_cap(
             Delegation::SpawnTask {
                 title: title.clone(),
                 note,
@@ -2874,12 +2886,27 @@ impl Tool for SpawnTaskTool {
             },
             MAX_DELEGATIONS_PER_TURN,
             NO_DEPTH_BOUND,
-        ) {
+        );
+        if seated && staged != Staged::Queued {
+            super::card_budget::release(&title);
+        }
+        match staged {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
             Staged::NoDrain(why) => {
                 return Ok(ToolResult::error(no_drain(SPAWN_TASK_TOOL, &effect, why)));
             }
+        }
+        tracing::debug!(
+            company = %self.company,
+            seated,
+            "[spawn_task] queued a card"
+        );
+        if seated {
+            return Ok(ToolResult::success(format!(
+                "Queued a task card: \"{title}\". It is written to the board when your turn \
+                 ends; you will be told here if it cannot be. Do not describe it as open yet."
+            )));
         }
         Ok(ToolResult::success(format!(
             "Queued a task card: \"{title}\". It will be opened on the board this turn."
@@ -3672,6 +3699,22 @@ fn no_drain(tool: &str, effect: &str, reason: NoDrainReason) -> String {
              `spawn_task` — naming the desk as its assignee — which persists and reaches them. Do \
              not retry this call; it will fail the same way, and do NOT report the work as handed \
              over or the desk as having replied."
+        ),
+    }
+}
+
+/// The refusal `spawn_task` returns when the conversation's card budget does
+/// not allow another card.
+fn card_refused(effect: &str, refusal: super::card_budget::CardRefusal) -> String {
+    match refusal {
+        super::card_budget::CardRefusal::Duplicate => format!(
+            "Refused: a card with this title is already open or queued for this conversation, \
+             so {effect}. Do not open it twice; the existing card tracks it."
+        ),
+        super::card_budget::CardRefusal::Full { cap } => format!(
+            "Refused: this conversation has already opened {cap} cards, the most one message \
+             may, so {effect}. Fold the rest into the cards already open, or tell the operator \
+             plainly what is still untracked."
         ),
     }
 }

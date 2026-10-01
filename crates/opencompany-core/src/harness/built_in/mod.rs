@@ -51,6 +51,8 @@ pub mod blockers;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
+/// The task-local card budget a HiveMind seat's `spawn_task` reserves against.
+pub mod card_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
 /// Guarding a chat-only (`suppress_tools`) turn's reply against the tool-call
