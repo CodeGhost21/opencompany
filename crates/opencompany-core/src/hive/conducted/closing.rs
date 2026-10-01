@@ -32,6 +32,7 @@ impl HiveDispatcher {
         thread_root: Option<EventSeq>,
         opened_at: EventSeq,
         request: &str,
+        answering: bool,
     ) -> Option<crate::hive::conclude::Conclusion> {
         // **A read that failed is not an episode with nothing in it.**
         //
@@ -86,6 +87,7 @@ impl HiveDispatcher {
                     opened_at,
                     &lead,
                     u64::MAX,
+                    answering,
                 )
                 .await;
         };
@@ -155,6 +157,7 @@ impl HiveDispatcher {
             opened_at,
             &seat,
             before,
+            answering,
         )
         .await
     }
@@ -176,6 +179,7 @@ impl HiveDispatcher {
         opened_at: EventSeq,
         seat: &str,
         above: u64,
+        answering: bool,
     ) -> Option<crate::hive::conclude::Conclusion> {
         let seat = seat.to_owned();
         let before = above;
@@ -196,6 +200,7 @@ impl HiveDispatcher {
             concluding: true,
             parking: self.seat_parking(&desk.desk_id, thread_root, episode_id),
             mentions: self.mentions.clone(),
+            answering,
         })
         .await;
         let closing = match outcome {

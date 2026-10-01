@@ -721,6 +721,16 @@ impl DelegationQueue {
         self.claim_as(DelegationScope::Seat(turn_key.into()), state)
     }
 
+    /// Scopes a seat turn on a host with no board to write cards to.
+    ///
+    /// Nothing drains it, so every delegation refuses in the seat's own turn
+    /// as unwired; and because the scope is the seat's, none of them can land
+    /// in a pooled turn's bucket instead.
+    #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
+    pub fn claim_seat_unwired(&self, turn_key: impl Into<String>) -> DelegationClaim {
+        self.claim_as(DelegationScope::Seat(turn_key.into()), DrainClaim::Unclaimed)
+    }
+
     /// The shared body of the claim constructors.
     ///
     /// # Everything it touches is `scope`'s and only `scope`'s (issue #661)
