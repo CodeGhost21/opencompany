@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import type { SkillAgentScope } from "@/api/skills";
 import {
   SCOPE_CLEARS_TO_INHERITED_WARNING,
   SCOPE_PINS_INHERITED_WARNING,
