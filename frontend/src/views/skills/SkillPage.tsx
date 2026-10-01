@@ -45,6 +45,7 @@ import {
 } from "@/lib/skill-scope";
 import { skillSourceLabel } from "@/lib/skills-list";
 import { avatarFor, teammateName } from "@/lib/team";
+import { SkillPlaybook } from "@/views/skills/SkillPlaybook";
 
 /** Why the picker is read-only although the page opened. */
 const MEMBER_READ_ONLY =
@@ -290,6 +291,16 @@ export function SkillPage({
 
       <Separator />
 
+      <SkillPlaybook
+        client={client}
+        company={company}
+        slug={skill.id}
+        canManage={canManage}
+        onSaved={onSaved}
+      />
+
+      <Separator />
+
       <section className="space-y-3" aria-label="Available to">
         <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Available to
@@ -504,9 +515,9 @@ export function SkillPage({
  * Three states, not two: a teammate that inherits and one that names this skill
  * are both ticked, and only the second stays ticked when the company enables
  * something else. Rendered as the link to that teammate's own page, which is
- * where the scope can be handed back to inheriting — this page deliberately
- * cannot do that, because expressing "reset to inherit" from one skill would
- * decide on the operator's behalf about every slug it is not showing.
+ * where a single teammate's scope is edited slug by slug. Handing one back to
+ * inheriting is what this page's "All agents" mode does — to every teammate at
+ * once, with the widening it causes named first.
  */
 function stateLabel(agent: SkillAgentScope): string {
   if (agent.state === "inherited") return "inherits every skill";

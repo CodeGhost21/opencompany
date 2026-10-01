@@ -73,6 +73,15 @@ let root: Root;
 function clientWith(updateAgent: unknown = vi.fn(() => Promise.resolve({}))) {
   return {
     updateAgent,
+    // The page's playbook panel reads the document on mount. Answered so these
+    // tests exercise the scope picker rather than the panel's failure state.
+    scopeFor: () => "/api/v1/companies/acme",
+    get: () =>
+      Promise.resolve({
+        slug: "brand-voice",
+        markdown: "---\nname: Brand Voice\ndescription: How we sound.\n---\nStep one.\n",
+        editable: true,
+      }),
   } as unknown as OpenCompanyClient;
 }
 

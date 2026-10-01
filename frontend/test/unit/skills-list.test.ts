@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  canEditSkill,
   canUninstallSkill,
   canUpdateSkill,
   DEFAULT_SKILL_FILTERS,
@@ -77,19 +76,13 @@ describe("skillSourceLabel", () => {
   });
 });
 
-describe("canUninstallSkill / canEditSkill", () => {
+describe("canUninstallSkill", () => {
   // Mirrors the host's uninstall arm, which admits Registry | Custom and
   // refuses everything else.
   it("allows uninstalling a registry install and a custom skill, never a company one", () => {
     expect(canUninstallSkill("registry")).toBe(true);
     expect(canUninstallSkill("custom")).toBe(true);
     expect(canUninstallSkill("company")).toBe(false);
-  });
-
-  it("offers Edit only for a skill the console authored", () => {
-    expect(canEditSkill("custom")).toBe(true);
-    expect(canEditSkill("registry")).toBe(false);
-    expect(canEditSkill("company")).toBe(false);
   });
 });
 

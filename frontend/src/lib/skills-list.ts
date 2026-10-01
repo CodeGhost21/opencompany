@@ -204,11 +204,6 @@ export function canUninstallSkill(source: string): boolean {
   return source === "registry" || source === "custom";
 }
 
-/** Only custom skills are editable in the console: nothing else was authored here. */
-export function canEditSkill(source: string): boolean {
-  return source === "custom";
-}
-
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;

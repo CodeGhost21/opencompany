@@ -48,7 +48,6 @@ import { categoryStyle } from "@/lib/skills";
 import { SkillViewToggle } from "@/views/skills/SkillViewToggle";
 import { SkillsTable } from "@/views/skills/SkillsTable";
 import {
-  canEditSkill,
   canUninstallSkill,
   canUpdateSkill,
   skillDriftLabel,
@@ -67,18 +66,6 @@ import {
   type SkillListFilters,
   type SkillSourceFilter,
 } from "@/lib/skills-list";
-
-/**
- * Why Edit is offered but never enabled.
- *
- * No route serves a skill's `SKILL.md`: `GET …/skills` and the registry listing
- * are both metadata only. An Edit dialog could therefore load a name, a
- * description and a category — and would save that back over a playbook body it
- * never read. Greying it with the reason says so; hiding it would leave an
- * operator hunting for an action that is not there.
- */
-const EDIT_UNAVAILABLE_REASON =
-  "Editing needs the skill's full text, which the host does not serve yet.";
 
 /** Category badge styling, tolerating the host's free-form category strings. */
 export function InstalledSkillsList({
@@ -399,7 +386,6 @@ function SkillRowMenu({
   onOpen: () => void;
 }) {
   const removable = canUninstallSkill(skill.source);
-  const editable = canEditSkill(skill.source);
   const updatable = canUpdateSkill(skill);
   const updateReason = skillUpdateUnavailableReason(skill);
 
@@ -420,19 +406,13 @@ function SkillRowMenu({
         <MoreHorizontal className="size-4" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="max-w-64">
-        <DropdownMenuItem disabled data-testid="skill-menu-edit">
+        {/* Opens the page, where the playbook carries its own Edit. One entry
+            rather than two that go to the same place; a skill the repository
+            authored says so there, on the document it is about. */}
+        <DropdownMenuItem onClick={onOpen} data-testid="skill-menu-edit">
           <Pencil className="mr-2 size-4" />
           Edit
         </DropdownMenuItem>
-        {!editable ? (
-          <MenuReason testId="skill-menu-edit-reason">
-            Only a skill you wrote here can be edited.
-          </MenuReason>
-        ) : (
-          <MenuReason testId="skill-menu-edit-reason">
-            {EDIT_UNAVAILABLE_REASON}
-          </MenuReason>
-        )}
         <DropdownMenuItem onClick={onToggle} data-testid="skill-menu-toggle">
           <Power className="mr-2 size-4" />
           {skill.enabled ? "Disable" : "Enable"}

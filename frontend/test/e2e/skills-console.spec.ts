@@ -208,21 +208,11 @@ test("the list opens in name order, with no ordering to choose", async ({
   expect(rendered).toEqual(byName);
 });
 
-test("the row menu greys Edit on every row, and Uninstall on a bundled one", async ({
+test("the row menu refuses Uninstall on a bundled skill and offers Disable", async ({
   page,
 }) => {
   await openSkills(page);
   const card = await openRowMenu(page, BUNDLED_NAME);
-
-  // Edit is offered and never enabled: no route serves a skill's `SKILL.md`,
-  // so an editor could only save a body it never read. Greyed with the reason,
-  // rather than absent — an action that is silently missing teaches nothing.
-  const edit = page.getByTestId("skill-menu-edit");
-  await expect(edit).toBeVisible();
-  await expect(edit).toHaveAttribute("aria-disabled", "true");
-  await expect(page.getByTestId("skill-menu-edit-reason")).toContainText(
-    "Only a skill you wrote here can be edited.",
-  );
 
   // Uninstall is refused for a bundled skill, in the host's own words.
   const uninstall = page.getByTestId("skill-menu-uninstall");
@@ -329,19 +319,52 @@ test("a SKILL.md upload stores a Custom skill and the list takes it", async ({
     "Edited just now",
   );
 
-  // A custom skill is the one thing the console authored, so Edit's refusal
-  // names the missing route rather than the skill's provenance.
+  // Edit goes to the page, where the document it uploaded is the thing on
+  // screen — and a rewrite there round-trips through the host.
   await card.getByTestId("skill-row-menu").click();
-  await expect(page.getByTestId("skill-menu-edit")).toHaveAttribute(
-    "aria-disabled",
-    "true",
-  );
-  await expect(page.getByTestId("skill-menu-edit-reason")).toContainText(
-    "needs the skill's full text",
+  await page.getByTestId("skill-menu-edit").click();
+  await expect(page.getByTestId("skill-page")).toBeVisible();
+  await expect(page.getByTestId("skill-doc-text")).toContainText(
+    "A playbook the console end-to-end suite uploaded as a bare document.",
   );
 
-  await page.keyboard.press("Escape");
+  await page.getByTestId("skill-doc-edit").click();
+  const editor = page.getByTestId("skill-doc-editor");
+  const rewritten = skillDoc({
+    name: "E2E Uploaded Skill",
+    description: "A playbook the end-to-end suite then rewrote in place.",
+  });
+  await editor.fill(rewritten);
+  await page.getByTestId("skill-doc-save").click();
+
+  // The editor closes onto the stored text, and the description the list reads
+  // out of that document moves with it.
+  await expect(page.getByTestId("skill-doc-text")).toContainText(
+    "then rewrote in place",
+    { timeout: 30_000 },
+  );
+  await page.getByTestId("skill-page-back").click();
+  await expect(installedCard(page, "E2E Uploaded Skill")).toContainText(
+    "then rewrote in place",
+  );
+
   await removeSkill(request, UPLOADED);
+});
+
+test("a repository-authored skill shows its playbook and says it is read-only", async ({
+  page,
+}) => {
+  await openSkills(page);
+  await installedCard(page, BUNDLED_NAME).click();
+
+  await expect(page.getByTestId("skill-page")).toBeVisible();
+  // The document comes off disk for a bundled skill, so an empty panel here
+  // would mean the read resolved the wrong layer.
+  await expect(page.getByTestId("skill-doc-text")).toContainText("name:");
+  await expect(page.getByTestId("skill-doc-read-only")).toContainText(
+    "authored in the repository",
+  );
+  await expect(page.getByTestId("skill-doc-edit")).toHaveCount(0);
 });
 
 test("an archive carrying one SKILL.md uploads under the directory's name", async ({

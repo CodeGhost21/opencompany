@@ -189,6 +189,52 @@ export function updateSkill(
   );
 }
 
+/** A skill's `SKILL.md`, as the detail page's editor loads it. */
+export interface SkillDocument {
+  slug: string;
+  /** The whole document — frontmatter and body — exactly as an agent reads it. */
+  markdown: string;
+  /**
+   * Whether a write here would be accepted at all, the caller's own role aside.
+   *
+   * Taken from the host rather than derived from `source`: the editor offered
+   * and the write attempted must not disagree about which skills are editable.
+   */
+  editable: boolean;
+}
+
+/** Read a skill's `SKILL.md`. Open to any member — a `404` means no document. */
+export function getSkillDoc(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+): Promise<SkillDocument> {
+  return client.get<SkillDocument>(
+    `${client.scopeFor(company)}/skills/${encodeURIComponent(slug)}/doc`,
+  );
+}
+
+/**
+ * Replace a skill's `SKILL.md`.
+ *
+ * The whole document, not a patch: the stored copy is what every agent reads.
+ * Refused with a `409` on a skill authored in the repository, and with the scan
+ * verdict on a document the host will not store — `force` overrides the latter
+ * for this request only, the same flag install and upload take.
+ */
+export function setSkillDoc(
+  client: OpenCompanyClient,
+  company: string | null,
+  slug: string,
+  markdown: string,
+  force = false,
+): Promise<Skill> {
+  return client.put<Skill>(
+    `${client.scopeFor(company)}/skills/${encodeURIComponent(slug)}/doc`,
+    { markdown, force },
+  );
+}
+
 /** Author a custom skill. */
 export function createSkill(
   client: OpenCompanyClient,
