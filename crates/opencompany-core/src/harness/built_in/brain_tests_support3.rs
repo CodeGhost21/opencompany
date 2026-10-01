@@ -419,6 +419,7 @@ pub(super) fn brain_over_script(
 pub(super) fn card_in_review(id: &str) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
+        opened_by: None,
         title: TaskTitle::authored(&format!("Work item {id}")),
         note: None,
         column: COLUMN_IN_REVIEW.to_string(),

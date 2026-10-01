@@ -331,6 +331,7 @@ fn build_brain(
 
 fn card(id: &str, assignee: &str) -> TaskRecord {
     TaskRecord {
+        opened_by: None,
         id: id.to_string(),
         title: TaskTitle::authored("Write the first note"),
         note: None,

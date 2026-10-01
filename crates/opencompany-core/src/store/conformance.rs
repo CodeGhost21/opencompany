@@ -1617,6 +1617,7 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
     let task = |id: &str, col: &str, at: u64| TaskRecord {
+        opened_by: None,
         id: id.to_string(),
         title: TaskTitle::authored(&format!("title {id}")),
         note: Some(format!("note {id}")),

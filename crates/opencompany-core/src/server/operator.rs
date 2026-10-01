@@ -2955,6 +2955,7 @@ async fn run_chat(
         // lose its card over who it was addressed to.
         let assignee = addressed_assignee(&runtime, message.chat.as_deref()).await;
         let record = crate::ports::tasks::TaskRecord {
+            opened_by: None,
             id: crate::ports::generate_id(),
             title,
             note,

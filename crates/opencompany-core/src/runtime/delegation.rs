@@ -2823,6 +2823,7 @@ impl<'a> DelegationRunner<'a> {
             return Ok(None);
         }
         let card = TaskRecord {
+            opened_by: None,
             id: generate_id(),
             title: crate::ports::tasks::mint_task_title(request, None, self.titler).await,
             note: Some(append_note(None, "operator", request)),
@@ -3114,6 +3115,7 @@ impl<'a> DelegationRunner<'a> {
                     .and_then(|resolved| resolved.canonical().map(str::to_string))
                     .unwrap_or_default();
                 let card = TaskRecord {
+                    opened_by: None,
                     id: generate_id(),
                     title: crate::ports::tasks::TaskTitle::system(&title),
                     note,

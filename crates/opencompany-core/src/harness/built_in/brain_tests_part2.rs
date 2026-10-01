@@ -247,6 +247,7 @@ async fn a_failed_node_write_still_records_the_artifact() {
 fn card(id: &str, assignee: &str) -> TaskRecord {
     TaskRecord {
         id: id.to_string(),
+        opened_by: None,
         title: TaskTitle::authored("Ship the thing"),
         note: None,
         column: "in_progress".to_string(),

@@ -525,6 +525,7 @@ async fn create_task(
         note: body.note,
         column,
         priority: body.priority.unwrap_or_else(|| "medium".to_string()),
+        opened_by: None,
         assignee,
         updated_at_millis: now_millis(),
         // Issue #246: provenance is now carried, not dropped. This was

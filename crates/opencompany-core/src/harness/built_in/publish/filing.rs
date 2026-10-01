@@ -413,6 +413,7 @@ impl PublishFiling<'_> {
         };
 
         let card = TaskRecord {
+            opened_by: None,
             id: generate_id(),
             title: crate::ports::tasks::TaskTitle::system(&publish::conversation_card_title(
                 &published,
