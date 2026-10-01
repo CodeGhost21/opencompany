@@ -1437,14 +1437,10 @@ async fn an_ask_opens_a_conversation_the_desk_only_references() {
 
     // **A seat is never offered a hand-off tool it cannot use here.**
     //
-    // `spawn_task`, `delegate_to_desk` and `delegate_to_teammate` are wired
-    // onto every roster agent and queue work the brain drains; no brain
-    // drains inside an episode, so the orchestrator refuses them outright
-    // (`drain_unwired`). On a live run a seat reached for one, took the
-    // refusal as proof that delegating was impossible, and told the operator
-    // to go and make "the board" available -- while `ask`, the tool that
-    // does work here, was on the same belt. The refusal was handled; the
-    // misdiagnosis it invited was not, so the names come off the belt.
+    // The hand-off and lifecycle verbs are wired onto roster agents but
+    // could only refuse on a seat, whose claim permits opening a card and
+    // nothing else; a refused tool argues the seat out of `ask`, so the names
+    // come off the belt. `spawn_task` stays, and `hive_seat_cards` covers it.
     let offered: Vec<String> = script
         .asks()
         .iter()
@@ -1454,7 +1450,12 @@ async fn an_ask_opens_a_conversation_the_desk_only_references() {
         !offered.is_empty(),
         "the fixture saw no tool schemas at all, so this asserts nothing",
     );
-    for withheld in ["spawn_task", "delegate_to_desk", "delegate_to_teammate"] {
+    for withheld in [
+        "delegate_to_desk",
+        "delegate_to_teammate",
+        "assign_task",
+        "review_task",
+    ] {
         assert!(
             !offered.iter().any(|name| name == withheld),
             "`{withheld}` was offered to an episode seat: {offered:?}",
